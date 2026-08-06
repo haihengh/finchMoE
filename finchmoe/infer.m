@@ -5096,7 +5096,6 @@ static void fused_layer_forward(
 
     int actual_K = (K > MAX_K) ? MAX_K : K;
 
-    // CPU expert path for debugging (set to 0 for GPU path)
     int force_cpu_experts = 1;
     if (force_cpu_experts) goto cpu_expert_fallback;
 
@@ -5491,6 +5490,7 @@ static void fused_layer_forward(
         // CPU fallback for experts
         size_t esz = active_expert_size();
         float *expert_out_cpu = malloc(HIDDEN_DIM * sizeof(float));
+        float total_weight = 0.0f;
         for (int k = 0; k < K; k++) {
             int eidx = expert_indices[k];
             off_t expert_offset = (off_t)eidx * esz;
@@ -5544,12 +5544,16 @@ static void fused_layer_forward(
             for (int j = 0; j < HIDDEN_DIM; j++) er += expert_out_cpu[j] * expert_out_cpu[j];
             if (isfinite(er) && er < 1e20f) {
                 cpu_vec_madd(moe_out, expert_out_cpu, expert_weights[k], HIDDEN_DIM);
-            } else {
-                fprintf(stderr, "[WARN] layer=%d expert=%d out_rms=%.1f — skipping\n",
-                        layer_idx, eidx, sqrtf(er/HIDDEN_DIM));
+                total_weight += expert_weights[k];
             }
         }
         free(expert_out_cpu);
+
+        // Renormalize MoE output when some experts were skipped
+        if (total_weight > 0.0f && total_weight < 0.99f) {
+            float inv_tw = 1.0f / total_weight;
+            for (int i = 0; i < HIDDEN_DIM; i++) moe_out[i] *= inv_tw;
+        }
 
         // CPU shared expert
         float *shared_act = calloc(SHARED_INTERMEDIATE, sizeof(float));

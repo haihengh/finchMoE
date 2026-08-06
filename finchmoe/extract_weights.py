@@ -185,6 +185,14 @@ def main():
                 sf.seek(data_start + tensor_offsets[0])
                 data = sf.read(byte_len)
 
+            # MLX stores scales/biases as FP16 (not BF16) — convert to BF16
+            is_scale_or_bias = san_name.endswith('.scales') or san_name.endswith('.biases')
+            if is_scale_or_bias and dtype == 'BF16':
+                arr = np.frombuffer(data, dtype=np.uint16)
+                f16 = arr.view(np.float16).astype(np.float32)
+                bf16 = (f16.view(np.uint32) >> 16).astype(np.uint16)
+                data = bf16.tobytes()
+
             out_f.write(data)
 
             manifest["tensors"][san_name] = {
