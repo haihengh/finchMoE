@@ -854,6 +854,66 @@ static int cpu_argmax(const float *x, int dim) {
     return best;
 }
 
+// Temperature sampling with top-k: softmax(logits/T), pick from top K
+static int cpu_sample_temp(const float *x, int dim, float temp, int top_k) {
+    if (temp <= 0.0f || top_k <= 1) return cpu_argmax(x, dim);
+
+    // Find max for numerical stability
+    float max_val = x[0];
+    for (int i = 1; i < dim; i++) if (x[i] > max_val) max_val = x[i];
+
+    // Compute exp(x/T - max/T) and sum
+    float *probs = malloc(dim * sizeof(float));
+    float sum = 0.0f;
+    float inv_t = 1.0f / temp;
+    for (int i = 0; i < dim; i++) {
+        probs[i] = expf((x[i] - max_val) * inv_t);
+        sum += probs[i];
+    }
+
+    // Top-k selection: zero out everything below top-k
+    if (top_k < dim) {
+        // Find k-th largest using simple partial sort
+        float *copy = malloc(dim * sizeof(float));
+        memcpy(copy, probs, dim * sizeof(float));
+        // Quickselect: find threshold for top-k
+        float threshold = 0.0f;
+        // Simple: sort a copy and find k-th
+        int *indices = malloc(dim * sizeof(int));
+        for (int i = 0; i < dim; i++) indices[i] = i;
+        // Partial bubble: just find top k
+        for (int i = 0; i < top_k && i < dim; i++) {
+            for (int j = i + 1; j < dim; j++) {
+                if (probs[indices[j]] > probs[indices[i]]) {
+                    int tmp = indices[i];
+                    indices[i] = indices[j];
+                    indices[j] = tmp;
+                }
+            }
+        }
+        threshold = probs[indices[top_k - 1]];
+        // Zero out below threshold
+        sum = 0.0f;
+        for (int i = 0; i < dim; i++) {
+            if (probs[i] < threshold) probs[i] = 0.0f;
+            else sum += probs[i];
+        }
+        free(copy);
+        free(indices);
+    }
+
+    // Sample from distribution
+    float r = (float)drand48() * sum;
+    float cumsum = 0.0f;
+    int chosen = 0;
+    for (int i = 0; i < dim; i++) {
+        cumsum += probs[i];
+        if (r <= cumsum) { chosen = i; break; }
+    }
+    free(probs);
+    return chosen;
+}
+
 // SiLU activation
 static void cpu_silu(float *x, int dim) {
     for (int i = 0; i < dim; i++) {
@@ -6747,7 +6807,17 @@ int main(int argc, char **argv) {
         PromptTokens *pt = NULL;
         if (serve_port == 0) {
             if (prompt_text) {
-                pt = encode_prompt_text_to_tokens(prompt_text);
+                // Wrap in Qwen chat template for coherent generation
+                char templated[8192];
+                snprintf(templated, sizeof(templated),
+                    "<|im_start|>system\n"
+                    "You are a helpful assistant.<|im_end|>\n"
+                    "<|im_start|>user\n"
+                    "%s<|im_end|>\n"
+                    "<|im_start|>assistant\n",
+                    prompt_text);
+                printf("[template] Using Qwen chat template\n");
+                pt = encode_prompt_text_to_tokens(templated);
                 if (!pt) {
                     fprintf(stderr, "ERROR: Failed to encode prompt. Make sure encode_prompt.py exists.\n");
                     return 1;
@@ -7039,7 +7109,7 @@ int main(int argc, char **argv) {
         double lm_ms = now_ms() - t_lm;
 
         // ---- Sample first token ----
-        int next_token = cpu_argmax(logits, VOCAB_SIZE);
+        int next_token = cpu_sample_temp(logits, VOCAB_SIZE, 0.8f, 40);
         double ttft_ms = now_ms() - t0;
 
         // Debug: show top-5 logits for first token
@@ -7120,8 +7190,8 @@ int main(int argc, char **argv) {
             // LM head
             lm_head_forward(wf, hidden, logits);
 
-            // Greedy sample
-            next_token = cpu_argmax(logits, VOCAB_SIZE);
+            // Temperature sample
+            next_token = cpu_sample_temp(logits, VOCAB_SIZE, 0.8f, 40);
 
             // Think budget: force end thinking if over budget
             if (in_think && g_think_budget > 0 && think_tokens >= g_think_budget) {
