@@ -56,7 +56,7 @@ export default function FileExplorerTab() {
     <div className="space-y-6">
       <div>
         <h2 className="text-2xl lg:text-3xl font-display font-bold tracking-tight">File Explorer</h2>
-        <p className="text-muted-foreground mt-1">Complete source map of the AeroMoE engine</p>
+        <p className="text-muted-foreground mt-1">Complete source map of the FinchMoE engine</p>
       </div>
 
       {/* Stats */}

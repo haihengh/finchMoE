@@ -9,18 +9,10 @@
 
 #include "../finchmoe_types.h"
 
-#ifdef __OBJC__
-@protocol MTLDevice;
-@protocol MTLCommandBuffer;
-@protocol MTLBuffer;
-using MTLDevicePtr        = id<MTLDevice>;
-using MTLCommandBufferPtr = id<MTLCommandBuffer>;
-using MTLBufferPtr_t      = id<MTLBuffer>;
-#else
+// Metal types are opaque void* — only .mm files bridge to real ObjC types.
 using MTLDevicePtr        = void*;
 using MTLCommandBufferPtr = void*;
 using MTLBufferPtr_t      = void*;
-#endif
 
 #include <cstdint>
 #include <string>

@@ -47,13 +47,8 @@
 #include <cstdint>
 #include <string>
 
-// Forward-declare MTLBuffer for non-ObjC translation units.
-#ifdef __OBJC__
-@protocol MTLBuffer;
-using MTLBufferPtr_mr = id<MTLBuffer>;
-#else
+// Metal buffer type is opaque void* — only .mm files bridge to real ObjC types.
 using MTLBufferPtr_mr = void*;
-#endif
 
 namespace finchmoe {
 

@@ -36,13 +36,8 @@
 #include <cstdio>
 #include <functional>
 
-// Forward declare Metal types so this header doesn't pull in ObjC
-#ifdef __OBJC__
-@protocol MTLBuffer;
-using MTLBufferPtr = id<MTLBuffer>;
-#else
-using MTLBufferPtr = void*;  // opaque in non-ObjC TUs
-#endif
+// Metal buffer type is opaque void* — only .mm files bridge to real ObjC types.
+using MTLBufferPtr = void*;
 
 namespace finchmoe {
 

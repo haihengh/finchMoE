@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>AeroMoE Engine — Technical Reference</title>
+<title>FinchMoE Engine — Technical Reference</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/contrib/auto-render.min.js"
@@ -229,7 +229,7 @@ h2.sub-title, h3.sub-sub-title, h1.section-title { orphans: 2; }
   <div class="cover-overlay"></div>
   <div class="cover-body">
     <div class="cover-badge">Technical Reference</div>
-    <h1>AeroMoE Engine</h1>
+    <h1>FinchMoE Engine</h1>
     <p class="cover-subtitle">Production C++/Metal Inference for Qwen3.6-35B-A3B<br>on Apple Silicon</p>
     <div class="cover-meta">
       <span class="cover-meta-item">Version 1.0</span>
@@ -249,7 +249,7 @@ h2.sub-title, h3.sub-sub-title, h1.section-title { orphans: 2; }
   <ul class="toc-list">
     <li class="toc-h2"><a href="#s1"><span class="toc-text">1. Executive Summary</span><span class="toc-dots"></span><span class="toc-page-num"><span class="page-ref" data-href="#s1"></span></span></a></li>
     <li class="toc-h2"><a href="#s2"><span class="toc-text">2. Model Architecture — Qwen3.6-35B-A3B</span><span class="toc-dots"></span><span class="toc-page-num"><span class="page-ref" data-href="#s2"></span></span></a></li>
-    <li class="toc-h2"><a href="#s3"><span class="toc-text">3. .aeromoe File Format</span><span class="toc-dots"></span><span class="toc-page-num"><span class="page-ref" data-href="#s3"></span></span></a></li>
+    <li class="toc-h2"><a href="#s3"><span class="toc-text">3. .finchmoe File Format</span><span class="toc-dots"></span><span class="toc-page-num"><span class="page-ref" data-href="#s3"></span></span></a></li>
     <li class="toc-h2"><a href="#s4"><span class="toc-text">4. Component Architecture</span><span class="toc-dots"></span><span class="toc-page-num"><span class="page-ref" data-href="#s4"></span></span></a></li>
     <li class="toc-h3"><a href="#s4-1"><span class="toc-text">4.1  MemoryLedger</span><span class="toc-dots"></span><span class="toc-page-num"><span class="page-ref" data-href="#s4-1"></span></span></a></li>
     <li class="toc-h3"><a href="#s4-2"><span class="toc-text">4.2  ExpertCache</span><span class="toc-dots"></span><span class="toc-page-num"><span class="page-ref" data-href="#s4-2"></span></span></a></li>
@@ -270,7 +270,7 @@ h2.sub-title, h3.sub-sub-title, h1.section-title { orphans: 2; }
     <li class="toc-h2"><a href="#s7"><span class="toc-text">7. Build System</span><span class="toc-dots"></span><span class="toc-page-num"><span class="page-ref" data-href="#s7"></span></span></a></li>
     <li class="toc-h2"><a href="#s8"><span class="toc-text">8. Complete File Reference</span><span class="toc-dots"></span><span class="toc-page-num"><span class="page-ref" data-href="#s8"></span></span></a></li>
     <li class="toc-h2"><a href="#s9"><span class="toc-text">9. Performance Characteristics</span><span class="toc-dots"></span><span class="toc-page-num"><span class="page-ref" data-href="#s9"></span></span></a></li>
-    <li class="toc-h2"><a href="#appA"><span class="toc-text">Appendix A — .aeromoe Header Layout (C Struct)</span><span class="toc-dots"></span><span class="toc-page-num"><span class="page-ref" data-href="#appA"></span></span></a></li>
+    <li class="toc-h2"><a href="#appA"><span class="toc-text">Appendix A — .finchmoe Header Layout (C Struct)</span><span class="toc-dots"></span><span class="toc-page-num"><span class="page-ref" data-href="#appA"></span></span></a></li>
     <li class="toc-h2"><a href="#appB"><span class="toc-text">Appendix B — ChatML Tool-Call Example</span><span class="toc-dots"></span><span class="toc-page-num"><span class="page-ref" data-href="#appB"></span></span></a></li>
   </ul>
 </div>
@@ -279,9 +279,9 @@ h2.sub-title, h3.sub-sub-title, h1.section-title { orphans: 2; }
 <div id="s1">
 <h1 class="section-title"><span class="section-num">1.</span> Executive Summary</h1>
 
-<p>AeroMoE is a from-scratch, Metal-accelerated inference engine for the Qwen3.6-35B-A3B Mixture-of-Experts language model. It runs entirely on Apple Silicon GPUs via Metal Compute shaders, with a hard 4 GB active RAM budget enforced at runtime. The project deliberately avoids third-party inference frameworks: there is no ONNX, no Core ML, no llama.cpp dependency. Every component — from the binary weight format and the memory allocator to the Metal kernels and the agentic tool-calling loop — is purpose-built for this model's exact architecture, parameter counts, and on-device memory topology.</p>
+<p>FinchMoE is a from-scratch, Metal-accelerated inference engine for the Qwen3.6-35B-A3B Mixture-of-Experts language model. It runs entirely on Apple Silicon GPUs via Metal Compute shaders, with a hard 4 GB active RAM budget enforced at runtime. The project deliberately avoids third-party inference frameworks: there is no ONNX, no Core ML, no llama.cpp dependency. Every component — from the binary weight format and the memory allocator to the Metal kernels and the agentic tool-calling loop — is purpose-built for this model's exact architecture, parameter counts, and on-device memory topology.</p>
 
-<p>The central engineering challenge is that Qwen3.6-35B-A3B has 128 experts per MoE layer across 94 transformer blocks. Holding all expert weights in memory simultaneously requires roughly 22 GB — far beyond the 4 GB active budget. AeroMoE solves this with a demand-paged expert cache: each expert slab lives on NVMe as a 64 KB-aligned region in the custom <code>.aeromoe</code> format, and the engine streams only the 8 experts actually activated by the top-8 router into <code>MTLStorageModeShared</code> buffers, evicting cold slabs by LFU+recency when pressure exceeds the soft cap.</p>
+<p>The central engineering challenge is that Qwen3.6-35B-A3B has 128 experts per MoE layer across 94 transformer blocks. Holding all expert weights in memory simultaneously requires roughly 22 GB — far beyond the 4 GB active budget. FinchMoE solves this with a demand-paged expert cache: each expert slab lives on NVMe as a 64 KB-aligned region in the custom <code>.finchmoe</code> format, and the engine streams only the 8 experts actually activated by the top-8 router into <code>MTLStorageModeShared</code> buffers, evicting cold slabs by LFU+recency when pressure exceeds the soft cap.</p>
 
 <p>Key properties of the production build:</p>
 <ul>
@@ -302,7 +302,7 @@ h2.sub-title, h3.sub-sub-title, h1.section-title { orphans: 2; }
 
 <p>Qwen3.6-35B-A3B is a sparse Mixture-of-Experts Transformer. The name encodes the key dimensions: 35 billion total parameters, with only 3 billion active per forward pass (hence "A3B"). The sparsity arises from the MoE blocks replacing the dense feed-forward network in each transformer layer. A router selects 8 of 128 experts per token per layer, activating only those experts' weights, which is what keeps arithmetic intensity low enough for on-device inference.</p>
 
-<p>The full hyperparameter set is listed in Table 1. The 16:1 GQA ratio (64 query heads, 4 KV heads) substantially reduces KV cache memory: instead of storing one K/V pair per query head, only 4 KV heads are maintained, with each KV head broadcast to 16 query heads during attention. The extended RoPE theta of 1,000,000 supports context lengths up to approximately 128k tokens, though AeroMoE caps the KV cache at 4096 tokens for the RAM budget.</p>
+<p>The full hyperparameter set is listed in Table 1. The 16:1 GQA ratio (64 query heads, 4 KV heads) substantially reduces KV cache memory: instead of storing one K/V pair per query head, only 4 KV heads are maintained, with each KV head broadcast to 16 query heads during attention. The extended RoPE theta of 1,000,000 supports context lengths up to approximately 128k tokens, though FinchMoE caps the KV cache at 4096 tokens for the RAM budget.</p>
 
 <table>
   <caption data-label="Table 1">Qwen3.6-35B-A3B Model Hyperparameters</caption>
@@ -332,13 +332,13 @@ h2.sub-title, h3.sub-sub-title, h1.section-title { orphans: 2; }
 
 <!-- ═══════════════════════ SECTION 3: FILE FORMAT ═══════════════════════ -->
 <div id="s3">
-<h1 class="section-title"><span class="section-num">3.</span> .aeromoe File Format</h1>
+<h1 class="section-title"><span class="section-num">3.</span> .finchmoe File Format</h1>
 
-<p>The <code>.aeromoe</code> binary format is the custom weight container designed to make expert streaming fast and zero-copy. Its defining constraint is that every expert slab begins on a 64 KB boundary, matching the page granularity of Apple Silicon's unified memory controller and enabling <code>pread()</code> directly into an <code>MTLBuffer</code> without any intermediate copy buffer.</p>
+<p>The <code>.finchmoe</code> binary format is the custom weight container designed to make expert streaming fast and zero-copy. Its defining constraint is that every expert slab begins on a 64 KB boundary, matching the page granularity of Apple Silicon's unified memory controller and enabling <code>pread()</code> directly into an <code>MTLBuffer</code> without any intermediate copy buffer.</p>
 
 <pre>Offset          Region          Size       Contents
 ──────────────  ──────────────  ─────────  ─────────────────────────────────────
-0x0000_0000     FILE HEADER     512 B      magic "AEROMOE\0" + version + ModelConfig
+0x0000_0000     FILE HEADER     512 B      magic "FINCHMOE\0" + version + ModelConfig
 0x0000_0200     DENSE INDEX     ≤ 64 KB    TensorDesc[] for backbone tensors
 [aligned 64K]   EXPERT INDEX    variable   (layer, expert) → file offset table
 [aligned 64K]   DENSE WEIGHTS   variable   all non-expert tensors, packed bf16
@@ -352,21 +352,21 @@ h2.sub-title, h3.sub-sub-title, h1.section-title { orphans: 2; }
 
 <p>Total slab payload: \(3 \times 768 \times 4096 \times 2 = 18{,}874{,}368\) bytes ≈ 18 MB. The slab is padded to the next 64 KB boundary, so the Expert Index entry for the next slab always starts at an aligned offset. This padding is negligible relative to slab size.</p>
 
-<p><strong>Converter.</strong> The Python converter script (<code>aeromoe_convert.py</code>) reads the original Safetensors shards, reorders tensors into the Dense + Expert layout, computes the FNV-1a name hashes, writes the Expert Index, and emits 64 KB-aligned expert slabs via <code>os.pwrite()</code>. Output is a single <code>.aeromoe</code> file per model variant (base or Instruct); no multi-file sharding is needed because only the currently-active expert slabs reside in RAM.</p>
+<p><strong>Converter.</strong> The Python converter script (<code>finchmoe_convert.py</code>) reads the original Safetensors shards, reorders tensors into the Dense + Expert layout, computes the FNV-1a name hashes, writes the Expert Index, and emits 64 KB-aligned expert slabs via <code>os.pwrite()</code>. Output is a single <code>.finchmoe</code> file per model variant (base or Instruct); no multi-file sharding is needed because only the currently-active expert slabs reside in RAM.</p>
 
-<div class="note-box"><strong>Why not GGUF / Safetensors / ONNX?</strong> These formats interleave expert and non-expert weights by layer, making it impossible to read a single expert's three matrices with one <code>pread()</code> call. The 64 KB alignment in <code>.aeromoe</code> is the key property enabling zero-copy MTLBuffer loads.</div>
+<div class="note-box"><strong>Why not GGUF / Safetensors / ONNX?</strong> These formats interleave expert and non-expert weights by layer, making it impossible to read a single expert's three matrices with one <code>pread()</code> call. The 64 KB alignment in <code>.finchmoe</code> is the key property enabling zero-copy MTLBuffer loads.</div>
 </div>
 
 <!-- ════════════════════ SECTION 4: COMPONENT ARCHITECTURE ═══════════════ -->
 <div id="s4">
 <h1 class="section-title"><span class="section-num">4.</span> Component Architecture</h1>
 
-<p>AeroMoE is structured in five sessions (build phases), each building on the previous layer's interfaces. The layered architecture ensures that the pure C++ public API in Session 4 and 5 is entirely free of ObjC++ or Metal types, enabling it to be used from plain C++ callers without importing any Apple framework headers.</p>
+<p>FinchMoE is structured in five sessions (build phases), each building on the previous layer's interfaces. The layered architecture ensures that the pure C++ public API in Session 4 and 5 is entirely free of ObjC++ or Metal types, enabling it to be used from plain C++ callers without importing any Apple framework headers.</p>
 
 <div class="arch-diagram">
   <div class="arch-row">
     <div class="arch-label">CLI</div>
-    <div class="arch-content"><strong>aeromoe_chat</strong> &nbsp;·&nbsp; <strong>aeromoe_generate</strong> &nbsp;&nbsp;&nbsp; CLI executables (plain C++)</div>
+    <div class="arch-content"><strong>finchmoe_chat</strong> &nbsp;·&nbsp; <strong>finchmoe_generate</strong> &nbsp;&nbsp;&nbsp; CLI executables (plain C++)</div>
   </div>
   <div class="arch-row">
     <div class="arch-label">Session 5</div>
@@ -389,11 +389,11 @@ h2.sub-title, h3.sub-sub-title, h1.section-title { orphans: 2; }
   </div>
   <div class="arch-row">
     <div class="arch-label">Session 1</div>
-    <div class="arch-content"><strong>aeromoe_types</strong> &nbsp;·&nbsp; <strong>aeromoe_format</strong> &nbsp;·&nbsp; <strong>MemoryLedger</strong><br>
+    <div class="arch-content"><strong>finchmoe_types</strong> &nbsp;·&nbsp; <strong>finchmoe_format</strong> &nbsp;·&nbsp; <strong>MemoryLedger</strong><br>
     Shared types, format structs, atomic memory accounting</div>
   </div>
   <div class="arch-io-row">
-    <div class="arch-io-item"><span class="arch-arrow">&#8597;</span><span>pread() / NVMe</span><span style="font-style:italic">.aeromoe file</span></div>
+    <div class="arch-io-item"><span class="arch-arrow">&#8597;</span><span>pread() / NVMe</span><span style="font-style:italic">.finchmoe file</span></div>
     <div class="arch-io-item"><span class="arch-arrow">&#8597;</span><span>MTLBuffer (Shared)</span><span style="font-style:italic">Apple Silicon GPU</span></div>
   </div>
 </div>
@@ -405,10 +405,10 @@ h2.sub-title, h3.sub-sub-title, h1.section-title { orphans: 2; }
 <p>An LFU+recency expert slab cache keyed on <code>(layer_idx, expert_id)</code> pairs. Each entry holds an <code>MTLStorageModeShared</code> buffer containing the three projection matrices for that expert. When <code>acquire_expert(layer, id)</code> is called, the cache checks for a hit (O(1) via <code>std::unordered_map</code>); on miss it calls <code>IOPlanner::submit()</code> to schedule the <code>pread()</code> and inserts a pending entry. Eviction is triggered by <code>MemoryLedger::pressure()</code> before each new slab load. The eviction comparator orders entries by <code>use_count</code> ascending, breaking ties by <code>last_used_tick</code> ascending (oldest first). Entries with a non-zero <code>pin_count</code> — set atomically when an entry is bound to an in-flight Metal command buffer — are skipped during eviction regardless of score.</p>
 
 <h2 class="sub-title" id="s4-3">4.3 IOPlanner</h2>
-<p>A fixed-size thread pool (default: 8 worker threads, matching Qwen3.6's top-8 routing) that executes <code>pread()</code> calls against the open <code>.aeromoe</code> file descriptor. Each call to <code>submit(layer, expert_id, dest_ptr, nbytes, offset)</code> queues a work item and returns a <code>std::future&lt;Status&gt;</code>. The destination pointer <code>dest_ptr</code> is the <code>.contents</code> pointer of a freshly allocated <code>MTLStorageModeShared</code> buffer, so the <code>pread()</code> syscall writes directly into GPU-accessible unified memory. For a single MoE layer, all 8 required expert slabs are submitted simultaneously, allowing up to 8 parallel NVMe reads. The <code>ModelRunner</code> uses the returned futures to overlap I/O with Metal command encoding for the preceding layer, yielding approximately 15 ms of pipeline parallelism per MoE layer on NVMe-backed systems.</p>
+<p>A fixed-size thread pool (default: 8 worker threads, matching Qwen3.6's top-8 routing) that executes <code>pread()</code> calls against the open <code>.finchmoe</code> file descriptor. Each call to <code>submit(layer, expert_id, dest_ptr, nbytes, offset)</code> queues a work item and returns a <code>std::future&lt;Status&gt;</code>. The destination pointer <code>dest_ptr</code> is the <code>.contents</code> pointer of a freshly allocated <code>MTLStorageModeShared</code> buffer, so the <code>pread()</code> syscall writes directly into GPU-accessible unified memory. For a single MoE layer, all 8 required expert slabs are submitted simultaneously, allowing up to 8 parallel NVMe reads. The <code>ModelRunner</code> uses the returned futures to overlap I/O with Metal command encoding for the preceding layer, yielding approximately 15 ms of pipeline parallelism per MoE layer on NVMe-backed systems.</p>
 
 <h2 class="sub-title" id="s4-4">4.4 EngineCore</h2>
-<p><code>EngineCore</code> is the central resource owner. It opens the <code>.aeromoe</code> file at startup and holds the file descriptor for the lifetime of the engine. It allocates the <code>MTLDevice</code> (always the default device on Apple Silicon) and creates a single <code>MTLCommandQueue</code> used by all render operations. During initialisation, all dense backbone tensors — token embeddings, attention Q/K/V/O projections, RMSNorm weights, and the language model head — are loaded into persistent <code>MTLStorageModeShared</code> buffers totalling approximately 600 MB. These are never evicted. <code>EngineCore</code> exposes <code>acquire_expert()</code> and <code>release_expert()</code> to the <code>ModelRunner</code>, coordinating with the <code>ExpertCache</code> and pinning buffers before Metal command submission.</p>
+<p><code>EngineCore</code> is the central resource owner. It opens the <code>.finchmoe</code> file at startup and holds the file descriptor for the lifetime of the engine. It allocates the <code>MTLDevice</code> (always the default device on Apple Silicon) and creates a single <code>MTLCommandQueue</code> used by all render operations. During initialisation, all dense backbone tensors — token embeddings, attention Q/K/V/O projections, RMSNorm weights, and the language model head — are loaded into persistent <code>MTLStorageModeShared</code> buffers totalling approximately 600 MB. These are never evicted. <code>EngineCore</code> exposes <code>acquire_expert()</code> and <code>release_expert()</code> to the <code>ModelRunner</code>, coordinating with the <code>ExpertCache</code> and pinning buffers before Metal command submission.</p>
 
 <h2 class="sub-title" id="s4-5">4.5 Metal Kernels</h2>
 <p>All GPU compute is expressed as Metal Compute kernels compiled into a <code>.metallib</code> at build time and loaded via <code>MTLLibrary</code> at engine startup. Table 2 lists the six kernel families.</p>
@@ -508,7 +508,7 @@ engine.register_tool(
 <h1 class="section-title"><span class="section-num">6.</span> Memory Budget Deep-Dive</h1>
 
 <table>
-  <caption data-label="Table 3">AeroMoE RAM Budget — M3 Max, bf16, 4096-token context</caption>
+  <caption data-label="Table 3">FinchMoE RAM Budget — M3 Max, bf16, 4096-token context</caption>
   <thead>
     <tr><th>Component</th><th>Calculation</th><th>Size</th></tr>
   </thead>
@@ -530,7 +530,7 @@ engine.register_tool(
 <div id="s7">
 <h1 class="section-title"><span class="section-num">7.</span> Build System</h1>
 
-<p>AeroMoE uses CMake 3.26+ with three top-level executable targets and one shared library target. The project structure separates Metal source (<code>.metal</code>), Objective-C++ implementation (<code>.mm</code>), and pure C++ (<code>.cpp</code>) into distinct source lists. Metal files are compiled to a <code>.metallib</code> bundle by a custom CMake rule invoking <code>xcrun metal</code> and <code>xcrun metallib</code>; the bundle is embedded as a compile-time resource into <code>aeromoe_engine</code> using <code>xxd -i</code>.</p>
+<p>FinchMoE uses CMake 3.26+ with three top-level executable targets and one shared library target. The project structure separates Metal source (<code>.metal</code>), Objective-C++ implementation (<code>.mm</code>), and pure C++ (<code>.cpp</code>) into distinct source lists. Metal files are compiled to a <code>.metallib</code> bundle by a custom CMake rule invoking <code>xcrun metal</code> and <code>xcrun metallib</code>; the bundle is embedded as a compile-time resource into <code>finchmoe_engine</code> using <code>xxd -i</code>.</p>
 
 <p>All ObjC++ files are compiled with <code>-fobjc-arc</code> and <code>-x objective-c++</code>. Metal types are forward-declared in public headers using <code>#ifdef __OBJC__</code> guards so that pure C++ consumers can include <code>inference_engine.h</code> without pulling in any Apple framework headers.</p>
 
@@ -538,9 +538,9 @@ engine.register_tool(
 cmake --build build -j$(sysctl -n hw.logicalcpu)
 
 # Individual targets
-cmake --build build --target aeromoe_test      # smoke test suite
-cmake --build build --target aeromoe_generate  # generation CLI
-cmake --build build --target aeromoe_chat      # interactive chat CLI</pre>
+cmake --build build --target finchmoe_test      # smoke test suite
+cmake --build build --target finchmoe_generate  # generation CLI
+cmake --build build --target finchmoe_chat      # interactive chat CLI</pre>
 
 <table>
   <caption data-label="Table 4">CMake Targets and Compiler Flags</caption>
@@ -548,10 +548,10 @@ cmake --build build --target aeromoe_chat      # interactive chat CLI</pre>
     <tr><th>Target</th><th>Type</th><th>Key Flags</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>aeromoe_engine</code></td><td>Static library</td><td><code>-O3 -march=armv8.5-a+fp16+bf16 -ffast-math</code></td></tr>
-    <tr><td><code>aeromoe_generate</code></td><td>Executable</td><td>Links <code>aeromoe_engine</code></td></tr>
-    <tr><td><code>aeromoe_chat</code></td><td>Executable</td><td>Links <code>aeromoe_engine</code></td></tr>
-    <tr><td><code>aeromoe_test</code></td><td>Executable</td><td>Links <code>aeromoe_engine</code>; Catch2 test runner</td></tr>
+    <tr><td><code>finchmoe_engine</code></td><td>Static library</td><td><code>-O3 -march=armv8.5-a+fp16+bf16 -ffast-math</code></td></tr>
+    <tr><td><code>finchmoe_generate</code></td><td>Executable</td><td>Links <code>finchmoe_engine</code></td></tr>
+    <tr><td><code>finchmoe_chat</code></td><td>Executable</td><td>Links <code>finchmoe_engine</code></td></tr>
+    <tr><td><code>finchmoe_test</code></td><td>Executable</td><td>Links <code>finchmoe_engine</code>; Catch2 test runner</td></tr>
   </tbody>
 </table>
 
@@ -563,15 +563,15 @@ cmake --build build --target aeromoe_chat      # interactive chat CLI</pre>
 <h1 class="section-title"><span class="section-num">8.</span> Complete File Reference</h1>
 
 <table>
-  <caption data-label="Table 5">AeroMoE Source Files — 38 files, 8,738 lines total</caption>
+  <caption data-label="Table 5">FinchMoE Source Files — 38 files, 8,738 lines total</caption>
   <thead>
     <tr><th>File</th><th>Type</th><th>Lines</th><th>Session</th><th>Description</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>aeromoe_types.h</code></td><td>C++ header</td><td>120</td><td>1</td><td>Core enums, Status codes, bf16 typedef, ModelConfig</td></tr>
-    <tr><td><code>aeromoe_types.cpp</code></td><td>C++</td><td>55</td><td>1</td><td>Status string table, ModelConfig defaults</td></tr>
-    <tr><td><code>aeromoe_format.h</code></td><td>C++ header</td><td>148</td><td>1</td><td>FileHeader, TensorDesc, ExpertIndex structs; format constants</td></tr>
-    <tr><td><code>aeromoe_format.cpp</code></td><td>C++</td><td>210</td><td>1</td><td>Header validation, FNV-1a hash, index read/write utilities</td></tr>
+    <tr><td><code>finchmoe_types.h</code></td><td>C++ header</td><td>120</td><td>1</td><td>Core enums, Status codes, bf16 typedef, ModelConfig</td></tr>
+    <tr><td><code>finchmoe_types.cpp</code></td><td>C++</td><td>55</td><td>1</td><td>Status string table, ModelConfig defaults</td></tr>
+    <tr><td><code>finchmoe_format.h</code></td><td>C++ header</td><td>148</td><td>1</td><td>FileHeader, TensorDesc, ExpertIndex structs; format constants</td></tr>
+    <tr><td><code>finchmoe_format.cpp</code></td><td>C++</td><td>210</td><td>1</td><td>Header validation, FNV-1a hash, index read/write utilities</td></tr>
     <tr><td><code>memory_ledger.h</code></td><td>C++ header</td><td>62</td><td>1</td><td>Lock-free atomic budget accounting interface</td></tr>
     <tr><td><code>memory_ledger.cpp</code></td><td>C++</td><td>88</td><td>1</td><td>reserve / release / pressure implementation</td></tr>
     <tr><td><code>engine_core.h</code></td><td>C++ header</td><td>95</td><td>2</td><td>MTLDevice ownership, acquire/release expert API</td></tr>
@@ -639,14 +639,14 @@ cmake --build build --target aeromoe_chat      # interactive chat CLI</pre>
 
 <!-- ════════════════════ APPENDIX A: HEADER STRUCT ═══════════════════════ -->
 <div id="appA">
-<h1 class="section-title">Appendix A — .aeromoe Header Layout (C Struct)</h1>
+<h1 class="section-title">Appendix A — .finchmoe Header Layout (C Struct)</h1>
 
 <p>The file header occupies exactly 512 bytes starting at offset 0. All integer fields are little-endian. The <code>ModelConfig</code> embedded in the header stores the hyperparameters sufficient to reconstruct the model topology without external configuration files.</p>
 
-<pre>/* aeromoe_format.h — File header structs */
+<pre>/* finchmoe_format.h — File header structs */
 
-#define AEROMOE_MAGIC    "AEROMOE\0"  /* 8 bytes, null-terminated */
-#define AEROMOE_VERSION  1
+#define FINCHMOE_MAGIC    "FINCHMOE\0"  /* 8 bytes, null-terminated */
+#define FINCHMOE_VERSION  1
 
 typedef struct {
     uint32_t hidden_size;          /* 4096  */
@@ -665,8 +665,8 @@ typedef struct {
 } ModelConfig;                     /* 96 bytes */
 
 typedef struct {
-    char        magic[8];          /* "AEROMOE\0"                  */
-    uint32_t    version;           /* AEROMOE_VERSION = 1          */
+    char        magic[8];          /* "FINCHMOE\0"                  */
+    uint32_t    version;           /* FINCHMOE_VERSION = 1          */
     uint32_t    flags;             /* bit 0: Instruct variant       */
     uint64_t    dense_index_offset;/* byte offset of Dense Index    */
     uint64_t    dense_index_count; /* number of TensorDesc entries  */
@@ -677,7 +677,7 @@ typedef struct {
     uint64_t    total_file_size;
     ModelConfig model_config;      /* embedded topology             */
     uint8_t     _pad[356];         /* pad to exactly 512 bytes      */
-} AeroMoEFileHeader;               /* = 512 bytes, static_assert'd  */
+} FinchMoEFileHeader;               /* = 512 bytes, static_assert'd  */
 
 typedef struct {
     uint64_t name_hash;            /* FNV-1a 64-bit of tensor name  */

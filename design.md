@@ -1,10 +1,10 @@
-# AeroMoE — Design Review & Core Inference Engine Code
+# FinchMoE — Design Review & Core Inference Engine Code
 
 > **Where things live:**
-> - Engine implementation: [`aeromoe_engine/`](aeromoe_engine/) (C++/Metal, all 5 sessions complete)
-> - Binary format spec: [`aeromoe_format.md`](aeromoe_format.md)
-> - Converter: [`aeromoe_convert.py`](aeromoe_convert.py)
-> - Interactive visual explorer: [`aeromoe_explorer/`](aeromoe_explorer/)
+> - Engine implementation: [`finchmoe_engine/`](finchmoe_engine/) (C++/Metal, all 5 sessions complete)
+> - Binary format spec: [`finchmoe_format.md`](finchmoe_format.md)
+> - Converter: [`finchmoe_convert.py`](finchmoe_convert.py)
+> - Interactive visual explorer: [`finchmoe_explorer/`](finchmoe_explorer/)
 > - Architecture diagram: [`visualization.svg`](visualization.svg)
 
 ---
@@ -39,23 +39,23 @@ Overlap shared-expert GPU work with SSD reads	⚠️ Qwen3 MoE has no shared exp
 
 | Design section | Implemented in |
 |---------------|---------------|
-| Memory ledger / budget enforcement | [`aeromoe_engine/memory_ledger.h`](aeromoe_engine/memory_ledger.h) |
-| Expert slot cache (LFU+recency, refcounted) | [`aeromoe_engine/expert_cache.h`](aeromoe_engine/expert_cache.h), [`.mm`](aeromoe_engine/expert_cache.mm) |
-| I/O planner (parallel pread into Metal buffers) | [`aeromoe_engine/io_planner.h`](aeromoe_engine/io_planner.h), [`.cpp`](aeromoe_engine/io_planner.cpp) |
-| Manifest & expert index types | [`aeromoe_engine/aeromoe_format.h`](aeromoe_engine/aeromoe_format.h) |
-| Q4 GEMV + fused SwiGLU expert kernels | [`aeromoe_engine/kernels/moe_kernels.metal`](aeromoe_engine/kernels/moe_kernels.metal) |
-| RMSNorm kernel (Qwen epsilon placement) | [`aeromoe_engine/kernels/norm_kernels.metal`](aeromoe_engine/kernels/norm_kernels.metal) |
-| QK-Norm + RoPE fused kernel | [`aeromoe_engine/kernels/rope_kernels.metal`](aeromoe_engine/kernels/rope_kernels.metal) |
-| GQA paged-attention decode kernel | [`aeromoe_engine/kernels/attention_kernels.metal`](aeromoe_engine/kernels/attention_kernels.metal) |
-| GEMV kernel (bf16 matvec) | [`aeromoe_engine/kernels/gemv_kernels.metal`](aeromoe_engine/kernels/gemv_kernels.metal) |
-| Kernel dispatch / pipeline state | [`aeromoe_engine/kernels/kernel_dispatch.h`](aeromoe_engine/kernels/kernel_dispatch.h), [`.mm`](aeromoe_engine/kernels/kernel_dispatch.mm) |
-| Per-layer decode loop | [`aeromoe_engine/model_runner.h`](aeromoe_engine/model_runner.h), [`.mm`](aeromoe_engine/model_runner.mm) |
-| Top-level token loop + sampling | [`aeromoe_engine/inference_engine.mm`](aeromoe_engine/inference_engine.mm), [`sampler.cpp`](aeromoe_engine/sampler.cpp) |
-| KV cache (paged, GQA, bf16) | [`aeromoe_engine/kv_cache.h`](aeromoe_engine/kv_cache.h), [`.mm`](aeromoe_engine/kv_cache.mm) |
-| Router top-k + renormalization | [`aeromoe_engine/sampler.cpp`](aeromoe_engine/sampler.cpp) (CPU-side `topk_renorm`) |
-| Binary format specification | [`aeromoe_format.md`](aeromoe_format.md) |
-| safetensors → .aeromoe converter | [`aeromoe_convert.py`](aeromoe_convert.py) |
-| Visual explorer (interactive diagrams) | [`aeromoe_explorer/`](aeromoe_explorer/) |
+| Memory ledger / budget enforcement | [`finchmoe_engine/memory_ledger.h`](finchmoe_engine/memory_ledger.h) |
+| Expert slot cache (LFU+recency, refcounted) | [`finchmoe_engine/expert_cache.h`](finchmoe_engine/expert_cache.h), [`.mm`](finchmoe_engine/expert_cache.mm) |
+| I/O planner (parallel pread into Metal buffers) | [`finchmoe_engine/io_planner.h`](finchmoe_engine/io_planner.h), [`.cpp`](finchmoe_engine/io_planner.cpp) |
+| Manifest & expert index types | [`finchmoe_engine/finchmoe_format.h`](finchmoe_engine/finchmoe_format.h) |
+| Q4 GEMV + fused SwiGLU expert kernels | [`finchmoe_engine/kernels/moe_kernels.metal`](finchmoe_engine/kernels/moe_kernels.metal) |
+| RMSNorm kernel (Qwen epsilon placement) | [`finchmoe_engine/kernels/norm_kernels.metal`](finchmoe_engine/kernels/norm_kernels.metal) |
+| QK-Norm + RoPE fused kernel | [`finchmoe_engine/kernels/rope_kernels.metal`](finchmoe_engine/kernels/rope_kernels.metal) |
+| GQA paged-attention decode kernel | [`finchmoe_engine/kernels/attention_kernels.metal`](finchmoe_engine/kernels/attention_kernels.metal) |
+| GEMV kernel (bf16 matvec) | [`finchmoe_engine/kernels/gemv_kernels.metal`](finchmoe_engine/kernels/gemv_kernels.metal) |
+| Kernel dispatch / pipeline state | [`finchmoe_engine/kernels/kernel_dispatch.h`](finchmoe_engine/kernels/kernel_dispatch.h), [`.mm`](finchmoe_engine/kernels/kernel_dispatch.mm) |
+| Per-layer decode loop | [`finchmoe_engine/model_runner.h`](finchmoe_engine/model_runner.h), [`.mm`](finchmoe_engine/model_runner.mm) |
+| Top-level token loop + sampling | [`finchmoe_engine/inference_engine.mm`](finchmoe_engine/inference_engine.mm), [`sampler.cpp`](finchmoe_engine/sampler.cpp) |
+| KV cache (paged, GQA, bf16) | [`finchmoe_engine/kv_cache.h`](finchmoe_engine/kv_cache.h), [`.mm`](finchmoe_engine/kv_cache.mm) |
+| Router top-k + renormalization | [`finchmoe_engine/sampler.cpp`](finchmoe_engine/sampler.cpp) (CPU-side `topk_renorm`) |
+| Binary format specification | [`finchmoe_format.md`](finchmoe_format.md) |
+| safetensors → .finchmoe converter | [`finchmoe_convert.py`](finchmoe_convert.py) |
+| Visual explorer (interactive diagrams) | [`finchmoe_explorer/`](finchmoe_explorer/) |
 
 ---
 
@@ -64,13 +64,13 @@ Overlap shared-expert GPU work with SSD reads	⚠️ Qwen3 MoE has no shared exp
 Language: C++17 / Objective-C++ (.mm) + Metal Shading Language. Illustrative but structurally complete — tensor shapes come from manifest.json at load time, never hard-coded.
 
 2.1 Manifest & expert index
-// aeromoe_format.h
+// finchmoe_format.h
 #pragma once
 #include <cstdint>
 #include <vector>
 #include <string>
 
-namespace aeromoe {
+namespace finchmoe {
 
 struct QuantSpec {            // per-tensor-group quantization
     enum Kind : uint8_t { Q4_BLOCK32, Q5_BLOCK32, Q8, F16, F32 };
@@ -104,7 +104,7 @@ struct ExpertIndex {
     uint32_t n_experts_;
 };
 
-} // namespace aeromoe
+} // namespace finchmoe
 
 2.2 Memory ledger (the 4 GB contract)
 // memory_ledger.h
@@ -113,7 +113,7 @@ struct ExpertIndex {
 #include <cstdint>
 #include <stdexcept>
 
-namespace aeromoe {
+namespace finchmoe {
 
 class MemoryLedger {
 public:
@@ -125,7 +125,7 @@ public:
         if (cur > ceiling_) {
             used_.fetch_sub(bytes);
             throw std::runtime_error(
-                std::string("AeroMoE budget exceeded reserving ") + tag);
+                std::string("FinchMoE budget exceeded reserving ") + tag);
         }
     }
     void release(uint64_t bytes) { used_.fetch_sub(bytes); }
@@ -136,7 +136,7 @@ private:
     uint64_t ceiling_;
 };
 
-} // namespace aeromoe
+} // namespace finchmoe
 
 
 Construction-time plan check (fail fast, never swap):
@@ -159,7 +159,7 @@ void validate_budget(const ModelManifest& m, const EngineConfig& cfg,
 #include <vector>
 #include <mutex>
 
-namespace aeromoe {
+namespace finchmoe {
 
 struct SlotKey {
     uint32_t layer, expert;
@@ -241,7 +241,7 @@ private:
     MemoryLedger& ledger_;
 };
 
-} // namespace aeromoe
+} // namespace finchmoe
 
 2.4 I/O planner — bounded parallel pread into Metal buffers
 // io_planner.mm
@@ -250,16 +250,16 @@ private:
 #include <fcntl.h>
 #include <unistd.h>
 #include "expert_cache.h"
-#include "aeromoe_format.h"
+#include "finchmoe_format.h"
 
-namespace aeromoe {
+namespace finchmoe {
 
 class IOPlanner {
 public:
     IOPlanner(const ExpertIndex& idx, std::vector<int> layer_fds,
               ExpertCache& cache, uint32_t max_inflight = 3)
       : idx_(idx), fds_(std::move(layer_fds)), cache_(cache) {
-        q_   = dispatch_queue_create("aeromoe.io", DISPATCH_QUEUE_CONCURRENT);
+        q_   = dispatch_queue_create("finchmoe.io", DISPATCH_QUEUE_CONCURRENT);
         sem_ = dispatch_semaphore_create(max_inflight);   // autotuned 2–4
         grp_ = dispatch_group_create();
     }
@@ -303,7 +303,7 @@ private:
     dispatch_queue_t q_; dispatch_semaphore_t sem_; dispatch_group_t grp_;
 };
 
-} // namespace aeromoe
+} // namespace finchmoe
 
 2.5 Metal kernels — Q4 GEMV + fused SwiGLU + weighted combine
 // expert_kernels.metal
@@ -417,7 +417,7 @@ void DecodeLayer::run(uint32_t layer, id<MTLCommandQueue> queue,
 }
 
 2.7 Top-level token loop
-(→ Implemented in [`inference_engine.mm`](aeromoe_engine/inference_engine.mm) and [`model_runner.mm`](aeromoe_engine/model_runner.mm))
+(→ Implemented in [`inference_engine.mm`](finchmoe_engine/inference_engine.mm) and [`model_runner.mm`](finchmoe_engine/model_runner.mm))
 
 ```cpp
 int32_t Engine::decode_one_token(TokenState& st) {
@@ -451,7 +451,7 @@ RMSNorm (with +eps inside sqrt), SwiGLU experts	SwiGLU you already have; RMSNorm
 Below are the four kernels you must rewrite. Everything else (Q4 GEMV, SwiGLU expert FFN, residual add) carries over from the previous document.
 
 1. Fused RMSNorm (Qwen epsilon placement)
-(→ Implemented in [`aeromoe_engine/kernels/norm_kernels.metal`](aeromoe_engine/kernels/norm_kernels.metal))
+(→ Implemented in [`finchmoe_engine/kernels/norm_kernels.metal`](finchmoe_engine/kernels/norm_kernels.metal))
 // rmsnorm.metal — y = x / sqrt(mean(x^2) + eps) * w
 // One threadgroup per vector; d_model up to 8192.
 #include <metal_stdlib>
@@ -493,7 +493,7 @@ kernel void rmsnorm_f16(
 }
 
 2. Fused QK-Norm + RoPE (the Qwen3 signature kernel)
-(→ Implemented in [`aeromoe_engine/kernels/rope_kernels.metal`](aeromoe_engine/kernels/rope_kernels.metal))
+(→ Implemented in [`finchmoe_engine/kernels/rope_kernels.metal`](finchmoe_engine/kernels/rope_kernels.metal))
 
 This is the kernel that does not exist in Llama/Gemma engines. Qwen3 applies a per-head RMSNorm to Q and K after projection, before RoPE. Fusing norm + rotation into one pass avoids two extra round trips through unified memory — on bandwidth-starved 8 GB machines this matters.
 
@@ -546,10 +546,10 @@ kernel void qk_norm_rope(
 }
 
 
-Trap to respect: HuggingFace Qwen checkpoints use the NeoX half-split RoPE pairing, while many GGUF-derived kernels use interleaved pairs. Your .aeromoe converter must pick one convention and the kernel must match it — this is the #1 source of "model loads but outputs gibberish" bugs when porting model families.
+Trap to respect: HuggingFace Qwen checkpoints use the NeoX half-split RoPE pairing, while many GGUF-derived kernels use interleaved pairs. Your .finchmoe converter must pick one convention and the kernel must match it — this is the #1 source of "model loads but outputs gibberish" bugs when porting model families.
 
 3. GQA paged-attention decode kernel
-(→ Implemented in [`aeromoe_engine/kernels/attention_kernels.metal`](aeromoe_engine/kernels/attention_kernels.metal))
+(→ Implemented in [`finchmoe_engine/kernels/attention_kernels.metal`](finchmoe_engine/kernels/attention_kernels.metal))
 
 Generic single-query attention exists in many engines, but it must be specialized for: GQA broadcast ratio, your paged-KV block layout, and quantized KV blocks.
 
@@ -624,7 +624,7 @@ kernel void gqa_decode_attention(
 Production version: vectorize the dot products with half4 loads, keep acc in fp32 registers per simdlane, and add the Q8 KV-block dequant path for older pages.
 
 4. Router: softmax + top-k with renormalization
-(→ Implemented in [`aeromoe_engine/sampler.cpp`](aeromoe_engine/sampler.cpp) — CPU-side `topk_renorm()`)
+(→ Implemented in [`finchmoe_engine/sampler.cpp`](finchmoe_engine/sampler.cpp) — CPU-side `topk_renorm()`)
 
 Small but numerically load-bearing. Qwen3 MoE with norm_topk_prob=true requires the selected weights be renormalized to sum to 1 over the top-k — do it where you already do top-k, on CPU (n_experts floats is tiny):
 
@@ -670,17 +670,17 @@ Since Qwen3 MoE has no shared expert, command buffer B from the earlier design i
 ## Part 4: Additional references
 
 ### Converter
-The converter design (safetensors → .aeromoe repacking of Q/K norm weights, RoPE convention, and per-expert slices) is fully implemented in [`aeromoe_convert.py`](aeromoe_convert.py). It handles:
+The converter design (safetensors → .finchmoe repacking of Q/K norm weights, RoPE convention, and per-expert slices) is fully implemented in [`finchmoe_convert.py`](finchmoe_convert.py). It handles:
 - NeoX half-split RoPE layout matching (the #1 source of "model loads but outputs gibberish" bugs)
 - `norm_topk_prob` flag recording in the binary header
 - 64 KB-aligned expert slabs with gate/up/down packed for direct Metal binding
 - Architecture validation with hard-fail on unknown config fields
 
 ### Binary format
-The complete `.aeromoe` format specification is in [`aeromoe_format.md`](aeromoe_format.md) — header layout, dense/expert index entry structures, and slab internal layout.
+The complete `.finchmoe` format specification is in [`finchmoe_format.md`](finchmoe_format.md) — header layout, dense/expert index entry structures, and slab internal layout.
 
 ### Visual explorer
-Interactive visualizations of every concept described in this document are available in the [AeroMoE Explorer](aeromoe_explorer/) Next.js app:
+Interactive visualizations of every concept described in this document are available in the [FinchMoE Explorer](finchmoe_explorer/) Next.js app:
 - Architecture stack with animated signal flow
 - 9-step inference pipeline walkthrough
 - 128-expert routing grid with top-8 selection animation
@@ -703,7 +703,7 @@ num_hidden_layers	94	40
 hidden_size	4096	2048
 num_experts	128	256 (8 routed + 1 shared)
 context_length	4096 (KV budget)	262,144 native
-The architecture has evolved — it now uses a hybrid Gated Delta Network + MoE design rather than the pure dense-attention + MoE structure we targeted. You'll need to update the model config constants in aeromoe_types.h and model_runner.mm to match the published weights before converting.
+The architecture has evolved — it now uses a hybrid Gated Delta Network + MoE design rather than the pure dense-attention + MoE structure we targeted. You'll need to update the model config constants in finchmoe_types.h and model_runner.mm to match the published weights before converting.
 
 Also useful:
 

@@ -1,4 +1,4 @@
-// All static data for AeroMoE Explorer
+// All static data for FinchMoE Explorer
 
 export const MODEL_CONFIG = {
   name: 'Qwen3.6-35B-A3B',
@@ -46,8 +46,8 @@ export const SESSION_LABELS: Record<number, { title: string; color: string; desc
 
 export const SOURCE_FILES: SourceFile[] = [
   // Session 1
-  { name: 'aeromoe_types.h', path: 'src/', session: 1, lines: 184, type: 'header', description: 'Core type definitions: LayerMeta, ExpertSlab, ModelHeader, bf16 helpers', symbols: ['LayerMeta', 'ExpertSlab', 'ModelHeader', 'bf16_to_float', 'float_to_bf16'] },
-  { name: 'aeromoe_format.h', path: 'src/', session: 1, lines: 315, type: 'header', description: '.aeromoe binary format reader/writer with 64KB alignment and mmap support', symbols: ['AeroMoeFormat', 'FormatReader', 'FormatWriter', 'ALIGNMENT_64KB', 'MAGIC_NUMBER'] },
+  { name: 'finchmoe_types.h', path: 'src/', session: 1, lines: 184, type: 'header', description: 'Core type definitions: LayerMeta, ExpertSlab, ModelHeader, bf16 helpers', symbols: ['LayerMeta', 'ExpertSlab', 'ModelHeader', 'bf16_to_float', 'float_to_bf16'] },
+  { name: 'finchmoe_format.h', path: 'src/', session: 1, lines: 315, type: 'header', description: '.finchmoe binary format reader/writer with 64KB alignment and mmap support', symbols: ['FinchMoeFormat', 'FormatReader', 'FormatWriter', 'ALIGNMENT_64KB', 'MAGIC_NUMBER'] },
   { name: 'memory_ledger.h', path: 'src/', session: 1, lines: 148, type: 'header', description: 'Real-time memory budget tracker with soft/hard caps and eviction triggers', symbols: ['MemoryLedger', 'BudgetEntry', 'EvictionPolicy', 'SoftCap', 'HardCap'] },
   // Session 2
   { name: 'expert_cache.h', path: 'src/', session: 2, lines: 152, type: 'header', description: 'LFU expert cache with Metal buffer management and async prefetch', symbols: ['ExpertCache', 'CacheEntry', 'EvictionResult', 'PrefetchHint'] },
@@ -86,7 +86,7 @@ export const SOURCE_FILES: SourceFile[] = [
   { name: 'tool_engine.cpp', path: 'src/', session: 5, lines: 272, type: 'source', description: 'ToolEngine implementation: dispatch, execute, result formatting', symbols: ['ToolEngine::register_handler', 'ToolEngine::dispatch', 'ToolEngine::execute'] },
   { name: 'chat_main.cpp', path: 'tools/', session: 5, lines: 431, type: 'source', description: 'Interactive chat CLI with tool-calling and multi-turn support', symbols: ['main', 'chat_loop', 'handle_tool_call', 'display_response'] },
   // Build
-  { name: 'CMakeLists.txt', path: '', session: 0, lines: 83, type: 'cmake', description: 'CMake build configuration for macOS with Metal framework linking', symbols: ['project(AeroMoE)', 'find_library(Metal)', 'add_executable'] },
+  { name: 'CMakeLists.txt', path: '', session: 0, lines: 83, type: 'cmake', description: 'CMake build configuration for macOS with Metal framework linking', symbols: ['project(FinchMoE)', 'find_library(Metal)', 'add_executable'] },
   { name: 'README.md', path: '', session: 0, lines: 94, type: 'markdown', description: 'Project documentation: build instructions, usage, architecture overview', symbols: ['Build', 'Usage', 'Architecture', 'License'] },
   { name: 'engine_test.cpp', path: 'test/', session: 0, lines: 58, type: 'test', description: 'Basic engine integration test: load model, generate one token', symbols: ['test_load_model', 'test_generate_token', 'test_expert_cache'] },
 ];
@@ -109,7 +109,7 @@ export const ARCHITECTURE_LAYERS: ArchitectureLayer[] = [
   {
     id: 'cli',
     label: 'CLI Tools',
-    components: ['aeromoe_chat', 'aeromoe_generate'],
+    components: ['finchmoe_chat', 'finchmoe_generate'],
     session: 5,
     color: '#f59e0b',
     description: 'Command-line interfaces for interactive chat and raw text generation',
@@ -154,16 +154,16 @@ export const ARCHITECTURE_LAYERS: ArchitectureLayer[] = [
   {
     id: 'format',
     label: 'Wire Format',
-    components: ['aeromoe_types', 'aeromoe_format', 'MemoryLedger'],
+    components: ['finchmoe_types', 'finchmoe_format', 'MemoryLedger'],
     session: 1,
     color: '#3b82f6',
-    description: '.aeromoe binary format with 64KB alignment, type definitions, and real-time memory budget tracking',
-    files: ['aeromoe_types.h', 'aeromoe_format.h', 'memory_ledger.h'],
+    description: '.finchmoe binary format with 64KB alignment, type definitions, and real-time memory budget tracking',
+    files: ['finchmoe_types.h', 'finchmoe_format.h', 'memory_ledger.h'],
   },
   {
     id: 'foundation',
     label: 'Foundation',
-    components: ['.aeromoe file', 'Apple Silicon GPU'],
+    components: ['.finchmoe file', 'Apple Silicon GPU'],
     session: 0,
     color: '#64748b',
     description: 'The model weights file and the Metal-capable Apple Silicon hardware',

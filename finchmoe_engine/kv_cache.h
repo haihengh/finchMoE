@@ -42,15 +42,9 @@
 #include <cstdint>
 #include <cassert>
 
-#ifdef __OBJC__
-@protocol MTLBuffer;
-@protocol MTLDevice;
-using MTLBufferPtr_t = id<MTLBuffer>;
-using MTLDevicePtr   = id<MTLDevice>;
-#else
+// Metal types are opaque void* — only .mm files bridge to real ObjC types.
 using MTLBufferPtr_t = void*;
 using MTLDevicePtr   = void*;
-#endif
 
 namespace finchmoe {
 

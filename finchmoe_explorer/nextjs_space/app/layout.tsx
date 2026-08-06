@@ -9,15 +9,15 @@ const jakartaSans = Plus_Jakarta_Sans({ subsets: ['latin'], variable: '--font-di
 const jetbrainsMono = JetBrains_Mono({ subsets: ['latin'], variable: '--font-mono' })
 
 export const metadata = {
-  title: 'AeroMoE Explorer',
-  description: 'Interactive visualization of the AeroMoE inference engine for Qwen3.6-35B-A3B on Apple Silicon',
+  title: 'FinchMoE Explorer',
+  description: 'Interactive visualization of the FinchMoE inference engine for Qwen3.6-35B-A3B on Apple Silicon',
   icons: {
     icon: '/favicon.svg',
     shortcut: '/favicon.svg',
   },
   openGraph: {
-    title: 'AeroMoE Explorer',
-    description: 'Interactive visualization of the AeroMoE inference engine for Qwen3.6-35B-A3B on Apple Silicon',
+    title: 'FinchMoE Explorer',
+    description: 'Interactive visualization of the FinchMoE inference engine for Qwen3.6-35B-A3B on Apple Silicon',
     images: [{ url: '/og-image.png', width: 1200, height: 630 }],
   },
   metadataBase: new URL(process.env.NEXTAUTH_URL || 'http://localhost:3000'),

@@ -1,10 +1,10 @@
-# AeroMoE
+# FinchMoE
 
 **SSD-streamed Metal inference for Qwen MoE models on Apple Silicon**
 
-AeroMoE runs Qwen3.6-35B-A3B–class Mixture-of-Experts models on M1–M4 Macs with **under 4 GB active unified memory** by keeping the dense backbone resident and streaming routed expert weights from SSD on demand. Metal-only GPU execution, no ANE.
+FinchMoE runs Qwen3.6-35B-A3B–class Mixture-of-Experts models on M1–M4 Macs with **under 4 GB active unified memory** by keeping the dense backbone resident and streaming routed expert weights from SSD on demand. Metal-only GPU execution, no ANE.
 
-![AeroMoE Architecture](visualization.svg)
+![FinchMoE Architecture](visualization.svg)
 
 **🔗 [Live Interactive Demo](https://haihengh-local-inference-moe.abacusai.app/)** — explore the architecture, MoE routing, memory manager, and inference pipeline in your browser.
 
@@ -13,35 +13,35 @@ AeroMoE runs Qwen3.6-35B-A3B–class Mixture-of-Experts models on M1–M4 Macs w
 ## Quick start
 
 ```bash
-# 1. Convert Hugging Face weights → .aeromoe format
-python3 aeromoe_convert.py \
+# 1. Convert Hugging Face weights → .finchmoe format
+python3 finchmoe_convert.py \
     --model-dir ~/models/Qwen3.6-35B-A3B-Instruct \
-    --output    qwen3.aeromoe
+    --output    qwen3.finchmoe
 
 # 2. Build the engine (macOS 14+, Xcode 15+, CMake 3.22+)
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(sysctl -n hw.logicalcpu)
 
 # 3a. One-shot generation
-./build/aeromoe_generate qwen3.aeromoe "Explain MoE routing"
+./build/finchmoe_generate qwen3.finchmoe "Explain MoE routing"
 
 # 3b. Interactive chat with tool-calling
-./build/aeromoe_chat qwen3.aeromoe qwen3.tiktoken \
+./build/finchmoe_chat qwen3.finchmoe qwen3.tiktoken \
     --system "You are a helpful assistant." \
     --ctx 4096 --temp 0.7 --top-p 0.9
 ```
 
-See **[aeromoe_engine/README.md](aeromoe_engine/README.md)** for the full engine reference, kernel catalog, and API docs.
+See **[finchmoe_engine/README.md](finchmoe_engine/README.md)** for the full engine reference, kernel catalog, and API docs.
 
 ---
 
 ## Project structure
 
 ```
-AeroMoE/
-├── aeromoe_convert.py          safetensors → .aeromoe converter (✅ done)
-├── aeromoe_engine/             C++/Metal inference runtime (✅ done)
-│   ├── aeromoe_format.h        .aeromoe binary format parser
+FinchMoE/
+├── finchmoe_convert.py          safetensors → .finchmoe converter (✅ done)
+├── finchmoe_engine/             C++/Metal inference runtime (✅ done)
+│   ├── finchmoe_format.h        .finchmoe binary format parser
 │   ├── memory_ledger.h         Lock-free 4 GB budget tracker
 │   ├── expert_cache.h/.mm      LFU+recency expert slab cache
 │   ├── io_planner.h/.cpp       Bounded parallel pread() I/O
@@ -54,9 +54,9 @@ AeroMoE/
 │   ├── tool_engine.h/.cpp      Multi-turn agentic tool-calling loop
 │   ├── tools/                  CLI executables (generate + chat)
 │   └── test/                   Engine smoke test
-├── aeromoe_explorer/           Interactive Next.js visualization app
+├── finchmoe_explorer/           Interactive Next.js visualization app
 │   └── 6 tabs: Overview, Pipeline, MoE Routing, Memory, Tool-Calling, File Explorer
-├── aeromoe_format.md           .aeromoe binary format specification
+├── finchmoe_format.md           .finchmoe binary format specification
 ├── design.md                   Design review + Qwen3.6 kernel reference code
 └── visualization.svg           Architecture diagram
 ```
@@ -65,7 +65,7 @@ AeroMoE/
 
 ## Architecture
 
-AeroMoE treats Apple Silicon's unified memory as the **sole constraint** and the internal SSD as a **streaming weight store** — not a swap device.
+FinchMoE treats Apple Silicon's unified memory as the **sole constraint** and the internal SSD as a **streaming weight store** — not a swap device.
 
 ### The problem
 Qwen3.6-35B-A3B has ~128 routed experts per layer × 94 layers. Each expert is ~18 MB (bf16). Loading all experts into RAM would need >200 GB — impossible on consumer Macs.
@@ -104,12 +104,12 @@ Actual resident usage depends on the checkpoint: layers, hidden size, expert cou
 
 ---
 
-## Model format: `.aeromoe`
+## Model format: `.finchmoe`
 
-AeroMoE uses a custom inference-only binary format — not safetensors, not MLX shards. The SSD representation is the GPU-consumable layout; no unpacking or dequantization at load time.
+FinchMoE uses a custom inference-only binary format — not safetensors, not MLX shards. The SSD representation is the GPU-consumable layout; no unpacking or dequantization at load time.
 
 ```
-model.aeromoe/
+model.finchmoe/
 ├── Header (512 B)         magic, version, model config, dtype, offsets
 ├── Dense index            48 B per tensor (name hash, offset, shape, dtype)
 ├── Expert index           24 B per (layer, expert) slab
@@ -118,7 +118,7 @@ model.aeromoe/
                            gate_proj | up_proj | down_proj, zero-padded to 64 KB
 ```
 
-Full specification: **[aeromoe_format.md](aeromoe_format.md)**
+Full specification: **[finchmoe_format.md](finchmoe_format.md)**
 
 ### Quantization
 | Component | Scheme |
@@ -160,7 +160,7 @@ Full specification: **[aeromoe_format.md](aeromoe_format.md)**
 
 **🔗 [Live demo →](https://haihengh-local-inference-moe.abacusai.app/)**
 
-The **[AeroMoE Explorer](aeromoe_explorer/)** is a Next.js app with 6 interactive tabs:
+The **[FinchMoE Explorer](finchmoe_explorer/)** is a Next.js app with 6 interactive tabs:
 1. **Overview** — Animated architecture stack with signal pulse
 2. **Inference Pipeline** — 9-step animated token generation walkthrough
 3. **MoE Routing** — 128-expert grid with top-8 routing and LFU cache simulation
@@ -175,9 +175,9 @@ The **[AeroMoE Explorer](aeromoe_explorer/)** is a Next.js app with 6 interactiv
 | Document | What it covers |
 |----------|---------------|
 | [README.md](README.md) | This file — project overview, quick start, architecture |
-| [aeromoe_engine/README.md](aeromoe_engine/README.md) | Engine reference: build, API, kernels, tool-calling, REPL |
+| [finchmoe_engine/README.md](finchmoe_engine/README.md) | Engine reference: build, API, kernels, tool-calling, REPL |
 | [design.md](design.md) | Design review, kernel reference code, Qwen3.6-specifics |
-| [aeromoe_format.md](aeromoe_format.md) | `.aeromoe` binary format: header, indexes, slab layout |
+| [finchmoe_format.md](finchmoe_format.md) | `.finchmoe` binary format: header, indexes, slab layout |
 | [visualization.svg](visualization.svg) | Standalone architecture diagram |
 
 ---
@@ -195,7 +195,7 @@ The **[AeroMoE Explorer](aeromoe_explorer/)** is a Next.js app with 6 interactiv
 
 | # | Component | Status |
 |---|-----------|--------|
-| 1 | `safetensors → .aeromoe` converter + wire format types | ✅ Complete |
+| 1 | `safetensors → .finchmoe` converter + wire format types | ✅ Complete |
 | 2 | Engine core: expert cache, I/O planner, Metal device init | ✅ Complete |
 | 3 | Metal kernels: RoPE, RMSNorm, GEMV, GQA attention, MoE | ✅ Complete |
 | 4 | Inference loop: KV cache, sampler, 94-layer forward pass | ✅ Complete |

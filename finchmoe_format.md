@@ -1,4 +1,4 @@
-# AeroMoE File Format — Session 1 Reference
+# FinchMoE File Format — Session 1 Reference
 
 ## Binary Layout (all sections 64 KB-aligned)
 
@@ -16,7 +16,7 @@ Offset          Section             Size
 
 | Offset | Size | Field              | Notes                                      |
 |--------|------|--------------------|--------------------------------------------|
-| 0x000  |  8 B | magic              | `"AEROMOE\0"`                              |
+| 0x000  |  8 B | magic              | `"FINCHMOE\0"`                              |
 | 0x008  |  4 B | version            | `0x0001_0000`  (major=1, minor=0)          |
 | 0x00C  |  4 B | dtype_code         | 0=bf16  1=fp16  2=fp32  3=fp8_e4m3         |
 | 0x010  |  4 B | hidden_size        |                                            |
@@ -89,27 +89,27 @@ For Qwen3.6-35B-A3B (bf16):
 
 ```bash
 # Dry run — show layout plan, no file written
-python aeromoe_convert.py \
+python finchmoe_convert.py \
     --model-dir ~/models/Qwen3.6-35B-A3B-Instruct \
-    --output    ~/models/qwen36_35b_instruct.aeromoe \
+    --output    ~/models/qwen36_35b_instruct.finchmoe \
     --dry-run
 
 # Full conversion (keep source bf16 dtype)
-python aeromoe_convert.py \
+python finchmoe_convert.py \
     --model-dir ~/models/Qwen3.6-35B-A3B-Instruct \
-    --output    ~/models/qwen36_35b_instruct.aeromoe \
+    --output    ~/models/qwen36_35b_instruct.finchmoe \
     --workers   8
 
 # Convert + verify checksums on 32 random tensors
-python aeromoe_convert.py \
+python finchmoe_convert.py \
     --model-dir ~/models/Qwen3.6-35B-A3B \
-    --output    ~/models/qwen36_35b_base.aeromoe \
+    --output    ~/models/qwen36_35b_base.finchmoe \
     --verify
 
 # Force fp16 output (slightly smaller, marginal quality loss)
-python aeromoe_convert.py \
+python finchmoe_convert.py \
     --model-dir ~/models/Qwen3.6-35B-A3B-Instruct \
-    --output    ~/models/qwen36_35b_fp16.aeromoe \
+    --output    ~/models/qwen36_35b_fp16.finchmoe \
     --dtype float16
 ```
 
@@ -126,7 +126,7 @@ via `pread()`-style seeks for maximum efficiency on large shards.
 
 | # | Component                       | Status     |
 |---|---------------------------------|------------|
-| 1 | `safetensors → .aeromoe` converter | ✅ Done  |
+| 1 | `safetensors → .finchmoe` converter | ✅ Done  |
 | 2 | C++ engine core                 | Next       |
 | 3 | Metal kernels (Qwen3.6-specific)| Pending    |
 | 4 | Inference loop + model loader   | Pending    |

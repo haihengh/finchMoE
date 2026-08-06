@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Build outputs
+finchmoe_engine/build/
+finchmoe_explorer/nextjs_space/.next/
+finchmoe_explorer/nextjs_space/out/
+
+# Dependencies
+finchmoe_explorer/nextjs_space/node_modules/
+finchmoe_explorer/nextjs_space/package-lock.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Misc
+*.o
+*.a
+*.metallib

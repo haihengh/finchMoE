@@ -55,11 +55,11 @@ kernel void rms_norm_bf16(
     device       ushort* __restrict__ output  [[ buffer(2) ]],  // [rows, hidden]
     constant     uint&                hidden  [[ buffer(3) ]],
     constant     float&               eps     [[ buffer(4) ]],
-    uint2 tgid   [[ threadgroup_position_in_grid ]],
+    uint  tgid   [[ threadgroup_position_in_grid ]],
     uint  tid    [[ thread_index_in_threadgroup ]],
     uint  tg_sz  [[ threads_per_threadgroup ]]
 ) {
-    uint row    = tgid.x;
+    uint row    = tgid;
     uint base   = row * hidden;
 
     // ── pass 1: accumulate sum of squares ────────────────────────────────────
@@ -162,11 +162,11 @@ kernel void rms_norm_inplace_bf16(
     device const ushort* __restrict__ weight  [[ buffer(1) ]],
     constant     uint&                hidden  [[ buffer(2) ]],
     constant     float&               eps     [[ buffer(3) ]],
-    uint2 tgid   [[ threadgroup_position_in_grid ]],
+    uint  tgid   [[ threadgroup_position_in_grid ]],
     uint  tid    [[ thread_index_in_threadgroup ]],
     uint  tg_sz  [[ threads_per_threadgroup ]]
 ) {
-    uint row  = tgid.x;
+    uint row  = tgid;
     uint base = row * hidden;
 
     float local_ss = 0.0f;

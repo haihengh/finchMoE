@@ -69,7 +69,7 @@ struct ModelConfig {
     // Norms & positional
     float    rms_norm_eps             = 1e-6f;
     float    rope_theta               = 1'000'000.0f;
-    char     rope_scaling_type[8]     = "yarn\0\0\0\0";
+    char     rope_scaling_type[9]     = "yarn";
 
     // Storage
     DType    storage_dtype            = DType::BF16;

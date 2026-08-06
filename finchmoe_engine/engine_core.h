@@ -24,17 +24,9 @@
 #include <atomic>
 #include <functional>
 
-// Forward-declare Metal types (ObjC++ only in engine_core.mm)
-#ifdef __OBJC__
-@protocol MTLDevice;
-@protocol MTLBuffer;
-@protocol MTLCommandQueue;
-using MTLDevicePtr       = id<MTLDevice>;
-using MTLCommandQueuePtr = id<MTLCommandQueue>;
-#else
+// Metal types are opaque void* — only .mm files bridge to real ObjC types.
 using MTLDevicePtr       = void*;
 using MTLCommandQueuePtr = void*;
-#endif
 
 namespace finchmoe {
 

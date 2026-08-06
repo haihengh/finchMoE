@@ -68,7 +68,7 @@ export default function AppShell() {
             </div>
             <div>
               <h1 className="text-xl font-display font-bold tracking-tight text-foreground glow-text-blue">
-                AeroMoE
+                FinchMoE
               </h1>
               <p className="text-xs text-muted-foreground font-mono hidden sm:block">
                 Qwen3.6-35B-A3B · Apple Silicon · Metal GPU

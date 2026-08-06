@@ -2,10 +2,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // RoPE (Rotary Position Embedding) for Qwen3.6-35B-A3B
 //
-// Qwen3 uses the NeoX half-split convention:
+// Qwen3 uses the NeoX hd2-split convention:
 //   - The head_dim is split into two equal halves:
-//       first half  = [0 .. head_dim/2)
-//       second half = [head_dim/2 .. head_dim)
+//       first hd2  = [0 .. head_dim/2)
+//       second hd2 = [head_dim/2 .. head_dim)
 //   - Rotation pairs: (x[i], x[i + head_dim/2]) for i in [0, head_dim/2)
 //   - This differs from GPT-NeoX interleaved (x[2i], x[2i+1]).
 //
@@ -49,7 +49,7 @@ inline ushort f32_to_bf16(float f) {
 // grid:       (seq_len * n_heads, 1, 1)
 // threadgroup (head_dim/2, 1, 1)           each thread handles one rotation pair
 //
-// NeoX half-split:
+// NeoX hd2-split:
 //   x0 = tensor[pos, head, i]              i in [0, head_dim/2)
 //   x1 = tensor[pos, head, i + head_dim/2]
 //   cos_val, sin_val from table at [position_id, i]
@@ -72,22 +72,22 @@ kernel void rope_neox_bf16(
     uint head_id = tgid % n_heads;
 
     uint pos    = pos_ids[seq_pos];
-    uint half   = head_dim / 2u;
+    uint hd2   = head_dim / 2u;
 
-    // Only threads [0, half) are active; threads >= half are idle.
-    if (tid >= half) return;
+    // Only threads [0, hd2) are active; threads >= hd2 are idle.
+    if (tid >= hd2) return;
 
     uint base   = (seq_pos * n_heads + head_id) * head_dim;
     uint i      = tid;  // rotation pair index
 
     float x0    = bf16_to_f32(tensor[base + i]);
-    float x1    = bf16_to_f32(tensor[base + i + half]);
+    float x1    = bf16_to_f32(tensor[base + i + hd2]);
 
-    float c     = cos_table[pos * half + i];
-    float s     = sin_table[pos * half + i];
+    float c     = cos_table[pos * hd2 + i];
+    float s     = sin_table[pos * hd2 + i];
 
     tensor[base + i]        = f32_to_bf16(x0 * c - x1 * s);
-    tensor[base + i + half] = f32_to_bf16(x0 * s + x1 * c);
+    tensor[base + i + hd2] = f32_to_bf16(x0 * s + x1 * c);
 }
 
 // ── kernel: rope_neox_fused_qk_bf16 ─────────────────────────────────────────
@@ -122,29 +122,29 @@ kernel void rope_neox_fused_qk_bf16(
     uint head_id   = tgid % max_heads;
 
     uint pos  = pos_ids[seq_pos];
-    uint half = head_dim / 2u;
+    uint hd2 = head_dim / 2u;
 
-    if (tid >= half) return;
+    if (tid >= hd2) return;
 
-    float c = cos_table[pos * half + tid];
-    float s = sin_table[pos * half + tid];
+    float c = cos_table[pos * hd2 + tid];
+    float s = sin_table[pos * hd2 + tid];
 
     // Apply to Q
     if (head_id < n_heads) {
         uint base_q = (seq_pos * n_heads + head_id) * head_dim;
         float x0    = bf16_to_f32(q[base_q + tid]);
-        float x1    = bf16_to_f32(q[base_q + tid + half]);
+        float x1    = bf16_to_f32(q[base_q + tid + hd2]);
         q[base_q + tid]        = f32_to_bf16(x0 * c - x1 * s);
-        q[base_q + tid + half] = f32_to_bf16(x0 * s + x1 * c);
+        q[base_q + tid + hd2] = f32_to_bf16(x0 * s + x1 * c);
     }
 
     // Apply to K
     if (head_id < n_kv_heads) {
         uint base_k = (seq_pos * n_kv_heads + head_id) * head_dim;
         float x0    = bf16_to_f32(k[base_k + tid]);
-        float x1    = bf16_to_f32(k[base_k + tid + half]);
+        float x1    = bf16_to_f32(k[base_k + tid + hd2]);
         k[base_k + tid]        = f32_to_bf16(x0 * c - x1 * s);
-        k[base_k + tid + half] = f32_to_bf16(x0 * s + x1 * c);
+        k[base_k + tid + hd2] = f32_to_bf16(x0 * s + x1 * c);
     }
 }
 
@@ -175,15 +175,15 @@ kernel void build_yarn_rope_tables(
     uint tid  [[ thread_index_in_threadgroup ]]
 ) {
     uint pos  = tgid;
-    uint half = head_dim / 2u;
-    if (tid >= half) return;
+    uint hd2 = head_dim / 2u;
+    if (tid >= hd2) return;
 
     // Effective frequency for dimension tid
     float exp_val  = -2.0f * (float)tid / (float)head_dim;
     float freq     = pow(rope_theta, exp_val) / scale;
     float angle    = (float)pos * freq;
 
-    uint out_idx   = pos * half + tid;
+    uint out_idx   = pos * hd2 + tid;
     cos_out[out_idx] = cos(angle);
     sin_out[out_idx] = sin(angle);
 }
