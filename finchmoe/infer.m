@@ -5096,6 +5096,10 @@ static void fused_layer_forward(
 
     int actual_K = (K > MAX_K) ? MAX_K : K;
 
+    // TEMPORARY: force CPU expert path to isolate NaN source
+    int force_cpu_experts = 1;
+    if (force_cpu_experts) goto cpu_expert_fallback;
+
     if (packed_fd >= 0 && g_metal && g_metal->buf_multi_expert_data[0]) {
         // GPU multi-expert path with LRU cache + parallel I/O:
         // For each expert:
@@ -5481,7 +5485,9 @@ static void fused_layer_forward(
         // will wait for the GPU and apply the final combine.
         return;
 
-    } else if (packed_fd >= 0) {
+    }
+    cpu_expert_fallback:
+    if (packed_fd >= 0) {
         // CPU fallback for experts
         size_t esz = active_expert_size();
         float *expert_out_cpu = malloc(HIDDEN_DIM * sizeof(float));
@@ -5520,12 +5526,28 @@ static void fused_layer_forward(
             cpu_dequant_matvec(dw, ds_p, db_p, act_out, expert_out_cpu,
                                HIDDEN_DIM, MOE_INTERMEDIATE, GROUP_SIZE, 4);
 
+            if (layer_idx == 7) {
+                float gr=0, ur=0, ar=0, er=0;
+                for(int j=0;j<MOE_INTERMEDIATE;j++){gr+=gate_proj_out[j]*gate_proj_out[j];ur+=up_proj_out[j]*up_proj_out[j];ar+=act_out[j]*act_out[j];}
+                for(int j=0;j<HIDDEN_DIM;j++) er+=expert_out_cpu[j]*expert_out_cpu[j];
+                fprintf(stderr,"[EXPERT-DBG] layer=%d k=%d expert=%d gate_rms=%.6f up_rms=%.6f act_rms=%.6f out_rms=%.6f weight=%.4f\n",
+                  layer_idx, k, eidx, sqrtf(gr/MOE_INTERMEDIATE), sqrtf(ur/MOE_INTERMEDIATE), sqrtf(ar/MOE_INTERMEDIATE), sqrtf(er/HIDDEN_DIM), expert_weights[k]);
+            }
+
             free(gate_proj_out);
             free(up_proj_out);
             free(act_out);
             free(expert_data);
 
-            cpu_vec_madd(moe_out, expert_out_cpu, expert_weights[k], HIDDEN_DIM);
+            // Guard against NaN/Inf from degenerate expert quantization
+            float er = 0;
+            for (int j = 0; j < HIDDEN_DIM; j++) er += expert_out_cpu[j] * expert_out_cpu[j];
+            if (isfinite(er) && er < 1e10f) {
+                cpu_vec_madd(moe_out, expert_out_cpu, expert_weights[k], HIDDEN_DIM);
+            } else {
+                fprintf(stderr, "[WARN] layer=%d expert=%d out_rms=%.1f — skipping\n",
+                        layer_idx, eidx, sqrtf(er/HIDDEN_DIM));
+            }
         }
         free(expert_out_cpu);
 
@@ -5555,6 +5577,17 @@ static void fused_layer_forward(
     }
 
     // ---- Final combine: hidden = h_mid + moe_out + shared_out ----
+    { float hmid_rms=0, moe_rms=0, shr_rms=0;
+      for (int i=0;i<HIDDEN_DIM;i++){hmid_rms+=h_mid[i]*h_mid[i];moe_rms+=moe_out[i]*moe_out[i];shr_rms+=shared_out[i]*shared_out[i];}
+      hmid_rms=sqrtf(hmid_rms/HIDDEN_DIM); moe_rms=sqrtf(moe_rms/HIDDEN_DIM); shr_rms=sqrtf(shr_rms/HIDDEN_DIM);
+      if(!isfinite(hmid_rms)||!isfinite(moe_rms)||!isfinite(shr_rms) || layer_idx==7) {
+        fprintf(stderr,"[CPU-COMBINE] layer=%d h_mid_rms=%.6f moe_rms=%.6f shared_rms=%.6f\n",
+          layer_idx, hmid_rms, moe_rms, shr_rms);
+        // Check moe_out first few values
+        fprintf(stderr,"[CPU-COMBINE] moe_out[0..3]=[%.4f,%.4f,%.4f,%.4f]\n",
+          moe_out[0], moe_out[1], moe_out[2], moe_out[3]);
+      }
+    }
     for (int i = 0; i < HIDDEN_DIM; i++) {
         hidden[i] = h_mid[i] + moe_out[i] + shared_out[i];
     }
@@ -6975,6 +7008,9 @@ int main(int argc, char **argv) {
                                     pos,
                                     layer_mmaps[layer] != MAP_FAILED ? layer_mmaps[layer] : NULL,
                                     K, layer_fds[layer]);
+                { float hr=0; for(int j=0;j<HIDDEN_DIM;j++) hr+=hidden[j]*hidden[j];
+                  hr=sqrtf(hr/HIDDEN_DIM);
+                  if(!isfinite(hr)) fprintf(stderr,"[LOOP] layer %d: hidden rms=nan!\n",layer); }
             }
             // Full completion — need hidden state for final norm + lm_head
             complete_deferred_experts();
@@ -6984,6 +7020,8 @@ int main(int argc, char **argv) {
         if (embed_batch) { free(embed_batch); embed_batch = NULL; }
 
         // ---- Final norm ----
+        { float hr=0; for(int j=0;j<HIDDEN_DIM;j++) hr+=hidden[j]*hidden[j];
+          fprintf(stderr,"[PRE-NORM] hidden rms=%.6f isfinite=%d\n", sqrtf(hr/HIDDEN_DIM), isfinite(sqrtf(hr/HIDDEN_DIM))); }
         if (final_norm_w) {
             float *normed = malloc(HIDDEN_DIM * sizeof(float));
             cpu_rms_norm(hidden, final_norm_w, normed, HIDDEN_DIM, RMS_NORM_EPS);
