@@ -6959,6 +6959,10 @@ int main(int argc, char **argv) {
             // Full completion — need hidden state for final norm + lm_head
             complete_deferred_experts();
             pos++;
+            { float hr = 0; for (int j=0; j<HIDDEN_DIM; j++) hr += hidden[j]*hidden[j];
+              hr = sqrtf(hr/HIDDEN_DIM);
+              fprintf(stderr, "[DEBUG] after complete_deferred: hidden rms=%.6f isfinite=%d\n", hr, isfinite(hr)); }
+            pos++;
         }
 
         if (embed_batch) { free(embed_batch); embed_batch = NULL; }

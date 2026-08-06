@@ -31,3 +31,12 @@ archive/
 flash-moe/
 omlx/
 turbo-fieldfare/
+
+# Build artifacts (finchmoe)
+finchmoe/model_weights.bin
+finchmoe/vocab.bin
+finchmoe/tokenizer.bin
+finchmoe/finchmoe-infer
+finchmoe/finchmoe-chat
+finchmoe/expert_index.json
+finchmoe/packed_experts/
