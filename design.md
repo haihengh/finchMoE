@@ -386,3 +386,235 @@ Memory-pressure handler: a DISPATCH_SOURCE_TYPE_MEMORYPRESSURE source that shrin
 Error paths: the abort() in the pread callback needs a real cancellation path.
 
 If you'd like this as a downloadable .md file or a PDF, say the word. Otherwise, the natural next step is the converter (safetensors → .aeromoe packer) — that's where the manifest values and ExpertRecord layout get pinned down for the actual Qwen 3.6 35B-A3B checkpoint.
+
+
+
+
+Yes — a Qwen-specific kernel set is unavoidable
+
+TurboFieldfare had to hand-write Gemma-specific kernels because generic kernels don't capture the model family's architectural quirks (Gemma's logit soft-capping, pre/post-norm sandwich, GeGLU). Qwen 3-family MoE has its own set of quirks that make stock kernels either wrong or slow:
+
+Qwen 3-family quirk	Why a generic kernel fails
+QK-Norm: per-head RMSNorm applied to Q and K before RoPE	Not present in Llama/Gemma kernels; skipping it produces garbage output
+GQA with a specific n_heads : n_kv_heads ratio	Attention kernel must broadcast KV heads; ratio comes from the manifest
+Softmax router with renormalized top-k (norm_topk_prob=true)	Routing weights must be re-softmaxed over only the selected k — using raw softmax weights changes numerics
+No shared expert in Qwen3 MoE (unlike Qwen2-MoE / DeepSeek)	Changes your overlap plan: cbB in the earlier design has nothing to run — overlap the next layer's norm or KV quantization instead
+RMSNorm (with +eps inside sqrt), SwiGLU experts	SwiGLU you already have; RMSNorm epsilon placement must match exactly
+
+⚠️ Verify each of these against the actual "Qwen 3.6 35B-A3B" checkpoint config at conversion time — fine-tuned/uncensored variants occasionally ship altered configs. The converter should hard-fail on unknown fields, exactly like TurboFieldfare's Gemma validator.
+
+Below are the four kernels you must rewrite. Everything else (Q4 GEMV, SwiGLU expert FFN, residual add) carries over from the previous document.
+
+1. Fused RMSNorm (Qwen epsilon placement)
+// rmsnorm.metal — y = x / sqrt(mean(x^2) + eps) * w
+// One threadgroup per vector; d_model up to 8192.
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void rmsnorm_f16(
+    device const half* x       [[buffer(0)]],
+    device const half* w       [[buffer(1)]],
+    device half*       y       [[buffer(2)]],
+    constant uint&     n       [[buffer(3)]],
+    constant float&    eps     [[buffer(4)]],   // from manifest (e.g. 1e-6)
+    uint tid  [[thread_position_in_threadgroup]],
+    uint tptg [[threads_per_threadgroup]])
+{
+    threadgroup float partial[32];
+
+    // 1. sum of squares, fp32 accumulation (critical for Q4 backbones)
+    float acc = 0.0f;
+    for (uint i = tid; i < n; i += tptg) {
+        float v = float(x[i]);
+        acc += v * v;
+    }
+    acc = simd_sum(acc);
+    if ((tid & 31) == 0) partial[tid >> 5] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 32) {
+        float s = (tid < (tptg + 31) / 32) ? partial[tid] : 0.0f;
+        s = simd_sum(s);
+        if (tid == 0) partial[0] = s;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // 2. normalize — Qwen: rsqrt(mean + eps), weight multiply (no +1 offset,
+    //    unlike Gemma's (1 + w) — this is exactly the kind of trap that
+    //    forces per-family kernels)
+    float inv = rsqrt(partial[0] / float(n) + eps);
+    for (uint i = tid; i < n; i += tptg)
+        y[i] = half(float(x[i]) * inv * float(w[i]));
+}
+
+2. Fused QK-Norm + RoPE (the Qwen3 signature kernel)
+
+This is the kernel that does not exist in Llama/Gemma engines. Qwen3 applies a per-head RMSNorm to Q and K after projection, before RoPE. Fusing norm + rotation into one pass avoids two extra round trips through unified memory — on bandwidth-starved 8 GB machines this matters.
+
+// qknorm_rope.metal
+// Input:  q [n_heads * head_dim], k [n_kv_heads * head_dim]  (post-GEMV)
+// Output: in-place normalized + rotated.
+// Grid: one threadgroup per head (Q and K dispatched separately or via
+// head_offset trick; shown here as one kernel handling both).
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void qk_norm_rope(
+    device half*        vec        [[buffer(0)]],  // q or k, packed heads
+    device const half*  norm_w     [[buffer(1)]],  // per-head-dim weights
+    constant uint&      head_dim   [[buffer(2)]],
+    constant float&     eps        [[buffer(3)]],
+    constant float&     rope_theta [[buffer(4)]],  // e.g. 1e6 for Qwen3 long-ctx
+    constant uint&      pos        [[buffer(5)]],  // absolute token position
+    uint head [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]])
+{
+    device half* h = vec + head * head_dim;
+    threadgroup float tg_sum;
+
+    // --- per-head RMSNorm (QK-Norm). head_dim <= 128 → one simdgroup ---
+    float v = (tid < head_dim) ? float(h[tid]) : 0.0f;
+    float ss = simd_sum(v * v);
+    if (tid == 0) tg_sum = ss;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float inv = rsqrt(tg_sum / float(head_dim) + eps);
+    float normed = v * inv * float(norm_w[tid]);   // norm_w shared across heads
+
+    // --- RoPE, interleaved-pair convention: pairs (2i, 2i+1) ---
+    // NOTE: Qwen uses the "half-split" (GPT-NeoX) layout in HF:
+    // pair = (i, i + head_dim/2). Match the converter's layout choice!
+    uint half_d = head_dim / 2;
+    threadgroup float tmp[128];
+    tmp[tid] = normed;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid < head_dim) {
+        uint  i    = (tid < half_d) ? tid : tid - half_d;
+        float freq = pow(rope_theta, -2.0f * float(i) / float(head_dim));
+        float ang  = float(pos) * freq;
+        float c = cos(ang), s = sin(ang);
+        float x0 = tmp[i], x1 = tmp[i + half_d];
+        h[tid] = half((tid < half_d) ? x0 * c - x1 * s
+                                     : x1 * c + x0 * s);
+    }
+}
+
+
+Trap to respect: HuggingFace Qwen checkpoints use the NeoX half-split RoPE pairing, while many GGUF-derived kernels use interleaved pairs. Your .aeromoe converter must pick one convention and the kernel must match it — this is the #1 source of "model loads but outputs gibberish" bugs when porting model families.
+
+3. GQA paged-attention decode kernel
+
+Generic single-query attention exists in many engines, but it must be specialized for: GQA broadcast ratio, your paged-KV block layout, and quantized KV blocks.
+
+// gqa_decode_attn.metal — single-token decode, one threadgroup per Q head.
+#include <metal_stdlib>
+using namespace metal;
+
+struct KVPageTable {            // matches engine's paged allocator
+    constant uint* page_ids;    // logical block -> physical page
+    // pages are [page_size][n_kv_heads][head_dim] half (or Q8 in v2)
+};
+
+kernel void gqa_decode_attention(
+    device const half*  q          [[buffer(0)]],  // [n_heads*head_dim], post-RoPE
+    device const half*  kv_pool    [[buffer(1)]],  // physical page pool
+    constant uint*      page_ids   [[buffer(2)]],
+    device half*        out        [[buffer(3)]],  // [n_heads*head_dim]
+    constant uint&      seq_len    [[buffer(4)]],
+    constant uint&      page_size  [[buffer(5)]],  // tokens per page, e.g. 64
+    constant uint&      n_kv_heads [[buffer(6)]],
+    constant uint&      gqa_ratio  [[buffer(7)]],  // n_heads / n_kv_heads
+    constant uint&      head_dim   [[buffer(8)]],
+    constant uint&      k_pool_off [[buffer(9)]],  // v pool = k pool + offset
+    uint h   [[threadgroup_position_in_grid]],     // query head
+    uint tid [[thread_position_in_threadgroup]],
+    uint tptg[[threads_per_threadgroup]])
+{
+    const uint kvh   = h / gqa_ratio;              // GQA broadcast
+    const float scale = rsqrt(float(head_dim));
+    device const half* qh = q + h * head_dim;
+
+    // Online softmax (flash-style, single pass over history)
+    float m = -INFINITY, l = 0.0f;
+    float acc[128];                                 // head_dim <= 128
+    for (uint d = 0; d < head_dim; ++d) acc[d] = 0.0f;
+
+    // Each thread strides over history positions
+    for (uint t = tid; t < seq_len; t += tptg) {
+        uint page = page_ids[t / page_size];
+        uint slot = t % page_size;
+        device const half* kvec = kv_pool
+            + (size_t(page) * page_size + slot) * n_kv_heads * head_dim
+            + kvh * head_dim;
+        device const half* vvec = kvec + k_pool_off;
+
+        float s = 0.0f;
+        for (uint d = 0; d < head_dim; ++d)
+            s += float(qh[d]) * float(kvec[d]);
+        s *= scale;
+
+        float m_new = max(m, s);
+        float corr  = exp(m - m_new);
+        float p     = exp(s - m_new);
+        l = l * corr + p;
+        for (uint d = 0; d < head_dim; ++d)
+            acc[d] = acc[d] * corr + p * float(vvec[d]);
+        m = m_new;
+    }
+
+    // Cross-thread reduction of (m, l, acc) via threadgroup memory —
+    // standard log-sum-exp merge, elided for brevity but REQUIRED:
+    //   merged_m = max(m_i); merged_l = Σ l_i * exp(m_i - merged_m);
+    //   merged_acc = Σ acc_i * exp(m_i - merged_m);
+    // ... reduction code ...
+
+    if (tid == 0)
+        for (uint d = 0; d < head_dim; ++d)
+            out[h * head_dim + d] = half(acc[d] / l);
+}
+
+
+Production version: vectorize the dot products with half4 loads, keep acc in fp32 registers per simdlane, and add the Q8 KV-block dequant path for older pages.
+
+4. Router: softmax + top-k with renormalization
+
+Small but numerically load-bearing. Qwen3 MoE with norm_topk_prob=true requires the selected weights be renormalized to sum to 1 over the top-k — do it where you already do top-k, on CPU (n_experts floats is tiny):
+
+// router_topk.cpp — CPU side, matches HF Qwen3-MoE semantics
+std::pair<std::vector<uint32_t>, std::vector<float>>
+topk_renorm(const float* logits, uint32_t n_experts, uint32_t k) {
+    // softmax over ALL experts first (fp32)
+    float mx = *std::max_element(logits, logits + n_experts);
+    std::vector<float> p(n_experts);
+    float sum = 0.f;
+    for (uint32_t i = 0; i < n_experts; ++i)
+        sum += (p[i] = std::exp(logits[i] - mx));
+    for (auto& v : p) v /= sum;
+
+    // top-k by probability
+    std::vector<uint32_t> ids(n_experts);
+    std::iota(ids.begin(), ids.end(), 0);
+    std::partial_sort(ids.begin(), ids.begin() + k, ids.end(),
+                      [&](uint32_t a, uint32_t b){ return p[a] > p[b]; });
+    ids.resize(k);
+
+    // renormalize over the selected k (norm_topk_prob=true)
+    float ksum = 0.f;
+    for (auto i : ids) ksum += p[i];
+    std::vector<float> w(k);
+    for (uint32_t j = 0; j < k; ++j) w[j] = p[ids[j]] / ksum;
+    return {ids, w};
+}
+
+
+If a variant checkpoint sets norm_topk_prob=false, skip the last step — another reason the converter must record this flag in manifest.json rather than assuming.
+
+What you do not need to rewrite
+Q4 GEMV / SwiGLU expert kernels from the previous doc — Qwen3 experts are standard SwiGLU, only shapes change (read from manifest).
+Residual add, embedding lookup, LM head — generic.
+Sampling — generic.
+Adjusted overlap plan (no shared expert)
+
+Since Qwen3 MoE has no shared expert, command buffer B from the earlier design is empty. Replace the overlap with: while pread()s are in flight for layer l's experts, encode and commit layer l's KV write-back + old-page KV quantization, and precompute nothing speculative. That keeps the GPU busy during SSD latency without violating the no-prefetch rule.
+
+Want the converter-side counterpart next — i.e., how safetensors → .aeromoe must repack Q/K norm weights, RoPE convention, and per-expert slices so these kernels bind directly?
+
