@@ -4,13 +4,14 @@
 .LSOverride
 
 # Build outputs
-finchmoe_engine/build/
-finchmoe_explorer/nextjs_space/.next/
-finchmoe_explorer/nextjs_space/out/
+build/
+*.o
+*.a
+*.metallib
+*.air
 
-# Dependencies
-finchmoe_explorer/nextjs_space/node_modules/
-finchmoe_explorer/nextjs_space/package-lock.json
+# Downloaded models
+models/
 
 # Python
 __pycache__/
@@ -23,10 +24,10 @@ __pycache__/
 *.swp
 *.swo
 
-# Downloaded models
-models/
+# Archive (old finchMoE code)
+archive/
 
-# Misc
-*.o
-*.a
-*.metallib
+# Reference projects (separate repos)
+flash-moe/
+omlx/
+turbo-fieldfare/

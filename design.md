@@ -1,711 +1,259 @@
-# FinchMoE — Design Review & Core Inference Engine Code
+# FinchMoE Design Document
 
-> **Where things live:**
-> - Engine implementation: [`finchmoe_engine/`](finchmoe_engine/) (C++/Metal, all 5 sessions complete)
-> - Binary format spec: [`finchmoe_format.md`](finchmoe_format.md)
-> - Converter: [`finchmoe_convert.py`](finchmoe_convert.py)
-> - Interactive visual explorer: [`finchmoe_explorer/`](finchmoe_explorer/)
-> - Architecture diagram: [`visualization.svg`](visualization.svg)
+## 1. Overview
 
----
+FinchMoE is a C/Metal inference engine purpose-built for **Qwen 3.6 35B A3B** on Apple Silicon. It streams 4-bit quantized expert weights from SSD through a custom Metal compute pipeline, targeting ≥3.5 tok/s at ≤3 GB RAM.
 
-## Part 1: Design Review
+The engine is forked from [flash-moe](flash-moe/), a proven C/Metal engine that runs Qwen3.5-397B-A17B at 4.36 tok/s on M3 Max (48GB). We adapt its architecture for the smaller Qwen 3.6 35B A3B model, targeting lower-RAM devices (16GB Mac mini → iPhone).
 
-### What holds up
-Decision	Verdict
-Metal-only, no ANE	✅ Correct — dynamic expert binding is impossible to do cleanly on ANE
-Layer-sharded expert files, contiguous per-expert slices	✅ Correct — one pread() per miss
-Bounded slot cache instead of load/unload per token	✅ Correct — routing locality makes blind unloads waste SSD bandwidth
-No speculative prefetch	✅ Correct for v1 — revisit only with measured hit rates
-Overlap shared-expert GPU work with SSD reads	⚠️ Qwen3 MoE has no shared expert — overlap KV write-back + quantization instead (see § Adjusted overlap plan below)
-### Weaknesses to fix before coding
+## 2. Why Not finchmoe_engine?
 
-1. **Router→CPU sync point.** The GPU must finish router logits before the CPU can plan I/O. That's a per-layer pipeline stall. Fix: split each layer into two command buffers and read back only top_k × (uint16 id, half weight) via a shared-storage-mode buffer — never a full logits copy. On decode (1 token), do top-k on CPU from the raw logits vector (small, e.g. 128 floats); it's cheaper than a GPU sort + readback.
-   - **→ Addressed in `model_runner.mm`**: router logits written to a shared-storage Metal buffer; CPU reads only the small float vector and runs `topk_renorm()` (see `sampler.cpp`).
+The original `finchmoe_engine` (archived) was built in C++/ObjC++ for a pre-release Qwen MoE specification that never shipped. The published Qwen 3.6 architecture is fundamentally different:
 
-2. **Slot fragmentation.** Experts across layers may differ in size. Fix: all slots sized to max_expert_bytes from the manifest. Wastes a few MB, eliminates an allocator.
-   - **→ Addressed in `expert_cache.mm`**: uniform slot size from `manifest.max_expert_bytes`.
+| Aspect | finchmoe_engine target | Actual Qwen 3.6 |
+|---|---|---|
+| Attention | 100% full attention | 75% GatedDeltaNet, 25% full attention |
+| Expert layout | Fused gate_up_proj | Separate gate_proj + up_proj + down_proj |
+| Hidden dim | Different | 2048 |
+| Quantization | Custom scheme | MLX affine INT4 group-64 |
 
-3. **Eviction during in-flight GPU reads.** A slot must not be evicted while a command buffer still references it. Fix: per-slot refcount pinned until command-buffer completion handler fires.
-   - **→ Addressed in `expert_cache.h`**: `std::atomic<int> refcount` with `lookup_and_pin()` / `unpin()` + `addCompletedHandler` in the decode loop.
+flash-moe already targets the correct model family (`qwen3_5_moe`) and implements all required operations (GatedDeltaNet, MoE routing, SSD streaming, Metal dequant). Adaptation requires dimension changes, not architectural redesign.
 
-4. **pread into Metal buffers.** Use MTLStorageModeShared buffers and pread() directly into buffer.contents — zero-copy on unified memory. Open the expert files with F_NOCACHE off by default; only enable it under memory pressure (watch dispatch_source memory-pressure events).
-   - **→ Addressed in `io_planner.cpp`**: `pread()` directly into `slot->buffer.contents` via GCD dispatch. Memory-pressure handler deferred to v2.
+## 3. Hardware Targets
 
-5. **Budget enforcement is missing a mechanism.** Add a central MemoryLedger that every allocation goes through; fail construction if the plan exceeds the ceiling instead of discovering it at runtime.
-   - **→ Addressed in `memory_ledger.h`**: `MemoryLedger` with atomic `reserve()`/`release()` and `validate_budget()` called at engine construction time.
+### Development: M4 Mac mini 16GB
 
-### Implementation map: design → source files
+| Resource | Available | Engine Usage | Headroom |
+|---|---|---|---|
+| RAM | 16 GB unified | ~1.6 GB | ~14.4 GB for OS + page cache |
+| SSD | External 1.8TB | ~19 GB model | Plenty |
+| GPU | M4 (10-core?) | Metal compute | TBD |
+| Memory bandwidth | ~120 GB/s (est.) | — | — |
 
-| Design section | Implemented in |
-|---------------|---------------|
-| Memory ledger / budget enforcement | [`finchmoe_engine/memory_ledger.h`](finchmoe_engine/memory_ledger.h) |
-| Expert slot cache (LFU+recency, refcounted) | [`finchmoe_engine/expert_cache.h`](finchmoe_engine/expert_cache.h), [`.mm`](finchmoe_engine/expert_cache.mm) |
-| I/O planner (parallel pread into Metal buffers) | [`finchmoe_engine/io_planner.h`](finchmoe_engine/io_planner.h), [`.cpp`](finchmoe_engine/io_planner.cpp) |
-| Manifest & expert index types | [`finchmoe_engine/finchmoe_format.h`](finchmoe_engine/finchmoe_format.h) |
-| Q4 GEMV + fused SwiGLU expert kernels | [`finchmoe_engine/kernels/moe_kernels.metal`](finchmoe_engine/kernels/moe_kernels.metal) |
-| RMSNorm kernel (Qwen epsilon placement) | [`finchmoe_engine/kernels/norm_kernels.metal`](finchmoe_engine/kernels/norm_kernels.metal) |
-| QK-Norm + RoPE fused kernel | [`finchmoe_engine/kernels/rope_kernels.metal`](finchmoe_engine/kernels/rope_kernels.metal) |
-| GQA paged-attention decode kernel | [`finchmoe_engine/kernels/attention_kernels.metal`](finchmoe_engine/kernels/attention_kernels.metal) |
-| GEMV kernel (bf16 matvec) | [`finchmoe_engine/kernels/gemv_kernels.metal`](finchmoe_engine/kernels/gemv_kernels.metal) |
-| Kernel dispatch / pipeline state | [`finchmoe_engine/kernels/kernel_dispatch.h`](finchmoe_engine/kernels/kernel_dispatch.h), [`.mm`](finchmoe_engine/kernels/kernel_dispatch.mm) |
-| Per-layer decode loop | [`finchmoe_engine/model_runner.h`](finchmoe_engine/model_runner.h), [`.mm`](finchmoe_engine/model_runner.mm) |
-| Top-level token loop + sampling | [`finchmoe_engine/inference_engine.mm`](finchmoe_engine/inference_engine.mm), [`sampler.cpp`](finchmoe_engine/sampler.cpp) |
-| KV cache (paged, GQA, bf16) | [`finchmoe_engine/kv_cache.h`](finchmoe_engine/kv_cache.h), [`.mm`](finchmoe_engine/kv_cache.mm) |
-| Router top-k + renormalization | [`finchmoe_engine/sampler.cpp`](finchmoe_engine/sampler.cpp) (CPU-side `topk_renorm`) |
-| Binary format specification | [`finchmoe_format.md`](finchmoe_format.md) |
-| safetensors → .finchmoe converter | [`finchmoe_convert.py`](finchmoe_convert.py) |
-| Visual explorer (interactive diagrams) | [`finchmoe_explorer/`](finchmoe_explorer/) |
+The larger page cache (14.4 GB vs 7-8 GB on 397B model) means higher expert cache hit rates, potentially compensating for slower SSD vs the M3 Max.
 
----
+### Target: iPhone (A-series)
 
-## Part 2: Core Engine Code
+- Much tighter RAM (6-8 GB)
+- No swap — must fit everything in physical memory
+- Slower SSD, less bandwidth
+- Likely needs model shrinking (3-bit? fewer experts?) or aggressive preloading
 
-Language: C++17 / Objective-C++ (.mm) + Metal Shading Language. Illustrative but structurally complete — tensor shapes come from manifest.json at load time, never hard-coded.
+## 4. Inference Pipeline
 
-2.1 Manifest & expert index
-// finchmoe_format.h
-#pragma once
-#include <cstdint>
-#include <vector>
-#include <string>
+Adapted from flash-moe's proven per-layer pipeline:
 
-namespace finchmoe {
-
-struct QuantSpec {            // per-tensor-group quantization
-    enum Kind : uint8_t { Q4_BLOCK32, Q5_BLOCK32, Q8, F16, F32 };
-    Kind kind;
-    uint32_t block_size;      // elements per quant block (e.g. 32)
-};
-
-struct ModelManifest {
-    uint32_t n_layers, d_model, n_heads, n_kv_heads, head_dim;
-    uint32_t n_experts, top_k;
-    uint32_t d_ff_expert, d_ff_shared;     // shared-expert width; 0 if none
-    uint32_t vocab_size, max_context;
-    float    rope_theta;
-    QuantSpec backbone_q, expert_q, router_q;
-    uint64_t max_expert_bytes;             // sizing for uniform slots
-    // parsed from manifest.json; validated against tensor coverage
-};
-
-// index.bin: one record per (layer, expert), contiguous, mmap-friendly
-struct ExpertRecord {
-    uint64_t offset;          // into experts/layer_XXX.bin, 64KB aligned
-    uint32_t length;          // total bytes: gate+up+down, packed for Metal
-    uint32_t gate_up_bytes;   // split point inside the slice
-};
-
-struct ExpertIndex {
-    std::vector<ExpertRecord> records;     // n_layers * n_experts
-    const ExpertRecord& at(uint32_t layer, uint32_t expert) const {
-        return records[layer * n_experts_ + expert];
-    }
-    uint32_t n_experts_;
-};
-
-} // namespace finchmoe
-
-2.2 Memory ledger (the 4 GB contract)
-// memory_ledger.h
-#pragma once
-#include <atomic>
-#include <cstdint>
-#include <stdexcept>
-
-namespace finchmoe {
-
-class MemoryLedger {
-public:
-    explicit MemoryLedger(uint64_t ceiling_bytes) : ceiling_(ceiling_bytes) {}
-
-    // All engine allocations MUST reserve here first.
-    void reserve(uint64_t bytes, const char* tag) {
-        uint64_t cur = used_.fetch_add(bytes) + bytes;
-        if (cur > ceiling_) {
-            used_.fetch_sub(bytes);
-            throw std::runtime_error(
-                std::string("FinchMoE budget exceeded reserving ") + tag);
-        }
-    }
-    void release(uint64_t bytes) { used_.fetch_sub(bytes); }
-    uint64_t used() const { return used_.load(); }
-    uint64_t ceiling() const { return ceiling_; }
-private:
-    std::atomic<uint64_t> used_{0};
-    uint64_t ceiling_;
-};
-
-} // namespace finchmoe
-
-
-Construction-time plan check (fail fast, never swap):
-
-// Called once during engine init, before any Metal allocation.
-void validate_budget(const ModelManifest& m, const EngineConfig& cfg,
-                     MemoryLedger& ledger) {
-    ledger.reserve(cfg.backbone_bytes,      "backbone");       // ~1.6–2.1 GB
-    ledger.reserve(cfg.kv_budget_bytes,     "kv_cache");       // ~0.6–1.0 GB
-    ledger.reserve(cfg.n_slots * m.max_expert_bytes, "expert_slots");
-    ledger.reserve(cfg.scratch_bytes,       "metal_scratch");  // fixed arena
-    // If we get here, the plan fits under the ceiling (e.g. 3.9 GB).
-}
-
-2.3 Expert slot cache (bounded, refcounted, LFU+recency)
-// expert_cache.h
-#pragma once
-#import <Metal/Metal.h>
-#include <unordered_map>
-#include <vector>
-#include <mutex>
-
-namespace finchmoe {
-
-struct SlotKey {
-    uint32_t layer, expert;
-    bool operator==(const SlotKey& o) const {
-        return layer == o.layer && expert == o.expert;
-    }
-};
-struct SlotKeyHash {
-    size_t operator()(const SlotKey& k) const {
-        return (size_t(k.layer) << 32) ^ k.expert;
-    }
-};
-
-struct Slot {
-    id<MTLBuffer> buffer;        // MTLStorageModeShared, max_expert_bytes
-    SlotKey key{UINT32_MAX, UINT32_MAX};
-    std::atomic<int> refcount{0};   // pinned while a cmd buffer uses it
-    uint32_t freq = 0;              // decayed frequency score
-    uint64_t last_use_token = 0;
-    bool valid = false;
-};
-
-class ExpertCache {
-public:
-    ExpertCache(id<MTLDevice> dev, uint32_t n_slots, uint64_t slot_bytes,
-                MemoryLedger& ledger) : ledger_(ledger) {
-        // slot memory was already reserved by validate_budget()
-        slots_.resize(n_slots);
-        for (auto& s : slots_)
-            s.buffer = [dev newBufferWithLength:slot_bytes
-                                        options:MTLResourceStorageModeShared];
-    }
-
-    // Returns slot if resident (pins it), else nullptr.
-    Slot* lookup_and_pin(SlotKey key, uint64_t token_idx) {
-        std::lock_guard<std::mutex> g(mu_);
-        auto it = map_.find(key);
-        if (it == map_.end()) return nullptr;
-        Slot* s = &slots_[it->second];
-        s->refcount.fetch_add(1);
-        s->freq++; s->last_use_token = token_idx;
-        return s;
-    }
-
-    // Picks a victim: unpinned, lowest (freq, last_use). Caller fills it.
-    Slot* acquire_for_fill(SlotKey key, uint64_t token_idx) {
-        std::lock_guard<std::mutex> g(mu_);
-        Slot* victim = nullptr;
-        for (auto& s : slots_) {
-            if (s.refcount.load() != 0) continue;         // pinned: skip
-            if (!s.valid) { victim = &s; break; }         // free slot
-            if (!victim || std::tie(s.freq, s.last_use_token) <
-                           std::tie(victim->freq, victim->last_use_token))
-                victim = &s;
-        }
-        if (!victim) return nullptr;   // all pinned → caller stalls one read
-        if (victim->valid) map_.erase(victim->key);
-        victim->key = key; victim->valid = false;         // valid after fill
-        victim->freq = 1;  victim->last_use_token = token_idx;
-        victim->refcount.fetch_add(1);                    // pin for fill+use
-        return victim;
-    }
-
-    void publish(Slot* s) {           // after pread completes
-        std::lock_guard<std::mutex> g(mu_);
-        s->valid = true;
-        map_[s->key] = uint32_t(s - slots_.data());
-    }
-    void unpin(Slot* s) { s->refcount.fetch_sub(1); }
-
-    void decay() {                    // call every N tokens
-        std::lock_guard<std::mutex> g(mu_);
-        for (auto& s : slots_) s.freq >>= 1;
-    }
-private:
-    std::vector<Slot> slots_;
-    std::unordered_map<SlotKey, uint32_t, SlotKeyHash> map_;
-    std::mutex mu_;
-    MemoryLedger& ledger_;
-};
-
-} // namespace finchmoe
-
-2.4 I/O planner — bounded parallel pread into Metal buffers
-// io_planner.mm
-#import <Metal/Metal.h>
-#include <dispatch/dispatch.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include "expert_cache.h"
-#include "finchmoe_format.h"
-
-namespace finchmoe {
-
-class IOPlanner {
-public:
-    IOPlanner(const ExpertIndex& idx, std::vector<int> layer_fds,
-              ExpertCache& cache, uint32_t max_inflight = 3)
-      : idx_(idx), fds_(std::move(layer_fds)), cache_(cache) {
-        q_   = dispatch_queue_create("finchmoe.io", DISPATCH_QUEUE_CONCURRENT);
-        sem_ = dispatch_semaphore_create(max_inflight);   // autotuned 2–4
-        grp_ = dispatch_group_create();
-    }
-
-    // For each selected expert: hit → pin; miss → async pread into a slot.
-    // Returns pinned slots in expert order; blocks until all fills complete.
-    std::vector<Slot*> fetch(uint32_t layer,
-                             const std::vector<uint32_t>& experts,
-                             uint64_t token_idx) {
-        std::vector<Slot*> out(experts.size(), nullptr);
-        for (size_t i = 0; i < experts.size(); ++i) {
-            SlotKey key{layer, experts[i]};
-            if (Slot* hit = cache_.lookup_and_pin(key, token_idx)) {
-                out[i] = hit;
-                continue;
-            }
-            Slot* slot = nullptr;
-            while (!(slot = cache_.acquire_for_fill(key, token_idx)))
-                dispatch_group_wait(grp_, DISPATCH_TIME_FOREVER); // rare
-            out[i] = slot;
-            const ExpertRecord& rec = idx_.at(layer, experts[i]);
-            int fd = fds_[layer];
-            dispatch_semaphore_wait(sem_, DISPATCH_TIME_FOREVER);
-            dispatch_group_async(grp_, q_, ^{
-                // Zero-copy on unified memory: read straight into the
-                // MTLBuffer's shared-storage contents.
-                void* dst = slot->buffer.contents;
-                ssize_t n = pread(fd, dst, rec.length, off_t(rec.offset));
-                if (n != (ssize_t)rec.length) abort();  // TODO: error path
-                cache_.publish(slot);
-                dispatch_semaphore_signal(sem_);
-            });
-        }
-        dispatch_group_wait(grp_, DISPATCH_TIME_FOREVER);
-        return out;   // every slot pinned; unpin in cmd-buffer completion
-    }
-private:
-    const ExpertIndex& idx_;
-    std::vector<int> fds_;                 // one fd per layer file
-    ExpertCache& cache_;
-    dispatch_queue_t q_; dispatch_semaphore_t sem_; dispatch_group_t grp_;
-};
-
-} // namespace finchmoe
-
-2.5 Metal kernels — Q4 GEMV + fused SwiGLU + weighted combine
-// expert_kernels.metal
-#include <metal_stdlib>
-using namespace metal;
-
-// Q4 block layout (block_size = 32): [half scale][half min][16 packed bytes]
-struct Q4Block { half scale; half zmin; uchar q[16]; };
-
-inline float dequant_dot(device const Q4Block* row_blocks,
-                         device const half* x, uint n_blocks) {
-    float acc = 0.0f;
-    for (uint b = 0; b < n_blocks; ++b) {
-        device const Q4Block& blk = row_blocks[b];
-        float s = float(blk.scale), m = float(blk.zmin);
-        device const half* xb = x + b * 32;
-        for (uint i = 0; i < 16; ++i) {
-            uchar p = blk.q[i];
-            acc += (s * float(p & 0xF)  + m) * float(xb[2*i]);
-            acc += (s * float(p >> 4)   + m) * float(xb[2*i+1]);
-        }
-    }
-    return acc;
-}
-
-// One threadgroup per output row group; simdgroup reduction elided for brevity.
-// Fused: y_ff[j] = silu(gate_j · x) * (up_j · x)
-kernel void expert_gateup_silu(
-    device const Q4Block* gate_w   [[buffer(0)]],  // [d_ff][n_blocks]
-    device const Q4Block* up_w     [[buffer(1)]],
-    device const half*    x        [[buffer(2)]],  // [d_model]
-    device half*          y_ff     [[buffer(3)]],  // [d_ff]
-    constant uint&        d_model  [[buffer(4)]],
-    constant uint&        d_ff     [[buffer(5)]],
-    uint j [[thread_position_in_grid]])
-{
-    if (j >= d_ff) return;
-    uint nb = d_model / 32;
-    float g = dequant_dot(gate_w + j * nb, x, nb);
-    float u = dequant_dot(up_w   + j * nb, x, nb);
-    float silu = g / (1.0f + exp(-g));
-    y_ff[j] = half(silu * u);
-}
-
-// down projection + weighted accumulate into the shared MoE output.
-// Called once per selected expert; routing weight applied here so no
-// separate combine pass is needed.
-kernel void expert_down_accum(
-    device const Q4Block* down_w   [[buffer(0)]],  // [d_model][ff_blocks]
-    device const half*    y_ff     [[buffer(1)]],
-    device atomic_float*  moe_out  [[buffer(2)]],  // [d_model], fp32 accum
-    constant uint&        d_model  [[buffer(3)]],
-    constant uint&        d_ff     [[buffer(4)]],
-    constant float&       route_w  [[buffer(5)]],
-    uint i [[thread_position_in_grid]])
-{
-    if (i >= d_model) return;
-    uint nb = d_ff / 32;
-    float v = dequant_dot(down_w + i * nb, y_ff, nb);
-    atomic_fetch_add_explicit(&moe_out[i], route_w * v,
-                              memory_order_relaxed);
-}
-
-
-Production note: replace the scalar inner loop with simdgroup cooperative loads and 4-block unrolling; the structure (fused SiLU, weight-applied accumulate, fp32 accumulator) is the part that matters.
-
-2.6 The per-layer decode loop with I/O overlap
-// decode_layer.mm — one MoE layer for one decode token
-#include "io_planner.mm"
-
-void DecodeLayer::run(uint32_t layer, id<MTLCommandQueue> queue,
-                      LayerWeights& W, TokenState& st, IOPlanner& io,
-                      ExpertCache& cache) {
-    // ---- Command buffer A: attention + router (backbone, resident) ----
-    id<MTLCommandBuffer> cbA = [queue commandBuffer];
-    encode_rmsnorm(cbA, st.x, W.attn_norm);
-    encode_attention(cbA, st, W);            // QKV, RoPE, paged-KV decode attn
-    encode_rmsnorm(cbA, st.x, W.ffn_norm);
-    encode_router_logits(cbA, st.x, W.router, st.router_logits); // shared buf
-    [cbA commit];
-    [cbA waitUntilCompleted];                // unavoidable sync: need routing
-
-    // ---- CPU: top-k from tiny logits vector (n_experts floats) ----
-    auto [ids, weights] = topk_cpu(st.router_logits, manifest_.top_k);
-
-    // ---- Overlap: kick SSD reads, run shared expert meanwhile ----
-    id<MTLCommandBuffer> cbB = [queue commandBuffer];
-    if (W.has_shared_expert)
-        encode_shared_expert(cbB, st.x, W.shared, st.moe_out /*fp32 accum*/);
-    [cbB commit];                            // runs while pread() proceeds
-
-    std::vector<Slot*> slots = io.fetch(layer, ids, st.token_idx); // blocks
-
-    // ---- Command buffer C: routed experts ----
-    id<MTLCommandBuffer> cbC = [queue commandBuffer];
-    for (size_t i = 0; i < slots.size(); ++i) {
-        const ExpertRecord& rec = index_.at(layer, ids[i]);
-        // gate/up live at offset 0, down at gate_up_bytes, inside one slot
-        encode_expert_gateup_silu(cbC, slots[i]->buffer, 0, st.x, st.y_ff);
-        encode_expert_down_accum (cbC, slots[i]->buffer, rec.gate_up_bytes,
-                                  st.y_ff, st.moe_out, weights[i]);
-    }
-    encode_residual_add(cbC, st.x, st.moe_out);   // fp32→fp16 + residual
-
-    // Unpin slots only after the GPU is done touching them.
-    [cbC addCompletedHandler:^(id<MTLCommandBuffer>) {
-        for (Slot* s : slots) cache.unpin(s);
-    }];
-    [cbC commit];
-    [cbC waitUntilCompleted];   // v1: sync per layer; v2: pipeline layers
-}
-
-2.7 Top-level token loop
-(→ Implemented in [`inference_engine.mm`](finchmoe_engine/inference_engine.mm) and [`model_runner.mm`](finchmoe_engine/model_runner.mm))
-
-```cpp
-int32_t Engine::decode_one_token(TokenState& st) {
-    st.x = embed(st.token_id);                      // resident embedding
-    for (uint32_t l = 0; l < manifest_.n_layers; ++l)
-        layers_[l].run(l, queue_, weights_[l], st, io_, cache_);
-    if (st.token_idx % 64 == 0) cache_.decay();     // LFU aging
-    return sample(final_norm_lmhead(st.x), st.sampler);
-}
+```
+CMD3(prev) → CMD1: attention projections + delta-net  [GPU]
+           → CPU: flush results                        [CPU]
+           → CMD2: o_proj + norm + routing + shared    [GPU]
+           → CPU: softmax + topK routing               [CPU]
+           → I/O: parallel pread K=8 experts           [SSD]
+           → CMD3: expert forward + combine + norm     [GPU, DEFERRED]
 ```
 
-Part 3: Notes on what's deliberately omitted (v2 work)
-Chunked prefill: reuse IOPlanner::fetch with deduplicated (layer, expert) sets across the 32-token chunk — the cache/pin machinery above already supports it.
-Layer pipelining: replace waitUntilCompleted in cbC with events so layer l+1's attention overlaps layer l's expert compute; requires double-buffered TokenState.
-Memory-pressure handler: a DISPATCH_SOURCE_TYPE_MEMORYPRESSURE source that shrinks slot count and enables F_NOCACHE on the layer fds.
-Error paths: the abort() in the pread callback needs a real cancellation path.
+### Key Design Decisions (from flash-moe experiments)
 
-Yes — a Qwen-specific kernel set is unavoidable
+1. **Serial GPU → SSD → GPU** — On Apple Silicon, SSD DMA and GPU compute share the memory controller. Overlapping them causes GPU latency spikes. Serial pipeline is hardware-optimal.
 
-TurboFieldfare had to hand-write Gemma-specific kernels because generic kernels don't capture the model family's architectural quirks (Gemma's logit soft-capping, pre/post-norm sandwich, GeGLU). Qwen 3-family MoE has its own set of quirks that make stock kernels either wrong or slow:
+2. **No custom expert cache** — The OS page cache outperforms every custom caching scheme tested (Metal LRU, malloc cache, LZ4 compressed cache). "Trust the OS."
 
-Qwen 3-family quirk	Why a generic kernel fails
-QK-Norm: per-head RMSNorm applied to Q and K before RoPE	Not present in Llama/Gemma kernels; skipping it produces garbage output
-GQA with a specific n_heads : n_kv_heads ratio	Attention kernel must broadcast KV heads; ratio comes from the manifest
-Softmax router with renormalized top-k (norm_topk_prob=true)	Routing weights must be re-softmaxed over only the selected k — using raw softmax weights changes numerics
-No shared expert in Qwen3 MoE (unlike Qwen2-MoE / DeepSeek)	Changes your overlap plan: cbB in the earlier design has nothing to run — overlap the next layer's norm or KV quantization instead
-RMSNorm (with +eps inside sqrt), SwiGLU experts	SwiGLU you already have; RMSNorm epsilon placement must match exactly
+3. **FMA dequant** — Rearranging `(nibble * scale + bias) * x` to `fma(nibble, scale*x, bias*x)` gives +12% throughput by using the GPU's fused multiply-add unit.
 
-⚠️ Verify each of these against the actual "Qwen 3.6 35B-A3B" checkpoint config at conversion time — fine-tuned/uncensored variants occasionally ship altered configs. The converter should hard-fail on unknown fields, exactly like TurboFieldfare's Gemma validator.
+4. **Deferred CMD3** — Submit expert compute without waiting. GPU executes while CPU prepares next layer.
 
-Below are the four kernels you must rewrite. Everything else (Q4 GEMV, SwiGLU expert FFN, residual add) carries over from the previous document.
+5. **Accelerate BLAS for GatedDeltaNet** — `cblas_sgemv` + `cblas_sger` for the recurrent state update is 64% faster than scalar code.
 
-1. Fused RMSNorm (Qwen epsilon placement)
-(→ Implemented in [`finchmoe_engine/kernels/norm_kernels.metal`](finchmoe_engine/kernels/norm_kernels.metal))
-// rmsnorm.metal — y = x / sqrt(mean(x^2) + eps) * w
-// One threadgroup per vector; d_model up to 8192.
-#include <metal_stdlib>
-using namespace metal;
+## 5. Component Design
 
-kernel void rmsnorm_f16(
-    device const half* x       [[buffer(0)]],
-    device const half* w       [[buffer(1)]],
-    device half*       y       [[buffer(2)]],
-    constant uint&     n       [[buffer(3)]],
-    constant float&    eps     [[buffer(4)]],   // from manifest (e.g. 1e-6)
-    uint tid  [[thread_position_in_threadgroup]],
-    uint tptg [[threads_per_threadgroup]])
-{
-    threadgroup float partial[32];
+### 5.1 Model Loading
 
-    // 1. sum of squares, fp32 accumulation (critical for Q4 backbones)
-    float acc = 0.0f;
-    for (uint i = tid; i < n; i += tptg) {
-        float v = float(x[i]);
-        acc += v * v;
-    }
-    acc = simd_sum(acc);
-    if ((tid & 31) == 0) partial[tid >> 5] = acc;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tid < 32) {
-        float s = (tid < (tptg + 31) / 32) ? partial[tid] : 0.0f;
-        s = simd_sum(s);
-        if (tid == 0) partial[0] = s;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+Two-phase extraction from MLX 4-bit safetensors:
 
-    // 2. normalize — Qwen: rsqrt(mean + eps), weight multiply (no +1 offset,
-    //    unlike Gemma's (1 + w) — this is exactly the kind of trap that
-    //    forces per-family kernels)
-    float inv = rsqrt(partial[0] / float(n) + eps);
-    for (uint i = tid; i < n; i += tptg)
-        y[i] = half(float(x[i]) * inv * float(w[i]));
-}
+**Phase 1: Non-expert weights** (`extract_weights.py`)
+- Extract all non-expert tensors (embeddings, norms, attention, linear attention, shared expert, router)
+- Pack into single `model_weights.bin` (est. ~1.4 GB for Qwen3.6)
+- mmap'd at startup, read-only, zero-copy
+- Manifest in `model_weights.json`
 
-2. Fused QK-Norm + RoPE (the Qwen3 signature kernel)
-(→ Implemented in [`finchmoe_engine/kernels/rope_kernels.metal`](finchmoe_engine/kernels/rope_kernels.metal))
+**Phase 2: Expert weights** (`repack_experts.py`)
+- Extract 256 experts × 40 layers = 10,240 experts
+- Each expert: 983,040 bytes at 4-bit (gate_proj + up_proj + down_proj with scales/biases)
+- Write 40 contiguous layer files in `packed_experts/layer_XX.bin`
+- Per-layer file size: 256 × 0.94 MB ≈ 240 MB
+- Total: 40 × 240 MB ≈ 9.6 GB
 
-This is the kernel that does not exist in Llama/Gemma engines. Qwen3 applies a per-head RMSNorm to Q and K after projection, before RoPE. Fusing norm + rotation into one pass avoids two extra round trips through unified memory — on bandwidth-starved 8 GB machines this matters.
+Expert layout (same as flash-moe):
+```
+[gate_proj.weight (U32)] [gate_proj.scales (BF16)] [gate_proj.biases (BF16)]
+[up_proj.weight   (U32)] [up_proj.scales   (BF16)] [up_proj.biases   (BF16)]
+[down_proj.weight (U32)] [down_proj.scales (BF16)] [down_proj.biases (BF16)]
+```
 
-// qknorm_rope.metal
-// Input:  q [n_heads * head_dim], k [n_kv_heads * head_dim]  (post-GEMV)
-// Output: in-place normalized + rotated.
-// Grid: one threadgroup per head (Q and K dispatched separately or via
-// head_offset trick; shown here as one kernel handling both).
-#include <metal_stdlib>
-using namespace metal;
+### 5.2 Memory Layout
 
-kernel void qk_norm_rope(
-    device half*        vec        [[buffer(0)]],  // q or k, packed heads
-    device const half*  norm_w     [[buffer(1)]],  // per-head-dim weights
-    constant uint&      head_dim   [[buffer(2)]],
-    constant float&     eps        [[buffer(3)]],
-    constant float&     rope_theta [[buffer(4)]],  // e.g. 1e6 for Qwen3 long-ctx
-    constant uint&      pos        [[buffer(5)]],  // absolute token position
-    uint head [[threadgroup_position_in_grid]],
-    uint tid  [[thread_position_in_threadgroup]])
-{
-    device half* h = vec + head * head_dim;
-    threadgroup float tg_sum;
+```
+┌─────────────────────────────────────┐
+│ model_weights.bin (mmap'd, ~1.4 GB) │  ← Read-only, OS-managed
+├─────────────────────────────────────┤
+│ Metal scratch buffers (~100 MB)     │  ← GPU-accessible
+│  - buf_input [HIDDEN_DIM]           │
+│  - buf_expert_data [EXPERT_SIZE]    │
+│  - buf_expert_input [HIDDEN_DIM]    │
+│  - buf_expert_gate [MOE_INTER]      │
+│  - buf_expert_up [MOE_INTER]        │
+│  - buf_expert_act [MOE_INTER]       │
+│  - buf_expert_out [HIDDEN_DIM]      │
+│  - KV cache (10 attn layers)        │
+│  - GDN recurrent states (30 layers) │
+├─────────────────────────────────────┤
+│ OS page cache (~14 GB available)    │  ← Expert LRU caching
+└─────────────────────────────────────┘
+```
 
-    // --- per-head RMSNorm (QK-Norm). head_dim <= 128 → one simdgroup ---
-    float v = (tid < head_dim) ? float(h[tid]) : 0.0f;
-    float ss = simd_sum(v * v);
-    if (tid == 0) tg_sum = ss;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float inv = rsqrt(tg_sum / float(head_dim) + eps);
-    float normed = v * inv * float(norm_w[tid]);   // norm_w shared across heads
+Total engine RAM: ~1.6 GB (vs 6 GB for the 397B model)
 
-    // --- RoPE, interleaved-pair convention: pairs (2i, 2i+1) ---
-    // NOTE: Qwen uses the "half-split" (GPT-NeoX) layout in HF:
-    // pair = (i, i + head_dim/2). Match the converter's layout choice!
-    uint half_d = head_dim / 2;
-    threadgroup float tmp[128];
-    tmp[tid] = normed;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+### 5.3 Metal Shaders
 
-    if (tid < head_dim) {
-        uint  i    = (tid < half_d) ? tid : tid - half_d;
-        float freq = pow(rope_theta, -2.0f * float(i) / float(head_dim));
-        float ang  = float(pos) * freq;
-        float c = cos(ang), s = sin(ang);
-        float x0 = tmp[i], x1 = tmp[i + half_d];
-        h[tid] = half((tid < half_d) ? x0 * c - x1 * s
-                                     : x1 * c + x0 * s);
-    }
-}
+Reused from flash-moe with dimension updates:
 
+| Kernel | Purpose | Changes Needed |
+|---|---|---|
+| `dequant_matvec_4bit` | 4-bit dequant + matvec (FMA optimized) | Update tile sizes for 2048-dim |
+| `swiglu_fused` | SiLU gating × up projection | Dimension updates |
+| `rms_norm` | Two-pass sum-of-squares + apply | None (generic) |
+| `rms_norm_apply` | Apply pre-computed scale | None (generic) |
+| `batched_attention` | Q@K^T + softmax + scores@V | Head count update (16Q, 2KV) |
+| `rope_fused` | Rotary embeddings with Q deinterleave | Head dim unchanged (256) |
+| `moe_combine_residual` | Weighted sum + residual + sigmoid gate | Expert count update |
 
-Trap to respect: HuggingFace Qwen checkpoints use the NeoX half-split RoPE pairing, while many GGUF-derived kernels use interleaved pairs. Your .finchmoe converter must pick one convention and the kernel must match it — this is the #1 source of "model loads but outputs gibberish" bugs when porting model families.
+### 5.4 GatedDeltaNet (Linear Attention)
 
-3. GQA paged-attention decode kernel
-(→ Implemented in [`finchmoe_engine/kernels/attention_kernels.metal`](finchmoe_engine/kernels/attention_kernels.metal))
+Per-token recurrence using delta rule:
 
-Generic single-query attention exists in many engines, but it must be specialized for: GQA broadcast ratio, your paged-KV block layout, and quantized KV blocks.
+```
+Q, K, V, Z, A, B = projections(x)
+Q = L2_normalize(Q)
+K = L2_normalize(K)
+V = SiLU(conv1d(V))
+Z = SiLU(conv1d(Z))
 
-// gqa_decode_attn.metal — single-token decode, one threadgroup per Q head.
-#include <metal_stdlib>
-using namespace metal;
+# Recurrent state update (via Accelerate BLAS)
+S_t = A * S_{t-1} + B * K_t^T @ V_t   # cblas_sger
 
-struct KVPageTable {            // matches engine's paged allocator
-    constant uint* page_ids;    // logical block -> physical page
-    // pages are [page_size][n_kv_heads][head_dim] half (or Q8 in v2)
-};
+# Output
+o_t = Z * S_t @ Q_t / (A_log + dt_bias)  # cblas_sgemv
+```
 
-kernel void gqa_decode_attention(
-    device const half*  q          [[buffer(0)]],  // [n_heads*head_dim], post-RoPE
-    device const half*  kv_pool    [[buffer(1)]],  // physical page pool
-    constant uint*      page_ids   [[buffer(2)]],
-    device half*        out        [[buffer(3)]],  // [n_heads*head_dim]
-    constant uint&      seq_len    [[buffer(4)]],
-    constant uint&      page_size  [[buffer(5)]],  // tokens per page, e.g. 64
-    constant uint&      n_kv_heads [[buffer(6)]],
-    constant uint&      gqa_ratio  [[buffer(7)]],  // n_heads / n_kv_heads
-    constant uint&      head_dim   [[buffer(8)]],
-    constant uint&      k_pool_off [[buffer(9)]],  // v pool = k pool + offset
-    uint h   [[threadgroup_position_in_grid]],     // query head
-    uint tid [[thread_position_in_threadgroup]],
-    uint tptg[[threads_per_threadgroup]])
-{
-    const uint kvh   = h / gqa_ratio;              // GQA broadcast
-    const float scale = rsqrt(float(head_dim));
-    device const half* qh = q + h * head_dim;
+State per layer: [32 heads, 128 key_dim, 128 value_dim] = 2.1 MB BF16
+Total state (30 GDN layers): ~63 MB
 
-    // Online softmax (flash-style, single pass over history)
-    float m = -INFINITY, l = 0.0f;
-    float acc[128];                                 // head_dim <= 128
-    for (uint d = 0; d < head_dim; ++d) acc[d] = 0.0f;
+### 5.5 Full Attention
 
-    // Each thread strides over history positions
-    for (uint t = tid; t < seq_len; t += tptg) {
-        uint page = page_ids[t / page_size];
-        uint slot = t % page_size;
-        device const half* kvec = kv_pool
-            + (size_t(page) * page_size + slot) * n_kv_heads * head_dim
-            + kvh * head_dim;
-        device const half* vvec = kvec + k_pool_off;
+Standard GQA with KV cache (only on 10 full-attention layers):
 
-        float s = 0.0f;
-        for (uint d = 0; d < head_dim; ++d)
-            s += float(qh[d]) * float(kvec[d]);
-        s *= scale;
+```python
+Q, K, V = projections(x)
+Q, K = apply_rotary_embeddings(Q, K)
+scores = Q @ K^T / sqrt(head_dim)       # GPU batched
+attn = softmax(scores) @ V               # GPU batched
+output = o_proj(attn) * sigmoid(gate)    # Output gate
+```
 
-        float m_new = max(m, s);
-        float corr  = exp(m - m_new);
-        float p     = exp(s - m_new);
-        l = l * corr + p;
-        for (uint d = 0; d < head_dim; ++d)
-            acc[d] = acc[d] * corr + p * float(vvec[d]);
-        m = m_new;
-    }
+KV cache per layer (FP16): 2 × 2 heads × 256 head_dim × seq_len × 2 bytes
+At 4096 tokens: ~8 MB per layer, ~80 MB total
 
-    // Cross-thread reduction of (m, l, acc) via threadgroup memory —
-    // standard log-sum-exp merge, elided for brevity but REQUIRED:
-    //   merged_m = max(m_i); merged_l = Σ l_i * exp(m_i - merged_m);
-    //   merged_acc = Σ acc_i * exp(m_i - merged_m);
-    // ... reduction code ...
+### 5.6 MoE Routing
 
-    if (tid == 0)
-        for (uint d = 0; d < head_dim; ++d)
-            out[h * head_dim + d] = half(acc[d] / l);
-}
+```python
+router_logits = gate_proj(hidden)        # [256]
+probs = softmax(router_logits)
+top_k_indices, top_k_weights = top_k(probs, k=8)
+# Normalize top-k weights
+top_k_weights = softmax(top_k_weights)
 
+# Shared expert (always active)
+shared_out = shared_expert(hidden) * sigmoid(shared_gate(hidden))
 
-Production version: vectorize the dot products with half4 loads, keep acc in fp32 registers per simdlane, and add the Q8 KV-block dequant path for older pages.
+# Routed experts (streamed from SSD on demand)
+expert_out = sum(top_k_weights[i] * expert_i(hidden) for i in top_k_indices)
 
-4. Router: softmax + top-k with renormalization
-(→ Implemented in [`finchmoe_engine/sampler.cpp`](finchmoe_engine/sampler.cpp) — CPU-side `topk_renorm()`)
+output = expert_out + shared_out + residual
+```
 
-Small but numerically load-bearing. Qwen3 MoE with norm_topk_prob=true requires the selected weights be renormalized to sum to 1 over the top-k — do it where you already do top-k, on CPU (n_experts floats is tiny):
+## 6. Dimension Adaptation from flash-moe
 
-// router_topk.cpp — CPU side, matches HF Qwen3-MoE semantics
-std::pair<std::vector<uint32_t>, std::vector<float>>
-topk_renorm(const float* logits, uint32_t n_experts, uint32_t k) {
-    // softmax over ALL experts first (fp32)
-    float mx = *std::max_element(logits, logits + n_experts);
-    std::vector<float> p(n_experts);
-    float sum = 0.f;
-    for (uint32_t i = 0; i < n_experts; ++i)
-        sum += (p[i] = std::exp(logits[i] - mx));
-    for (auto& v : p) v /= sum;
+All changes from the Qwen3.5-397B baseline:
 
-    // top-k by probability
-    std::vector<uint32_t> ids(n_experts);
-    std::iota(ids.begin(), ids.end(), 0);
-    std::partial_sort(ids.begin(), ids.begin() + k, ids.end(),
-                      [&](uint32_t a, uint32_t b){ return p[a] > p[b]; });
-    ids.resize(k);
+```c
+// infer.m constant changes
+#define HIDDEN_DIM          2048    // was 4096
+#define NUM_LAYERS          40      // was 60
+#define NUM_ATTN_HEADS      16      // was 32
+#define NUM_KV_HEADS        2       // unchanged
+#define HEAD_DIM            256     // unchanged
+#define VOCAB_SIZE          248320  // unchanged
+#define NUM_EXPERTS         256     // was 512
+#define NUM_EXPERTS_PER_TOK 8       // was 10
+#define MOE_INTERMEDIATE    512     // was 1024
+#define SHARED_INTERMEDIATE 512     // was 1024
+#define LINEAR_NUM_V_HEADS  32      // was 64
+#define LINEAR_NUM_K_HEADS  16      // unchanged
+#define LINEAR_KEY_DIM      128     // unchanged
+#define LINEAR_VALUE_DIM    128     // unchanged
+// Derived:
+// LINEAR_TOTAL_KEY    = 16 * 128 = 2048 (was 2048, unchanged!)
+// LINEAR_TOTAL_VALUE  = 32 * 128 = 4096 (was 8192)
+// LINEAR_CONV_DIM     = 2048*2 + 4096 = 8192 (was 12288)
 
-    // renormalize over the selected k (norm_topk_prob=true)
-    float ksum = 0.f;
-    for (auto i : ids) ksum += p[i];
-    std::vector<float> w(k);
-    for (uint32_t j = 0; j < k; ++j) w[j] = p[ids[j]] / ksum;
-    return {ids, w};
-}
+#define EXPERT_SIZE         983040  // was 7077888 (~0.94 MB vs ~6.75 MB)
+```
 
+## 7. Search Integration (Future)
 
-If a variant checkpoint sets norm_topk_prob=false, skip the last step — another reason the converter must record this flag in manifest.json rather than assuming.
+Plan to integrate internet search directly into the inference loop, inspired by [llm-search](https://github.com/...):
 
-What you do not need to rewrite
-Q4 GEMV / SwiGLU expert kernels from the previous doc — Qwen3 experts are standard SwiGLU, only shapes change (read from manifest).
-Residual add, embedding lookup, LM head — generic.
-Sampling — generic.
-Adjusted overlap plan (no shared expert)
+- Tool definitions injected into the system prompt
+- Engine intercepts `<tool_call>` tokens in generated output
+- Executes SearXNG queries and `fetch_page` operations
+- Injects results back into the context
+- Self-hosted, no API keys required
 
-Since Qwen3 MoE has no shared expert, command buffer B from the earlier design is empty. Replace the overlap with: while pread()s are in flight for layer l's experts, encode and commit layer l's KV write-back + old-page KV quantization, and precompute nothing speculative. That keeps the GPU busy during SSD latency without violating the no-prefetch rule.
+Unlike llm-search's middleware approach, FinchMoE will handle tool calling natively in the C engine — no Python proxy needed.
 
----
+## 8. Performance Model
 
-## Part 4: Additional references
+Estimated performance on M4 Mac mini 16GB:
 
-### Converter
-The converter design (safetensors → .finchmoe repacking of Q/K norm weights, RoPE convention, and per-expert slices) is fully implemented in [`finchmoe_convert.py`](finchmoe_convert.py). It handles:
-- NeoX half-split RoPE layout matching (the #1 source of "model loads but outputs gibberish" bugs)
-- `norm_topk_prob` flag recording in the binary header
-- 64 KB-aligned expert slabs with gate/up/down packed for direct Metal binding
-- Architecture validation with hard-fail on unknown config fields
+| Component | Time (est.) | Notes |
+|---|---|---|
+| CMD1: attn + delta-net | ~0.6 ms | Half the hidden dim of 397B |
+| CPU: flush | ~0.01 ms | Unchanged |
+| CMD2: o_proj + norm + routing | ~0.3 ms | Smaller matrices |
+| CPU: softmax + topK | ~0.003 ms | 256 experts vs 512 |
+| I/O: pread K=8 experts | ~0.8 ms | 8 × 0.94 MB = 7.5 MB read |
+| CMD3: expert compute | ~0.02 ms | Deferred |
+| **Per layer** | **~1.7 ms** | |
+| **Per token (40 layers)** | **~68 ms** | **~14.7 tok/s theoretical** |
 
-### Binary format
-The complete `.finchmoe` format specification is in [`finchmoe_format.md`](finchmoe_format.md) — header layout, dense/expert index entry structures, and slab internal layout.
+Real-world will be lower due to:
+- External SSD latency (not internal NVMe)
+- Page cache misses requiring actual SSD reads
+- M4 GPU being slower than M3 Max GPU
 
-### Visual explorer
-Interactive visualizations of every concept described in this document are available in the [FinchMoE Explorer](finchmoe_explorer/) Next.js app:
-- Architecture stack with animated signal flow
-- 9-step inference pipeline walkthrough
-- 128-expert routing grid with top-8 selection animation
-- 4 GB memory gauge with context-length slider
-- Tool-calling agentic loop demo
-- Engine source tree browser
+Conservative estimate: **5-10 tok/s** — well above the 3.5 tok/s target.
 
+## 9. Appendix: flash-moe Experiments Reference
 
+Key findings from flash-moe's 58 experiments that inform our design:
 
-update design goal:
-
-The official base model is here:
-
-Qwen/Qwen3.6-35B-A3B: https://huggingface.co/Qwen/Qwen3.6-35B-A3B
-
-A few things to note — the published model specs differ slightly from what we hardcoded:
-
-Param	Our engine (from early spec)	Published HF card
-num_hidden_layers	94	40
-hidden_size	4096	2048
-num_experts	128	256 (8 routed + 1 shared)
-context_length	4096 (KV budget)	262,144 native
-The architecture has evolved — it now uses a hybrid Gated Delta Network + MoE design rather than the pure dense-attention + MoE structure we targeted. You'll need to update the model config constants in finchmoe_types.h and model_runner.mm to match the published weights before converting.
-
-Also useful:
-
-GGUF (for local testing): lmstudio-community/Qwen3.6-35B-A3B-GGUF   https://huggingface.co/lmstudio-community/Qwen3.6-35B-A3B-GGUF
-MLX 4-bit (Apple Silicon native): mlx-community/Qwen3.6-35B-A3B-4bit  https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-4bit
+| Finding | Impact |
+|---|---|
+| FMA dequant kernel | +12% tok/s |
+| Trust OS page cache (vs custom LRU) | +38% tok/s |
+| BLAS delta-net (Accelerate) | +64% attention speed |
+| GPU combine+norm in CMD3 | Pipeline-critical |
+| SSD DMA + GPU overlap impossible | Serial pipeline optimal |
+| LZ4 expert compression | -13% (decompress overhead) |
+| mmap expert files | -5× (page fault overhead) |
+| MTP speculative decoding | Break-even (MoE I/O scales per-token) |

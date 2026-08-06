@@ -1,222 +1,127 @@
 # FinchMoE
 
-**SSD-streamed Metal inference for Qwen MoE models on Apple Silicon**
+A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon, targeting ≥3.5 tok/s at ≤3 GB RAM — and eventually iPhone.
 
-FinchMoE runs Qwen3.6-35B-A3B–class Mixture-of-Experts models on M1–M4 Macs with **under 4 GB active unified memory** by keeping the dense backbone resident and streaming routed expert weights from SSD on demand. Metal-only GPU execution, no ANE.
+## Goals
 
-![FinchMoE Architecture](visualization.svg)
+| Target | Value |
+|---|---|
+| Model | Qwen 3.6 35B A3B (4-bit MLX quantized) |
+| Hardware | M4 Mac mini 16GB (dev), A-series iPhone (target) |
+| Speed | ≥3.5 tok/s |
+| Memory | ≤3 GB RAM for engine |
+| Disk | ~19 GB model + ~20 GB repacked experts |
+| Features | Text generation + built-in internet search |
 
-**🔗 [Live Interactive Demo](https://haihengh-local-inference-moe.abacusai.app/)** — explore the architecture, MoE routing, memory manager, and inference pipeline in your browser.
+## Why flash-moe?
 
----
+We evaluated the original `finchmoe_engine` (C++/ObjC++) and found it was built for a pre-release Qwen MoE spec that never shipped. The published Qwen 3.6 has a completely different architecture.
 
-## Quick start
+[flash-moe](flash-moe/) is a production C/Metal engine that already runs the Qwen3.5-MoE family (same `qwen3_5_moe` model type as Qwen 3.6) at 4.36 tok/s on M3 Max. It implements:
 
-```bash
-# 1. Convert Hugging Face weights → .finchmoe format
-python3 finchmoe_convert.py \
-    --model-dir ~/models/Qwen3.6-35B-A3B-Instruct \
-    --output    qwen3.finchmoe
-
-# 2. Build the engine (macOS 14+, Xcode 15+, CMake 3.22+)
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(sysctl -n hw.logicalcpu)
-
-# 3a. One-shot generation
-./build/finchmoe_generate qwen3.finchmoe "Explain MoE routing"
-
-# 3b. Interactive chat with tool-calling
-./build/finchmoe_chat qwen3.finchmoe qwen3.tiktoken \
-    --system "You are a helpful assistant." \
-    --ctx 4096 --temp 0.7 --top-p 0.9
-```
-
-See **[finchmoe_engine/README.md](finchmoe_engine/README.md)** for the full engine reference, kernel catalog, and API docs.
-
----
-
-## Project structure
-
-```
-FinchMoE/
-├── finchmoe_convert.py          safetensors → .finchmoe converter (✅ done)
-├── finchmoe_engine/             C++/Metal inference runtime (✅ done)
-│   ├── finchmoe_format.h        .finchmoe binary format parser
-│   ├── memory_ledger.h         Lock-free 4 GB budget tracker
-│   ├── expert_cache.h/.mm      LFU+recency expert slab cache
-│   ├── io_planner.h/.cpp       Bounded parallel pread() I/O
-│   ├── engine_core.h/.mm       Metal device + command queue init
-│   ├── model_runner.h/.mm      94-layer Qwen3.6 forward pass
-│   ├── kernels/                6 Metal shaders (RoPE, RMSNorm, GEMV, attention, MoE)
-│   ├── kv_cache.h/.mm          Paged GQA KV cache
-│   ├── sampler.h/.cpp          Temperature / top-p / top-k sampling
-│   ├── tokenizer.h/.cpp        BPE tiktoken tokenizer
-│   ├── tool_engine.h/.cpp      Multi-turn agentic tool-calling loop
-│   ├── tools/                  CLI executables (generate + chat)
-│   └── test/                   Engine smoke test
-├── finchmoe_explorer/           Interactive Next.js visualization app
-│   └── 6 tabs: Overview, Pipeline, MoE Routing, Memory, Tool-Calling, File Explorer
-├── finchmoe_format.md           .finchmoe binary format specification
-├── design.md                   Design review + Qwen3.6 kernel reference code
-└── visualization.svg           Architecture diagram
-```
-
----
+- **SSD Expert Streaming** — 4-bit expert weights streamed from NVMe on demand
+- **FMA-Optimized Dequant** — fused multiply-add in Metal shaders (+12% throughput)
+- **GatedDeltaNet via Accelerate BLAS** — 64% faster than scalar
+- **GPU Fused Attention** — batched Q@K^T, softmax, scores@V on Metal
+- **Trust the OS Page Cache** — no custom expert cache (every attempt was slower)
 
 ## Architecture
 
-FinchMoE treats Apple Silicon's unified memory as the **sole constraint** and the internal SSD as a **streaming weight store** — not a swap device.
-
-### The problem
-Qwen3.6-35B-A3B has ~128 routed experts per layer × 94 layers. Each expert is ~18 MB (bf16). Loading all experts into RAM would need >200 GB — impossible on consumer Macs.
-
-### The approach
-- **Resident backbone** (~600 MB): embeddings, attention projections, norms, routers, and shared path. Always in Metal-visible unified memory.
-- **Expert SSD streaming**: only the top-k selected experts (8 per token) are fetched from SSD via `pread()` directly into Metal buffers.
-- **Bounded expert cache**: 8–16 hot expert slots per layer, managed by LFU+recency eviction. Routing locality means cache hits are common — blind load/unload per token would waste SSD bandwidth.
-- **Overlap**: while SSD reads are in flight for layer *l*'s experts, the GPU runs KV write-back and quantization for layer *l* (Qwen3 MoE has no shared expert; the overlap target is KV maintenance, not shared-expert compute).
-- **No speculative prefetch**: Flash-MoE's measurements showed that prefetching hurts on unified memory due to contention. Load only what the router actually selects.
-
-### Per-token decode loop
-```
-For each of 94 layers:
-  1. Backbone GPU: RMSNorm → QKV proj → RoPE → GQA attention → router logits
-  2. CPU: top-k from the small logits vector (n_experts floats)
-  3. Overlap: kick parallel pread() for cache-miss experts, GPU runs KV maintenance
-  4. Expert GPU: bind cached/fetched slots → Q4 GEMV → fused SwiGLU → down proj → combine
-```
-
----
-
-## Memory budget
-
-**Hard cap: 4 GB** active engine allocation. Enforced at construction time by `MemoryLedger` — refuses to start rather than letting macOS swap.
-
-| Region | Allocation | Notes |
-|--------|-----------|-------|
-| Quantized dense backbone | ~600 MB | Embedding, attention, norms, routers, shared path |
-| KV cache | ~400 MB | 4096 tokens, paged GQA, bf16. Sliding-window first, quantize older blocks before eviction |
-| Expert cache pool | ≤ 2.9 GB | LFU+recency managed. Hard eviction before cap |
-| Activation scratch | ~128 MB | Fixed-size Metal arena, reused per layer |
-| **Total ceiling** | **≤ 4.0 GB** | Runtime allocator + admission control |
-
-Actual resident usage depends on the checkpoint: layers, hidden size, expert count, top-k, shared expert structure, attention type, and KV dimensions. The converter inspects and records all of these at conversion time.
-
----
-
-## Model format: `.finchmoe`
-
-FinchMoE uses a custom inference-only binary format — not safetensors, not MLX shards. The SSD representation is the GPU-consumable layout; no unpacking or dequantization at load time.
+### Model: Qwen 3.6 35B A3B
 
 ```
-model.finchmoe/
-├── Header (512 B)         magic, version, model config, dtype, offsets
-├── Dense index            48 B per tensor (name hash, offset, shape, dtype)
-├── Expert index           24 B per (layer, expert) slab
-├── Dense weights          backbone tensors, tightly packed, 64 KB aligned
-└── Expert slabs           one aligned slab per (layer, expert)
-                           gate_proj | up_proj | down_proj, zero-padded to 64 KB
+40 layers: 30× GatedDeltaNet + 10× full attention (3:1 pattern)
+Full attention at layers 3, 7, 11, 15, 19, 23, 27, 31, 35, 39
 ```
-
-Full specification: **[finchmoe_format.md](finchmoe_format.md)**
-
-### Quantization
-| Component | Scheme |
-|-----------|--------|
-| Router | 8-bit |
-| Norms, RoPE, small sensitive tensors | FP16 / FP32 |
-| Dense backbone | Q4, with Q5/Q6 selectively for quality |
-| Routed experts | Q4 (default), Q5 (quality profile) |
-
----
-
-## Qwen3.6-35B-A3B model config
 
 | Parameter | Value |
-|-----------|-------|
-| `hidden_size` | 4096 |
-| `num_hidden_layers` | 94 |
-| `num_attention_heads` | 64 |
-| `num_key_value_heads` | 4 |
-| `head_dim` | 64 |
-| `num_experts` | 128 |
-| `num_experts_per_tok` | 8 |
-| `moe_intermediate_size` | 768 |
-| `intermediate_size` | 2048 |
-| `vocab_size` | 151936 |
-| `rope_theta` | 1,000,000 |
-| `norm_topk_prob` | True |
-| Shared expert | None (Qwen3 MoE) |
+|---|---|
+| Hidden dim | 2048 |
+| Attention heads | 16 (GQA: 16Q, 2KV) |
+| Head dim | 256 |
+| Vocab | 248,320 |
+| Experts | 256 (top-8) + 1 shared |
+| MoE intermediate | 512 |
+| Max position | 262,144 |
+| RoPE theta | 10,000,000 |
+| Partial rotary | 0.25 |
+| MRoPE | interleaved [11, 11, 10] |
 
-### Architecture quirks requiring custom kernels
-- **QK-Norm**: per-head RMSNorm on Q and K before RoPE (not in Llama/Gemma)
-- **Softmax router with renormalized top-k**: routing weights re-softmaxed over selected k only
-- **GQA with 64:4 Q:KV head ratio**: attention kernel must broadcast KV heads
-- **No shared expert**: changes the overlap plan — GPU runs KV maintenance during SSD reads
+### GatedDeltaNet Layer
 
----
+Pure delta-rule recurrence (not Mamba/SSM). Projects input → Q/K/V/Z/A/B, runs depthwise conv1d(kernel=4), then recurrent state update.
 
-## Available visualizations
+| Component | Dimensions |
+|---|---|
+| in_proj_qkv | [8192, 2048] |
+| in_proj_z | [4096, 2048] |
+| in_proj_a / in_proj_b | [32, 2048] |
+| conv1d | [8192, 4, 1] |
+| A_log, dt_bias | [32] |
+| norm | [128] |
+| out_proj | [2048, 4096] |
+| Recurrent state | [32, 128, 128] ≈ 2.1 MB |
 
-**🔗 [Live demo →](https://haihengh-local-inference-moe.abacusai.app/)**
+### Full Attention Layer
 
-The **[FinchMoE Explorer](finchmoe_explorer/)** is a Next.js app with 6 interactive tabs:
-1. **Overview** — Animated architecture stack with signal pulse
-2. **Inference Pipeline** — 9-step animated token generation walkthrough
-3. **MoE Routing** — 128-expert grid with top-8 routing and LFU cache simulation
-4. **Memory Manager** — SVG gauge (0–4 GB), context slider, breakdown bars
-5. **Tool-Calling** — Agentic flow diagram with step-by-step demo
-6. **File Explorer** — Engine source tree with search and detail drawer
+Standard GQA with Q/output-gate fusion (`attn_output_gate: true`).
 
----
+| Component | Dimensions |
+|---|---|
+| q_proj (doubled) | [4096, 2048] |
+| k_proj / v_proj | [512, 2048] |
+| o_proj | [2048, 2048] |
 
-## Documentation map
+### MoE Expert (4-bit, per expert)
 
-| Document | What it covers |
-|----------|---------------|
-| [README.md](README.md) | This file — project overview, quick start, architecture |
-| [finchmoe_engine/README.md](finchmoe_engine/README.md) | Engine reference: build, API, kernels, tool-calling, REPL |
-| [design.md](design.md) | Design review, kernel reference code, Qwen3.6-specifics |
-| [finchmoe_format.md](finchmoe_format.md) | `.finchmoe` binary format: header, indexes, slab layout |
-| [visualization.svg](visualization.svg) | Standalone architecture diagram |
+| Component | Shape | Packed Size |
+|---|---|---|
+| gate_proj | [512, 2048] INT4 | 196 KB |
+| up_proj | [512, 2048] INT4 | 196 KB |
+| down_proj | [2048, 512] INT4 | 590 KB |
+| **Total per expert** | | **~0.94 MB** |
+| **Total experts** | 256 × 40 layers | **~9.6 GB** |
 
----
+Quantization: MLX affine INT4, group-64, BF16 scale+bias.
 
-## Requirements
+## Project Structure
 
-- macOS 14.0+ (Sonoma or later)
-- Apple Silicon: M1, M2, M3, or M4
-- CMake ≥ 3.22, Xcode 15+ (Metal shader compilation, ObjC++20)
-- Python 3.10+ with `safetensors`, `numpy` (converter only)
+```
+finchMoE/
+├── README.md              # This file
+├── design.md              # Detailed design document
+├── flash-moe/             # Starting codebase (Qwen3.5-397B engine)
+├── turbo-fieldfare/       # Performance benchmark (Swift, Gemma 4)
+├── omlx/                  # Qwen-specific Metal kernel reference
+├── models/
+│   ├── Qwen3.6-35B-A3B-4bit/   # Target model (~19 GB)
+│   └── Qwen3.5-397B-A17B-4bit/ # Baseline model (~209 GB, downloading)
+└── archive/               # Original finchMoE code (pre-reboot)
+```
 
----
+## Reference Projects
 
-## Build order / status
+| Project | What We Use It For |
+|---|---|
+| **flash-moe** | Starting codebase — already runs qwen3_5_moe architecture |
+| **turbo-fieldfare** | Performance benchmark — 3.5 tok/s, ~2 GB RAM, M4 mini |
+| **omlx** | Qwen-specific Metal kernel optimizations (GDN, FA256, MoE) |
 
-| # | Component | Status |
-|---|-----------|--------|
-| 1 | `safetensors → .finchmoe` converter + wire format types | ✅ Complete |
-| 2 | Engine core: expert cache, I/O planner, Metal device init | ✅ Complete |
-| 3 | Metal kernels: RoPE, RMSNorm, GEMV, GQA attention, MoE | ✅ Complete |
-| 4 | Inference loop: KV cache, sampler, 94-layer forward pass | ✅ Complete |
-| 5 | Tool-calling: tokenizer, chat template, tool parser, agentic loop | ✅ Complete |
-| — | Chunked prefill | 🔜 v2 |
-| — | Layer pipelining (overlap layer l+1 attention with layer l experts) | 🔜 v2 |
-| — | Memory-pressure handler (adaptive slot count, `F_NOCACHE`) | 🔜 v2 |
+## Development Plan
 
----
+1. **Baseline**: Download flash-moe's Qwen3.5-397B model, run on M4 mini 16GB, measure tok/s
+2. **Adapt dimensions**: Port flash-moe constants to Qwen3.6 (hidden=2048, layers=40, experts=256)
+3. **Repack experts**: Update `repack_experts.py` for Qwen3.6 expert sizes
+4. **Extract weights**: Update `extract_weights.py` for Qwen3.6 non-expert tensors
+5. **Test**: Run Qwen3.6 inference on M4 mini, measure tok/s
+6. **Optimize**: Apply omlx kernel improvements, target turbo-fieldfare performance
+7. **Search**: Integrate internet search (inspired by llm-search pattern)
+8. **iOS**: Port to A-series chips
 
-## Performance expectations
+## Status
 
-Token/sec depends on: Apple GPU and unified-memory bandwidth, internal SSD speed, actual expert size and top-k, cache hit rate, and quantization profile. No hard numbers without a converted checkpoint on a specific Mac model.
-
-The v1 success criterion: **correct output matching a reference runtime within tolerance, no system swap, active engine allocation below 4 GB, stable cold-cache decoding.**
-
----
-
-## Credits
-
-Built on lessons from:
-- **Flash-MoE**: hand-written Metal kernels, quantized matvec, `pread()`-based SSD streaming
-- **TurboFieldfare**: strict resident-memory accounting, per-layer expert streaming, bounded cache
-- **oMLX**: paged KV-cache, request scheduling, OpenAI-compatible API patterns
+- [x] Qwen3.6-35B-A3B-4bit downloaded (19 GB)
+- [ ] Qwen3.5-397B-A17B-4bit baseline downloading (120/209 GB)
+- [ ] flash-moe adapted for Qwen3.6 dimensions
+- [ ] Baseline benchmark on M4 mini
+- [ ] FinchMoE benchmark on M4 mini
