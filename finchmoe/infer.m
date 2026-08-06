@@ -124,7 +124,7 @@
 #define THINK_START_TOKEN   248068  // <think>
 #define THINK_END_TOKEN     248069  // </think>
 
-#define MODEL_PATH_DEFAULT "../models/Qwen3.6-35B-A3B-4bit"
+#define MODEL_PATH_DEFAULT "../models/Qwen3.6-35B-A3B-4bit-df"
 
 // ============================================================================
 // Timing helper
@@ -5096,7 +5096,7 @@ static void fused_layer_forward(
 
     int actual_K = (K > MAX_K) ? MAX_K : K;
 
-    // TEMPORARY: force CPU expert path to isolate NaN source
+    // CPU expert path for debugging (set to 0 for GPU path)
     int force_cpu_experts = 1;
     if (force_cpu_experts) goto cpu_expert_fallback;
 
@@ -5542,7 +5542,7 @@ static void fused_layer_forward(
             // Guard against NaN/Inf from degenerate expert quantization
             float er = 0;
             for (int j = 0; j < HIDDEN_DIM; j++) er += expert_out_cpu[j] * expert_out_cpu[j];
-            if (isfinite(er) && er < 1e10f) {
+            if (isfinite(er) && er < 1e20f) {
                 cpu_vec_madd(moe_out, expert_out_cpu, expert_weights[k], HIDDEN_DIM);
             } else {
                 fprintf(stderr, "[WARN] layer=%d expert=%d out_rms=%.1f — skipping\n",

@@ -1,5 +1,5 @@
 {
-  "model": "../models/Qwen3.6-35B-A3B-4bit",
+  "model": "../models/Qwen3.6-35B-A3B-4bit-df",
   "num_tensors": 1397,
   "tensors": {
     "lm_head.biases": {

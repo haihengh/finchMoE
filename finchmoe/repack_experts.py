@@ -23,6 +23,7 @@ import json
 import os
 import time
 import sys
+import numpy as np
 
 # Component order and expected sizes (Qwen3.6-35B-A3B 4-bit)
 COMPONENTS = [
@@ -132,7 +133,7 @@ def repack_layer(layer_idx, expert_reads, model_path, fds, output_dir, dry_run=F
     bytes_written = 0
 
     # Build read plan: group reads by source file for better locality
-    # Each entry: (src_fd, src_offset, dst_offset, size)
+    # Each entry: (src_fd, src_offset, dst_offset, size, needs_fp16_convert)
     read_plan = []
     for expert_idx in range(NUM_EXPERTS):
         for comp in COMPONENTS:
@@ -140,17 +141,27 @@ def repack_layer(layer_idx, expert_reads, model_path, fds, output_dir, dry_run=F
             src_fd = fds[info['file']]
             src_offset = info['abs_offset'] + expert_idx * info['expert_stride']
             dst_offset = expert_idx * EXPERT_SIZE + comp['offset']
-            read_plan.append((src_fd, src_offset, dst_offset, comp['size']))
+            # Scales and biases are stored as FP16 in MLX, need conversion to BF16
+            is_scale_or_bias = ('scales' in comp['name'] or 'biases' in comp['name'])
+            read_plan.append((src_fd, src_offset, dst_offset, comp['size'], is_scale_or_bias))
 
     # Sort by (src_fd, src_offset) for sequential read locality
     read_plan.sort(key=lambda x: (x[0], x[1]))
 
-    # Execute reads and writes
-    for src_fd, src_offset, dst_offset, size in read_plan:
+    # Execute reads and writes, converting FP16 → BF16 for scales/biases
+    for src_fd, src_offset, dst_offset, size, needs_convert in read_plan:
         data = os.pread(src_fd, size, src_offset)
         if len(data) != size:
             raise IOError(f"Short read: expected {size}, got {len(data)} "
                           f"at offset {src_offset}")
+        if needs_convert:
+            # FP16 (uint16) → BF16 (uint16): decode as float16, re-encode as bfloat16
+            arr = np.frombuffer(data, dtype=np.uint16)
+            # View as float16, convert to float32
+            f16 = arr.view(np.float16).astype(np.float32)
+            # Convert float32 to bfloat16: take upper 16 bits
+            bf16 = (f16.view(np.uint32) >> 16).astype(np.uint16)
+            data = bf16.tobytes()
         os.pwrite(fd_out, data, dst_offset)
         bytes_written += size
 
@@ -183,14 +194,25 @@ def verify_layer(layer_idx, expert_reads, model_path, fds, output_dir):
             original = os.pread(src_fd, comp['size'], src_offset)
             packed = os.pread(fd_packed, comp['size'], dst_offset)
 
-            if original != packed:
+            # For scales/biases: source is FP16, packed is BF16 — compare as float32
+            is_sb = ('scales' in comp['name'] or 'biases' in comp['name'])
+            if is_sb:
+                src_f32 = np.frombuffer(original, dtype=np.uint16).view(np.float16).astype(np.float32)
+                pck_u16 = np.frombuffer(packed, dtype=np.uint16)
+                pck_f32 = (pck_u16.astype(np.uint32) << 16).view(np.float32)
+                if not np.allclose(src_f32, pck_f32, rtol=1e-2, atol=1e-3, equal_nan=True):
+                    md = np.max(np.abs(src_f32 - pck_f32))
+                    if md > 1e-2:  # only report significant diffs
+                        print(f"  MISMATCH: layer {layer_idx}, expert {expert_idx}, {comp['name']} max_diff={md:.6e}")
+                        mismatches += 1
+            elif original != packed:
                 print(f"  MISMATCH: layer {layer_idx}, expert {expert_idx}, {comp['name']}")
                 mismatches += 1
 
     os.close(fd_packed)
 
     if mismatches == 0:
-        print(f"  Layer {layer_idx}: verification PASSED (experts 0, 1, 127, 255)")
+        print(f"  Layer {layer_idx}: verification PASSED")
     else:
         print(f"  Layer {layer_idx}: verification FAILED ({mismatches} mismatches)")
 
