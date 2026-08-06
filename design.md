@@ -1,19 +1,65 @@
-AeroMoE — Design Review & Core Inference Engine Code
-Part 1: Design Review
-What holds up
+# AeroMoE — Design Review & Core Inference Engine Code
+
+> **Where things live:**
+> - Engine implementation: [`aeromoe_engine/`](aeromoe_engine/) (C++/Metal, all 5 sessions complete)
+> - Binary format spec: [`aeromoe_format.md`](aeromoe_format.md)
+> - Converter: [`aeromoe_convert.py`](aeromoe_convert.py)
+> - Interactive visual explorer: [`aeromoe_explorer/`](aeromoe_explorer/)
+> - Architecture diagram: [`visualization.svg`](visualization.svg)
+
+---
+
+## Part 1: Design Review
+
+### What holds up
 Decision	Verdict
 Metal-only, no ANE	✅ Correct — dynamic expert binding is impossible to do cleanly on ANE
 Layer-sharded expert files, contiguous per-expert slices	✅ Correct — one pread() per miss
 Bounded slot cache instead of load/unload per token	✅ Correct — routing locality makes blind unloads waste SSD bandwidth
 No speculative prefetch	✅ Correct for v1 — revisit only with measured hit rates
-Overlap shared-expert GPU work with SSD reads	✅ Correct, this is the single biggest latency hiding win
-Weaknesses to fix before coding
-Router→CPU sync point. The GPU must finish router logits before the CPU can plan I/O. That's a per-layer pipeline stall. Fix: split each layer into two command buffers and read back only top_k × (uint16 id, half weight) via a shared-storage-mode buffer — never a full logits copy. On decode (1 token), do top-k on CPU from the raw logits vector (small, e.g. 128 floats); it's cheaper than a GPU sort + readback.
-Slot fragmentation. Experts across layers may differ in size. Fix: all slots sized to max_expert_bytes from the manifest. Wastes a few MB, eliminates an allocator.
-Eviction during in-flight GPU reads. A slot must not be evicted while a command buffer still references it. Fix: per-slot refcount pinned until command-buffer completion handler fires.
-pread into Metal buffers. Use MTLStorageModeShared buffers and pread() directly into buffer.contents — zero-copy on unified memory. Open the expert files with F_NOCACHE off by default; only enable it under memory pressure (watch dispatch_source memory-pressure events).
-Budget enforcement is missing a mechanism. Add a central MemoryLedger that every allocation goes through; fail construction if the plan exceeds the ceiling instead of discovering it at runtime.
-Part 2: Core Engine Code
+Overlap shared-expert GPU work with SSD reads	⚠️ Qwen3 MoE has no shared expert — overlap KV write-back + quantization instead (see § Adjusted overlap plan below)
+### Weaknesses to fix before coding
+
+1. **Router→CPU sync point.** The GPU must finish router logits before the CPU can plan I/O. That's a per-layer pipeline stall. Fix: split each layer into two command buffers and read back only top_k × (uint16 id, half weight) via a shared-storage-mode buffer — never a full logits copy. On decode (1 token), do top-k on CPU from the raw logits vector (small, e.g. 128 floats); it's cheaper than a GPU sort + readback.
+   - **→ Addressed in `model_runner.mm`**: router logits written to a shared-storage Metal buffer; CPU reads only the small float vector and runs `topk_renorm()` (see `sampler.cpp`).
+
+2. **Slot fragmentation.** Experts across layers may differ in size. Fix: all slots sized to max_expert_bytes from the manifest. Wastes a few MB, eliminates an allocator.
+   - **→ Addressed in `expert_cache.mm`**: uniform slot size from `manifest.max_expert_bytes`.
+
+3. **Eviction during in-flight GPU reads.** A slot must not be evicted while a command buffer still references it. Fix: per-slot refcount pinned until command-buffer completion handler fires.
+   - **→ Addressed in `expert_cache.h`**: `std::atomic<int> refcount` with `lookup_and_pin()` / `unpin()` + `addCompletedHandler` in the decode loop.
+
+4. **pread into Metal buffers.** Use MTLStorageModeShared buffers and pread() directly into buffer.contents — zero-copy on unified memory. Open the expert files with F_NOCACHE off by default; only enable it under memory pressure (watch dispatch_source memory-pressure events).
+   - **→ Addressed in `io_planner.cpp`**: `pread()` directly into `slot->buffer.contents` via GCD dispatch. Memory-pressure handler deferred to v2.
+
+5. **Budget enforcement is missing a mechanism.** Add a central MemoryLedger that every allocation goes through; fail construction if the plan exceeds the ceiling instead of discovering it at runtime.
+   - **→ Addressed in `memory_ledger.h`**: `MemoryLedger` with atomic `reserve()`/`release()` and `validate_budget()` called at engine construction time.
+
+### Implementation map: design → source files
+
+| Design section | Implemented in |
+|---------------|---------------|
+| Memory ledger / budget enforcement | [`aeromoe_engine/memory_ledger.h`](aeromoe_engine/memory_ledger.h) |
+| Expert slot cache (LFU+recency, refcounted) | [`aeromoe_engine/expert_cache.h`](aeromoe_engine/expert_cache.h), [`.mm`](aeromoe_engine/expert_cache.mm) |
+| I/O planner (parallel pread into Metal buffers) | [`aeromoe_engine/io_planner.h`](aeromoe_engine/io_planner.h), [`.cpp`](aeromoe_engine/io_planner.cpp) |
+| Manifest & expert index types | [`aeromoe_engine/aeromoe_format.h`](aeromoe_engine/aeromoe_format.h) |
+| Q4 GEMV + fused SwiGLU expert kernels | [`aeromoe_engine/kernels/moe_kernels.metal`](aeromoe_engine/kernels/moe_kernels.metal) |
+| RMSNorm kernel (Qwen epsilon placement) | [`aeromoe_engine/kernels/norm_kernels.metal`](aeromoe_engine/kernels/norm_kernels.metal) |
+| QK-Norm + RoPE fused kernel | [`aeromoe_engine/kernels/rope_kernels.metal`](aeromoe_engine/kernels/rope_kernels.metal) |
+| GQA paged-attention decode kernel | [`aeromoe_engine/kernels/attention_kernels.metal`](aeromoe_engine/kernels/attention_kernels.metal) |
+| GEMV kernel (bf16 matvec) | [`aeromoe_engine/kernels/gemv_kernels.metal`](aeromoe_engine/kernels/gemv_kernels.metal) |
+| Kernel dispatch / pipeline state | [`aeromoe_engine/kernels/kernel_dispatch.h`](aeromoe_engine/kernels/kernel_dispatch.h), [`.mm`](aeromoe_engine/kernels/kernel_dispatch.mm) |
+| Per-layer decode loop | [`aeromoe_engine/model_runner.h`](aeromoe_engine/model_runner.h), [`.mm`](aeromoe_engine/model_runner.mm) |
+| Top-level token loop + sampling | [`aeromoe_engine/inference_engine.mm`](aeromoe_engine/inference_engine.mm), [`sampler.cpp`](aeromoe_engine/sampler.cpp) |
+| KV cache (paged, GQA, bf16) | [`aeromoe_engine/kv_cache.h`](aeromoe_engine/kv_cache.h), [`.mm`](aeromoe_engine/kv_cache.mm) |
+| Router top-k + renormalization | [`aeromoe_engine/sampler.cpp`](aeromoe_engine/sampler.cpp) (CPU-side `topk_renorm`) |
+| Binary format specification | [`aeromoe_format.md`](aeromoe_format.md) |
+| safetensors → .aeromoe converter | [`aeromoe_convert.py`](aeromoe_convert.py) |
+| Visual explorer (interactive diagrams) | [`aeromoe_explorer/`](aeromoe_explorer/) |
+
+---
+
+## Part 2: Core Engine Code
 
 Language: C++17 / Objective-C++ (.mm) + Metal Shading Language. Illustrative but structurally complete — tensor shapes come from manifest.json at load time, never hard-coded.
 
@@ -371,6 +417,9 @@ void DecodeLayer::run(uint32_t layer, id<MTLCommandQueue> queue,
 }
 
 2.7 Top-level token loop
+(→ Implemented in [`inference_engine.mm`](aeromoe_engine/inference_engine.mm) and [`model_runner.mm`](aeromoe_engine/model_runner.mm))
+
+```cpp
 int32_t Engine::decode_one_token(TokenState& st) {
     st.x = embed(st.token_id);                      // resident embedding
     for (uint32_t l = 0; l < manifest_.n_layers; ++l)
@@ -378,17 +427,13 @@ int32_t Engine::decode_one_token(TokenState& st) {
     if (st.token_idx % 64 == 0) cache_.decay();     // LFU aging
     return sample(final_norm_lmhead(st.x), st.sampler);
 }
+```
 
 Part 3: Notes on what's deliberately omitted (v2 work)
 Chunked prefill: reuse IOPlanner::fetch with deduplicated (layer, expert) sets across the 32-token chunk — the cache/pin machinery above already supports it.
 Layer pipelining: replace waitUntilCompleted in cbC with events so layer l+1's attention overlaps layer l's expert compute; requires double-buffered TokenState.
 Memory-pressure handler: a DISPATCH_SOURCE_TYPE_MEMORYPRESSURE source that shrinks slot count and enables F_NOCACHE on the layer fds.
 Error paths: the abort() in the pread callback needs a real cancellation path.
-
-If you'd like this as a downloadable .md file or a PDF, say the word. Otherwise, the natural next step is the converter (safetensors → .aeromoe packer) — that's where the manifest values and ExpertRecord layout get pinned down for the actual Qwen 3.6 35B-A3B checkpoint.
-
-
-
 
 Yes — a Qwen-specific kernel set is unavoidable
 
@@ -406,6 +451,7 @@ RMSNorm (with +eps inside sqrt), SwiGLU experts	SwiGLU you already have; RMSNorm
 Below are the four kernels you must rewrite. Everything else (Q4 GEMV, SwiGLU expert FFN, residual add) carries over from the previous document.
 
 1. Fused RMSNorm (Qwen epsilon placement)
+(→ Implemented in [`aeromoe_engine/kernels/norm_kernels.metal`](aeromoe_engine/kernels/norm_kernels.metal))
 // rmsnorm.metal — y = x / sqrt(mean(x^2) + eps) * w
 // One threadgroup per vector; d_model up to 8192.
 #include <metal_stdlib>
@@ -447,6 +493,7 @@ kernel void rmsnorm_f16(
 }
 
 2. Fused QK-Norm + RoPE (the Qwen3 signature kernel)
+(→ Implemented in [`aeromoe_engine/kernels/rope_kernels.metal`](aeromoe_engine/kernels/rope_kernels.metal))
 
 This is the kernel that does not exist in Llama/Gemma engines. Qwen3 applies a per-head RMSNorm to Q and K after projection, before RoPE. Fusing norm + rotation into one pass avoids two extra round trips through unified memory — on bandwidth-starved 8 GB machines this matters.
 
@@ -502,6 +549,7 @@ kernel void qk_norm_rope(
 Trap to respect: HuggingFace Qwen checkpoints use the NeoX half-split RoPE pairing, while many GGUF-derived kernels use interleaved pairs. Your .aeromoe converter must pick one convention and the kernel must match it — this is the #1 source of "model loads but outputs gibberish" bugs when porting model families.
 
 3. GQA paged-attention decode kernel
+(→ Implemented in [`aeromoe_engine/kernels/attention_kernels.metal`](aeromoe_engine/kernels/attention_kernels.metal))
 
 Generic single-query attention exists in many engines, but it must be specialized for: GQA broadcast ratio, your paged-KV block layout, and quantized KV blocks.
 
@@ -576,6 +624,7 @@ kernel void gqa_decode_attention(
 Production version: vectorize the dot products with half4 loads, keep acc in fp32 registers per simdlane, and add the Q8 KV-block dequant path for older pages.
 
 4. Router: softmax + top-k with renormalization
+(→ Implemented in [`aeromoe_engine/sampler.cpp`](aeromoe_engine/sampler.cpp) — CPU-side `topk_renorm()`)
 
 Small but numerically load-bearing. Qwen3 MoE with norm_topk_prob=true requires the selected weights be renormalized to sum to 1 over the top-k — do it where you already do top-k, on CPU (n_experts floats is tiny):
 
@@ -616,5 +665,25 @@ Adjusted overlap plan (no shared expert)
 
 Since Qwen3 MoE has no shared expert, command buffer B from the earlier design is empty. Replace the overlap with: while pread()s are in flight for layer l's experts, encode and commit layer l's KV write-back + old-page KV quantization, and precompute nothing speculative. That keeps the GPU busy during SSD latency without violating the no-prefetch rule.
 
-Want the converter-side counterpart next — i.e., how safetensors → .aeromoe must repack Q/K norm weights, RoPE convention, and per-expert slices so these kernels bind directly?
+---
 
+## Part 4: Additional references
+
+### Converter
+The converter design (safetensors → .aeromoe repacking of Q/K norm weights, RoPE convention, and per-expert slices) is fully implemented in [`aeromoe_convert.py`](aeromoe_convert.py). It handles:
+- NeoX half-split RoPE layout matching (the #1 source of "model loads but outputs gibberish" bugs)
+- `norm_topk_prob` flag recording in the binary header
+- 64 KB-aligned expert slabs with gate/up/down packed for direct Metal binding
+- Architecture validation with hard-fail on unknown config fields
+
+### Binary format
+The complete `.aeromoe` format specification is in [`aeromoe_format.md`](aeromoe_format.md) — header layout, dense/expert index entry structures, and slab internal layout.
+
+### Visual explorer
+Interactive visualizations of every concept described in this document are available in the [AeroMoE Explorer](aeromoe_explorer/) Next.js app:
+- Architecture stack with animated signal flow
+- 9-step inference pipeline walkthrough
+- 128-expert routing grid with top-8 selection animation
+- 4 GB memory gauge with context-length slider
+- Tool-calling agentic loop demo
+- Engine source tree browser
