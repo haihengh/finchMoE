@@ -697,16 +697,18 @@ static PromptTokens *encode_prompt_text_to_tokens(const char *text) {
 // ============================================================================
 
 // 4-bit dequant matvec: out[out_dim] = W * x[in_dim]
-// W is stored as packed uint32 (8 x 4-bit values per uint32)
+// W is stored as packed uint32 (8 x 4-bit or 4 x 8-bit values per uint32)
 // scales/biases are bfloat16 per group
 static void cpu_dequant_matvec(
     const uint32_t *W, const uint16_t *scales, const uint16_t *biases,
     const float *x, float *out,
-    int out_dim, int in_dim, int group_size
+    int out_dim, int in_dim, int group_size, int bits
 ) {
     int num_groups = in_dim / group_size;
-    int packed_per_group = group_size / 8;
-    int packed_cols = in_dim / 8;
+    int vals_per_u32 = (bits == 8) ? 4 : 8;
+    int packed_per_group = group_size / vals_per_u32;
+    int packed_cols = in_dim / vals_per_u32;
+    int shift_per_val = bits;
 
     for (int row = 0; row < out_dim; row++) {
         float acc = 0.0f;
@@ -722,11 +724,11 @@ static void cpu_dequant_matvec(
 
             for (int p = 0; p < packed_per_group; p++) {
                 uint32_t packed = w_row[base_packed + p];
-                int x_base = base_x + p * 8;
+                int x_base = base_x + p * vals_per_u32;
 
-                for (int n = 0; n < 8; n++) {
-                    uint32_t nibble = (packed >> (n * 4)) & 0xF;
-                    acc += ((float)nibble * scale + bias) * x[x_base + n];
+                for (int n = 0; n < vals_per_u32; n++) {
+                    uint32_t val = (packed >> (n * shift_per_val)) & ((1u << bits) - 1);
+                    acc += ((float)val * scale + bias) * x[x_base + n];
                 }
             }
         }
@@ -1331,7 +1333,7 @@ static void fast_dequant_matvec(
         gpu_dequant_matvec(g_metal, W, scales, biases, x, out,
                            (uint32_t)out_dim, (uint32_t)in_dim, (uint32_t)group_size);
     } else {
-        cpu_dequant_matvec(W, scales, biases, x, out, out_dim, in_dim, group_size);
+        cpu_dequant_matvec(W, scales, biases, x, out, out_dim, in_dim, group_size, 4);
     }
 }
 
@@ -1512,9 +1514,10 @@ static void gpu_encode_expert_forward_slot(
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
     } else {
-        gate_w_off = 0;        gate_s_off = 2097152;  gate_b_off = 2228224;
-        up_w_off   = 2359296;  up_s_off   = 4456448;  up_b_off   = 4587520;
-        down_w_off = 4718592;  down_s_off = 6815744;  down_b_off = 6946816;
+        // Qwen3.6 4-bit offsets (EXPERT_SIZE=1769472)
+        gate_w_off = 0;        gate_s_off = 524288;   gate_b_off = 557056;
+        up_w_off   = 589824;   up_s_off   = 1114112;  up_b_off   = 1146880;
+        down_w_off = 1179648;  down_s_off = 1703936;  down_b_off = 1736704;
     }
     id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : ctx->matvec_v3;
 
@@ -1608,9 +1611,10 @@ static void gpu_encode_expert_forward_slot_buf(
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
     } else {
-        gate_w_off = 0;        gate_s_off = 2097152;  gate_b_off = 2228224;
-        up_w_off   = 2359296;  up_s_off   = 4456448;  up_b_off   = 4587520;
-        down_w_off = 4718592;  down_s_off = 6815744;  down_b_off = 6946816;
+        // Qwen3.6 4-bit offsets (EXPERT_SIZE=1769472)
+        gate_w_off = 0;        gate_s_off = 524288;   gate_b_off = 557056;
+        up_w_off   = 589824;   up_s_off   = 1114112;  up_b_off   = 1146880;
+        down_w_off = 1179648;  down_s_off = 1703936;  down_b_off = 1736704;
     }
     id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : ctx->matvec_v3;
 
@@ -1708,9 +1712,10 @@ static void gpu_encode_experts_batched(
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
     } else {
-        gate_w_off = 0;        gate_s_off = 2097152;  gate_b_off = 2228224;
-        up_w_off   = 2359296;  up_s_off   = 4456448;  up_b_off   = 4587520;
-        down_w_off = 4718592;  down_s_off = 6815744;  down_b_off = 6946816;
+        // Qwen3.6 4-bit offsets (EXPERT_SIZE=1769472)
+        gate_w_off = 0;        gate_s_off = 524288;   gate_b_off = 557056;
+        up_w_off   = 589824;   up_s_off   = 1114112;  up_b_off   = 1146880;
+        down_w_off = 1179648;  down_s_off = 1703936;  down_b_off = 1736704;
     }
     id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : ctx->matvec_v3;
 
@@ -1794,14 +1799,14 @@ static void gpu_encode_expert_forward(
     id<MTLCommandBuffer> cmdbuf
 ) {
     NSUInteger gate_w_off = 0;
-    NSUInteger gate_s_off = 2097152;
-    NSUInteger gate_b_off = 2228224;
-    NSUInteger up_w_off   = 2359296;
-    NSUInteger up_s_off   = 4456448;
-    NSUInteger up_b_off   = 4587520;
-    NSUInteger down_w_off = 4718592;
-    NSUInteger down_s_off = 6815744;
-    NSUInteger down_b_off = 6946816;
+    NSUInteger gate_s_off = 524288;
+    NSUInteger gate_b_off = 557056;
+    NSUInteger up_w_off   = 589824;
+    NSUInteger up_s_off   = 1114112;
+    NSUInteger up_b_off   = 1146880;
+    NSUInteger down_w_off = 1179648;
+    NSUInteger down_s_off = 1703936;
+    NSUInteger down_b_off = 1736704;
 
     uint32_t gate_up_out = MOE_INTERMEDIATE;
     uint32_t gate_up_in  = HIDDEN_DIM;
@@ -1887,7 +1892,7 @@ static void fast_batch_matvec(
         for (int i = 0; i < num_specs; i++) {
             BatchMatvecSpec *s = &specs[i];
             cpu_dequant_matvec(s->W, s->scales, s->biases, x, s->out_cpu,
-                               s->out_dim, s->in_dim, s->group_size);
+                               s->out_dim, s->in_dim, s->group_size, 4);
         }
     }
 }
@@ -1917,9 +1922,10 @@ static void gpu_expert_forward(
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
     } else {
-        gate_w_off = 0;        gate_s_off = 2097152;  gate_b_off = 2228224;
-        up_w_off   = 2359296;  up_s_off   = 4456448;  up_b_off   = 4587520;
-        down_w_off = 4718592;  down_s_off = 6815744;  down_b_off = 6946816;
+        // Qwen3.6 4-bit offsets (EXPERT_SIZE=1769472)
+        gate_w_off = 0;        gate_s_off = 524288;   gate_b_off = 557056;
+        up_w_off   = 589824;   up_s_off   = 1114112;  up_b_off   = 1146880;
+        down_w_off = 1179648;  down_s_off = 1703936;  down_b_off = 1736704;
     }
     id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : ctx->matvec_v3;
 
@@ -2695,16 +2701,24 @@ static void moe_forward(
     snprintf(name, sizeof(name), "model.layers.%d.mlp.shared_expert_gate.biases", layer_idx);
     uint16_t *seg_b = get_tensor_ptr(wf, name);
 
-    // All 4 matmuls share h_post as input -- batch into one command buffer
+    // Routing gate + shared_expert_gate use 8-bit quantization (others use 4-bit)
+    // Do 8-bit matvecs on CPU; batch 4-bit ones for GPU
     if (gate_w && gate_s && gate_b && sgw && sgs && sgb &&
         suw && sus && sub && seg_w && seg_s && seg_b) {
-        BatchMatvecSpec moe_specs[4] = {
-            { gate_w, gate_s, gate_b, gate_scores,        (uint32_t)NUM_EXPERTS,        HIDDEN_DIM, GROUP_SIZE, 0 },
-            { sgw,    sgs,    sgb,    shared_gate,         (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 1 },
-            { suw,    sus,    sub,    shared_up,           (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 2 },
-            { seg_w,  seg_s,  seg_b,  &shared_gate_score,  1,                            HIDDEN_DIM, GROUP_SIZE, 3 },
+        // 8-bit matvecs (CPU only — no 8-bit GPU kernel)
+        cpu_dequant_matvec(gate_w, gate_s, gate_b, h_post, gate_scores,
+                           NUM_EXPERTS, HIDDEN_DIM, GROUP_SIZE, 8);
+        float seg_out;
+        cpu_dequant_matvec(seg_w, seg_s, seg_b, h_post, &seg_out,
+                           1, HIDDEN_DIM, GROUP_SIZE, 8);
+        shared_gate_score = seg_out;  // sigmoid applied later
+
+        // 4-bit matvecs (can use GPU)
+        BatchMatvecSpec moe_specs[2] = {
+            { sgw,    sgs,    sgb,    shared_gate, (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 0 },
+            { suw,    sus,    sub,    shared_up,   (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 1 },
         };
-        fast_batch_matvec(h_post, HIDDEN_DIM, moe_specs, 4);
+        fast_batch_matvec(h_post, HIDDEN_DIM, moe_specs, 2);
     }
 
     // Softmax routing scores
@@ -2756,26 +2770,26 @@ static void moe_forward(
                 }
 
                 uint32_t *gw = (uint32_t *)expert_data;
-                uint16_t *gs_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_S_OFF_2 : 2097152));
-                uint16_t *gb_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_B_OFF_2 : 2228224));
-                uint32_t *uw = (uint32_t *)((char *)expert_data + (g_use_2bit ? UP_W_OFF_2 : 2359296));
-                uint16_t *us_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_S_OFF_2 : 4456448));
-                uint16_t *ub_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_B_OFF_2 : 4587520));
-                uint32_t *dw = (uint32_t *)((char *)expert_data + (g_use_2bit ? DOWN_W_OFF_2 : 4718592));
-                uint16_t *ds_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_S_OFF_2 : 6815744));
-                uint16_t *db_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_B_OFF_2 : 6946816));
+                uint16_t *gs_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_S_OFF_2 : 524288));
+                uint16_t *gb_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_B_OFF_2 : 557056));
+                uint32_t *uw = (uint32_t *)((char *)expert_data + (g_use_2bit ? UP_W_OFF_2 : 589824));
+                uint16_t *us_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_S_OFF_2 : 1114112));
+                uint16_t *ub_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_B_OFF_2 : 1146880));
+                uint32_t *dw = (uint32_t *)((char *)expert_data + (g_use_2bit ? DOWN_W_OFF_2 : 1179648));
+                uint16_t *ds_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_S_OFF_2 : 1703936));
+                uint16_t *db_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_B_OFF_2 : 1736704));
 
                 float *gate_proj_out = malloc(MOE_INTERMEDIATE * sizeof(float));
                 float *up_proj_out = malloc(MOE_INTERMEDIATE * sizeof(float));
                 float *act_out = malloc(MOE_INTERMEDIATE * sizeof(float));
 
                 cpu_dequant_matvec(gw, gs_p, gb_p, h_post, gate_proj_out,
-                                   MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE);
+                                   MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 4);
                 cpu_dequant_matvec(uw, us_p, ub_p, h_post, up_proj_out,
-                                   MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE);
+                                   MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 4);
                 cpu_swiglu(gate_proj_out, up_proj_out, act_out, MOE_INTERMEDIATE);
                 cpu_dequant_matvec(dw, ds_p, db_p, act_out, expert_out,
-                                   HIDDEN_DIM, MOE_INTERMEDIATE, GROUP_SIZE);
+                                   HIDDEN_DIM, MOE_INTERMEDIATE, GROUP_SIZE, 4);
 
                 free(gate_proj_out);
                 free(up_proj_out);
@@ -4340,7 +4354,7 @@ static void fused_layer_forward(
             for (int i = 0; i < num_attn_specs; i++) {
                 BatchMatvecSpec *s = &attn_specs[i];
                 cpu_dequant_matvec(s->W, s->scales, s->biases, normed, s->out_cpu,
-                                   s->out_dim, s->in_dim, s->group_size);
+                                   s->out_dim, s->in_dim, s->group_size, 4);
             }
         }
         if (g_timing_enabled) { t1 = now_ms(); g_timing.cmd1_submit += t1 - t0; }
@@ -4377,10 +4391,10 @@ static void fused_layer_forward(
         float *spec_scores = s_spec_gate_scores;
         memset(spec_scores, 0, NUM_EXPERTS * sizeof(float));
 
-        // Gate projection matvec on pre-attention normed input (CPU, ~0.1ms for 512x4096)
+        // Gate projection matvec on pre-attention normed input (8-bit quantization)
         cpu_dequant_matvec(lc->gate_w, lc->gate_s, lc->gate_b,
                            normed, spec_scores,
-                           NUM_EXPERTS, HIDDEN_DIM, GROUP_SIZE);
+                           NUM_EXPERTS, HIDDEN_DIM, GROUP_SIZE, 8);
         cpu_softmax(spec_scores, NUM_EXPERTS);
 
         int spec_K = (K > MAX_K) ? MAX_K : K;
@@ -5016,13 +5030,19 @@ static void fused_layer_forward(
 
         // Routing + shared expert batch
         if (have_moe_weights) {
-            BatchMatvecSpec moe_specs[4] = {
-                { gate_w, gate_s, gate_b, gate_scores,        (uint32_t)NUM_EXPERTS,        HIDDEN_DIM, GROUP_SIZE, 0 },
-                { sgw,    sgs,    sgb,    shared_gate,         (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 1 },
-                { suw,    sus,    sub,    shared_up,           (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 2 },
-                { seg_w,  seg_s,  seg_b,  &shared_gate_score,  1,                            HIDDEN_DIM, GROUP_SIZE, 3 },
+            // 8-bit: routing gate + shared_expert_gate (CPU)
+            cpu_dequant_matvec(gate_w, gate_s, gate_b, h_post, gate_scores,
+                               NUM_EXPERTS, HIDDEN_DIM, GROUP_SIZE, 8);
+            float seg_buf;
+            cpu_dequant_matvec(seg_w, seg_s, seg_b, h_post, &seg_buf,
+                               1, HIDDEN_DIM, GROUP_SIZE, 8);
+            shared_gate_score = seg_buf;
+            // 4-bit: shared gate/up
+            BatchMatvecSpec moe_specs[2] = {
+                { sgw,    sgs,    sgb,    shared_gate, (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 0 },
+                { suw,    sus,    sub,    shared_up,   (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 1 },
             };
-            fast_batch_matvec(h_post, HIDDEN_DIM, moe_specs, 4);
+            fast_batch_matvec(h_post, HIDDEN_DIM, moe_specs, 2);
         }
         if (g_timing_enabled) { t1 = now_ms(); g_timing.cmd2_encode += t1 - t0; }
     }
@@ -5479,26 +5499,26 @@ static void fused_layer_forward(
 
             // CPU fallback offsets — use 4-bit layout (2-bit CPU path not yet implemented)
             uint32_t *gw = (uint32_t *)expert_data;
-            uint16_t *gs_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_S_OFF_2 : 2097152));
-            uint16_t *gb_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_B_OFF_2 : 2228224));
-            uint32_t *uw = (uint32_t *)((char *)expert_data + (g_use_2bit ? UP_W_OFF_2 : 2359296));
-            uint16_t *us_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_S_OFF_2 : 4456448));
-            uint16_t *ub_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_B_OFF_2 : 4587520));
-            uint32_t *dw = (uint32_t *)((char *)expert_data + (g_use_2bit ? DOWN_W_OFF_2 : 4718592));
-            uint16_t *ds_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_S_OFF_2 : 6815744));
-            uint16_t *db_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_B_OFF_2 : 6946816));
+            uint16_t *gs_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_S_OFF_2 : 524288));
+            uint16_t *gb_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_B_OFF_2 : 557056));
+            uint32_t *uw = (uint32_t *)((char *)expert_data + (g_use_2bit ? UP_W_OFF_2 : 589824));
+            uint16_t *us_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_S_OFF_2 : 1114112));
+            uint16_t *ub_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_B_OFF_2 : 1146880));
+            uint32_t *dw = (uint32_t *)((char *)expert_data + (g_use_2bit ? DOWN_W_OFF_2 : 1179648));
+            uint16_t *ds_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_S_OFF_2 : 1703936));
+            uint16_t *db_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_B_OFF_2 : 1736704));
 
             float *gate_proj_out = malloc(MOE_INTERMEDIATE * sizeof(float));
             float *up_proj_out = malloc(MOE_INTERMEDIATE * sizeof(float));
             float *act_out = malloc(MOE_INTERMEDIATE * sizeof(float));
 
             cpu_dequant_matvec(gw, gs_p, gb_p, h_post, gate_proj_out,
-                               MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE);
+                               MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 4);
             cpu_dequant_matvec(uw, us_p, ub_p, h_post, up_proj_out,
-                               MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE);
+                               MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 4);
             cpu_swiglu(gate_proj_out, up_proj_out, act_out, MOE_INTERMEDIATE);
             cpu_dequant_matvec(dw, ds_p, db_p, act_out, expert_out_cpu,
-                               HIDDEN_DIM, MOE_INTERMEDIATE, GROUP_SIZE);
+                               HIDDEN_DIM, MOE_INTERMEDIATE, GROUP_SIZE, 4);
 
             free(gate_proj_out);
             free(up_proj_out);
@@ -5514,7 +5534,7 @@ static void fused_layer_forward(
         cpu_swiglu(shared_gate, shared_up, shared_act, SHARED_INTERMEDIATE);
         if (sdw && sds && sdb) {
             cpu_dequant_matvec(sdw, sds, sdb, shared_act, shared_out,
-                               HIDDEN_DIM, SHARED_INTERMEDIATE, GROUP_SIZE);
+                               HIDDEN_DIM, SHARED_INTERMEDIATE, GROUP_SIZE, 4);
         }
         free(shared_act);
     } else {
@@ -6958,10 +6978,6 @@ int main(int argc, char **argv) {
             }
             // Full completion — need hidden state for final norm + lm_head
             complete_deferred_experts();
-            pos++;
-            { float hr = 0; for (int j=0; j<HIDDEN_DIM; j++) hr += hidden[j]*hidden[j];
-              hr = sqrtf(hr/HIDDEN_DIM);
-              fprintf(stderr, "[DEBUG] after complete_deferred: hidden rms=%.6f isfinite=%d\n", hr, isfinite(hr)); }
             pos++;
         }
 
