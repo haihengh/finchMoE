@@ -687,3 +687,25 @@ Interactive visualizations of every concept described in this document are avail
 - 4 GB memory gauge with context-length slider
 - Tool-calling agentic loop demo
 - Engine source tree browser
+
+
+
+update design goal:
+
+The official base model is here:
+
+Qwen/Qwen3.6-35B-A3B: https://huggingface.co/Qwen/Qwen3.6-35B-A3B
+
+A few things to note — the published model specs differ slightly from what we hardcoded:
+
+Param	Our engine (from early spec)	Published HF card
+num_hidden_layers	94	40
+hidden_size	4096	2048
+num_experts	128	256 (8 routed + 1 shared)
+context_length	4096 (KV budget)	262,144 native
+The architecture has evolved — it now uses a hybrid Gated Delta Network + MoE design rather than the pure dense-attention + MoE structure we targeted. You'll need to update the model config constants in aeromoe_types.h and model_runner.mm to match the published weights before converting.
+
+Also useful:
+
+GGUF (for local testing): lmstudio-community/Qwen3.6-35B-A3B-GGUF   https://huggingface.co/lmstudio-community/Qwen3.6-35B-A3B-GGUF
+MLX 4-bit (Apple Silicon native): mlx-community/Qwen3.6-35B-A3B-4bit  https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-4bit
