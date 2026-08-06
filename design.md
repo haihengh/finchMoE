@@ -78,10 +78,10 @@ Two-phase extraction from MLX 4-bit safetensors:
 
 **Phase 2: Expert weights** (`repack_experts.py`)
 - Extract 256 experts × 40 layers = 10,240 experts
-- Each expert: 983,040 bytes at 4-bit (gate_proj + up_proj + down_proj with scales/biases)
+- Each expert: 1,769,472 bytes at 4-bit (gate_proj + up_proj + down_proj with scales/biases)
 - Write 40 contiguous layer files in `packed_experts/layer_XX.bin`
-- Per-layer file size: 256 × 0.94 MB ≈ 240 MB
-- Total: 40 × 240 MB ≈ 9.6 GB
+- Per-layer file size: 256 × 1.69 MB ≈ 432 MB
+- Total: 40 × 432 MB ≈ 16.9 GB
 
 Expert layout (same as flash-moe):
 ```
@@ -206,7 +206,7 @@ All changes from the Qwen3.5-397B baseline:
 // LINEAR_TOTAL_VALUE  = 32 * 128 = 4096 (was 8192)
 // LINEAR_CONV_DIM     = 2048*2 + 4096 = 8192 (was 12288)
 
-#define EXPERT_SIZE         983040  // was 7077888 (~0.94 MB vs ~6.75 MB)
+#define EXPERT_SIZE         1769472  // was 7077888 (~1.69 MB vs ~6.75 MB)
 ```
 
 ## 7. Search Integration (Future)

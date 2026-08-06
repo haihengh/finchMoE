@@ -76,11 +76,11 @@ Standard GQA with Q/output-gate fusion (`attn_output_gate: true`).
 
 | Component | Shape | Packed Size |
 |---|---|---|
-| gate_proj | [512, 2048] INT4 | 196 KB |
-| up_proj | [512, 2048] INT4 | 196 KB |
+| gate_proj | [512, 2048] INT4 | 590 KB |
+| up_proj | [512, 2048] INT4 | 590 KB |
 | down_proj | [2048, 512] INT4 | 590 KB |
-| **Total per expert** | | **~0.94 MB** |
-| **Total experts** | 256 × 40 layers | **~9.6 GB** |
+| **Total per expert** | | **~1.69 MB** |
+| **Total experts** | 256 × 40 layers | **~16.9 GB** |
 
 Quantization: MLX affine INT4, group-64, BF16 scale+bias.
 
@@ -90,11 +90,21 @@ Quantization: MLX affine INT4, group-64, BF16 scale+bias.
 finchMoE/
 ├── README.md              # This file
 ├── design.md              # Detailed design document
-├── flash-moe/             # Starting codebase (Qwen3.5-397B engine)
+├── finchmoe/              # FinchMoE inference engine (adapted from flash-moe)
+│   ├── infer.m            #   Main engine (~7100 lines C/Metal)
+│   ├── shaders.metal      #   Metal compute kernels (~1300 lines)
+│   ├── Makefile           #   Build system
+│   ├── extract_weights.py #   Non-expert weight extraction
+│   ├── repack_experts.py  #   Expert weight repacking
+│   ├── generate_expert_index.py # Expert index generator
+│   ├── chat.m             #   Interactive chat TUI
+│   ├── tokenizer.h        #   C BPE tokenizer
+│   └── export_tokenizer.py#   Tokenizer export utility
+├── flash-moe/             # Starting codebase (Qwen3.5-397B engine, unmodified)
 ├── turbo-fieldfare/       # Performance benchmark (Swift, Gemma 4)
 ├── omlx/                  # Qwen-specific Metal kernel reference
 ├── models/
-│   ├── Qwen3.6-35B-A3B-4bit/   # Target model (~19 GB)
+│   ├── Qwen3.6-35B-A3B-4bit/   # Target model (~19 GB) ✅
 │   └── Qwen3.5-397B-A17B-4bit/ # Baseline model (~209 GB, downloading)
 └── archive/               # Original finchMoE code (pre-reboot)
 ```
@@ -110,18 +120,22 @@ finchMoE/
 ## Development Plan
 
 1. **Baseline**: Download flash-moe's Qwen3.5-397B model, run on M4 mini 16GB, measure tok/s
-2. **Adapt dimensions**: Port flash-moe constants to Qwen3.6 (hidden=2048, layers=40, experts=256)
-3. **Repack experts**: Update `repack_experts.py` for Qwen3.6 expert sizes
-4. **Extract weights**: Update `extract_weights.py` for Qwen3.6 non-expert tensors
-5. **Test**: Run Qwen3.6 inference on M4 mini, measure tok/s
-6. **Optimize**: Apply omlx kernel improvements, target turbo-fieldfare performance
-7. **Search**: Integrate internet search (inspired by llm-search pattern)
-8. **iOS**: Port to A-series chips
+2. ~~**Adapt dimensions**: Port flash-moe constants to Qwen3.6 (hidden=2048, layers=40, experts=256)~~ ✅
+3. ~~**Repack experts**: Update `repack_experts.py` for Qwen3.6 expert sizes~~ ✅
+4. ~~**Extract weights**: Update `extract_weights.py` for Qwen3.6 non-expert tensors~~ ✅
+5. **Extract + Repack + Build**: Run the model preparation pipeline
+6. **Test**: Run Qwen3.6 inference on M4 mini, measure tok/s
+7. **Optimize**: Apply omlx kernel improvements, target turbo-fieldfare performance
+8. **Search**: Integrate internet search (inspired by llm-search pattern)
+9. **iOS**: Port to A-series chips
 
 ## Status
 
 - [x] Qwen3.6-35B-A3B-4bit downloaded (19 GB)
 - [ ] Qwen3.5-397B-A17B-4bit baseline downloading (120/209 GB)
-- [ ] flash-moe adapted for Qwen3.6 dimensions
+- [x] flash-moe adapted for Qwen3.6 — all dimension constants updated
+- [x] extract_weights.py adapted for Qwen3.6
+- [x] repack_experts.py adapted for Qwen3.6 expert sizes
+- [ ] Model extraction + repacking
 - [ ] Baseline benchmark on M4 mini
 - [ ] FinchMoE benchmark on M4 mini
