@@ -23,6 +23,9 @@ __pycache__/
 *.swp
 *.swo
 
+# Downloaded models
+models/
+
 # Misc
 *.o
 *.a
