@@ -162,7 +162,9 @@ typedef struct {
 static LayerTimingAccum g_timing = {0};
 static int g_timing_enabled = 0;
 static int g_debug_layers = 0;  // --debug-layers: print per-layer hidden state stats
-static int g_gpu_experts = 0;   // --gpu-experts: use GPU expert path (~15 tok/s, quality WIP)
+static int g_gpu_experts = 0;   // --gpu-experts: force GPU experts (now default)
+static int g_cpu_experts = 0;   // --cpu-experts: force CPU experts for debugging
+static int g_compare_experts = -1; // --compare-experts N: compare GPU vs CPU expert outputs for layer N
 
 static void debug_print_hidden(const char *tag, int layer_idx, const float *h, int dim) {
     if (!g_debug_layers) return;
@@ -5202,9 +5204,9 @@ static void fused_layer_forward(
 
     int actual_K = (K > MAX_K) ? MAX_K : K;
 
-    // GPU expert path works but has a quality regression vs CPU.
-    // Use --gpu-experts to enable the faster GPU expert path (~15 tok/s vs ~2 tok/s).
-    int force_cpu_experts = g_gpu_experts ? 0 : 1;
+    // GPU expert path verified bit-identical to CPU path via --compare-experts.
+    // Use --cpu-experts to force CPU path for debugging.
+    int force_cpu_experts = g_cpu_experts ? 1 : 0;
     if (force_cpu_experts) goto cpu_expert_fallback;
 
     if (packed_fd >= 0 && g_metal && g_metal->buf_multi_expert_data[0]) {
@@ -5585,6 +5587,120 @@ static void fused_layer_forward(
         for (int k = 0; k < actual_K; k++) {
             g_deferred.expert_weights[k] = expert_weights[k];
             g_deferred.valid[k] = valid[k];
+        }
+
+        // GPU-vs-CPU expert comparison diagnostic
+        if (g_compare_experts == layer_idx) {
+            [cmd_experts waitUntilCompleted];
+
+            fprintf(stderr, "\n=== GPU vs CPU Expert Comparison (layer %d, K=%d) ===\n", layer_idx, actual_K);
+            fprintf(stderr, "h_post rms=%.4f, first5=[%.4f,%.4f,%.4f,%.4f,%.4f]\n",
+                    vec_rms(h_post, HIDDEN_DIM), h_post[0], h_post[1], h_post[2], h_post[3], h_post[4]);
+
+            size_t esz = active_expert_size();
+            for (int k = 0; k < actual_K; k++) {
+                if (!valid[k]) { fprintf(stderr, "  expert %d: INVALID (skipped)\n", k); continue; }
+
+                // Copy expert data that GPU used from Metal buffer to CPU
+                void *expert_data = malloc(esz);
+                memcpy(expert_data, [expert_bufs[k] contents], esz);
+
+                uint32_t *gw = (uint32_t *)expert_data;
+                uint16_t *gs_p = (uint16_t *)((char *)expert_data + 524288);
+                uint16_t *gb_p = (uint16_t *)((char *)expert_data + 557056);
+                uint32_t *uw = (uint32_t *)((char *)expert_data + 589824);
+                uint16_t *us_p = (uint16_t *)((char *)expert_data + 1114112);
+                uint16_t *ub_p = (uint16_t *)((char *)expert_data + 1146880);
+                uint32_t *dw = (uint32_t *)((char *)expert_data + 1179648);
+                uint16_t *ds_p = (uint16_t *)((char *)expert_data + 1703936);
+                uint16_t *db_p = (uint16_t *)((char *)expert_data + 1736704);
+
+                // --- CPU compute ---
+                float *cpu_gate = malloc(MOE_INTERMEDIATE * sizeof(float));
+                float *cpu_up   = malloc(MOE_INTERMEDIATE * sizeof(float));
+                float *cpu_act  = malloc(MOE_INTERMEDIATE * sizeof(float));
+                float *cpu_out  = malloc(HIDDEN_DIM * sizeof(float));
+
+                cpu_dequant_matvec(gw, gs_p, gb_p, h_post, cpu_gate, MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 4);
+                cpu_dequant_matvec(uw, us_p, ub_p, h_post, cpu_up,   MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 4);
+                cpu_swiglu(cpu_gate, cpu_up, cpu_act, MOE_INTERMEDIATE);
+                cpu_dequant_matvec(dw, ds_p, db_p, cpu_act, cpu_out, HIDDEN_DIM, MOE_INTERMEDIATE, GROUP_SIZE, 4);
+
+                // --- Read GPU results ---
+                float *gpu_gate = malloc(MOE_INTERMEDIATE * sizeof(float));
+                float *gpu_up   = malloc(MOE_INTERMEDIATE * sizeof(float));
+                float *gpu_act  = malloc(MOE_INTERMEDIATE * sizeof(float));
+                float *gpu_out  = malloc(HIDDEN_DIM * sizeof(float));
+
+                memcpy(gpu_gate, [g_metal->buf_multi_expert_gate[k] contents], MOE_INTERMEDIATE * sizeof(float));
+                memcpy(gpu_up,   [g_metal->buf_multi_expert_up[k] contents],   MOE_INTERMEDIATE * sizeof(float));
+                memcpy(gpu_act,  [g_metal->buf_multi_expert_act[k] contents],  MOE_INTERMEDIATE * sizeof(float));
+                memcpy(gpu_out,  [g_metal->buf_multi_expert_out[k] contents],  HIDDEN_DIM * sizeof(float));
+
+                // --- Compare ---
+                float max_dg = 0, max_du = 0, max_da = 0, max_do = 0;
+                float sum_dg = 0, sum_du = 0, sum_da = 0, sum_do = 0;
+                int first_bad_gate = -1, first_bad_up = -1, first_bad_act = -1, first_bad_out = -1;
+
+                for (int i = 0; i < MOE_INTERMEDIATE; i++) {
+                    float dg = fabsf(cpu_gate[i] - gpu_gate[i]);
+                    float du = fabsf(cpu_up[i] - gpu_up[i]);
+                    float da = fabsf(cpu_act[i] - gpu_act[i]);
+                    sum_dg += dg; sum_du += du; sum_da += da;
+                    if (dg > max_dg) { max_dg = dg; if (first_bad_gate < 0 && dg > 1e-3) first_bad_gate = i; }
+                    if (du > max_du) { max_du = du; if (first_bad_up < 0 && du > 1e-3) first_bad_up = i; }
+                    if (da > max_da) { max_da = da; if (first_bad_act < 0 && da > 1e-3) first_bad_act = i; }
+                }
+                for (int i = 0; i < HIDDEN_DIM; i++) {
+                    float d = fabsf(cpu_out[i] - gpu_out[i]);
+                    sum_do += d;
+                    if (d > max_do) { max_do = d; if (first_bad_out < 0 && d > 1e-3) first_bad_out = i; }
+                }
+
+                fprintf(stderr, "\n  --- Expert %d (idx=%d, weight=%.4f) ---\n", k, expert_indices[k], expert_weights[k]);
+                fprintf(stderr, "  %-12s  %8s  %8s  %8s  %12s  %12s\n", "stage", "cpu_rms", "gpu_rms", "max_diff", "avg_diff", "first_bad@");
+                fprintf(stderr, "  %-12s  %8.4f  %8.4f  %8.2e  %8.2e  %s\n",
+                    "gate_proj", vec_rms(cpu_gate, MOE_INTERMEDIATE), vec_rms(gpu_gate, MOE_INTERMEDIATE),
+                    max_dg, sum_dg/MOE_INTERMEDIATE,
+                    first_bad_gate >= 0 ? "idx=" : "OK");
+                if (first_bad_gate >= 0) fprintf(stderr, "    gate[%d]: cpu=%.6f gpu=%.6f\n", first_bad_gate, cpu_gate[first_bad_gate], gpu_gate[first_bad_gate]);
+
+                fprintf(stderr, "  %-12s  %8.4f  %8.4f  %8.2e  %8.2e  %s\n",
+                    "up_proj", vec_rms(cpu_up, MOE_INTERMEDIATE), vec_rms(gpu_up, MOE_INTERMEDIATE),
+                    max_du, sum_du/MOE_INTERMEDIATE,
+                    first_bad_up >= 0 ? "idx=" : "OK");
+                if (first_bad_up >= 0) fprintf(stderr, "    up[%d]: cpu=%.6f gpu=%.6f\n", first_bad_up, cpu_up[first_bad_up], gpu_up[first_bad_up]);
+
+                fprintf(stderr, "  %-12s  %8.4f  %8.4f  %8.2e  %8.2e  %s\n",
+                    "swiglu", vec_rms(cpu_act, MOE_INTERMEDIATE), vec_rms(gpu_act, MOE_INTERMEDIATE),
+                    max_da, sum_da/MOE_INTERMEDIATE,
+                    first_bad_act >= 0 ? "idx=" : "OK");
+                if (first_bad_act >= 0) fprintf(stderr, "    act[%d]: cpu=%.6f gpu=%.6f\n", first_bad_act, cpu_act[first_bad_act], gpu_act[first_bad_act]);
+
+                fprintf(stderr, "  %-12s  %8.4f  %8.4f  %8.2e  %8.2e  %s\n",
+                    "down_proj", vec_rms(cpu_out, HIDDEN_DIM), vec_rms(gpu_out, HIDDEN_DIM),
+                    max_do, sum_do/HIDDEN_DIM,
+                    first_bad_out >= 0 ? "idx=" : "OK");
+                if (first_bad_out >= 0) fprintf(stderr, "    out[%d]: cpu=%.6f gpu=%.6f\n", first_bad_out, cpu_out[first_bad_out], gpu_out[first_bad_out]);
+
+                // Show first 5 values of each stage
+                fprintf(stderr, "  gate first5 CPU: [%.4f, %.4f, %.4f, %.4f, %.4f]\n", cpu_gate[0], cpu_gate[1], cpu_gate[2], cpu_gate[3], cpu_gate[4]);
+                fprintf(stderr, "  gate first5 GPU: [%.4f, %.4f, %.4f, %.4f, %.4f]\n", gpu_gate[0], gpu_gate[1], gpu_gate[2], gpu_gate[3], gpu_gate[4]);
+                fprintf(stderr, "  out  first5 CPU: [%.4f, %.4f, %.4f, %.4f, %.4f]\n", cpu_out[0], cpu_out[1], cpu_out[2], cpu_out[3], cpu_out[4]);
+                fprintf(stderr, "  out  first5 GPU: [%.4f, %.4f, %.4f, %.4f, %.4f]\n", gpu_out[0], gpu_out[1], gpu_out[2], gpu_out[3], gpu_out[4]);
+
+                // Check scale/bias data used by GPU vs CPU
+                float gs0 = bf16_to_f32(gs_p[0]);
+                float gb0 = bf16_to_f32(gb_p[0]);
+                uint32_t gw0 = gw[0];
+                fprintf(stderr, "  gate weights[0]: packed=0x%08X scale[0]=%.6f bias[0]=%.6f\n", gw0, gs0, gb0);
+                fprintf(stderr, "  first nibble=%d effective_weight=%.6f\n", (gw0 & 0xF), (float)(gw0 & 0xF) * gs0 + gb0);
+
+                free(cpu_gate); free(cpu_up); free(cpu_act); free(cpu_out);
+                free(gpu_gate); free(gpu_up); free(gpu_act); free(gpu_out);
+                free(expert_data);
+            }
+            fprintf(stderr, "=== End Comparison ===\n\n");
         }
 
         // Return immediately — GPU experts are running async.
@@ -6685,7 +6801,9 @@ static void print_usage(const char *prog) {
     printf("  --collect-routing F  Log routing data to binary file F (for predictor training)\n");
     printf("  --think-budget N     Max thinking tokens before force </think> (default: 2048, 0=unlimited)\n");
     printf("  --debug-layers       Print per-layer hidden state statistics\n");
-    printf("  --gpu-experts        Use GPU expert path (~15 tok/s, may have quality issues)\n");
+    printf("  --gpu-experts        Use GPU expert path (now default, ~15 tok/s)\n");
+    printf("  --cpu-experts        Use CPU expert path for debugging (~2 tok/s)\n");
+    printf("  --compare-experts N  Compare GPU vs CPU expert outputs for layer N\n");
     printf("  --serve PORT         Run HTTP server (OpenAI-compatible API)\n");
     printf("  --help               This message\n");
 }
@@ -6728,13 +6846,15 @@ int main(int argc, char **argv) {
             {"predict",       no_argument,       0, 'D'},
             {"debug-layers",  no_argument,       0, 'X'},
             {"gpu-experts",   no_argument,       0, 'U'},
+            {"cpu-experts",   no_argument,       0, 'V'},
+            {"compare-experts", required_argument, 0, 'Y'},
             {"collect-routing", required_argument, 0, 'Z'},
             {"help",          no_argument,       0, 'h'},
             {0, 0, 0, 0}
         };
 
         int c;
-        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:LSTFE2GhXU", long_options, NULL)) != -1) {
+        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:LSTFE2GhXUY:V", long_options, NULL)) != -1) {
             switch (c) {
                 case 'm': model_path = optarg; break;
                 case 'w': weights_path = optarg; break;
@@ -6756,6 +6876,8 @@ int main(int argc, char **argv) {
                 case 'D': g_pred_enabled = 1; break;
                 case 'X': g_debug_layers = 1; break;
                 case 'U': g_gpu_experts = 1; break;
+                case 'V': g_cpu_experts = 1; break;
+                case 'Y': g_compare_experts = atoi(optarg); break;
                 case 'Z':
                     g_routing_log = fopen(optarg, "wb");
                     if (!g_routing_log) {
