@@ -222,6 +222,7 @@ static int g_cache_telemetry_enabled = 0;  // enabled by --cache-telemetry flag
 static int g_think_budget = 2048; // max thinking tokens before force-emitting </think>
 static float g_temperature = 0.8f;  // sampling temperature (0 = greedy argmax)
 static int g_top_k = 40;            // top-k sampling (1 = greedy)
+static int g_no_think = 0;          // 0 = thinking mode on, 1 = skip think block
 
 // Tiered I/O: cold fds (F_NOCACHE) for first reads, warm fds (page cached) for repeats
 static int *g_layer_fds_cold = NULL;    // [NUM_LAYERS] cold fds (set in main)
@@ -6215,11 +6216,24 @@ static const char *CORS_RESPONSE =
     "Access-Control-Max-Age: 86400\r\n"
     "\r\n";
 
+// Build the think suffix based on g_no_think.
+// Thinking ON:  <think>\n           (model generates reasoning inside <think>...</think>)
+// Thinking OFF: <think>\n\n</think>\n\n (empty think block — skip reasoning)
+static void build_think_suffix(char *buf, size_t bufsz) {
+    if (g_no_think) {
+        snprintf(buf, bufsz, "<think>\n\n</think>\n\n");
+    } else {
+        snprintf(buf, bufsz, "<think>\n");
+    }
+}
+
 // Tokenize a user turn (system prompt already cached in KV).
-// Only encodes: <|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n
+// Encodes: <|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n<think>\n
 static PromptTokens *tokenize_user_turn(const char *user_content) {
     const char *prefix = "<|im_start|>user\n";
-    const char *suffix = "<|im_end|>\n<|im_start|>assistant\n";
+    char think[32]; build_think_suffix(think, sizeof(think));
+    char suffix[256];
+    snprintf(suffix, sizeof(suffix), "<|im_end|>\n<|im_start|>assistant\n%s", think);
 
     size_t prompt_len = strlen(prefix) + strlen(user_content) + strlen(suffix) + 1;
     char *prompt = malloc(prompt_len);
@@ -6231,13 +6245,12 @@ static PromptTokens *tokenize_user_turn(const char *user_content) {
 }
 
 // Tokenize a continuation turn for session caching.
-// Prefixes with <|im_end|>\n to close the previous assistant turn, then the new user turn.
-// Used when the KV cache already contains the prior conversation state.
+// Prefixes with \n to follow the previous assistant's <|im_end|>, then the new user turn.
 static PromptTokens *tokenize_continuation_turn(const char *user_content) {
-    // EOS/<|im_end|> is already in the state (fed through model at end of generation)
-    // Just need the newline + new user turn + assistant prompt
     const char *prefix = "\n<|im_start|>user\n";
-    const char *suffix = "<|im_end|>\n<|im_start|>assistant\n";
+    char think[32]; build_think_suffix(think, sizeof(think));
+    char suffix[256];
+    snprintf(suffix, sizeof(suffix), "<|im_end|>\n<|im_start|>assistant\n%s", think);
 
     size_t prompt_len = strlen(prefix) + strlen(user_content) + strlen(suffix) + 1;
     char *prompt = malloc(prompt_len);
@@ -6267,7 +6280,7 @@ static char *load_system_prompt(void) {
             return buf;
         }
     }
-    return strdup("You are a helpful assistant. /think");
+    return strdup("You are a helpful assistant.");
 }
 
 // Tokenize a full chat message (system prompt + user turn) for first-time use.
@@ -6275,14 +6288,15 @@ static PromptTokens *tokenize_chat_message(const char *user_content) {
     static char *sys_prompt_text = NULL;
     if (!sys_prompt_text) sys_prompt_text = load_system_prompt();
 
-    // Build: <|im_start|>system\n{sys_prompt}<|im_end|>\n<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n
+    // Build: <|im_start|>system\n{sys_prompt}<|im_end|>\n<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n<think>\n
+    char think[32]; build_think_suffix(think, sizeof(think));
     size_t sys_len = strlen(sys_prompt_text);
     size_t user_len = strlen(user_content);
-    size_t total = 30 + sys_len + 30 + user_len + 40;  // generous padding for tags
+    size_t total = 80 + sys_len + user_len + strlen(think);  // generous padding for tags
     char *prompt = malloc(total);
     if (!prompt) return NULL;
-    snprintf(prompt, total, "<|im_start|>system\n%s<|im_end|>\n<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n",
-             sys_prompt_text, user_content);
+    snprintf(prompt, total, "<|im_start|>system\n%s<|im_end|>\n<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n%s",
+             sys_prompt_text, user_content, think);
     PromptTokens *pt = encode_prompt_text_to_tokens(prompt);
     free(prompt);
     return pt;
@@ -7021,6 +7035,7 @@ static void print_usage(const char *prog) {
     printf("  --compare-experts N  Compare GPU vs CPU expert outputs for layer N\n");
     printf("  --temperature F      Sampling temperature (default: 0.8, 0=greedy)\n");
     printf("  --top-k N            Top-k sampling (default: 40, 1=greedy)\n");
+    printf("  --no-think           Disable thinking mode (empty <think/> block)\n");
     printf("  --serve PORT         Run HTTP server (OpenAI-compatible API)\n");
     printf("  --max-seq-len N      Max context length for KV cache (default: 262144 = 256K, model limit)\n");
     printf("  --gpu-kv-seq N       GPU KV buffer pre-allocation in tokens (default: 8192)\n");
@@ -7063,6 +7078,7 @@ int main(int argc, char **argv) {
             {"think-budget",  required_argument, 0, 'B'},
             {"temperature",   required_argument, 0, 'e'},
             {"top-k",         required_argument, 0, 'o'},
+            {"no-think",      no_argument,       0, 'H'},
             {"serve",         required_argument, 0, 'R'},
             {"predict",       no_argument,       0, 'D'},
             {"debug-layers",  no_argument,       0, 'X'},
@@ -7077,7 +7093,7 @@ int main(int argc, char **argv) {
         };
 
         int c;
-        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:N:Q:e:o:LSTFE2GhXUY:V", long_options, NULL)) != -1) {
+        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:N:Q:e:o:HLSTFE2GhXUY:V", long_options, NULL)) != -1) {
             switch (c) {
                 case 'm': model_path = optarg; break;
                 case 'w': weights_path = optarg; break;
@@ -7111,6 +7127,7 @@ int main(int argc, char **argv) {
                 case 'B': g_think_budget = atoi(optarg); break;
                 case 'e': g_temperature = atof(optarg); break;
                 case 'o': g_top_k = atoi(optarg); break;
+                case 'H': g_no_think = 1; break;
                 case 'N': g_max_seq_len = atoi(optarg); break;
                 case 'Q': g_gpu_kv_seq = atoi(optarg); break;
                 case 'R': serve_port = atoi(optarg); break;
