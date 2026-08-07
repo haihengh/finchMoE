@@ -162,6 +162,7 @@ typedef struct {
 static LayerTimingAccum g_timing = {0};
 static int g_timing_enabled = 0;
 static int g_debug_layers = 0;  // --debug-layers: print per-layer hidden state stats
+static int g_gpu_experts = 0;   // --gpu-experts: use GPU expert path (~15 tok/s, quality WIP)
 
 static void debug_print_hidden(const char *tag, int layer_idx, const float *h, int dim) {
     if (!g_debug_layers) return;
@@ -5201,7 +5202,9 @@ static void fused_layer_forward(
 
     int actual_K = (K > MAX_K) ? MAX_K : K;
 
-    int force_cpu_experts = 1;
+    // GPU expert path works but has a quality regression vs CPU.
+    // Use --gpu-experts to enable the faster GPU expert path (~15 tok/s vs ~2 tok/s).
+    int force_cpu_experts = g_gpu_experts ? 0 : 1;
     if (force_cpu_experts) goto cpu_expert_fallback;
 
     if (packed_fd >= 0 && g_metal && g_metal->buf_multi_expert_data[0]) {
@@ -6682,6 +6685,7 @@ static void print_usage(const char *prog) {
     printf("  --collect-routing F  Log routing data to binary file F (for predictor training)\n");
     printf("  --think-budget N     Max thinking tokens before force </think> (default: 2048, 0=unlimited)\n");
     printf("  --debug-layers       Print per-layer hidden state statistics\n");
+    printf("  --gpu-experts        Use GPU expert path (~15 tok/s, may have quality issues)\n");
     printf("  --serve PORT         Run HTTP server (OpenAI-compatible API)\n");
     printf("  --help               This message\n");
 }
@@ -6723,13 +6727,14 @@ int main(int argc, char **argv) {
             {"serve",         required_argument, 0, 'R'},
             {"predict",       no_argument,       0, 'D'},
             {"debug-layers",  no_argument,       0, 'X'},
+            {"gpu-experts",   no_argument,       0, 'U'},
             {"collect-routing", required_argument, 0, 'Z'},
             {"help",          no_argument,       0, 'h'},
             {0, 0, 0, 0}
         };
 
         int c;
-        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:LSTFE2GhX", long_options, NULL)) != -1) {
+        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:LSTFE2GhXU", long_options, NULL)) != -1) {
             switch (c) {
                 case 'm': model_path = optarg; break;
                 case 'w': weights_path = optarg; break;
@@ -6750,6 +6755,7 @@ int main(int argc, char **argv) {
                 case 'G': gpu_linear_attn_enabled = 1; break;
                 case 'D': g_pred_enabled = 1; break;
                 case 'X': g_debug_layers = 1; break;
+                case 'U': g_gpu_experts = 1; break;
                 case 'Z':
                     g_routing_log = fopen(optarg, "wb");
                     if (!g_routing_log) {
