@@ -220,6 +220,8 @@ static int g_freq_tracking = 0;  // enabled by --freq flag
 static int g_use_2bit = 0;       // enabled by --2bit flag: use packed_experts_2bit/ + 2-bit kernel
 static int g_cache_telemetry_enabled = 0;  // enabled by --cache-telemetry flag
 static int g_think_budget = 2048; // max thinking tokens before force-emitting </think>
+static float g_temperature = 0.8f;  // sampling temperature (0 = greedy argmax)
+static int g_top_k = 40;            // top-k sampling (1 = greedy)
 
 // Tiered I/O: cold fds (F_NOCACHE) for first reads, warm fds (page cached) for repeats
 static int *g_layer_fds_cold = NULL;    // [NUM_LAYERS] cold fds (set in main)
@@ -929,52 +931,71 @@ static int cpu_argmax(const float *x, int dim) {
     return best;
 }
 
-// Temperature sampling with top-k: softmax(logits/T), pick from top K
+// Temperature sampling with top-k: softmax(logits/T), pick from top K.
+// Uses static buffers to avoid per-token malloc (called on every generation step).
 static int cpu_sample_temp(const float *x, int dim, float temp, int top_k) {
     if (temp <= 0.0f || top_k <= 1) return cpu_argmax(x, dim);
+
+    // Static buffers — VOCAB_SIZE is fixed at compile time
+    static float *probs = NULL;
+    static float *heap = NULL;   // min-heap of top-k probs
+    static int   *heap_idx = NULL;
+    if (!probs) {
+        probs    = malloc(VOCAB_SIZE * sizeof(float));
+        heap     = malloc(64 * sizeof(float));  // top_k won't exceed 64
+        heap_idx = malloc(64 * sizeof(int));
+    }
 
     // Find max for numerical stability
     float max_val = x[0];
     for (int i = 1; i < dim; i++) if (x[i] > max_val) max_val = x[i];
 
-    // Compute exp(x/T - max/T) and sum
-    float *probs = malloc(dim * sizeof(float));
-    float sum = 0.0f;
+    // Compute exp(x/T - max/T) and find top-k threshold via min-heap
     float inv_t = 1.0f / temp;
+    float sum = 0.0f;
+    int heap_n = 0;  // current heap size
+    float threshold = 0.0f;
+
     for (int i = 0; i < dim; i++) {
-        probs[i] = expf((x[i] - max_val) * inv_t);
-        sum += probs[i];
+        float p = expf((x[i] - max_val) * inv_t);
+        probs[i] = p;
+        sum += p;
+
+        // Maintain min-heap of top-k probabilities
+        if (heap_n < top_k) {
+            // Insert: bubble up
+            int pos = heap_n++;
+            while (pos > 0 && p < heap[(pos-1)/2]) {
+                heap[pos] = heap[(pos-1)/2];
+                heap_idx[pos] = heap_idx[(pos-1)/2];
+                pos = (pos-1)/2;
+            }
+            heap[pos] = p;
+            heap_idx[pos] = i;
+        } else if (p > heap[0]) {
+            // Replace min: bubble down
+            int pos = 0;
+            for (;;) {
+                int left = 2*pos + 1, right = 2*pos + 2, smallest = pos;
+                if (left < heap_n && heap[left] < heap[smallest]) smallest = left;
+                if (right < heap_n && heap[right] < heap[smallest]) smallest = right;
+                if (smallest == pos) break;
+                heap[pos] = heap[smallest];
+                heap_idx[pos] = heap_idx[smallest];
+                pos = smallest;
+            }
+            heap[pos] = p;
+            heap_idx[pos] = i;
+        }
     }
 
-    // Top-k selection: zero out everything below top-k
-    if (top_k < dim) {
-        // Find k-th largest using simple partial sort
-        float *copy = malloc(dim * sizeof(float));
-        memcpy(copy, probs, dim * sizeof(float));
-        // Quickselect: find threshold for top-k
-        float threshold = 0.0f;
-        // Simple: sort a copy and find k-th
-        int *indices = malloc(dim * sizeof(int));
-        for (int i = 0; i < dim; i++) indices[i] = i;
-        // Partial bubble: just find top k
-        for (int i = 0; i < top_k && i < dim; i++) {
-            for (int j = i + 1; j < dim; j++) {
-                if (probs[indices[j]] > probs[indices[i]]) {
-                    int tmp = indices[i];
-                    indices[i] = indices[j];
-                    indices[j] = tmp;
-                }
-            }
-        }
-        threshold = probs[indices[top_k - 1]];
-        // Zero out below threshold
-        sum = 0.0f;
-        for (int i = 0; i < dim; i++) {
-            if (probs[i] < threshold) probs[i] = 0.0f;
-            else sum += probs[i];
-        }
-        free(copy);
-        free(indices);
+    if (heap_n > 0) threshold = heap[0];  // k-th largest prob
+
+    // Zero out below threshold, recompute sum
+    sum = 0.0f;
+    for (int i = 0; i < dim; i++) {
+        if (probs[i] < threshold) probs[i] = 0.0f;
+        else sum += probs[i];
     }
 
     // Sample from distribution
@@ -985,7 +1006,6 @@ static int cpu_sample_temp(const float *x, int dim, float temp, int top_k) {
         cumsum += probs[i];
         if (r <= cumsum) { chosen = i; break; }
     }
-    free(probs);
     return chosen;
 }
 
@@ -6568,7 +6588,7 @@ static void process_chat_request(ServeState *s, int client_fd,
         free(normed);
     }
     lm_head_forward(s->wf, hidden, logits);
-    int next_token = cpu_argmax(logits, VOCAB_SIZE);
+    int next_token = cpu_sample_temp(logits, VOCAB_SIZE, g_temperature, g_top_k);
 
     // ---- Auto-regressive generation with SSE streaming ----
     if (g_pred_enabled) {
@@ -6644,7 +6664,7 @@ static void process_chat_request(ServeState *s, int client_fd,
             free(normed);
         }
         lm_head_forward(s->wf, hidden, logits);
-        next_token = cpu_argmax(logits, VOCAB_SIZE);
+        next_token = cpu_sample_temp(logits, VOCAB_SIZE, g_temperature, g_top_k);
     }
 
     double gen_ms = now_ms() - t_gen;
@@ -6999,6 +7019,8 @@ static void print_usage(const char *prog) {
     printf("  --gpu-experts        Use GPU expert path (now default, ~15 tok/s)\n");
     printf("  --cpu-experts        Use CPU expert path for debugging (~2 tok/s)\n");
     printf("  --compare-experts N  Compare GPU vs CPU expert outputs for layer N\n");
+    printf("  --temperature F      Sampling temperature (default: 0.8, 0=greedy)\n");
+    printf("  --top-k N            Top-k sampling (default: 40, 1=greedy)\n");
     printf("  --serve PORT         Run HTTP server (OpenAI-compatible API)\n");
     printf("  --max-seq-len N      Max context length for KV cache (default: 262144 = 256K, model limit)\n");
     printf("  --gpu-kv-seq N       GPU KV buffer pre-allocation in tokens (default: 8192)\n");
@@ -7039,6 +7061,8 @@ int main(int argc, char **argv) {
             {"2bit",          no_argument,       0, '2'},
             {"gpu-linear",    no_argument,       0, 'G'},
             {"think-budget",  required_argument, 0, 'B'},
+            {"temperature",   required_argument, 0, 'e'},
+            {"top-k",         required_argument, 0, 'o'},
             {"serve",         required_argument, 0, 'R'},
             {"predict",       no_argument,       0, 'D'},
             {"debug-layers",  no_argument,       0, 'X'},
@@ -7053,7 +7077,7 @@ int main(int argc, char **argv) {
         };
 
         int c;
-        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:N:Q:LSTFE2GhXUY:V", long_options, NULL)) != -1) {
+        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:N:Q:e:o:LSTFE2GhXUY:V", long_options, NULL)) != -1) {
             switch (c) {
                 case 'm': model_path = optarg; break;
                 case 'w': weights_path = optarg; break;
@@ -7085,6 +7109,8 @@ int main(int argc, char **argv) {
                     }
                     break;
                 case 'B': g_think_budget = atoi(optarg); break;
+                case 'e': g_temperature = atof(optarg); break;
+                case 'o': g_top_k = atoi(optarg); break;
                 case 'N': g_max_seq_len = atoi(optarg); break;
                 case 'Q': g_gpu_kv_seq = atoi(optarg); break;
                 case 'R': serve_port = atoi(optarg); break;
@@ -7153,6 +7179,8 @@ int main(int argc, char **argv) {
         printf("K:        %d experts/layer\n", K);
         printf("Quant:    %s experts (%zu bytes each)\n", g_use_2bit ? "2-bit" : "4-bit", active_expert_size());
         printf("Linear:   %s\n", gpu_linear_attn_enabled ? "fused GPU delta-net" : "CPU/hybrid fallback");
+        printf("Sample:   temp=%.2f top_k=%d%s\n", g_temperature, g_top_k,
+               g_temperature <= 0.0f ? " (greedy)" : "");
         printf("Tokens:   %d\n", max_tokens);
         if (g_malloc_cache) {
             printf("Cache:    malloc %d entries (%.1f GB)\n",
@@ -7487,7 +7515,7 @@ int main(int argc, char **argv) {
         double lm_ms = now_ms() - t_lm;
 
         // ---- Sample first token ----
-        int next_token = cpu_sample_temp(logits, VOCAB_SIZE, 0.8f, 40);
+        int next_token = cpu_sample_temp(logits, VOCAB_SIZE, g_temperature, g_top_k);
         double ttft_ms = now_ms() - t0;
 
         // Debug: show top-5 logits for first token
@@ -7569,7 +7597,7 @@ int main(int argc, char **argv) {
             lm_head_forward(wf, hidden, logits);
 
             // Temperature sample
-            next_token = cpu_sample_temp(logits, VOCAB_SIZE, 0.8f, 40);
+            next_token = cpu_sample_temp(logits, VOCAB_SIZE, g_temperature, g_top_k);
 
             // Think budget: force end thinking if over budget
             if (in_think && g_think_budget > 0 && think_tokens >= g_think_budget) {
