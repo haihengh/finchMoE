@@ -119,23 +119,26 @@ finchMoE/
 
 ## Development Plan
 
-1. **Baseline**: Download flash-moe's Qwen3.5-397B model, run on M4 mini 16GB, measure tok/s
-2. ~~**Adapt dimensions**: Port flash-moe constants to Qwen3.6 (hidden=2048, layers=40, experts=256)~~ ✅
-3. ~~**Repack experts**: Update `repack_experts.py` for Qwen3.6 expert sizes~~ ✅
-4. ~~**Extract weights**: Update `extract_weights.py` for Qwen3.6 non-expert tensors~~ ✅
-5. **Extract + Repack + Build**: Run the model preparation pipeline
-6. **Test**: Run Qwen3.6 inference on M4 mini, measure tok/s
-7. **Optimize**: Apply omlx kernel improvements, target turbo-fieldfare performance
-8. **Search**: Integrate internet search (inspired by llm-search pattern)
-9. **iOS**: Port to A-series chips
+1. ~~**Adapt dimensions**: Port flash-moe constants to Qwen3.6~~ ✅
+2. ~~**Repack experts**: Update `repack_experts.py`~~ ✅
+3. ~~**Extract weights**: Update `extract_weights.py`~~ ✅
+4. ~~**FP16→BF16 fix**: MLX stores scales/biases as FP16, not BF16~~ ✅
+5. ~~**Self-quantization pipeline**: BF16 → clean MLX 4-bit~~ ✅
+6. ~~**Norm weight fix**: Qwen3_5RMSNorm (1+weight) formulation~~ ✅
+7. **Coherent output**: Layer-by-layer comparison with MLX Python ref 🔄
+8. **GPU expert path**: Fix NaN in CMD3 for 6× speedup
+9. **Optimize**: KV cache quant, MTP, TurboQuant, flash attention
+10. **iOS**: Port to A-series chips
 
 ## Status
 
-- [x] Qwen3.6-35B-A3B-4bit downloaded (19 GB)
-- [ ] Qwen3.5-397B-A17B-4bit baseline downloading (120/209 GB)
-- [x] flash-moe adapted for Qwen3.6 — all dimension constants updated
-- [x] extract_weights.py adapted for Qwen3.6
-- [x] repack_experts.py adapted for Qwen3.6 expert sizes
-- [ ] Model extraction + repacking
-- [ ] Baseline benchmark on M4 mini
-- [ ] FinchMoE benchmark on M4 mini
+- [x] Qwen3.6-35B-A3B-bf16 downloaded (67 GB — original BF16)
+- [x] Qwen3.6-35B-A3B-4bit-custom self-quantized (18.5 GB, clean)
+- [x] flash-moe adapted for Qwen3.6 dimensions
+- [x] Self-quantization pipeline working (BF16→4bit→extract→repack)
+- [x] FP16/BF16 format mismatch fixed
+- [x] Qwen3_5RMSNorm weights fixed (1+weight_param)
+- [x] Engine runs at 1.8 tok/s (CPU path), 12 tok/s (GPU path, needs fix)
+- [ ] Coherent output — still producing word fragments
+- [ ] GPU expert path NaN fix
+- [ ] 397B baseline (downloaded, not yet tested)
