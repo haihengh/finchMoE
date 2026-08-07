@@ -358,3 +358,46 @@ Each expert (1,769,472 bytes):
    reimplementation, adding `--debug-layers` (printing hidden state RMS per layer)
    immediately revealed the explosion at layer 0, which directed all further
    investigation toward the expert weights.
+
+---
+
+## Bug 7: switch_mlp Weights Excluded from Extraction (2026-08-07)
+
+### Status: **FOUND, NOT YET FIXED**
+
+### Symptom
+Model produces degenerate output regardless of sampling settings or chat template fixes:
+- Raw prompts: repeating patterns (`". The a. The a..."`, `"time: time: time:"`)
+- Chat template: single-character repeats (`".........."`, `"-.-.-.-."`) or random byte sequences (`"â\"6â\"6..."`)
+- Output is never coherent, never grammatical, at any temperature (0.8–1.2) or top-k (40–80)
+
+### Root Cause
+**`extract_weights.py` filters out `switch_mlp` tensors**, treating them as routed expert weights. But `switch_mlp` is a **dense per-layer FFN** (like a standard transformer MLP block) that must run on every token at every layer. It is NOT a routed expert — it has no expert dimension, no routing, and the same weights apply to all tokens.
+
+The filter at `extract_weights.py:69`:
+```python
+expert_pattern = re.compile(r'\.switch_mlp\.(gate_proj|up_proj|down_proj)\.(weight|scales|biases)$')
+```
+
+This matches and skips all `model.layers.X.mlp.switch_mlp.*` tensors. As a result:
+- `model_weights.json` contains **0 switch_mlp tensors** (out of 240 expected: 40 layers × 6 tensors)
+- `model_weights.bin` has **no switch_mlp weights**
+- The C engine has **no code to compute switch_mlp** forward pass
+- Every layer's output is missing the switch_mlp contribution
+
+### Evidence
+- MLX loading confirms `switch_mlp` exists on every layer: `model.layers.X.mlp.switch_mlp.{down_proj,gate_proj,up_proj}.{weight,scales,biases}`
+- MLX reports 1024 unexpected parameters when loading the model without switch_mlp support
+- `model_weights.json` has 0 switch_mlp entries confirmed via Python check
+- Config.json shows the model type is `qwen3_5_moe` which includes switch_mlp per layer
+
+### Impact
+**Catastrophic** — every token through every layer is missing the switch_mlp computation. This explains all degenerate output patterns observed. The model is effectively producing random noise because a major component of each transformer layer is absent.
+
+### Fix Required (3 parts)
+1. **`extract_weights.py`**: Remove `switch_mlp` from the expert exclusion pattern. Add it to the non-expert weight extraction. It should be categorized under a new `switch_mlp` weight category.
+2. **`infer.m`**: Add `switch_mlp_forward()` function that computes: `gate_proj(hidden) → SiLU → * up_proj(hidden) → down_proj`. This is identical to the shared_expert computation but uses switch_mlp weights. Must be called for EVERY layer (both GatedDeltaNet and full attention).
+3. **Model weights manifest**: Add switch_mlp weight pointers to the layer config struct so `fused_layer_forward` can access them.
+
+### Similarity to Known Architecture
+The switch_mlp is architecturally identical to the `shared_expert` — both are dense FFNs with gate/up/down projections. The shared_expert already works correctly. The switch_mlp forward pass can be modeled directly on the existing shared_expert code.
