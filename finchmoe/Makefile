@@ -19,7 +19,7 @@ LDFLAGS = -lpthread -lcompression
 TARGET = finchmoe-infer
 SRC = infer.m
 
-CHAT_TARGET = finchmoe-chat
+CHAT_TARGET = chat
 CHAT_SRC = chat.m
 
 # Optional: pre-compiled Metal library
