@@ -161,6 +161,24 @@ typedef struct {
 
 static LayerTimingAccum g_timing = {0};
 static int g_timing_enabled = 0;
+static int g_debug_layers = 0;  // --debug-layers: print per-layer hidden state stats
+
+static void debug_print_hidden(const char *tag, int layer_idx, const float *h, int dim) {
+    if (!g_debug_layers) return;
+    double sum = 0, sum_sq = 0;
+    float minv = h[0], maxv = h[0];
+    for (int i = 0; i < dim; i++) {
+        sum += h[i];
+        sum_sq += (double)h[i] * h[i];
+        if (h[i] < minv) minv = h[i];
+        if (h[i] > maxv) maxv = h[i];
+    }
+    double mean = sum / dim;
+    double rms = sqrt(sum_sq / dim);
+    double std = sqrt(sum_sq / dim - mean * mean);
+    fprintf(stderr, "[DEBUG-L%d] %s: mean=%.6f rms=%.6f std=%.6f min=%.6f max=%.6f\n",
+            layer_idx, tag, mean, rms, std, minv, maxv);
+}
 
 // Temporal prediction pipeline counters (declared early for timing_print access)
 static int g_pred_enabled = 0;
@@ -4089,6 +4107,8 @@ static void fused_layer_forward(
     LayerWeightCache *lc = &layer_cache[layer_idx];
     int is_full = (kv != NULL);
 
+    debug_print_hidden("input", layer_idx, hidden, HIDDEN_DIM);
+
     // =====================================================================
     // PHASE 1: Deferred completion + CMD1 (attention projections)
     // =====================================================================
@@ -4309,6 +4329,7 @@ static void fused_layer_forward(
         if (g_timing_enabled) { t0 = now_ms(); }
         cpu_vec_copy(residual, hidden, HIDDEN_DIM);
         cpu_rms_norm(hidden, lc->input_norm_w, normed, HIDDEN_DIM, RMS_NORM_EPS);
+        debug_print_hidden("post-norm", layer_idx, normed, HIDDEN_DIM);
         if (g_timing_enabled) { t1 = now_ms(); g_timing.input_norm += t1 - t0; }
 
         // Submit CMD1: attention projections
@@ -4416,6 +4437,12 @@ static void fused_layer_forward(
                 cpu_dequant_matvec(s->W, s->scales, s->biases, normed, s->out_cpu,
                                    s->out_dim, s->in_dim, s->group_size, 4);
             }
+            if (g_debug_layers && !is_full && num_attn_specs == 4) {
+                debug_print_hidden("qkv-proj", layer_idx, qkv_out, LINEAR_CONV_DIM);
+                debug_print_hidden("z-proj", layer_idx, z_out, LINEAR_TOTAL_VALUE);
+                debug_print_hidden("beta-proj", layer_idx, beta_out, LINEAR_NUM_V_HEADS);
+                debug_print_hidden("alpha-proj", layer_idx, alpha_out, LINEAR_NUM_V_HEADS);
+            }
         }
         if (g_timing_enabled) { t1 = now_ms(); g_timing.cmd1_submit += t1 - t0; }
 
@@ -4426,6 +4453,13 @@ static void fused_layer_forward(
             if (!gpu_linear_attn) {
                 gpu_flush_batch_results(g_metal, attn_specs, num_attn_specs);
             }
+        }
+        // Debug: check projection outputs after CMD1 completes
+        if (g_debug_layers && !is_full && num_attn_specs == 4) {
+            debug_print_hidden("qkv-proj", layer_idx, qkv_out, LINEAR_CONV_DIM);
+            debug_print_hidden("z-proj", layer_idx, z_out, LINEAR_TOTAL_VALUE);
+            debug_print_hidden("beta-proj", layer_idx, beta_out, LINEAR_NUM_V_HEADS);
+            debug_print_hidden("alpha-proj", layer_idx, alpha_out, LINEAR_NUM_V_HEADS);
         }
         if (g_timing_enabled) { t1 = now_ms(); g_timing.cmd1_wait += t1 - t0; }
     }
@@ -4810,6 +4844,11 @@ static void fused_layer_forward(
                 }
             }
 
+            if (g_debug_layers) {
+                debug_print_hidden("delta-out", layer_idx, out_values, LINEAR_TOTAL_VALUE);
+                debug_print_hidden("gated-out", layer_idx, gated_out, LINEAR_TOTAL_VALUE);
+            }
+
             attn_out_for_oproj = gated_out;
 
             // conv_out, out_values are static — no free needed
@@ -5065,6 +5104,12 @@ static void fused_layer_forward(
         memcpy(h_post, [g_metal->buf_input contents], HIDDEN_DIM * sizeof(float));
         // Update hidden state to h_mid (= residual + o_proj)
         memcpy(hidden, h_mid, HIDDEN_DIM * sizeof(float));
+
+        if (g_debug_layers) {
+            debug_print_hidden("h_mid", layer_idx, h_mid, HIDDEN_DIM);
+            debug_print_hidden("h_post", layer_idx, h_post, HIDDEN_DIM);
+        }
+
         if (g_timing_enabled) { t1 = now_ms(); g_timing.cmd2_wait += t1 - t0; }
 
     } else {
@@ -5644,7 +5689,7 @@ static void fused_layer_forward(
     { float hmid_rms=0, moe_rms=0, shr_rms=0;
       for (int i=0;i<HIDDEN_DIM;i++){hmid_rms+=h_mid[i]*h_mid[i];moe_rms+=moe_out[i]*moe_out[i];shr_rms+=shared_out[i]*shared_out[i];}
       hmid_rms=sqrtf(hmid_rms/HIDDEN_DIM); moe_rms=sqrtf(moe_rms/HIDDEN_DIM); shr_rms=sqrtf(shr_rms/HIDDEN_DIM);
-      if(!isfinite(hmid_rms)||!isfinite(moe_rms)||!isfinite(shr_rms) || layer_idx==7) {
+      if(g_debug_layers || !isfinite(hmid_rms)||!isfinite(moe_rms)||!isfinite(shr_rms) || layer_idx==7) {
         fprintf(stderr,"[CPU-COMBINE] layer=%d h_mid_rms=%.6f moe_rms=%.6f shared_rms=%.6f\n",
           layer_idx, hmid_rms, moe_rms, shr_rms);
         // Check moe_out first few values
@@ -5655,6 +5700,8 @@ static void fused_layer_forward(
     for (int i = 0; i < HIDDEN_DIM; i++) {
         hidden[i] = h_mid[i] + moe_out[i] + shared_out[i];
     }
+
+    debug_print_hidden("output", layer_idx, hidden, HIDDEN_DIM);
 
     if (g_timing_enabled) {
         t1 = now_ms();
@@ -6634,6 +6681,7 @@ static void print_usage(const char *prog) {
     printf("  --predict            Enable temporal expert prediction (prefetch during CMD1_wait)\n");
     printf("  --collect-routing F  Log routing data to binary file F (for predictor training)\n");
     printf("  --think-budget N     Max thinking tokens before force </think> (default: 2048, 0=unlimited)\n");
+    printf("  --debug-layers       Print per-layer hidden state statistics\n");
     printf("  --serve PORT         Run HTTP server (OpenAI-compatible API)\n");
     printf("  --help               This message\n");
 }
@@ -6674,13 +6722,14 @@ int main(int argc, char **argv) {
             {"think-budget",  required_argument, 0, 'B'},
             {"serve",         required_argument, 0, 'R'},
             {"predict",       no_argument,       0, 'D'},
+            {"debug-layers",  no_argument,       0, 'X'},
             {"collect-routing", required_argument, 0, 'Z'},
             {"help",          no_argument,       0, 'h'},
             {0, 0, 0, 0}
         };
 
         int c;
-        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:LSTFE2Gh", long_options, NULL)) != -1) {
+        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:LSTFE2GhX", long_options, NULL)) != -1) {
             switch (c) {
                 case 'm': model_path = optarg; break;
                 case 'w': weights_path = optarg; break;
@@ -6700,6 +6749,7 @@ int main(int argc, char **argv) {
                 case '2': g_use_2bit = 1; break;
                 case 'G': gpu_linear_attn_enabled = 1; break;
                 case 'D': g_pred_enabled = 1; break;
+                case 'X': g_debug_layers = 1; break;
                 case 'Z':
                     g_routing_log = fopen(optarg, "wb");
                     if (!g_routing_log) {

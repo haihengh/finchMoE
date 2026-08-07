@@ -44,11 +44,15 @@ def main():
         if '.switch_mlp.' not in tensor_name:
             continue
 
+        # Skip MTP (Multi-Token Prediction) layers — we only want the main model experts
+        if tensor_name.startswith('mtp.') or '.mtp.' in tensor_name:
+            continue
+
         parts = tensor_name.split('.')
-        # Find layer index
+        # Find layer index: look for 'layers' preceded by 'model' (not 'mtp')
         layer_idx = None
         for i, p in enumerate(parts):
-            if p == 'layers' and i + 1 < len(parts):
+            if p == 'layers' and i + 1 < len(parts) and i > 0 and parts[i-1] == 'model':
                 try:
                     layer_idx = int(parts[i + 1])
                 except ValueError:
@@ -80,6 +84,7 @@ def main():
     import struct
 
     file_headers = {}
+    file_data_starts = {}  # filename -> data section start offset (8 + header_len)
     for filename in sorted(set(
         info['file'] for layer_data in expert_tensors.values()
         for info in layer_data.values()
@@ -89,6 +94,7 @@ def main():
             with open(filepath, 'rb') as f:
                 header_len = struct.unpack('<Q', f.read(8))[0]
                 file_headers[filename] = json.loads(f.read(header_len))
+                file_data_starts[filename] = 8 + header_len
 
     # Build expert_reads
     expert_reads = {}
@@ -120,8 +126,11 @@ def main():
             shape = meta['shape']
             dtype = meta['dtype']
             data_offsets = meta['data_offsets']
-            byte_start = data_offsets[0]
-            byte_end = data_offsets[1]
+            # data_offsets are relative to the data section (after header).
+            # os.pread needs absolute file offsets, so add the data section start.
+            ds = file_data_starts[filename]
+            byte_start = ds + data_offsets[0]
+            byte_end = ds + data_offsets[1]
 
             # For expert tensors, shape is [num_experts, out_dim, in_dim_packed]
             # expert_stride = size of one expert's worth of this component

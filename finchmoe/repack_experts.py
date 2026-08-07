@@ -141,9 +141,12 @@ def repack_layer(layer_idx, expert_reads, model_path, fds, output_dir, dry_run=F
             src_fd = fds[info['file']]
             src_offset = info['abs_offset'] + expert_idx * info['expert_stride']
             dst_offset = expert_idx * EXPERT_SIZE + comp['offset']
-            # Scales and biases are stored as FP16 in MLX, need conversion to BF16
+            # MLX community models store scales/biases as FP16 with dtype='BF16' (known quirk).
+            # Our self-quantized models store them as BF16 with dtype='U16'.
+            # Only convert when dtype is 'BF16' (meaning data is actually FP16).
             is_scale_or_bias = ('scales' in comp['name'] or 'biases' in comp['name'])
-            read_plan.append((src_fd, src_offset, dst_offset, comp['size'], is_scale_or_bias))
+            needs_fp16_convert = is_scale_or_bias and info.get('dtype') == 'BF16'
+            read_plan.append((src_fd, src_offset, dst_offset, comp['size'], needs_fp16_convert))
 
     # Sort by (src_fd, src_offset) for sequential read locality
     read_plan.sort(key=lambda x: (x[0], x[1]))
@@ -194,12 +197,20 @@ def verify_layer(layer_idx, expert_reads, model_path, fds, output_dir):
             original = os.pread(src_fd, comp['size'], src_offset)
             packed = os.pread(fd_packed, comp['size'], dst_offset)
 
-            # For scales/biases: source is FP16, packed is BF16 — compare as float32
+            # For scales/biases: source may be FP16 (dtype=BF16) or BF16 (dtype=U16)
             is_sb = ('scales' in comp['name'] or 'biases' in comp['name'])
             if is_sb:
-                src_f32 = np.frombuffer(original, dtype=np.uint16).view(np.float16).astype(np.float32)
+                src_u16 = np.frombuffer(original, dtype=np.uint16)
                 pck_u16 = np.frombuffer(packed, dtype=np.uint16)
-                pck_f32 = (pck_u16.astype(np.uint32) << 16).view(np.float32)
+                src_dtype = info.get('dtype', 'BF16')
+                if src_dtype == 'BF16':
+                    # MLX community model: source is FP16, packed is BF16
+                    src_f32 = src_u16.view(np.float16).astype(np.float32)
+                    pck_f32 = (pck_u16.astype(np.uint32) << 16).view(np.float32)
+                else:
+                    # Self-quantized model: both source and packed are BF16
+                    src_f32 = (src_u16.astype(np.uint32) << 16).view(np.float32)
+                    pck_f32 = (pck_u16.astype(np.uint32) << 16).view(np.float32)
                 if not np.allclose(src_f32, pck_f32, rtol=1e-2, atol=1e-3, equal_nan=True):
                     md = np.max(np.abs(src_f32 - pck_f32))
                     if md > 1e-2:  # only report significant diffs

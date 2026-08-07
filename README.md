@@ -125,7 +125,7 @@ finchMoE/
 4. ~~**FP16→BF16 fix**: MLX stores scales/biases as FP16, not BF16~~ ✅
 5. ~~**Self-quantization pipeline**: BF16 → clean MLX 4-bit~~ ✅
 6. ~~**Norm weight fix**: Qwen3_5RMSNorm (1+weight) formulation~~ ✅
-7. **Coherent output**: Layer-by-layer comparison with MLX Python ref 🔄
+7. ~~**Coherent output**: Layer-by-layer comparison with MLX Python ref~~ ✅ (3 bugs fixed)
 8. **GPU expert path**: Fix NaN in CMD3 for 6× speedup
 9. **Optimize**: KV cache quant, MTP, TurboQuant, flash attention
 10. **iOS**: Port to A-series chips
@@ -138,7 +138,7 @@ finchMoE/
 - [x] Self-quantization pipeline working (BF16→4bit→extract→repack)
 - [x] FP16/BF16 format mismatch fixed
 - [x] Qwen3_5RMSNorm weights fixed (1+weight_param)
-- [x] Engine runs at 1.8 tok/s (CPU path), 12 tok/s (GPU path, needs fix)
-- [ ] Coherent output — still producing word fragments
-- [ ] GPU expert path NaN fix
+- [x] Engine runs at 1.9 tok/s
+- [x] Coherent output — produces grammatical English completions
+- [ ] GPU expert path speed optimization
 - [ ] 397B baseline (downloaded, not yet tested)
