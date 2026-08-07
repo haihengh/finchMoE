@@ -138,7 +138,7 @@ finchMoE/
 - [x] Self-quantization pipeline working (BF16→4bit→extract→repack)
 - [x] FP16/BF16 format mismatch fixed
 - [x] Qwen3_5RMSNorm weights fixed (1+weight_param)
-- [x] Engine runs at 1.9 tok/s
+- [x] Engine runs at 10-15 tok/s (GPU experts, default)
 - [x] Coherent output — produces grammatical English completions
-- [ ] GPU expert path speed optimization
+- [x] GPU expert path verified bit-identical to CPU (--compare-experts)
 - [ ] 397B baseline (downloaded, not yet tested)
