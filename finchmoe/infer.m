@@ -6283,6 +6283,23 @@ static char *load_system_prompt(void) {
     return strdup("You are a helpful assistant.");
 }
 
+// Tokenize ONLY the system prompt (for prefill caching).
+// Encodes: <|im_start|>system\n{system_prompt}<|im_end|>\n
+// The user turn + assistant prompt are added per-request by tokenize_user_turn.
+static PromptTokens *tokenize_system_prompt(void) {
+    static char *sys_prompt_text = NULL;
+    if (!sys_prompt_text) sys_prompt_text = load_system_prompt();
+
+    size_t sys_len = strlen(sys_prompt_text);
+    size_t total = 64 + sys_len;
+    char *prompt = malloc(total);
+    if (!prompt) return NULL;
+    snprintf(prompt, total, "<|im_start|>system\n%s<|im_end|>\n", sys_prompt_text);
+    PromptTokens *pt = encode_prompt_text_to_tokens(prompt);
+    free(prompt);
+    return pt;
+}
+
 // Tokenize a full chat message (system prompt + user turn) for first-time use.
 static PromptTokens *tokenize_chat_message(const char *user_content) {
     static char *sys_prompt_text = NULL;
@@ -6292,7 +6309,7 @@ static PromptTokens *tokenize_chat_message(const char *user_content) {
     char think[32]; build_think_suffix(think, sizeof(think));
     size_t sys_len = strlen(sys_prompt_text);
     size_t user_len = strlen(user_content);
-    size_t total = 80 + sys_len + user_len + strlen(think);  // generous padding for tags
+    size_t total = 80 + sys_len + user_len + strlen(think);
     char *prompt = malloc(total);
     if (!prompt) return NULL;
     snprintf(prompt, total, "<|im_start|>system\n%s<|im_end|>\n<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n%s",
@@ -6761,7 +6778,7 @@ static void serve_loop(
 
     // ---- System prompt cache: prefill system prompt once at startup ----
     fprintf(stderr, "[serve] Pre-caching system prompt...\n");
-    PromptTokens *sys_pt = tokenize_chat_message("");
+    PromptTokens *sys_pt = tokenize_system_prompt();
     int sys_pos = 0;
     if (sys_pt && sys_pt->count > 0) {
         float *sys_embed_batch = NULL;
