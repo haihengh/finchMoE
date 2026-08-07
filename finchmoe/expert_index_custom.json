@@ -1,0 +1,4765 @@
+{
+  "model_path": "/Volumes/samsung 2t/code/finchMoE/models/Qwen3.6-35B-A3B-4bit-custom",
+  "expert_reads": {
+    "0": {
+      "gate_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 3928446976,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4710178816,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4701790208,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4062664704,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4726956032,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4718567424,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 3794229248,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4693401600,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4685012992,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "1": {
+      "gate_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 1083314176,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4861969408,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4853580800,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 1217531904,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4878746624,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4870358016,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 949096448,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4845192192,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4836803584,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "2": {
+      "gate_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 993138688,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4746336320,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4737947712,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 1127356416,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4763113536,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4754724928,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 858920960,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4729559104,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4721170496,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "3": {
+      "gate_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 993665024,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4353128704,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4344740096,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 1127882752,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4369905920,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4361517312,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 859447296,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4336351488,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4327962880,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "4": {
+      "gate_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 1414735872,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4395844352,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4387455744,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 1548953600,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4412621568,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4404232960,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 1280518144,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4379067136,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4370678528,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "5": {
+      "gate_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 1836331008,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4448584960,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4440196352,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 1970548736,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4465362176,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4456973568,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 1702113280,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4431807744,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4423419136,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "6": {
+      "gate_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 2257926144,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4501325568,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4492936960,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 2392143872,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4518102784,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4509714176,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 2123708416,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4484548352,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4476159744,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "7": {
+      "gate_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 2662678528,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4551894912,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4543506304,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 2796896256,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4568672128,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4560283520,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 2528460800,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4535117696,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4526729088,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "8": {
+      "gate_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 3097905152,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4606340480,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4597951872,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 3232122880,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4623117696,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4614729088,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 2963687424,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4589563264,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4581174656,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "9": {
+      "gate_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 3519500288,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4659081088,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4650692480,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 3653718016,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4675858304,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4667469696,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 3385282560,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4642303872,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4633915264,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "10": {
+      "gate_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 1504909312,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4914710016,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4906321408,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 1639127040,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4931487232,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4923098624,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 1370691584,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4897932800,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4889544192,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "11": {
+      "gate_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 1909661696,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4965279360,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4956890752,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 2043879424,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4982056576,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4973667968,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 1775443968,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4948502144,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4940113536,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "12": {
+      "gate_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 2344888320,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5019724928,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5011336320,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 2479106048,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5036502144,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5028113536,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 2210670592,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5002947712,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4994559104,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "13": {
+      "gate_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 2766483456,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5072465536,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5064076928,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 2900701184,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5089242752,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5080854144,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 2632265728,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5055688320,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5047299712,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "14": {
+      "gate_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 3188078592,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5125206144,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5116817536,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 3322296320,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5141983360,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5133594752,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 3053860864,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5108428928,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5100040320,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "15": {
+      "gate_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 3592830976,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5175775488,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5167386880,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 3727048704,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5192552704,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5184164096,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 3458613248,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5158998272,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5150609664,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "16": {
+      "gate_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4028057600,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5230221056,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5221832448,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4162275328,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5246998272,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5238609664,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 3893839872,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5213443840,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5205055232,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "17": {
+      "gate_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4449652736,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5282961664,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5274573056,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4583870464,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5299738880,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5291350272,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 4315435008,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5266184448,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00001-of-00004.safetensors",
+        "abs_offset": 5257795840,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "18": {
+      "gate_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 153159680,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4641321408,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4632932800,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 287377408,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4658098624,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4649710016,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 18941952,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4624544192,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4616155584,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "19": {
+      "gate_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 557912064,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4691890752,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4683502144,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 692129792,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4708667968,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4700279360,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 423694336,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4675113536,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4666724928,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "20": {
+      "gate_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 1414733824,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4799076928,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4790688320,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 1548951552,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4815854144,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4807465536,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 1280516096,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4782299712,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4773911104,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "21": {
+      "gate_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 1836328960,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4851817536,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4843428928,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 1970546688,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4868594752,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4860206144,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 1702111232,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4835040320,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4826651712,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "22": {
+      "gate_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 2257924096,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4904558144,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4896169536,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 2392141824,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4921335360,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4912946752,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 2123706368,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4887780928,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4879392320,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "23": {
+      "gate_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 2662676480,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4955127488,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4946738880,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 2796894208,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4971904704,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4963516096,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 2528458752,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4938350272,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4929961664,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "24": {
+      "gate_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 3097903104,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5009573056,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5001184448,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 3232120832,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5026350272,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5017961664,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 2963685376,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4992795840,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4984407232,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "25": {
+      "gate_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 3519498240,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5062313664,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5053925056,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 3653715968,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5079090880,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5070702272,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 3385280512,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5045536448,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5037147840,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "26": {
+      "gate_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 3941093376,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5115054272,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5106665664,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4075311104,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5131831488,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5123442880,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 3806875648,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5098277056,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5089888448,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "27": {
+      "gate_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4345319424,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5165557952,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5157169344,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4479537152,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5182335168,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5173946560,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 4211101696,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5148780736,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00002-of-00004.safetensors",
+        "abs_offset": 5140392128,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "28": {
+      "gate_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 167317504,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4249818752,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4241430144,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 301535232,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4266595968,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4258207360,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 33099776,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4233041536,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4224652928,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "29": {
+      "gate_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 588912640,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4302559360,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4294170752,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 723130368,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4319336576,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4310947968,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 454694912,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4285782144,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4277393536,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "30": {
+      "gate_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 1428891648,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4407574272,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4399185664,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 1563109376,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4424351488,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4415962880,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 1294673920,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4390797056,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4382408448,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "31": {
+      "gate_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 1833644032,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4458143616,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4449755008,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 1967861760,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4474920832,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4466532224,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 1699426304,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4441366400,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4432977792,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "32": {
+      "gate_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 2268870656,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4512589184,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4504200576,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 2403088384,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4529366400,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4520977792,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 2134652928,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4495811968,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4487423360,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "33": {
+      "gate_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 2690465792,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4565329792,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4556941184,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 2824683520,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4582107008,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4573718400,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 2556248064,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4548552576,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4540163968,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "34": {
+      "gate_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 3112060928,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4618070400,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4609681792,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 3246278656,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4634847616,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4626459008,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 2977843200,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4601293184,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4592904576,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "35": {
+      "gate_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 3516813312,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4668639744,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4660251136,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 3651031040,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4685416960,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4677028352,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 3382595584,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4651862528,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4643473920,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "36": {
+      "gate_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 3952037888,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4723085184,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4714696576,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4086255616,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4739862400,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4731473792,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 3817820160,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4706307968,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00003-of-00004.safetensors",
+        "abs_offset": 4697919360,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "37": {
+      "gate_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 153161728,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4238088832,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4229700224,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 287379456,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4254866048,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4246477440,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 18944000,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4221311616,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4212923008,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "38": {
+      "gate_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 574756864,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4290829440,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4282440832,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 708974592,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4307606656,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4299218048,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 440539136,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4274052224,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4265663616,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    },
+    "39": {
+      "gate_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 979509248,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "gate_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4341398784,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "gate_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4333010176,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 1113726976,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          512,
+          256
+        ],
+        "dtype": "U32"
+      },
+      "up_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4358176000,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "up_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4349787392,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          512,
+          32
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.weight": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 845291520,
+        "expert_stride": 524288,
+        "expert_size": 524288,
+        "total_size": 134217728,
+        "shape": [
+          256,
+          2048,
+          64
+        ],
+        "dtype": "U32"
+      },
+      "down_proj.scales": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4324621568,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      },
+      "down_proj.biases": {
+        "file": "model-00004-of-00004.safetensors",
+        "abs_offset": 4316232960,
+        "expert_stride": 32768,
+        "expert_size": 32768,
+        "total_size": 8388608,
+        "shape": [
+          256,
+          2048,
+          8
+        ],
+        "dtype": "U16"
+      }
+    }
+  }
+}

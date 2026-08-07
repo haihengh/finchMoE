@@ -1,255 +1,228 @@
 #!/usr/bin/env python3
 """
 Quantize BF16 Qwen3.6 model to MLX-compatible 4-bit/8-bit safetensors.
-
-Produces output identical in structure to mlx-community quantized models.
-Then use the existing extract_weights.py + repack_experts.py pipeline.
-
-Usage:
-    python quantize_model.py --model ../models/Qwen3.6-35B-A3B-bf16 \\
-                             --output ../models/Qwen3.6-35B-A3B-4bit-custom
+Usage: python quantize_model.py --model <bf16-dir> --output <output-dir>
 """
 
-import argparse
-import json
-import os
-import struct
-import sys
-import time
+import argparse, json, os, struct, sys, time, shutil
 from collections import defaultdict
 import numpy as np
 from safetensors.numpy import save_file
 
 
 def bf16_encode(arr_f32):
-    """Encode float32 array as bfloat16 uint16."""
     return (arr_f32.view(np.uint32) >> 16).astype(np.uint16)
 
 
-def quantize_affine(weights_f32, bits, group_size):
-    """
-    MLX-style affine quantization: w_q = round((w - bias) / scale)
-
-    Returns (packed_u32, scales_bf16, biases_bf16)
-    packed_u32: [out_dim, in_dim * bits / 32] — 8 values per U32 for 4-bit
-    """
+def quantize_affine(weights_f32, bits, group_size=64):
+    """MLX affine quant: w_q = round((w - min)/scale), scale = (max-min)/(2^bits-1)"""
     out_dim, in_dim = weights_f32.shape
     num_groups = in_dim // group_size
     max_val = (1 << bits) - 1
-    values_per_u32 = 32 // bits
+    vpu = 32 // bits  # values per U32
 
     w = weights_f32.reshape(out_dim, num_groups, group_size)
-
-    # Per-group min (bias) and max → scale
     w_min = w.min(axis=2)
     w_max = w.max(axis=2)
     scales = np.maximum((w_max - w_min) / max_val, 1e-8)
     biases = w_min
 
-    # Quantize and clamp
     q = np.round((w - biases[:, :, np.newaxis]) / scales[:, :, np.newaxis])
     q = np.clip(q, 0, max_val).astype(np.uint8)
 
-    # Pack into U32
-    packed_cols = in_dim // values_per_u32
-    u32_per_group = group_size // values_per_u32
+    packed_cols = in_dim // vpu
     packed = np.zeros((out_dim, packed_cols), dtype=np.uint32)
-
+    upg = group_size // vpu  # U32 per group
     for g in range(num_groups):
-        for u in range(u32_per_group):
+        for u in range(upg):
             u32_val = np.zeros(out_dim, dtype=np.uint32)
-            for v in range(values_per_u32):
-                u32_val |= q[:, g, u * values_per_u32 + v].astype(np.uint32) << (v * bits)
-            packed[:, g * u32_per_group + u] = u32_val
+            for v in range(vpu):
+                u32_val |= q[:, g, u * vpu + v].astype(np.uint32) << (v * bits)
+            packed[:, g * upg + u] = u32_val
 
-    scales_bf16 = bf16_encode(scales.flatten()).reshape(out_dim, num_groups)
-    biases_bf16 = bf16_encode(biases.flatten()).reshape(out_dim, num_groups)
-
-    return packed, scales_bf16, biases_bf16
-
-
-# Tensors that use 8-bit for better routing precision
-EIGHT_BIT_PATTERNS = ['.mlp.gate.weight', '.mlp.shared_expert_gate.weight']
+    return (packed,
+            bf16_encode(scales.flatten()).reshape(out_dim, num_groups),
+            bf16_encode(biases.flatten()).reshape(out_dim, num_groups))
 
 
-def should_use_8bit(name):
-    return any(p in name for p in EIGHT_BIT_PATTERNS)
+EIGHT_BIT = ['.mlp.gate.weight', '.mlp.shared_expert_gate.weight']
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Quantize Qwen3.6 BF16 → MLX 4-bit')
-    parser.add_argument('--model', type=str, required=True)
-    parser.add_argument('--output', type=str, required=True)
-    args = parser.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument('--model', required=True)
+    p.add_argument('--output', required=True)
+    args = p.parse_args()
+    os.makedirs(args.output, exist_ok=True)
 
-    model_path = args.model
-    output_path = args.output
-    os.makedirs(output_path, exist_ok=True)
+    # Load source index
+    with open(os.path.join(args.model, 'model.safetensors.index.json')) as f:
+        src_idx = json.load(f)
+    src_map = src_idx['weight_map']  # original_name → file
 
-    # Load index
-    with open(os.path.join(model_path, 'model.safetensors.index.json')) as f:
-        idx = json.load(f)
-    weight_map = idx['weight_map']
+    # Normalize names: strip 'language_model.' prefix, skip vision
+    tensor_map = {}  # normalized_name → (source_file, original_name)
+    for orig_name, fname in src_map.items():
+        if 'visual' in orig_name or 'vision_tower' in orig_name:
+            continue
+        nn = orig_name
+        for prefix in ['model.language_model.', 'language_model.']:
+            if nn.startswith(prefix):
+                nn = 'model.' + nn[len(prefix):]
+                break
+        tensor_map[nn] = (fname, orig_name)
 
-    # Copy metadata files
-    import shutil
-    for fname in os.listdir(model_path):
-        if not fname.endswith('.safetensors'):
-            src = os.path.join(model_path, fname)
-            dst = os.path.join(output_path, fname)
-            if os.path.isfile(src):
-                shutil.copy2(src, dst)
+    # Copy metadata
+    for fn in os.listdir(args.model):
+        if not fn.endswith('.safetensors'):
+            s, d = os.path.join(args.model, fn), os.path.join(args.output, fn)
+            if os.path.isfile(s):
+                shutil.copy2(s, d)
 
-    # Group by output shard (distribute evenly across 4 shards)
-    all_tensors = sorted(weight_map.keys())
-    n = len(all_tensors)
-    shard_size = (n + 3) // 4
-    shards = [all_tensors[i * shard_size:(i + 1) * shard_size] for i in range(4)]
+    # Distribute across 4 shards
+    names = sorted(tensor_map.keys())
+    n = len(names)
+    ss = (n + 3) // 4
+    print(f"{n} tensors → 4 shards of ~{ss} each")
 
-    # Read quantization config from original model if present
-    qc = {}
-    config_path = os.path.join(model_path, 'config.json')
-    if os.path.exists(config_path):
-        with open(config_path) as f:
-            cfg = json.load(f)
-        qc = cfg.get('quantization_config', {})
+    # Pre-load source file headers (small)
+    src_files = set(fname for fname, _ in tensor_map.values())
+    headers = {}
+    for fname in src_files:
+        fpath = os.path.join(args.model, fname)
+        with open(fpath, 'rb') as f:
+            hl = struct.unpack('<Q', f.read(8))[0]
+            headers[fname] = (fpath, 8 + hl, json.loads(f.read(hl)))
 
-    new_weight_map = {}
-    total_start = time.time()
+    new_map = {}
+    t0 = time.time()
 
-    for shard_idx, tensor_names in enumerate(shards):
-        if not tensor_names:
+    for si in range(4):
+        batch = names[si * ss:(si + 1) * ss]
+        if not batch:
             break
+        sn = f"model-{si + 1:05d}-of-00004.safetensors"
+        sp = os.path.join(args.output, sn)
+        print(f"Shard {si + 1}/4: {len(batch)} tensors → {sn}")
 
-        shard_name = f"model-{shard_idx + 1:05d}-of-00004.safetensors"
-        print(f"\nShard {shard_idx + 1}/4: {len(tensor_names)} tensors")
-
-        # Collect unique source files for this shard
-        src_files = set(weight_map[n] for n in tensor_names)
-
-        # Cache opened files and their headers
-        file_cache = {}
-        for fname in src_files:
-            fpath = os.path.join(model_path, fname)
-            with open(fpath, 'rb') as f:
-                hlen = struct.unpack('<Q', f.read(8))[0]
-                file_cache[fname] = {
-                    'path': fpath,
-                    'header': json.loads(f.read(hlen)),
-                    'data_start': 8 + hlen,
-                }
-
-        tensors_out = {}
-        t0 = time.time()
-
-        for i, name in enumerate(tensor_names):
-            src_fname = weight_map[name]
-            fc = file_cache[src_fname]
-            hdr = fc['header']
-            ds = fc['data_start']
-
-            if name not in hdr:
-                print(f"  WARNING: {name} not in {src_fname}, skipping")
+        out = {}
+        for i, nn in enumerate(batch):
+            src_fn, orig_name = tensor_map[nn]
+            fpath, ds, hdr = headers[src_fn]
+            if orig_name not in hdr:
                 continue
-
-            info = hdr[name]
-            doff = info['data_offsets']
-            shape = info['shape']
-            dtype = info['dtype']
+            info = hdr[orig_name]
+            doff, shape, dtype = info['data_offsets'], info['shape'], info['dtype']
             size = doff[1] - doff[0]
 
-            with open(fc['path'], 'rb') as f:
+            with open(fpath, 'rb') as f:
                 f.seek(ds + doff[0])
                 raw = f.read(size)
 
-            # Parse BF16 or F32
+            # Dequant from source
             if dtype == 'BF16':
-                arr_u16 = np.frombuffer(raw, dtype=np.uint16)
-                arr_f32 = (arr_u16.astype(np.uint32) << 16).view(np.float32)
+                arr = (np.frombuffer(raw, np.uint16).astype(np.uint32) << 16).view(np.float32)
             elif dtype == 'F32':
-                arr_f32 = np.frombuffer(raw, dtype=np.float32)
+                arr = np.frombuffer(raw, np.float32)
             else:
-                tensors_out[name] = raw  # keep as-is
-                new_weight_map[name] = shard_name
+                out[nn] = np.frombuffer(raw, np.uint8)
+                new_map[nn] = sn
                 continue
 
-            # Quantize weight tensors
-            if '.weight' in name and len(shape) >= 2:
-                bits = 8 if should_use_8bit(name) else 4
+            # Qwen3_5RMSNorm: effective weight = 1 + weight_param (~0→~1)
+            if 'norm.weight' in nn or 'layernorm.weight' in nn:
+                arr = arr + 1.0
 
+            # Quantize weight tensors; handle fused expert projections
+            # Original model has fused gate_up_proj [n_exp, 2*intermediate, hidden]
+            # We split into gate_proj [n_exp, intermediate, hidden] + up_proj [same]
+            is_expert = '.mlp.experts.' in nn
+            is_weight = '.weight' in nn or is_expert
+
+            if is_weight and len(shape) >= 2 and shape[-1] % 64 == 0:
+                bits = 8 if any(p in nn for p in EIGHT_BIT) else 4
                 if len(shape) == 2:
-                    out_dim, in_dim = shape
-                    if in_dim % 64 == 0:
-                        w = arr_f32.reshape(out_dim, in_dim)
-                        packed, scales, biases = quantize_affine(w, bits, 64)
-
-                        tensors_out[name] = packed
-                        sname = name.replace('.weight', '.scales')
-                        bname = name.replace('.weight', '.biases')
-                        tensors_out[sname] = scales
-                        tensors_out[bname] = biases
-                        new_weight_map[name] = shard_name
-                        new_weight_map[sname] = shard_name
-                        new_weight_map[bname] = shard_name
-                    else:
-                        tensors_out[name] = raw  # keep as BF16
-                        new_weight_map[name] = shard_name
-
+                    packed, scales, biases = quantize_affine(arr.reshape(shape[0], shape[1]), bits)
+                    out[nn] = packed
+                    snn = nn.replace('.weight', '.scales')
+                    bnn = nn.replace('.weight', '.biases')
+                    out[snn], out[bnn] = scales, biases
+                    new_map[nn] = new_map[snn] = new_map[bnn] = sn
                 elif len(shape) == 3:
-                    # Expert tensor: [n_experts, out_dim, in_packed]
                     n_exp, out_d, in_p = shape
-                    w = arr_f32.reshape(n_exp, out_d, -1)
+                    w = arr.reshape(n_exp, out_d, -1)
                     actual_in = w.shape[-1]
-                    if actual_in % 64 == 0:
-                        packed_all = []
-                        scales_all = []
-                        biases_all = []
+
+                    # Handle fused gate_up_proj: split into gate_proj + up_proj
+                    if '.mlp.experts.gate_up_proj' in nn:
+                        half = out_d // 2  # 1024 → 512 each
+                        w_gate = w[:, :half, :]
+                        w_up = w[:, half:, :]
+                        pl_g, sl_g, bl_g = [], [], []
+                        pl_u, sl_u, bl_u = [], [], []
                         for e in range(n_exp):
-                            p, s, b = quantize_affine(w[e].reshape(out_d, actual_in), bits, 64)
-                            packed_all.append(p)
-                            scales_all.append(s)
-                            biases_all.append(b)
+                            pg, sg, bg = quantize_affine(w_gate[e].reshape(half, actual_in), bits)
+                            pu, su, bu = quantize_affine(w_up[e].reshape(half, actual_in), bits)
+                            pl_g.append(pg); sl_g.append(sg); bl_g.append(bg)
+                            pl_u.append(pu); sl_u.append(su); bl_u.append(bu)
+                        # Store as split names: gate_proj + up_proj
+                        gname = nn.replace('.mlp.experts.gate_up_proj', '.mlp.switch_mlp.gate_proj.weight')
+                        uname = nn.replace('.mlp.experts.gate_up_proj', '.mlp.switch_mlp.up_proj.weight')
+                        out[gname] = np.stack(pl_g)
+                        out[uname] = np.stack(pl_u)
+                        gsn = gname.replace('.weight', '.scales')
+                        gbn = gname.replace('.weight', '.biases')
+                        usn = uname.replace('.weight', '.scales')
+                        ubn = uname.replace('.weight', '.biases')
+                        out[gsn], out[gbn] = np.stack(sl_g), np.stack(bl_g)
+                        out[usn], out[ubn] = np.stack(sl_u), np.stack(bl_u)
+                        for n in [gname, uname, gsn, gbn, usn, ubn]:
+                            new_map[n] = sn
 
-                        tensors_out[name] = np.stack(packed_all)
-                        sname = name.replace('.weight', '.scales')
-                        bname = name.replace('.weight', '.biases')
-                        tensors_out[sname] = np.stack(scales_all)
-                        tensors_out[bname] = np.stack(biases_all)
-                        new_weight_map[name] = shard_name
-                        new_weight_map[sname] = shard_name
-                        new_weight_map[bname] = shard_name
+                    # Handle down_proj (kept under switch_mlp name)
+                    elif '.mlp.experts.down_proj' in nn:
+                        dname = nn.replace('.mlp.experts.down_proj', '.mlp.switch_mlp.down_proj.weight')
+                        pl, sl, bl = [], [], []
+                        for e in range(n_exp):
+                            p, s, b = quantize_affine(w[e].reshape(out_d, actual_in), bits)
+                            pl.append(p); sl.append(s); bl.append(b)
+                        out[dname] = np.stack(pl)
+                        dsn = dname.replace('.weight', '.scales')
+                        dbn = dname.replace('.weight', '.biases')
+                        out[dsn], out[dbn] = np.stack(sl), np.stack(bl)
+                        for n in [dname, dsn, dbn]:
+                            new_map[n] = sn
+
                     else:
-                        tensors_out[name] = raw
-                        new_weight_map[name] = shard_name
-                else:
-                    tensors_out[name] = raw
-                    new_weight_map[name] = shard_name
+                        pl, sl, bl = [], [], []
+                        for e in range(n_exp):
+                            p, s, b = quantize_affine(w[e].reshape(out_d, actual_in), bits)
+                            pl.append(p); sl.append(s); bl.append(b)
+                        out[nn] = np.stack(pl)
+                        snn = nn.replace('.weight', '.scales')
+                        bnn = nn.replace('.weight', '.biases')
+                        out[snn], out[bnn] = np.stack(sl), np.stack(bl)
+                        new_map[nn] = new_map[snn] = new_map[bnn] = sn
             else:
-                # Non-weight: keep as BF16
-                tensors_out[name] = raw if isinstance(raw, bytes) else arr_f32.tobytes() if dtype == 'F32' else arr_u16.tobytes()
-                new_weight_map[name] = shard_name
+                # Keep as BF16
+                arr_u16 = (arr.view(np.uint32) >> 16).astype(np.uint16)
+                # Reshape to match original shape
+                out[nn] = arr_u16.reshape(shape) if len(shape) > 1 else arr_u16
+                new_map[nn] = sn
 
-            if (i + 1) % 100 == 0:
-                print(f"  [{i+1}/{len(tensor_names)}]")
+            if (i + 1) % 200 == 0:
+                print(f"  [{i+1}/{len(batch)}]")
 
-        # Write shard
-        shard_path = os.path.join(output_path, shard_name)
-        save_file(tensors_out, shard_path)
-        sz = os.path.getsize(shard_path) / 1e9
-        elapsed = time.time() - t0
-        print(f"  Wrote {sz:.2f} GB in {elapsed:.0f}s ({sz / elapsed:.2f} GB/s)")
+        save_file(out, sp)
+        sz = os.path.getsize(sp) / 1e9
+        del out  # free memory before next shard
+        print(f"  {sz:.2f} GB in {time.time() - t0:.0f}s")
 
     # Write index
-    index_out = {
-        'metadata': {'total_size': 0},
-        'weight_map': new_weight_map,
-    }
-    with open(os.path.join(output_path, 'model.safetensors.index.json'), 'w') as f:
-        json.dump(index_out, f, indent=2)
+    with open(os.path.join(args.output, 'model.safetensors.index.json'), 'w') as f:
+        json.dump({'metadata': {'total_size': 0}, 'weight_map': new_map}, f, indent=2)
 
-    total_elapsed = time.time() - total_start
-    print(f"\nDone in {total_elapsed:.0f}s")
-    print(f"Output: {output_path}")
+    print(f"\nDone in {time.time() - t0:.0f}s → {args.output}")
 
 
 if __name__ == '__main__':

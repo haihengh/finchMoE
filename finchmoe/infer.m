@@ -124,7 +124,7 @@
 #define THINK_START_TOKEN   248068  // <think>
 #define THINK_END_TOKEN     248069  // </think>
 
-#define MODEL_PATH_DEFAULT "../models/Qwen3.6-35B-A3B-4bit-df"
+#define MODEL_PATH_DEFAULT "../models/Qwen3.6-35B-A3B-4bit-custom"
 
 // ============================================================================
 // Timing helper
@@ -6639,6 +6639,7 @@ static void print_usage(const char *prog) {
 }
 
 int main(int argc, char **argv) {
+    srand48(time(NULL));
     @autoreleasepool {
         const char *model_path = MODEL_PATH_DEFAULT;
         const char *weights_path = NULL;
@@ -6807,17 +6808,8 @@ int main(int argc, char **argv) {
         PromptTokens *pt = NULL;
         if (serve_port == 0) {
             if (prompt_text) {
-                // Wrap in Qwen chat template for coherent generation
-                char templated[8192];
-                snprintf(templated, sizeof(templated),
-                    "<|im_start|>system\n"
-                    "You are a helpful assistant.<|im_end|>\n"
-                    "<|im_start|>user\n"
-                    "%s<|im_end|>\n"
-                    "<|im_start|>assistant\n",
-                    prompt_text);
-                printf("[template] Using Qwen chat template\n");
-                pt = encode_prompt_text_to_tokens(templated);
+                // Try without chat template first — base model completions
+                pt = encode_prompt_text_to_tokens(prompt_text);
                 if (!pt) {
                     fprintf(stderr, "ERROR: Failed to encode prompt. Make sure encode_prompt.py exists.\n");
                     return 1;
