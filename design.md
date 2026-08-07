@@ -243,7 +243,96 @@ Real-world will be lower due to:
 
 Conservative estimate: **5-10 tok/s** — well above the 3.5 tok/s target.
 
-## 9. Appendix: flash-moe Experiments Reference
+## 9. Device-Specific Performance Estimates
+
+All estimates assume 4-bit experts, K=4, short context. Memory-bandwidth-bound.
+
+| Device | Memory Bandwidth | GPU tok/s | CPU tok/s | RAM Usage |
+|---|---|---|---|---|
+| M4 Mac mini 16GB | ~120 GB/s | **12** (measured) | 1.8 (measured) | ~1.8 GB |
+| M3 Max 48GB | ~400 GB/s | 4.4 (flash-moe claim) | — | ~6 GB |
+| M1 Mac mini 8-16GB | ~68 GB/s | **5–8** (est.) | 1–1.5 (est.) | ~1.8 GB |
+| iPhone A18 Pro | ~50-70 GB/s | **3–5** (est.) | 0.5–1 (est.) | ~1.8 GB |
+| iPhone A16/A17 | ~40-50 GB/s | **2–3** (est.) | 0.5–1 (est.) | ~1.8 GB |
+
+M4 is significantly faster than M3 Max for this workload because the engine is bandwidth-bound and M4's 120 GB/s serves a 3B-active model more efficiently than M3 Max's 400 GB/s serves a 17B-active model (397B).
+
+## 10. Long Context: 256K Window Analysis
+
+### Memory Impact
+
+Only 10 of 40 layers are full attention (KV cache needed):
+
+| Component | Per Token | × 256K |
+|---|---|---|
+| K cache (2 heads × 256d × FP16) | 1,024 bytes | 256 MB |
+| V cache (same) | 1,024 bytes | 256 MB |
+| Per full-attn layer | 2,048 bytes | 512 MB |
+| **10 full-attn layers** | | **~5 GB** |
+
+Total for 256K: engine base (~1.8 GB) + KV cache (~5 GB) = **~7 GB**. Leaves ~9 GB for macOS + page cache on 16 GB — tight but workable.
+
+### Speed Impact (Without Optimizations)
+
+Attention scores `Q@K^T` are O(heads × dim × seq_len), dominating at long context:
+
+| Context Length | tok/s (est.) |
+|---|---|
+| 4K (typical chat) | 12 |
+| 32K | ~2 |
+| 128K | ~0.7 |
+| 256K | **~0.4** |
+
+### Optimization: KV Cache Quantization
+
+Quantizing K and V caches from FP16 saves memory AND speeds up the attention matmul (less data to read):
+
+| KV Format | KV Size (256K) | Attention Speed | Quality vs FP16 |
+|---|---|---|---|
+| FP16 (current) | 5.0 GB | 1× | Reference |
+| Q8_0 (per-channel 8-bit) | 2.5 GB | ~2× | Negligible loss |
+| Q4_K_M (block 4-bit) | 1.25 GB | ~4× | Small, acceptable |
+| **TurboQuant Q4** (Hadamard + 4-bit) | 1.25 GB | ~4× | **Near Q8 quality** |
+
+With Q8_0 at 256K: **~0.7–1.0 tok/s**. With TurboQuant Q4: **~1.0–1.5 tok/s** at Q8-like quality.
+
+### TurboQuant Implementation
+
+Three components, ~100 lines of Metal + ~30 lines of C:
+
+```
+1. Hadamard rotation: per-head [256×256] via Fast Walsh-Hadamard (8 butterfly passes)
+2. Channel-wise quantization: one scale per 256d channel (vs one per tensor)
+3. Inline dequant during attention: dequant + inverse rotation before Q@K^T
+```
+
+The rotation flattens outlier channels so 4-bit quantization evenly captures all dimensions — this is why TurboQuant Q4 approaches Q8 quality. The rotation itself costs O(n log n) with n=256 — about 0.02ms per attention layer, negligible compared to the attention matmul.
+
+## 11. MTP (Multi-Token Prediction)
+
+Qwen3.6 includes a built-in MTP layer that predicts a second token in parallel with the main model. The main model then verifies it:
+
+| | Without MTP | With MTP |
+|---|---|---|
+| Tokens per forward pass | 1 | 1.0–2.0 (avg ~1.6 at 70% acceptance) |
+| Overhead | — | +1 MTP layer (~2.5% of main model) |
+| Effective speedup | 1× | **~1.5×** |
+
+Flash-moe found MTP break-even for the 397B model because expert I/O (6.75 MB each) dominates per-token cost. For Qwen3.6 with **much smaller experts** (1.69 MB each, 4× smaller), the I/O cost is proportionally lower and MTP should be a net win. Implementation requires loading the MTP weights (a single small safetensors file, ~100 MB) and adding one extra forward pass per token.
+
+## 12. Optimization Priority
+
+| Priority | Feature | Effort | Impact |
+|---|---|---|---|
+| 1 | Clean model output (self-quantize BF16) | In progress | Baseline |
+| 2 | GPU expert path fix | Debug | 6× speedup |
+| 3 | KV cache Q8_0 | ~60 lines Metal | Saves 2.5 GB, good at 32K+ ctx |
+| 4 | MTP speculative decoding | ~200 lines C | 1.5× speedup |
+| 5 | TurboQuant Q4 KV cache | ~100 lines Metal | Q8 quality at Q4 size |
+| 6 | Flash attention | ~300 lines Metal | 2× long-context speed |
+| 7 | iPhone port | Engineering | Target deployment |
+
+## 13. Appendix: flash-moe Experiments Reference
 
 Key findings from flash-moe's 58 experiments that inform our design:
 
@@ -256,4 +345,4 @@ Key findings from flash-moe's 58 experiments that inform our design:
 | SSD DMA + GPU overlap impossible | Serial pipeline optimal |
 | LZ4 expert compression | -13% (decompress overhead) |
 | mmap expert files | -5× (page fault overhead) |
-| MTP speculative decoding | Break-even (MoE I/O scales per-token) |
+| MTP speculative decoding | Break-even for 397B (likely net win for Qwen3.6 smaller experts) |
