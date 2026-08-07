@@ -29,7 +29,7 @@ SHADER_SRC = shaders.metal
 
 MODEL_DIR = ../models/Qwen3.6-35B-A3B-4bit
 
-.PHONY: all clean extract index repack
+.PHONY: all clean extract index repack chat
 
 all: $(TARGET)
 

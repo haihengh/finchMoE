@@ -148,11 +148,11 @@ If you already have a prepared model (pre-quantized or self-quantized):
 
 ```bash
 cd finchmoe
-make                          # Build engine + chat client
+make && make chat             # Build engine + chat client
 ./finchmoe-infer --serve 9000 # Start OpenAI-compatible API server
 ```
 
-Then test it:
+Then test it (in another terminal):
 
 ```bash
 # Health check
@@ -164,9 +164,10 @@ curl -N -X POST http://localhost:9000/v1/chat/completions \
   -d '{"messages":[{"role":"user","content":"Hello!"}],"max_tokens":100,"stream":true}'
 ```
 
-Or use the built-in TUI:
+Or use the built-in TUI (in another terminal, while the server is running):
 
 ```bash
+cd finchmoe
 ./chat --port 9000
 ```
 
