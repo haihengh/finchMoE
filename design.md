@@ -26,11 +26,23 @@ flash-moe already targets the correct model family (`qwen3_5_moe`) and implement
 | Resource | Available | Engine Usage | Headroom |
 |---|---|---|---|
 | RAM | 16 GB unified | ~1.6 GB | ~14.4 GB for OS + page cache |
-| SSD | External 1.8TB | ~19 GB model | Plenty |
+| SSD | Samsung 990 Plus NVMe (TB4 enclosure) | ~19 GB model + experts | Faster than internal SSD |
 | GPU | M4 (10-core?) | Metal compute | TBD |
 | Memory bandwidth | ~120 GB/s (est.) | — | — |
 
-The larger page cache (14.4 GB vs 7-8 GB on 397B model) means higher expert cache hit rates, potentially compensating for slower SSD vs the M3 Max.
+The larger page cache (14.4 GB vs 7-8 GB on 397B model) means higher expert cache hit rates. Both dev machines use a Samsung 990 Plus NVMe in a Thunderbolt 4 enclosure, which provides faster sequential reads than the internal SSDs on M1 and M4 Mac minis — a meaningful advantage for the SSD-streaming architecture.
+
+### Tested: Mac mini M1 8GB (2026-08-07)
+
+| Resource | Available | Engine Usage | Headroom |
+|---|---|---|---|
+| RAM | 8 GB unified | ~3.8 GB | ~1.6 GB free (52%), ~2.4 GB compressed |
+| Swap | — | **0 used** | Memory compression absorbs pressure |
+| GPU | M1 (8-core) | Metal compute | 1.6 ms GPU wait per layer |
+| SSD | Samsung 990 Plus NVMe (TB4 enclosure) | ~19 GB model + experts | Expert I/O: 1.5 ms/layer (warm); same drive as M4 |
+
+**Performance:** 3.3–8.2 tok/s (avg 5.4), prompt processing ~3–4 tok/s.
+Expert streaming from SSD is the bottleneck (37% of per-layer time) even on the fast external NVMe. Since both M1 and M4 share the same Samsung 990 Plus drive, the M1's lower throughput is attributable to slower GPU compute and lower memory bandwidth (~68 GB/s vs ~120 GB/s), not storage. The engine fits comfortably in 8 GB with no swapping, validating the SSD-streaming architecture. Expert malloc-cache is not viable (crashes at 500 entries).
 
 ### Target: iPhone (A-series)
 
@@ -38,6 +50,7 @@ The larger page cache (14.4 GB vs 7-8 GB on 397B model) means higher expert cach
 - No swap — must fit everything in physical memory
 - Slower SSD, less bandwidth
 - Likely needs model shrinking (3-bit? fewer experts?) or aggressive preloading
+- M1 8GB results suggest the architecture is viable: the engine already fits in 8GB with zero swap and exceeds the 3.5 tok/s minimum target. iPhone will need further optimization but the core approach is validated.
 
 ## 4. Inference Pipeline
 

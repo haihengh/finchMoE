@@ -143,6 +143,53 @@ finchMoE/
 - [x] GPU expert path **verified bit-identical** to CPU path (`--compare-experts`)
 - [ ] 397B baseline (downloaded, not yet tested)
 
+## Benchmarks
+
+### M4 Mac mini (16 GB) — Development Machine
+
+All benchmarks run from a **Samsung 990 Plus NVMe in a Thunderbolt 4 enclosure** (faster than internal SSD on both M1 and M4 Mac minis).
+
+| Metric | Value |
+|---|---|
+| Generation speed | **10–15 tok/s** |
+| Memory usage | ~1.6 GB engine + page cache |
+| Storage | Samsung 990 Plus NVMe via TB4 |
+
+### Mac mini M1 (8 GB) — Tested 2026-08-07
+
+Same Samsung 990 Plus NVMe via Thunderbolt 4 enclosure.
+
+| Metric | Value |
+|---|---|
+| **Generation speed (avg 100 tok)** | **5.4 tok/s** |
+| Cold start (first tokens) | 3.3–3.8 tok/s |
+| Warm (page cache filling) | 5–7 tok/s |
+| Hot (fully cached, peak) | 7–8.2 tok/s |
+| **Prompt processing** | **~3–4 tok/s** (270–350 ms/token) |
+| TTFT (11-token prompt) | 5,849 ms |
+| TTFT (103-token prompt) | 30,465 ms |
+| **Memory usage** | **~3.8 GB** engine footprint |
+| System free after runs | ~1.6 GB (52%) |
+| Swap used | **0** (none) |
+| Expert cache in RAM | Not viable (malloc-cache crashes at 500 entries) |
+
+**Per-layer timing (warm, 4.1 ms total):**
+
+| Phase | Time | % |
+|---|---|---|
+| cmd1_wait (GPU attention projections) | 1.6 ms | 40% |
+| expert_io (SSD read + dequant) | 1.5 ms | 37% |
+| cmd2_wait (GPU o_proj + norm + routing + shared) | 0.8 ms | 20% |
+| cmd3_encode (GPU expert compute) | 0.06 ms | 1.5% |
+
+**Key findings:**
+- Both machines use a **Samsung 990 Plus NVMe in a Thunderbolt 4 enclosure**, which is faster than the internal SSDs on M1 and M4 Mac minis. This is significant: the engine's SSD-streaming architecture benefits directly from fast external storage.
+- Generation speed **ramps up** as OS page cache warms (3.3 → 8.2 tok/s over 100 tokens)
+- **Expert I/O from SSD is the bottleneck** (37% of per-layer time), not GPU compute — even on a fast external NVMe
+- Memory compression keeps the 8 GB system from swapping (~2.4 GB compressed pages)
+- On M1 8GB the engine delivers **~40-50% of M4 16GB throughput**, limited primarily by slower GPU compute and lower memory bandwidth, not storage (both share the same external NVMe)
+- The 3.5 tok/s project minimum target is comfortably met even on this entry-level Apple Silicon machine
+
 ## Known Limitations
 
 **Base model behavior**: Qwen 3.6 35B A3B is a base (pre-trained) model, not instruction-tuned. Without the Qwen chat template (`<|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n<think>\n`), it produces next-token completions rather than direct answers. Output quality varies with temperature sampling (default 0.8). For Q&A use, pipe prompts through the chat template first.
