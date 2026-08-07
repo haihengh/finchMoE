@@ -27,7 +27,7 @@ METALC = xcrun -sdk macosx metal
 METALLIB_TOOL = xcrun -sdk macosx metallib
 SHADER_SRC = shaders.metal
 
-MODEL_DIR = ../models/Qwen3.6-35B-A3B-4bit
+MODEL_DIR = ../models/Qwen3.6-35B-A3B-4bit-custom
 
 .PHONY: all clean extract index repack chat
 

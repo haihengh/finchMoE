@@ -128,7 +128,7 @@ static int g_gpu_kv_seq  = DEFAULT_GPU_KV_SEQ;
 #define THINK_START_TOKEN   248068  // <think>
 #define THINK_END_TOKEN     248069  // </think>
 
-#define MODEL_PATH_DEFAULT "../models/Qwen3.6-35B-A3B-4bit"
+#define MODEL_PATH_DEFAULT "../models/Qwen3.6-35B-A3B-4bit-custom"
 
 // ============================================================================
 // Timing helper
