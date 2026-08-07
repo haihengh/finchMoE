@@ -114,9 +114,13 @@
 #define DOWN_S_OFF_2  3670016
 #define DOWN_B_OFF_2  3801088
 
-// KV cache maximum context length
-#define MAX_SEQ_LEN 1048576  // 1M context — only 10 full-attn layers need KV cache, ~5GB at max
-#define GPU_KV_SEQ  8192     // GPU KV buffer pre-allocation (grows if exceeded, falls back to CPU attn)
+// KV cache maximum context length — configurable via CLI for agentic workloads
+// Qwen 3.6 35B A3B has max_position_embeddings=262144 (256K). This default matches the model.
+// The RoPE embeddings are trained for 256K — exceeding this requires YaRN scaling (not implemented).
+#define DEFAULT_MAX_SEQ_LEN 262144  // 256K context — matches model's max_position_embeddings
+#define DEFAULT_GPU_KV_SEQ  8192     // GPU KV buffer pre-allocation (falls back to CPU past this)
+static int g_max_seq_len = DEFAULT_MAX_SEQ_LEN;
+static int g_gpu_kv_seq  = DEFAULT_GPU_KV_SEQ;
 
 // Special tokens
 #define EOS_TOKEN_1         248046
@@ -1040,7 +1044,7 @@ typedef struct {
     id<MTLBuffer> buf_kv_k[NUM_FULL_ATTN_LAYERS];  // K cache per full-attn layer
     id<MTLBuffer> buf_kv_v[NUM_FULL_ATTN_LAYERS];  // V cache per full-attn layer
     id<MTLBuffer> buf_attn_q;       // [NUM_ATTN_HEADS * HEAD_DIM floats] all query heads
-    id<MTLBuffer> buf_attn_scores;  // [NUM_ATTN_HEADS * MAX_SEQ_LEN floats] all heads' scores
+    id<MTLBuffer> buf_attn_scores;  // [NUM_ATTN_HEADS * g_gpu_kv_seq floats] all heads' scores
     id<MTLBuffer> buf_attn_out;     // [NUM_ATTN_HEADS * HEAD_DIM floats] full attention output
     id<MTLBuffer> buf_attn_gate;    // [NUM_ATTN_HEADS * HEAD_DIM floats] sigmoid gate
     // CMD3 GPU-side combine buffers (weighted_sum + residual + norm on GPU)
@@ -1253,7 +1257,7 @@ static MetalCtx *metal_setup(void) {
     // GPU attention buffers
     {
         size_t kv_dim = NUM_KV_HEADS * HEAD_DIM;  // 512
-        size_t kv_cache_size = GPU_KV_SEQ * kv_dim * sizeof(float);
+        size_t kv_cache_size = g_gpu_kv_seq * kv_dim * sizeof(float);
         for (int i = 0; i < NUM_FULL_ATTN_LAYERS; i++) {
             ctx->buf_kv_k[i] = [ctx->device newBufferWithLength:kv_cache_size
                                                         options:MTLResourceStorageModeShared];
@@ -1262,7 +1266,7 @@ static MetalCtx *metal_setup(void) {
         }
         ctx->buf_attn_q      = [ctx->device newBufferWithLength:NUM_ATTN_HEADS * HEAD_DIM * sizeof(float)
                                                         options:MTLResourceStorageModeShared];
-        ctx->buf_attn_scores = [ctx->device newBufferWithLength:(size_t)NUM_ATTN_HEADS * GPU_KV_SEQ * sizeof(float)
+        ctx->buf_attn_scores = [ctx->device newBufferWithLength:(size_t)NUM_ATTN_HEADS * g_gpu_kv_seq * sizeof(float)
                                                         options:MTLResourceStorageModeShared];
         ctx->buf_attn_out    = [ctx->device newBufferWithLength:NUM_ATTN_HEADS * HEAD_DIM * sizeof(float)
                                                         options:MTLResourceStorageModeShared];
@@ -1270,7 +1274,7 @@ static MetalCtx *metal_setup(void) {
                                                         options:MTLResourceStorageModeShared];
         printf("[metal] GPU attention buffers: %d KV caches (%.1f MB each), scores buf %.1f MB\n",
                NUM_FULL_ATTN_LAYERS, kv_cache_size / 1e6,
-               (double)(NUM_ATTN_HEADS * MAX_SEQ_LEN * sizeof(float)) / 1e6);
+               (double)(NUM_ATTN_HEADS * g_gpu_kv_seq * sizeof(float)) / 1e6);
     }
 
     // Persistent GPU state buffers for delta-net (linear attention layers)
@@ -2157,8 +2161,8 @@ typedef struct {
 
 static KVCache *kv_cache_new(void) {
     KVCache *c = calloc(1, sizeof(KVCache));
-    c->k_cache = calloc(MAX_SEQ_LEN * NUM_KV_HEADS * HEAD_DIM, sizeof(float));
-    c->v_cache = calloc(MAX_SEQ_LEN * NUM_KV_HEADS * HEAD_DIM, sizeof(float));
+    c->k_cache = calloc(g_max_seq_len * NUM_KV_HEADS * HEAD_DIM, sizeof(float));
+    c->v_cache = calloc(g_max_seq_len * NUM_KV_HEADS * HEAD_DIM, sizeof(float));
     c->len = 0;
     return c;
 }
@@ -4651,7 +4655,7 @@ static void fused_layer_forward(
         // Only enabled when seq_len >= 32 (below that, CPU is faster).
         int gpu_attn_ready = (g_metal && g_metal->attn_scores_pipe &&
                               fa_idx >= 0 && fa_idx < NUM_FULL_ATTN_LAYERS &&
-                              kv->len >= 32 && kv->len < GPU_KV_SEQ);
+                              kv->len >= 32 && kv->len < g_gpu_kv_seq);
 
         if (gpu_attn_ready) {
             // Copy Q and gate to GPU; attention dispatches will be in CMD2
@@ -4896,7 +4900,7 @@ static void fused_layer_forward(
     // Only enabled when seq_len >= 32 — below that, CPU attention is faster
     // because GPU command encoder overhead dominates at short sequences.
     int gpu_attn_fuse = (is_full && !attn_out_for_oproj && g_metal && g_metal->attn_scores_pipe
-                         && kv && kv->len >= 32 && kv->len < GPU_KV_SEQ);
+                         && kv && kv->len >= 32 && kv->len < g_gpu_kv_seq);
 
     if ((attn_out_for_oproj || gpu_attn_fuse) && oproj_w && oproj_s && oproj_b &&
         g_metal && g_metal->wf_buf && have_moe_weights &&
@@ -4940,7 +4944,7 @@ static void fused_layer_forward(
             uint32_t hd = HEAD_DIM;
             uint32_t kvd = (uint32_t)kv_dim;
             uint32_t sl = (uint32_t)kv->len;
-            uint32_t seq_stride = GPU_KV_SEQ;
+            uint32_t seq_stride = (uint32_t)g_gpu_kv_seq;
             uint32_t hpkv = (uint32_t)heads_per_kv;
 
             // Enc A1: attn_scores_batched
@@ -6107,13 +6111,21 @@ static int sse_send_delta(int fd, const char *request_id, const char *token_text
     return (wr <= 0) ? -1 : 0;
 }
 
-static void sse_send_done(int fd, const char *request_id) {
-    char chunk[1024];
+static void sse_send_done(int fd, const char *request_id,
+                          int prompt_tokens, int completion_tokens,
+                          double prefill_ms, double gen_ms) {
+    char chunk[2048];
     int n = snprintf(chunk, sizeof(chunk),
         "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\","
-        "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,"
+        "\"total_tokens\":%d,\"prefill_ms\":%.0f,\"generation_ms\":%.0f,"
+        "\"tokens_per_second\":%.1f}}\n\n"
         "data: [DONE]\n\n",
-        request_id);
+        request_id,
+        prompt_tokens, completion_tokens, prompt_tokens + completion_tokens,
+        prefill_ms, gen_ms,
+        completion_tokens > 0 ? completion_tokens * 1000.0 / gen_ms : 0.0);
     http_write(fd, chunk, n);
 }
 
@@ -6245,6 +6257,375 @@ static void sync_cpu_to_gpu_delta_state_serve(void **layer_states) {
     }
 }
 
+// ============================================================================
+// Request queue — enables concurrent clients without blocking the accept loop.
+// A single worker thread drains the queue sequentially (GPU is not concurrent).
+// ============================================================================
+
+#define SERVE_QUEUE_MAX 16
+
+typedef struct {
+    int client_fd;
+    char *content;          // malloc'd, freed after processing
+    int max_gen;
+    char session_id[64];
+    int has_session;
+    char request_id[64];
+} ServeQueueEntry;
+
+typedef struct {
+    ServeQueueEntry entries[SERVE_QUEUE_MAX];
+    int head, tail, count;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    int shutdown;
+} ServeQueue;
+
+static ServeQueue g_serve_queue = {
+    .mutex = PTHREAD_MUTEX_INITIALIZER,
+    .cond  = PTHREAD_COND_INITIALIZER,
+};
+
+// All shared state needed by the worker thread to process a request
+typedef struct {
+    WeightFile *wf;
+    Vocabulary *vocab;
+    void **layer_states;
+    KVCache **kv_caches;
+    void **layer_mmaps;
+    int *layer_fds;
+    uint16_t *final_norm_w;
+    int K;
+    // System prompt cache (read-only after init)
+    int sys_prompt_len;
+    // Snapshot storage
+    float *kv_k_snapshots[NUM_LAYERS];
+    float *kv_v_snapshots[NUM_LAYERS];
+    int   kv_snapshot_len[NUM_LAYERS];
+    float *la_conv_snapshots[NUM_LAYERS];
+    float *la_ssm_snapshots[NUM_LAYERS];
+    void  *gpu_delta_snapshots[NUM_LINEAR_LAYERS];
+    void  *gpu_conv_snapshots[NUM_LINEAR_LAYERS];
+    // Session tracking (protected by session_mutex)
+    char active_session_id[64];
+    int  session_pos;
+    pthread_mutex_t session_mutex;
+} ServeState;
+
+// Forward declaration
+static void process_chat_request(ServeState *s, int client_fd,
+                                 const char *content, int max_gen,
+                                 const char *session_id, int has_session,
+                                 const char *request_id);
+
+// ============================================================================
+// Worker thread: dequeues requests and processes them sequentially
+// ============================================================================
+
+static void *serve_worker(void *arg) {
+    ServeState *s = (ServeState *)arg;
+    ServeQueue *q = &g_serve_queue;
+
+    for (;;) {
+        pthread_mutex_lock(&q->mutex);
+        while (q->count == 0 && !q->shutdown)
+            pthread_cond_wait(&q->cond, &q->mutex);
+        if (q->shutdown && q->count == 0) {
+            pthread_mutex_unlock(&q->mutex);
+            break;
+        }
+        ServeQueueEntry e = q->entries[q->head];
+        q->head = (q->head + 1) % SERVE_QUEUE_MAX;
+        q->count--;
+        pthread_mutex_unlock(&q->mutex);
+
+        process_chat_request(s, e.client_fd,
+                             e.content, e.max_gen,
+                             e.has_session ? e.session_id : NULL, e.has_session,
+                             e.request_id);
+
+        free(e.content);
+    }
+    return NULL;
+}
+
+// ============================================================================
+// process_chat_request — full generation pipeline for a single chat request
+// (extracted from serve_loop so the worker thread can call it)
+// ============================================================================
+
+static void process_chat_request(ServeState *s, int client_fd,
+                                 const char *content, int max_gen,
+                                 const char *session_id, int has_session,
+                                 const char *request_id) {
+
+    float *hidden = calloc(HIDDEN_DIM, sizeof(float));
+    float *logits = calloc(VOCAB_SIZE, sizeof(float));
+
+    int is_continuation = (has_session &&
+                           s->active_session_id[0] != '\0' &&
+                           strcmp(session_id, s->active_session_id) == 0);
+
+    fprintf(stderr, "[serve] %s content=%zu chars, max_tokens=%d, session=%s%s\n",
+            request_id, strlen(content), max_gen,
+            has_session ? session_id : "(none)",
+            is_continuation ? " [CONTINUE]" : " [NEW]");
+
+    // ---- Tokenize ----
+    PromptTokens *pt;
+    if (is_continuation) {
+        pt = tokenize_continuation_turn(content);
+    } else {
+        pt = tokenize_user_turn(content);
+    }
+    if (!pt) {
+        http_write_str(client_fd,
+            "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n"
+            "{\"error\":\"tokenization failed\"}\n");
+        free(hidden); free(logits); close(client_fd);
+        return;
+    }
+
+    fprintf(stderr, "[serve] %s prompt=%d tokens%s\n", request_id, pt->count,
+            is_continuation ? " (continuation — skipping snapshot restore)" : "");
+
+    size_t kv_dim = NUM_KV_HEADS * HEAD_DIM;
+    size_t conv_state_size = (CONV_KERNEL_SIZE - 1) * LINEAR_CONV_DIM * sizeof(float);
+    size_t ssm_state_size = LINEAR_NUM_V_HEADS * LINEAR_VALUE_DIM * LINEAR_KEY_DIM * sizeof(float);
+
+    int pos;
+    if (is_continuation) {
+        pos = s->session_pos;
+    } else {
+        // Restore state from system prompt snapshot
+        for (int i = 0; i < NUM_LAYERS; i++) {
+            if (s->kv_caches[i] && s->kv_k_snapshots[i]) {
+                size_t sz = s->sys_prompt_len * kv_dim * sizeof(float);
+                memcpy(s->kv_caches[i]->k_cache, s->kv_k_snapshots[i], sz);
+                memcpy(s->kv_caches[i]->v_cache, s->kv_v_snapshots[i], sz);
+                s->kv_caches[i]->len = s->kv_snapshot_len[i];
+                if (g_metal) {
+                    int fa_idx = (i + 1) / FULL_ATTN_INTERVAL - 1;
+                    if (fa_idx >= 0 && fa_idx < NUM_FULL_ATTN_LAYERS) {
+                        memcpy([g_metal->buf_kv_k[fa_idx] contents],
+                               s->kv_k_snapshots[i], sz);
+                        memcpy([g_metal->buf_kv_v[fa_idx] contents],
+                               s->kv_v_snapshots[i], sz);
+                    }
+                }
+            } else if (s->kv_caches[i]) {
+                s->kv_caches[i]->len = 0;
+            }
+            if (s->layer_states[i] && s->la_conv_snapshots[i]) {
+                LinearAttnState *ls = (LinearAttnState *)s->layer_states[i];
+                memcpy(ls->conv_state, s->la_conv_snapshots[i], conv_state_size);
+                memcpy(ls->ssm_state, s->la_ssm_snapshots[i], ssm_state_size);
+            } else if (s->layer_states[i]) {
+                LinearAttnState *ls = (LinearAttnState *)s->layer_states[i];
+                memset(ls->conv_state, 0, conv_state_size);
+                memset(ls->ssm_state, 0, ssm_state_size);
+            }
+        }
+        // Restore GPU delta-net state
+        if (g_metal && g_metal->delta_net_step) {
+            for (int i = 0; i < NUM_LINEAR_LAYERS; i++) {
+                if (s->gpu_delta_snapshots[i] && g_metal->buf_delta_state[i])
+                    memcpy([g_metal->buf_delta_state[i] contents],
+                           s->gpu_delta_snapshots[i], 32*128*128*sizeof(float));
+                if (s->gpu_conv_snapshots[i] && g_metal->buf_conv_state[i])
+                    memcpy([g_metal->buf_conv_state[i] contents],
+                           s->gpu_conv_snapshots[i], 3*LINEAR_CONV_DIM*sizeof(float));
+            }
+        } else {
+            reset_delta_net_state();
+        }
+        pos = s->sys_prompt_len;
+        // Update active session
+        pthread_mutex_lock(&s->session_mutex);
+        if (has_session) {
+            strncpy(s->active_session_id, session_id, sizeof(s->active_session_id) - 1);
+            s->active_session_id[sizeof(s->active_session_id) - 1] = '\0';
+        } else {
+            s->active_session_id[0] = '\0';
+        }
+        pthread_mutex_unlock(&s->session_mutex);
+    }
+    if (g_cache_telemetry_enabled) cache_telemetry_reset();
+
+    // ---- Send SSE headers ----
+    http_write_str(client_fd, SSE_HEADERS);
+
+    // ---- Batch prefill ----
+    double t_prefill = now_ms();
+    float *serve_embed_batch = NULL;
+    if (pt->count > 1) {
+        serve_embed_batch = malloc((size_t)pt->count * HIDDEN_DIM * sizeof(float));
+        for (int i = 0; i < pt->count; i++) {
+            embed_lookup(s->wf, pt->ids[i], serve_embed_batch + (size_t)i * HIDDEN_DIM);
+        }
+    }
+    for (int i = 0; i < pt->count - 1; i++) {
+        cache_telemetry_note_token();
+        if (serve_embed_batch) {
+            memcpy(hidden, serve_embed_batch + (size_t)i * HIDDEN_DIM,
+                   HIDDEN_DIM * sizeof(float));
+        } else {
+            embed_lookup(s->wf, pt->ids[i], hidden);
+        }
+        for (int layer = 0; layer < NUM_LAYERS; layer++) {
+            int is_full = ((layer + 1) % FULL_ATTN_INTERVAL == 0);
+            fused_layer_forward(s->wf, layer, hidden,
+                                is_full ? s->kv_caches[layer] : NULL,
+                                is_full ? NULL : s->layer_states[layer],
+                                pos,
+                                s->layer_mmaps[layer] != MAP_FAILED ? s->layer_mmaps[layer] : NULL,
+                                s->K, s->layer_fds[layer]);
+        }
+        discard_deferred_experts();
+        pos++;
+    }
+    // Last prefill token
+    {
+        cache_telemetry_note_token();
+        if (serve_embed_batch) {
+            memcpy(hidden, serve_embed_batch + (size_t)(pt->count - 1) * HIDDEN_DIM,
+                   HIDDEN_DIM * sizeof(float));
+        } else {
+            embed_lookup(s->wf, pt->ids[0], hidden);
+        }
+        for (int layer = 0; layer < NUM_LAYERS; layer++) {
+            int is_full = ((layer + 1) % FULL_ATTN_INTERVAL == 0);
+            fused_layer_forward(s->wf, layer, hidden,
+                                is_full ? s->kv_caches[layer] : NULL,
+                                is_full ? NULL : s->layer_states[layer],
+                                pos,
+                                s->layer_mmaps[layer] != MAP_FAILED ? s->layer_mmaps[layer] : NULL,
+                                s->K, s->layer_fds[layer]);
+        }
+        complete_deferred_experts();
+        pos++;
+    }
+    if (serve_embed_batch) { free(serve_embed_batch); serve_embed_batch = NULL; }
+    double prefill_ms = now_ms() - t_prefill;
+    fprintf(stderr, "[serve] %s prefill=%d tokens in %.0fms\n",
+            request_id, pt->count, prefill_ms);
+
+    // ---- Final norm + LM head for first token ----
+    if (s->final_norm_w) {
+        float *normed = malloc(HIDDEN_DIM * sizeof(float));
+        cpu_rms_norm(hidden, s->final_norm_w, normed, HIDDEN_DIM, RMS_NORM_EPS);
+        memcpy(hidden, normed, HIDDEN_DIM * sizeof(float));
+        free(normed);
+    }
+    lm_head_forward(s->wf, hidden, logits);
+    int next_token = cpu_argmax(logits, VOCAB_SIZE);
+
+    // ---- Auto-regressive generation with SSE streaming ----
+    if (g_pred_enabled) {
+        g_pred_generating = 1;
+        g_pred_valid = 0;
+    }
+    double t_gen = now_ms();
+    int gen_count = 0;
+    int in_think = 0;
+    int think_tokens = 0;
+    char *gen_response = calloc(1, 256 * 1024);
+    int gen_resp_len = 0;
+
+    for (int gen = 0; gen < max_gen; gen++) {
+        if (next_token == EOS_TOKEN_1 || next_token == EOS_TOKEN_2) {
+            cache_telemetry_note_token();
+            embed_lookup(s->wf, next_token, hidden);
+            for (int layer = 0; layer < NUM_LAYERS; layer++) {
+                int is_full = ((layer + 1) % FULL_ATTN_INTERVAL == 0);
+                fused_layer_forward(s->wf, layer, hidden,
+                                    is_full ? s->kv_caches[layer] : NULL,
+                                    is_full ? NULL : s->layer_states[layer],
+                                    pos,
+                                    s->layer_mmaps[layer] != MAP_FAILED ? s->layer_mmaps[layer] : NULL,
+                                    s->K, s->layer_fds[layer]);
+            }
+            discard_deferred_experts();
+            pos++;
+            break;
+        }
+
+        if (next_token == THINK_START_TOKEN) in_think = 1;
+        if (next_token == THINK_END_TOKEN) in_think = 0;
+        if (in_think) {
+            think_tokens++;
+            if (g_think_budget > 0 && think_tokens >= g_think_budget) {
+                next_token = THINK_END_TOKEN;
+                in_think = 0;
+            }
+        }
+
+        const char *tok_str = decode_token(s->vocab, next_token);
+        if (!in_think && tok_str && gen_resp_len + (int)strlen(tok_str) < 256*1024 - 1) {
+            int tlen = (int)strlen(tok_str);
+            memcpy(gen_response + gen_resp_len, tok_str, tlen);
+            gen_resp_len += tlen;
+            gen_response[gen_resp_len] = 0;
+        }
+        if (sse_send_delta(client_fd, request_id, tok_str) < 0) {
+            fprintf(stderr, "[serve] %s client disconnected, stopping generation\n", request_id);
+            break;
+        }
+        gen_count++;
+
+        cache_telemetry_note_token();
+        embed_lookup(s->wf, next_token, hidden);
+        for (int layer = 0; layer < NUM_LAYERS; layer++) {
+            int is_full = ((layer + 1) % FULL_ATTN_INTERVAL == 0);
+            fused_layer_forward(s->wf, layer, hidden,
+                                is_full ? s->kv_caches[layer] : NULL,
+                                is_full ? NULL : s->layer_states[layer],
+                                pos,
+                                s->layer_mmaps[layer] != MAP_FAILED ? s->layer_mmaps[layer] : NULL,
+                                s->K, s->layer_fds[layer]);
+        }
+        complete_deferred_experts();
+        pos++;
+
+        if (s->final_norm_w) {
+            float *normed = malloc(HIDDEN_DIM * sizeof(float));
+            cpu_rms_norm(hidden, s->final_norm_w, normed, HIDDEN_DIM, RMS_NORM_EPS);
+            memcpy(hidden, normed, HIDDEN_DIM * sizeof(float));
+            free(normed);
+        }
+        lm_head_forward(s->wf, hidden, logits);
+        next_token = cpu_argmax(logits, VOCAB_SIZE);
+    }
+
+    double gen_ms = now_ms() - t_gen;
+    sse_send_done(client_fd, request_id,
+                  pt->count, gen_count, prefill_ms, gen_ms);
+
+    free(gen_response);
+    // Save session position for potential continuation
+    pthread_mutex_lock(&s->session_mutex);
+    s->session_pos = pos;
+    pthread_mutex_unlock(&s->session_mutex);
+    fprintf(stderr, "[serve] %s session_pos=%d (session=%s)\n",
+            request_id, pos,
+            s->active_session_id[0] ? s->active_session_id : "(none)");
+
+    fprintf(stderr, "[serve] %s generated=%d tokens in %.0fms (%.2f tok/s)\n",
+            request_id, gen_count, gen_ms,
+            gen_count > 0 ? gen_count * 1000.0 / gen_ms : 0.0);
+    if (g_expert_cache) {
+        cache_telemetry_print(g_expert_cache->hits, g_expert_cache->misses);
+    } else if (g_malloc_cache) {
+        cache_telemetry_print(g_malloc_cache->hits, g_malloc_cache->misses);
+    }
+
+    free(pt->ids);
+    free(pt);
+    free(hidden);
+    free(logits);
+    close(client_fd);
+}
+
 static void serve_loop(
     int port,
     WeightFile *wf, Vocabulary *vocab,
@@ -6276,19 +6657,29 @@ static void serve_loop(
 
     printf("[serve] Listening on http://0.0.0.0:%d\n", port);
     printf("[serve] Endpoints: POST /v1/chat/completions, GET /v1/models, GET /health\n");
+    printf("[serve] Queue: max %d pending requests\n", SERVE_QUEUE_MAX);
     fflush(stdout);
 
     static uint64_t req_counter = 0;
 
+    // ---- Initialize ServeState ----
+    ServeState s_state;
+    memset(&s_state, 0, sizeof(s_state));
+    s_state.wf = wf;
+    s_state.vocab = vocab;
+    s_state.layer_states = layer_states;
+    s_state.kv_caches = kv_caches;
+    s_state.layer_mmaps = layer_mmaps;
+    s_state.layer_fds = layer_fds;
+    s_state.final_norm_w = final_norm_w;
+    s_state.K = K;
+    s_state.session_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+
     // ---- System prompt cache: prefill system prompt once at startup ----
-    // Tokenize the system prompt and run it through all 60 layers.
-    // Save the resulting KV cache + linear attention state as a snapshot.
-    // On each request, restore the snapshot instead of re-prefilling.
     fprintf(stderr, "[serve] Pre-caching system prompt...\n");
-    PromptTokens *sys_pt = tokenize_chat_message("");  // empty user = just system prompt
+    PromptTokens *sys_pt = tokenize_chat_message("");
     int sys_pos = 0;
     if (sys_pt && sys_pt->count > 0) {
-        // Pre-embed all system prompt tokens
         float *sys_embed_batch = NULL;
         if (sys_pt->count > 1) {
             sys_embed_batch = malloc((size_t)sys_pt->count * HIDDEN_DIM * sizeof(float));
@@ -6296,7 +6687,6 @@ static void serve_loop(
                 embed_lookup(wf, sys_pt->ids[i], sys_embed_batch + (size_t)i * HIDDEN_DIM);
             }
         }
-        // Intermediate system prompt tokens: discard last-layer expert output
         for (int i = 0; i < sys_pt->count - 1; i++) {
             cache_telemetry_note_token();
             if (sys_embed_batch) {
@@ -6317,7 +6707,6 @@ static void serve_loop(
             discard_deferred_experts();
             sys_pos++;
         }
-        // Last system prompt token: full completion
         {
             cache_telemetry_note_token();
             if (sys_embed_batch) {
@@ -6339,28 +6728,14 @@ static void serve_loop(
             sys_pos++;
         }
         if (sys_embed_batch) { free(sys_embed_batch); sys_embed_batch = NULL; }
-        // Sync CPU state → GPU for delta-net
         sync_cpu_to_gpu_delta_state_serve(layer_states);
         fprintf(stderr, "[serve] System prompt cached: %d tokens prefilled\n", sys_pos);
     }
     free(sys_pt);
 
-    // Save snapshot of KV caches + linear attention state after system prompt
-    // These are restored at the start of each request instead of resetting to zero
-    typedef struct {
-        float *k_snapshot;
-        float *v_snapshot;
-        int len;
-    } KVSnapshot;
-    KVSnapshot kv_snapshots[NUM_LAYERS];
-    memset(kv_snapshots, 0, sizeof(kv_snapshots));
+    s_state.sys_prompt_len = sys_pos;
 
-    // Linear attention snapshots
-    float *la_conv_snapshots[NUM_LAYERS];
-    float *la_ssm_snapshots[NUM_LAYERS];
-    memset(la_conv_snapshots, 0, sizeof(la_conv_snapshots));
-    memset(la_ssm_snapshots, 0, sizeof(la_ssm_snapshots));
-
+    // ---- Save snapshots into ServeState ----
     size_t kv_dim = NUM_KV_HEADS * HEAD_DIM;
     size_t conv_state_size = (CONV_KERNEL_SIZE - 1) * LINEAR_CONV_DIM * sizeof(float);
     size_t ssm_state_size = LINEAR_NUM_V_HEADS * LINEAR_VALUE_DIM * LINEAR_KEY_DIM * sizeof(float);
@@ -6368,70 +6743,67 @@ static void serve_loop(
     for (int i = 0; i < NUM_LAYERS; i++) {
         if (kv_caches[i]) {
             size_t sz = sys_pos * kv_dim * sizeof(float);
-            kv_snapshots[i].k_snapshot = malloc(sz);
-            kv_snapshots[i].v_snapshot = malloc(sz);
-            memcpy(kv_snapshots[i].k_snapshot, kv_caches[i]->k_cache, sz);
-            memcpy(kv_snapshots[i].v_snapshot, kv_caches[i]->v_cache, sz);
-            kv_snapshots[i].len = kv_caches[i]->len;
+            s_state.kv_k_snapshots[i] = malloc(sz);
+            s_state.kv_v_snapshots[i] = malloc(sz);
+            memcpy(s_state.kv_k_snapshots[i], kv_caches[i]->k_cache, sz);
+            memcpy(s_state.kv_v_snapshots[i], kv_caches[i]->v_cache, sz);
+            s_state.kv_snapshot_len[i] = kv_caches[i]->len;
         }
         if (layer_states[i]) {
-            LinearAttnState *s = (LinearAttnState *)layer_states[i];
-            la_conv_snapshots[i] = malloc(conv_state_size);
-            la_ssm_snapshots[i] = malloc(ssm_state_size);
-            memcpy(la_conv_snapshots[i], s->conv_state, conv_state_size);
-            memcpy(la_ssm_snapshots[i], s->ssm_state, ssm_state_size);
+            LinearAttnState *ls = (LinearAttnState *)layer_states[i];
+            s_state.la_conv_snapshots[i] = malloc(conv_state_size);
+            s_state.la_ssm_snapshots[i] = malloc(ssm_state_size);
+            memcpy(s_state.la_conv_snapshots[i], ls->conv_state, conv_state_size);
+            memcpy(s_state.la_ssm_snapshots[i], ls->ssm_state, ssm_state_size);
         }
     }
-    // Also snapshot GPU delta-net state
-    void *gpu_delta_snapshots[NUM_LINEAR_LAYERS];
-    void *gpu_conv_snapshots[NUM_LINEAR_LAYERS];
-    memset(gpu_delta_snapshots, 0, sizeof(gpu_delta_snapshots));
-    memset(gpu_conv_snapshots, 0, sizeof(gpu_conv_snapshots));
     if (g_metal && g_metal->delta_net_step) {
         for (int i = 0; i < NUM_LINEAR_LAYERS; i++) {
             if (g_metal->buf_delta_state[i]) {
                 size_t sz = 32*128*128*sizeof(float);
-                gpu_delta_snapshots[i] = malloc(sz);
-                memcpy(gpu_delta_snapshots[i], [g_metal->buf_delta_state[i] contents], sz);
+                s_state.gpu_delta_snapshots[i] = malloc(sz);
+                memcpy(s_state.gpu_delta_snapshots[i], [g_metal->buf_delta_state[i] contents], sz);
             }
             if (g_metal->buf_conv_state[i]) {
                 size_t sz = 3*LINEAR_CONV_DIM*sizeof(float);
-                gpu_conv_snapshots[i] = malloc(sz);
-                memcpy(gpu_conv_snapshots[i], [g_metal->buf_conv_state[i] contents], sz);
+                s_state.gpu_conv_snapshots[i] = malloc(sz);
+                memcpy(s_state.gpu_conv_snapshots[i], [g_metal->buf_conv_state[i] contents], sz);
             }
         }
     }
-    int sys_prompt_len = sys_pos;  // number of tokens in system prompt cache
 
-    // ---- Session state: track one active conversation session ----
-    // The KV caches + linear attention state ARE the session.
-    // We just track whether to restore from snapshot (new session) or continue (same session).
-    char active_session_id[64] = {0};
-    int session_pos = 0;  // RoPE position after last generation for the active session
+    // ---- Start worker thread ----
+    pthread_t worker;
+    if (pthread_create(&worker, NULL, serve_worker, &s_state) != 0) {
+        fprintf(stderr, "[serve] ERROR: failed to create worker thread\n");
+        close(server_fd);
+        return;
+    }
+    pthread_detach(worker);
+    fprintf(stderr, "[serve] Worker thread started\n");
 
+    // ---- Accept loop: enqueue POST requests, answer GET immediately ----
     for (;;) {
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
         int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
         if (client_fd < 0) { perror("accept"); continue; }
 
-        // Read HTTP request
-        char *reqbuf = malloc(1024 * 1024); // 1MB max request
+        char *reqbuf = malloc(1024 * 1024);
         int reqlen = read_http_request(client_fd, reqbuf, 1024 * 1024);
         if (reqlen <= 0) { free(reqbuf); close(client_fd); continue; }
 
-        // Parse method and path from first line
         char method[16] = {0}, path[256] = {0};
         sscanf(reqbuf, "%15s %255s", method, path);
 
-        // Handle CORS preflight
+        // CORS preflight
         if (strcmp(method, "OPTIONS") == 0) {
             http_write_str(client_fd, CORS_RESPONSE);
             free(reqbuf); close(client_fd);
             continue;
         }
 
-        // GET /health
+        // GET /health — always respond immediately
         if (strcmp(method, "GET") == 0 && strcmp(path, "/health") == 0) {
             const char *resp =
                 "HTTP/1.1 200 OK\r\n"
@@ -6439,13 +6811,13 @@ static void serve_loop(
                 "Access-Control-Allow-Origin: *\r\n"
                 "Connection: close\r\n"
                 "\r\n"
-                "{\"status\":\"ok\",\"model\":\"qwen3.5-397b-a17b\"}\n";
+                "{\"status\":\"ok\",\"model\":\"qwen3.6-35b-a3b\"}\n";
             http_write_str(client_fd, resp);
             free(reqbuf); close(client_fd);
             continue;
         }
 
-        // GET /v1/models
+        // GET /v1/models — always respond immediately
         if (strcmp(method, "GET") == 0 && strcmp(path, "/v1/models") == 0) {
             const char *resp =
                 "HTTP/1.1 200 OK\r\n"
@@ -6453,16 +6825,15 @@ static void serve_loop(
                 "Access-Control-Allow-Origin: *\r\n"
                 "Connection: close\r\n"
                 "\r\n"
-                "{\"object\":\"list\",\"data\":[{\"id\":\"qwen3.5-397b-a17b\","
+                "{\"object\":\"list\",\"data\":[{\"id\":\"qwen3.6-35b-a3b\","
                 "\"object\":\"model\",\"owned_by\":\"local\"}]}\n";
             http_write_str(client_fd, resp);
             free(reqbuf); close(client_fd);
             continue;
         }
 
-        // POST /v1/chat/completions
+        // POST /v1/chat/completions — enqueue for worker thread
         if (strcmp(method, "POST") == 0 && strcmp(path, "/v1/chat/completions") == 0) {
-            // Find body (after \r\n\r\n)
             char *body = strstr(reqbuf, "\r\n\r\n");
             if (!body) {
                 http_write_str(client_fd,
@@ -6472,14 +6843,12 @@ static void serve_loop(
             }
             body += 4;
 
-            // Extract session_id and max_tokens BEFORE content extraction
-            // (extract_last_content mutates the body buffer in place)
             int max_gen = extract_max_tokens(body, 8192);
             if (max_gen > 32768) max_gen = 32768;
+
             char req_session_id[64] = {0};
             int has_session = extract_session_id(body, req_session_id, sizeof(req_session_id));
 
-            // Extract user content from messages (mutates body — must be last)
             char *content = extract_last_content(body);
             if (!content || strlen(content) == 0) {
                 http_write_str(client_fd,
@@ -6487,279 +6856,55 @@ static void serve_loop(
                     "{\"error\":\"no content in messages\"}\n");
                 free(reqbuf); close(client_fd); continue;
             }
-            int is_continuation = (has_session &&
-                                   active_session_id[0] != '\0' &&
-                                   strcmp(req_session_id, active_session_id) == 0);
-
-            // Session persistence is handled by the client (chat.m)
 
             char request_id[64];
             snprintf(request_id, sizeof(request_id), "chatcmpl-%llu", ++req_counter);
 
-            fprintf(stderr, "[serve] %s content=%zu chars, max_tokens=%d, session=%s%s\n",
-                    request_id, strlen(content), max_gen,
-                    has_session ? req_session_id : "(none)",
-                    is_continuation ? " [CONTINUE]" : " [NEW]");
-
-            // ---- Tokenize ----
-            // Continuation: prefix with <|im_end|>\n to close prior assistant turn
-            // New session: just the user turn (system prompt restored from snapshot)
-            PromptTokens *pt;
-            if (is_continuation) {
-                pt = tokenize_continuation_turn(content);
-            } else {
-                pt = tokenize_user_turn(content);
-            }
-            if (!pt) {
-                http_write_str(client_fd,
-                    "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n"
-                    "{\"error\":\"tokenization failed\"}\n");
+            // Try to enqueue
+            pthread_mutex_lock(&g_serve_queue.mutex);
+            if (g_serve_queue.count >= SERVE_QUEUE_MAX) {
+                pthread_mutex_unlock(&g_serve_queue.mutex);
+                // Queue full — return 503
+                char busy_resp[512];
+                int nr = snprintf(busy_resp, sizeof(busy_resp),
+                    "HTTP/1.1 503 Service Unavailable\r\n"
+                    "Content-Type: application/json\r\n"
+                    "Access-Control-Allow-Origin: *\r\n"
+                    "Retry-After: 3\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                    "{\"error\":\"server busy\",\"queue_depth\":%d,\"retry_after_s\":3}\n",
+                    SERVE_QUEUE_MAX);
+                http_write(client_fd, busy_resp, nr);
+                fprintf(stderr, "[serve] %s 503 queue full (depth=%d)\n",
+                        request_id, SERVE_QUEUE_MAX);
                 free(reqbuf); close(client_fd); continue;
             }
 
-            fprintf(stderr, "[serve] %s prompt=%d tokens%s\n", request_id, pt->count,
-                    is_continuation ? " (continuation — skipping snapshot restore)" : "");
-
-            int pos;
-            if (is_continuation) {
-                // ---- Continue from existing session state ----
-                // The KV caches + linear attention state already contain the full
-                // conversation history. Just set pos to where we left off.
-                pos = session_pos;
+            int slot = g_serve_queue.tail;
+            g_serve_queue.entries[slot].client_fd = client_fd;
+            g_serve_queue.entries[slot].content = strdup(content);
+            g_serve_queue.entries[slot].max_gen = max_gen;
+            if (has_session) {
+                strncpy(g_serve_queue.entries[slot].session_id, req_session_id, 63);
+                g_serve_queue.entries[slot].session_id[63] = '\0';
             } else {
-                // ---- Restore state from system prompt snapshot ----
-                // Instead of resetting to zero, restore to the cached system prompt state.
-                // This skips re-prefilling the system prompt tokens (~20 tokens, ~6s saved).
-                for (int i = 0; i < NUM_LAYERS; i++) {
-                    if (kv_caches[i] && kv_snapshots[i].k_snapshot) {
-                        size_t sz = sys_prompt_len * kv_dim * sizeof(float);
-                        memcpy(kv_caches[i]->k_cache, kv_snapshots[i].k_snapshot, sz);
-                        memcpy(kv_caches[i]->v_cache, kv_snapshots[i].v_snapshot, sz);
-                        kv_caches[i]->len = kv_snapshots[i].len;
-                        // Also restore GPU KV mirror
-                        if (g_metal) {
-                            int fa_idx = (i + 1) / FULL_ATTN_INTERVAL - 1;
-                            if (fa_idx >= 0 && fa_idx < NUM_FULL_ATTN_LAYERS) {
-                                memcpy([g_metal->buf_kv_k[fa_idx] contents],
-                                       kv_snapshots[i].k_snapshot, sz);
-                                memcpy([g_metal->buf_kv_v[fa_idx] contents],
-                                       kv_snapshots[i].v_snapshot, sz);
-                            }
-                        }
-                    } else if (kv_caches[i]) {
-                        kv_caches[i]->len = 0;
-                    }
-                    if (layer_states[i] && la_conv_snapshots[i]) {
-                        LinearAttnState *s = (LinearAttnState *)layer_states[i];
-                        memcpy(s->conv_state, la_conv_snapshots[i], conv_state_size);
-                        memcpy(s->ssm_state, la_ssm_snapshots[i], ssm_state_size);
-                    } else if (layer_states[i]) {
-                        LinearAttnState *s = (LinearAttnState *)layer_states[i];
-                        memset(s->conv_state, 0, conv_state_size);
-                        memset(s->ssm_state, 0, ssm_state_size);
-                    }
-                }
-                // Restore GPU delta-net state
-                if (g_metal && g_metal->delta_net_step) {
-                    for (int i = 0; i < NUM_LINEAR_LAYERS; i++) {
-                        if (gpu_delta_snapshots[i] && g_metal->buf_delta_state[i])
-                            memcpy([g_metal->buf_delta_state[i] contents],
-                                   gpu_delta_snapshots[i], 32*128*128*sizeof(float));
-                        if (gpu_conv_snapshots[i] && g_metal->buf_conv_state[i])
-                            memcpy([g_metal->buf_conv_state[i] contents],
-                                   gpu_conv_snapshots[i], 3*LINEAR_CONV_DIM*sizeof(float));
-                    }
-                } else {
-                    reset_delta_net_state();
-                }
-                pos = sys_prompt_len;  // start after cached system prompt
-                // Update active session
-                if (has_session) {
-                    strncpy(active_session_id, req_session_id, sizeof(active_session_id) - 1);
-                    active_session_id[sizeof(active_session_id) - 1] = '\0';
-                } else {
-                    active_session_id[0] = '\0';
-                }
+                g_serve_queue.entries[slot].session_id[0] = '\0';
             }
-            if (g_cache_telemetry_enabled) cache_telemetry_reset();
+            g_serve_queue.entries[slot].has_session = has_session;
+            strncpy(g_serve_queue.entries[slot].request_id, request_id, 63);
+            g_serve_queue.entries[slot].request_id[63] = '\0';
 
-            // ---- Send SSE headers ----
-            http_write_str(client_fd, SSE_HEADERS);
+            g_serve_queue.tail = (g_serve_queue.tail + 1) % SERVE_QUEUE_MAX;
+            g_serve_queue.count++;
+            pthread_cond_signal(&g_serve_queue.cond);
+            int qdepth = g_serve_queue.count;
+            pthread_mutex_unlock(&g_serve_queue.mutex);
 
-            // ---- Batch prefill ----
-            double t_prefill = now_ms();
-            // Pre-embed all request tokens
-            float *serve_embed_batch = NULL;
-            if (pt->count > 1) {
-                serve_embed_batch = malloc((size_t)pt->count * HIDDEN_DIM * sizeof(float));
-                for (int i = 0; i < pt->count; i++) {
-                    embed_lookup(wf, pt->ids[i], serve_embed_batch + (size_t)i * HIDDEN_DIM);
-                }
-            }
-            // Intermediate prefill tokens: discard last-layer expert output
-            for (int i = 0; i < pt->count - 1; i++) {
-                cache_telemetry_note_token();
-                if (serve_embed_batch) {
-                    memcpy(hidden, serve_embed_batch + (size_t)i * HIDDEN_DIM,
-                           HIDDEN_DIM * sizeof(float));
-                } else {
-                    embed_lookup(wf, pt->ids[i], hidden);
-                }
-                for (int layer = 0; layer < NUM_LAYERS; layer++) {
-                    int is_full = ((layer + 1) % FULL_ATTN_INTERVAL == 0);
-                    fused_layer_forward(wf, layer, hidden,
-                                        is_full ? kv_caches[layer] : NULL,
-                                        is_full ? NULL : layer_states[layer],
-                                        pos,
-                                        layer_mmaps[layer] != MAP_FAILED ? layer_mmaps[layer] : NULL,
-                                        K, layer_fds[layer]);
-                }
-                discard_deferred_experts();
-                pos++;
-            }
-            // Last prefill token: full completion (need hidden for logits)
-            {
-                cache_telemetry_note_token();
-                if (serve_embed_batch) {
-                    memcpy(hidden, serve_embed_batch + (size_t)(pt->count - 1) * HIDDEN_DIM,
-                           HIDDEN_DIM * sizeof(float));
-                } else {
-                    embed_lookup(wf, pt->ids[0], hidden);
-                }
-                for (int layer = 0; layer < NUM_LAYERS; layer++) {
-                    int is_full = ((layer + 1) % FULL_ATTN_INTERVAL == 0);
-                    fused_layer_forward(wf, layer, hidden,
-                                        is_full ? kv_caches[layer] : NULL,
-                                        is_full ? NULL : layer_states[layer],
-                                        pos,
-                                        layer_mmaps[layer] != MAP_FAILED ? layer_mmaps[layer] : NULL,
-                                        K, layer_fds[layer]);
-                }
-                complete_deferred_experts();
-                pos++;
-            }
-            if (serve_embed_batch) { free(serve_embed_batch); serve_embed_batch = NULL; }
-            double prefill_ms = now_ms() - t_prefill;
-            fprintf(stderr, "[serve] %s prefill=%d tokens in %.0fms\n",
-                    request_id, pt->count, prefill_ms);
-
-            // ---- Final norm + LM head for first token ----
-            if (final_norm_w) {
-                float *normed = malloc(HIDDEN_DIM * sizeof(float));
-                cpu_rms_norm(hidden, final_norm_w, normed, HIDDEN_DIM, RMS_NORM_EPS);
-                memcpy(hidden, normed, HIDDEN_DIM * sizeof(float));
-                free(normed);
-            }
-            lm_head_forward(wf, hidden, logits);
-            int next_token = cpu_argmax(logits, VOCAB_SIZE);
-
-            // ---- Auto-regressive generation with SSE streaming ----
-            if (g_pred_enabled) {
-                g_pred_generating = 1;
-                g_pred_valid = 0;
-            }
-            double t_gen = now_ms();
-            int gen_count = 0;
-            int in_think = 0;
-            int think_tokens = 0;
-            // Accumulate response for session persistence
-            char *gen_response = calloc(1, 256 * 1024);
-            int gen_resp_len = 0;
-
-            for (int gen = 0; gen < max_gen; gen++) {
-                if (next_token == EOS_TOKEN_1 || next_token == EOS_TOKEN_2) {
-                    // Feed EOS through the model so session state includes it
-                    cache_telemetry_note_token();
-                    embed_lookup(wf, next_token, hidden);
-                    for (int layer = 0; layer < NUM_LAYERS; layer++) {
-                        int is_full = ((layer + 1) % FULL_ATTN_INTERVAL == 0);
-                        fused_layer_forward(wf, layer, hidden,
-                                            is_full ? kv_caches[layer] : NULL,
-                                            is_full ? NULL : layer_states[layer],
-                                            pos,
-                                            layer_mmaps[layer] != MAP_FAILED ? layer_mmaps[layer] : NULL,
-                                            K, layer_fds[layer]);
-                    }
-                    discard_deferred_experts();
-                    pos++;
-                    break;
-                }
-
-                // Think budget enforcement
-                if (next_token == THINK_START_TOKEN) in_think = 1;
-                if (next_token == THINK_END_TOKEN) in_think = 0;
-                if (in_think) {
-                    think_tokens++;
-                    if (g_think_budget > 0 && think_tokens >= g_think_budget) {
-                        next_token = THINK_END_TOKEN;  // force end thinking
-                        in_think = 0;
-                    }
-                }
-
-                const char *tok_str = decode_token(vocab, next_token);
-                // Accumulate non-thinking response for session persistence
-                if (!in_think && tok_str && gen_resp_len + (int)strlen(tok_str) < 256*1024 - 1) {
-                    int tlen = (int)strlen(tok_str);
-                    memcpy(gen_response + gen_resp_len, tok_str, tlen);
-                    gen_resp_len += tlen;
-                    gen_response[gen_resp_len] = 0;
-                }
-                if (sse_send_delta(client_fd, request_id, tok_str) < 0) {
-                    fprintf(stderr, "[serve] %s client disconnected, stopping generation\n", request_id);
-                    break;
-                }
-                gen_count++;
-
-                // Generate next
-                cache_telemetry_note_token();
-                embed_lookup(wf, next_token, hidden);
-                for (int layer = 0; layer < NUM_LAYERS; layer++) {
-                    int is_full = ((layer + 1) % FULL_ATTN_INTERVAL == 0);
-                    fused_layer_forward(wf, layer, hidden,
-                                        is_full ? kv_caches[layer] : NULL,
-                                        is_full ? NULL : layer_states[layer],
-                                        pos,
-                                        layer_mmaps[layer] != MAP_FAILED ? layer_mmaps[layer] : NULL,
-                                        K, layer_fds[layer]);
-                }
-                complete_deferred_experts();
-                pos++;
-
-                if (final_norm_w) {
-                    float *normed = malloc(HIDDEN_DIM * sizeof(float));
-                    cpu_rms_norm(hidden, final_norm_w, normed, HIDDEN_DIM, RMS_NORM_EPS);
-                    memcpy(hidden, normed, HIDDEN_DIM * sizeof(float));
-                    free(normed);
-                }
-                lm_head_forward(wf, hidden, logits);
-                next_token = cpu_argmax(logits, VOCAB_SIZE);
-            }
-
-            sse_send_done(client_fd, request_id);
-
-            // ---- Save session state ----
-            free(gen_response);
-            // The KV caches + linear attention state already contain this conversation.
-            // Just record the position so the next request can continue from here.
-            session_pos = pos;
-            fprintf(stderr, "[serve] %s session_pos=%d (session=%s)\n",
-                    request_id, session_pos,
-                    active_session_id[0] ? active_session_id : "(none)");
-
-            double gen_ms = now_ms() - t_gen;
-            fprintf(stderr, "[serve] %s generated=%d tokens in %.0fms (%.2f tok/s)\n",
-                    request_id, gen_count, gen_ms,
-                    gen_count > 0 ? gen_count * 1000.0 / gen_ms : 0.0);
-            if (g_expert_cache) {
-                cache_telemetry_print(g_expert_cache->hits, g_expert_cache->misses);
-            } else if (g_malloc_cache) {
-                cache_telemetry_print(g_malloc_cache->hits, g_malloc_cache->misses);
-            }
-
-            free(pt->ids);
-            free(pt);
+            fprintf(stderr, "[serve] %s enqueued (depth=%d/%d)\n",
+                    request_id, qdepth, SERVE_QUEUE_MAX);
             free(reqbuf);
-            close(client_fd);
+            // Note: client_fd is NOT closed — worker thread will close it after generation
             continue;
         }
 
@@ -6805,6 +6950,8 @@ static void print_usage(const char *prog) {
     printf("  --cpu-experts        Use CPU expert path for debugging (~2 tok/s)\n");
     printf("  --compare-experts N  Compare GPU vs CPU expert outputs for layer N\n");
     printf("  --serve PORT         Run HTTP server (OpenAI-compatible API)\n");
+    printf("  --max-seq-len N      Max context length for KV cache (default: 262144 = 256K, model limit)\n");
+    printf("  --gpu-kv-seq N       GPU KV buffer pre-allocation in tokens (default: 8192)\n");
     printf("  --help               This message\n");
 }
 
@@ -6849,12 +6996,14 @@ int main(int argc, char **argv) {
             {"cpu-experts",   no_argument,       0, 'V'},
             {"compare-experts", required_argument, 0, 'Y'},
             {"collect-routing", required_argument, 0, 'Z'},
+            {"max-seq-len",   required_argument, 0, 'N'},
+            {"gpu-kv-seq",    required_argument, 0, 'Q'},
             {"help",          no_argument,       0, 'h'},
             {0, 0, 0, 0}
         };
 
         int c;
-        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:LSTFE2GhXUY:V", long_options, NULL)) != -1) {
+        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:N:Q:LSTFE2GhXUY:V", long_options, NULL)) != -1) {
             switch (c) {
                 case 'm': model_path = optarg; break;
                 case 'w': weights_path = optarg; break;
@@ -6886,6 +7035,8 @@ int main(int argc, char **argv) {
                     }
                     break;
                 case 'B': g_think_budget = atoi(optarg); break;
+                case 'N': g_max_seq_len = atoi(optarg); break;
+                case 'Q': g_gpu_kv_seq = atoi(optarg); break;
                 case 'R': serve_port = atoi(optarg); break;
                 case 'h': print_usage(argv[0]); return 0;
                 default:  print_usage(argv[0]); return 1;
@@ -6960,6 +7111,8 @@ int main(int argc, char **argv) {
             printf("Cache:    %d entries%s\n", cache_entries,
                    cache_entries > 0 ? "" : " (disabled)");
         }
+        printf("Context:  max_seq=%d (%.0fK tokens), GPU_KV=%d tokens\n",
+               g_max_seq_len, g_max_seq_len / 1000.0, g_gpu_kv_seq);
 
         double t0 = now_ms();
 
@@ -7156,6 +7309,11 @@ int main(int argc, char **argv) {
 
         // ---- Serve mode: enter HTTP server loop (never returns) ----
         if (serve_port > 0) {
+            double gpu_kv_gb = (double)g_gpu_kv_seq * NUM_KV_HEADS * HEAD_DIM * sizeof(float)
+                               * NUM_FULL_ATTN_LAYERS * 2 / 1e9;
+            printf("[config] Context: max_seq=%d (%.0fK), gpu_kv=%d tokens (%.1f GB GPU KV buffers)\n",
+                   g_max_seq_len, g_max_seq_len / 1000.0,
+                   g_gpu_kv_seq, gpu_kv_gb);
             reset_delta_net_state();
             serve_loop(serve_port, wf, vocab,
                        layer_states, kv_caches,

@@ -92,15 +92,16 @@ finchMoE/
 ├── BUGS.md                # Bug documentation and lessons learned
 ├── design.md              # Detailed design document
 ├── finchmoe/              # FinchMoE inference engine (adapted from flash-moe)
-│   ├── infer.m            #   Main engine (~7100 lines C/Metal)
+│   ├── infer.m            #   Main engine (~7800 lines C/Metal, includes HTTP server)
 │   ├── shaders.metal      #   Metal compute kernels (~1300 lines)
 │   ├── Makefile           #   Build system
+│   ├── chat.m             #   Interactive chat TUI (streaming markdown, sessions)
+│   ├── tokenizer.h        #   C BPE tokenizer (248K vocab)
+│   ├── linenoise.c/h      #   Line editing + history
 │   ├── extract_weights.py #   Non-expert weight extraction
-│   ├── repack_experts.py  #   Expert weight repacking
+│   ├── repack_experts.py  #   Expert weight repacking (dtype-aware)
 │   ├── generate_expert_index.py # Expert index generator
-│   ├── chat.m             #   Interactive chat TUI
-│   ├── tokenizer.h        #   C BPE tokenizer
-│   └── export_tokenizer.py#   Tokenizer export utility
+│   └── quantize_model.py  #   BF16 → MLX 4-bit quantization
 ├── flash-moe/             # Starting codebase (Qwen3.5-397B engine, unmodified)
 ├── turbo-fieldfare/       # Performance benchmark (Swift, Gemma 4)
 ├── omlx/                  # Qwen-specific Metal kernel reference
@@ -129,25 +130,61 @@ finchMoE/
 - [x] GPU expert path verified bit-identical to CPU (`--compare-experts`)
 - [x] Engine runs at **10–15 tok/s** on M4 (GPU experts + GPU delta-net, default)
 - [x] Coherent output — produces grammatical English text completions
+- [x] **HTTP server with OpenAI-compatible API** (`--serve PORT`)
+- [x] **Request queue** — concurrent clients queued, 503 when full
+- [x] **Configurable context window** (`--max-seq-len`, `--gpu-kv-seq`)
+- [x] **Performance stats in SSE stream** (prompt/generation tok/s, prefill time)
+- [x] **Chat template** — `<|im_start|>` wrapping for Q&A behavior
+- [x] **Built-in TUI chat client** (`./chat`)
 - [ ] 397B baseline (downloaded, not yet tested)
 - [ ] KV cache quant, MTP, TurboQuant, flash attention optimizations
 - [ ] iOS port (A-series chips)
 
 ## Running the Engine
 
+### Quick Start
+
+If you already have a prepared model (pre-quantized or self-quantized):
+
+```bash
+cd finchmoe
+make                          # Build engine + chat client
+./finchmoe-infer --serve 9000 # Start OpenAI-compatible API server
+```
+
+Then test it:
+
+```bash
+# Health check
+curl http://localhost:9000/health
+
+# Generate
+curl -N -X POST http://localhost:9000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Hello!"}],"max_tokens":100,"stream":true}'
+```
+
+Or use the built-in TUI:
+
+```bash
+./chat --port 9000
+```
+
 ### Build
 
 ```bash
 cd finchmoe
 make          # Build finchmoe-infer
-make chat     # Build interactive chat TUI (optional)
+make chat     # Build interactive chat TUI
 ```
 
 Requires: Xcode Command Line Tools (`xcode-select --install`), macOS 14+.
 
 ### Model Preparation
 
-If you've downloaded a pre-quantized model from mlx-community or self-quantized with `quantize_model.py`, run these one-time preparation steps:
+**Option A: Pre-quantized model (recommended)**
+
+Download a pre-quantized model (e.g. from mlx-community), then run the one-time preparation:
 
 ```bash
 cd finchmoe
@@ -156,12 +193,27 @@ make index MODEL_DIR=../models/Qwen3.6-35B-A3B-4bit-custom
 make repack
 ```
 
+**Option B: Self-quantize from BF16**
+
+If you have the original BF16 model (~67 GB):
+
+```bash
+cd finchmoe
+python3 quantize_model.py \
+  --model ../models/Qwen3.6-35B-A3B-bf16 \
+  --output ../models/Qwen3.6-35B-A3B-4bit-custom \
+  --bits 4
+make extract MODEL_DIR=../models/Qwen3.6-35B-A3B-4bit-custom
+make index MODEL_DIR=../models/Qwen3.6-35B-A3B-4bit-custom
+make repack
+```
+
 This produces:
 - `model_weights.bin` / `model_weights.json` — non-expert weights (mmap'd at startup)
 - `expert_index.json` — expert tensor layout, offsets, and shapes
-- `packed_experts/layer_00.bin` … `layer_39.bin` — 4-bit expert weights per layer
+- `packed_experts/layer_00.bin` … `layer_39.bin` — 4-bit expert weights per layer (~16.9 GB total)
 
-### Basic Usage
+### Basic Usage (CLI)
 
 ```bash
 cd finchmoe
@@ -171,23 +223,164 @@ cd finchmoe
 
 The engine auto-detects `model_weights.bin`, `vocab.bin`, and `../models/Qwen3.6-35B-A3B-4bit-custom/packed_experts/` relative to the current directory. Override with `--model`, `--weights`, `--manifest`, or `--vocab`.
 
+**Note:** CLI mode sends prompts as-is (base model completions). For Q&A behavior, use Server Mode which automatically wraps prompts in the Qwen chat template.
+
+### Server Mode (OpenAI-Compatible API)
+
+Start FinchMoE as a standalone HTTP server — works with Open WebUI, Continue.dev, Jan, LM Studio, and any OpenAI-compatible client.
+
+```bash
+cd finchmoe
+
+# Basic server (default context: 256K max, 8K GPU-accelerated)
+./finchmoe-infer --serve 9000
+
+# Agentic workloads: 100K GPU context, full 256K window
+./finchmoe-infer --serve 9000 --gpu-kv-seq 100000 --max-seq-len 262144
+```
+
+Then connect any tool to `http://localhost:9000/v1`.
+
+#### API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/chat/completions` | Streaming chat completions (SSE) |
+| `GET` | `/v1/models` | Model list |
+| `GET` | `/health` | Health check + model name |
+
+#### Chat Completions
+
+```bash
+# Streaming (SSE)
+curl -N -X POST http://localhost:9000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "Explain quantum computing in one sentence."}],
+    "max_tokens": 200,
+    "stream": true
+  }'
+
+# Multi-turn with session persistence
+curl -N -X POST http://localhost:9000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "Follow-up question..."}],
+    "max_tokens": 200,
+    "stream": true,
+    "session_id": "my-session-42"
+  }'
+```
+
+Each SSE response includes a `usage` block with timing stats in the final chunk:
+
+```json
+{
+  "id": "chatcmpl-1",
+  "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+  "usage": {
+    "prompt_tokens": 25,
+    "completion_tokens": 350,
+    "total_tokens": 375,
+    "prefill_ms": 62,
+    "generation_ms": 23000,
+    "tokens_per_second": 15.2
+  }
+}
+```
+
+#### Request Queue
+
+The server uses a **worker thread + FIFO queue** for concurrent clients:
+
+- **Idle**: Request is picked up immediately, response streams in real-time
+- **Busy**: Request is enqueued (up to 16 deep), connection held open, processed in order
+- **Overflow**: Returns `HTTP 503` with `Retry-After: 3` and `{"error": "server busy", "queue_depth": 16}`
+- **Health checks** (`GET /health`) and **model list** (`GET /v1/models`) always respond instantly — they bypass the queue
+
+This means tools like Open WebUI can fire off multiple requests without connection errors. If the queue overflows, the client gets a proper retry hint rather than a dropped connection.
+
+#### Built-in Chat Client
+
+```bash
+cd finchmoe
+./chat                 # Connect to localhost:9000 (default)
+./chat --port 9000     # Explicit port
+./chat --show-think    # Show <think> blocks (dimmed)
+./chat --resume ID     # Resume a previous session
+./chat --sessions      # List saved sessions
+```
+
+Features: streaming markdown rendering (bold, italic, code blocks, headers), session persistence to `~/.flash-moe/sessions/`, command history via linenoise.
+
+#### System Prompt
+
+Customize the system prompt by creating `~/.flash-moe/system.md`. The server hot-loads it at startup and pre-caches it so every request starts from the cached system prompt state (saves ~6 seconds of prefill).
+
+Default: `"You are a helpful assistant."`
+
+#### Tool Integration Examples
+
+**Open WebUI:**
+```bash
+OPENAI_API_BASE=http://localhost:9000/v1 OPENAI_API_KEY=not-needed open-webui
+```
+
+**Continue.dev (VS Code):**
+```json
+{
+  "models": [{
+    "title": "FinchMoE Qwen3.6",
+    "provider": "openai",
+    "apiBase": "http://localhost:9000/v1",
+    "apiKey": "not-needed"
+  }]
+}
+```
+
+**ChatGPT-style web UI** — any frontend that speaks OpenAI-compatible `/v1/chat/completions` will work. Point it at `http://localhost:9000/v1`.
+
 ### Key Flags
 
 | Flag | Purpose |
 |---|---|
 | `--prompt TEXT` | Input prompt text |
-| `--tokens N` | Max tokens to generate (default: 20) |
+| `--tokens N` | Max tokens to generate (default: 20, max: 32768) |
 | `--timing` | Per-layer timing breakdown |
 | `--k N` | Active experts per layer (default: 4) |
-| `--cache-entries N` | Expert LRU Metal cache size (default: 2500, 0=disabled) |
+| `--cache-entries N` | Expert LRU Metal cache size (default: 0 = trust OS page cache) |
 | `--cpu-linear` | CPU delta-net path (disable fused GPU path) |
 | `--cpu-experts` | CPU expert path (~2 tok/s, for debugging correctness) |
 | `--debug-layers` | Print hidden state statistics per layer |
 | `--compare-experts N` | Verify GPU vs CPU expert outputs for layer N |
 | `--freq` | Expert frequency tracking + analysis |
-| `--serve PORT` | Run as HTTP server (OpenAI-compatible `/v1/chat/completions`) |
-| `--think-budget N` | Max thinking tokens before force `</think>` (default: 2048) |
+| `--serve PORT` | Run as HTTP server (OpenAI-compatible API, default port: 9000) |
+| `--max-seq-len N` | Max context length for KV cache (default: 262144 = 256K, model's RoPE limit) |
+| `--gpu-kv-seq N` | GPU KV buffer pre-allocation in tokens (default: 8192, falls back to CPU past this) |
+| `--think-budget N` | Max thinking tokens before force `<`/`think>` (default: 2048, 0=unlimited) |
 | `--model PATH` | Model directory containing `packed_experts/` |
+
+#### Context Window Configuration
+
+The engine has two context-length knobs:
+
+| Flag | Default | What it controls |
+|---|---|---|
+| `--max-seq-len` | 262,144 (256K) | KV cache allocation cap. Matches the model's `max_position_embeddings` — the RoPE embeddings are trained for 256K and cannot generalize beyond without YaRN scaling. |
+| `--gpu-kv-seq` | 8,192 | GPU Metal buffer pre-allocation for accelerated attention. Past this limit, attention **automatically falls back to CPU** — the engine doesn't crash, it just slows down. |
+
+The 256K limit comes directly from the model config (`max_position_embeddings: 262144`). Both Qwen 3.6 35B and Qwen 3.5 397B share this limit. Setting `--max-seq-len` higher won't help — the RoPE embeddings have no signal beyond 256K.
+
+For agentic workloads with long context:
+
+```bash
+# 100K GPU-accelerated context, full 256K max
+./finchmoe-infer --serve 9000 --gpu-kv-seq 100000 --max-seq-len 262144
+```
+
+GPU KV buffers at 100K tokens: ~4.1 GB (10 full-attention layers × 2 (K+V) × 512 dims × 4 bytes × 100K tokens).
+
+The 30 GatedDeltaNet layers have **no length limit** — they use a fixed-size recurrent matrix, not a growing KV cache.
 
 ### Running Benchmarks
 
@@ -252,7 +445,13 @@ Same Samsung 990 Plus NVMe via Thunderbolt 4 enclosure.
 
 ## Known Limitations
 
-**Base model behavior**: Qwen 3.6 35B A3B is a base (pre-trained) model, not instruction-tuned. Without the Qwen chat template (`<|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n<think>\n`), it produces next-token completions rather than direct answers. Output quality varies with temperature sampling (default 0.8). For Q&A use, pipe prompts through the chat template first.
+**Base model behavior**: Qwen 3.6 35B A3B is a base (pre-trained) model, not instruction-tuned. The server automatically wraps prompts in the Qwen chat template (`<|im_start|>system\n...<|im_end|>\n<|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n`). For direct CLI use (`--prompt`), prompts are sent as-is (base model completions) — use `--serve` for Q&A behavior.
+
+**Single-worker generation**: The worker thread processes one request at a time. Concurrent requests are queued (up to 16), then get HTTP 503. This is fine for personal use and agentic workloads (tools typically send one request at a time and wait for the response). For high-throughput multi-user serving, continuous batching would be needed.
+
+**GPU context limit**: GPU-accelerated attention caps at `--gpu-kv-seq` tokens (default: 8,192). Past this, the engine falls back to CPU attention automatically — slower but functionally correct. Increase with `--gpu-kv-seq` if you have GPU memory headroom.
+
+**No sampling controls yet**: Temperature, top-p, top-k are not exposed. The engine always uses greedy decoding (argmax). This is fine for factual/agentic use cases but limits creative diversity.
 
 ## Bugs & Debugging
 

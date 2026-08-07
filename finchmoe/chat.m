@@ -6,7 +6,7 @@
  * Resume with: ./chat --resume <session_id>
  *
  * Build:  make chat
- * Run:    ./chat [--port 8000] [--show-think] [--resume <id>]
+ * Run:    ./chat [--port 9000] [--show-think] [--resume <id>]
  */
 
 #import <Foundation/Foundation.h>
@@ -489,7 +489,7 @@ static char *stream_response(int sock, int show_thinking) {
 // ============================================================================
 
 int main(int argc, char **argv) {
-    int port = 8000;
+    int port = 9000;
     int max_tokens = 8192;
     int show_thinking = 0;
     const char *resume_id = NULL;
@@ -516,7 +516,7 @@ int main(int argc, char **argv) {
             case 'l': session_list(); return 0;
             case 'h':
                 printf("Usage: %s [options]\n", argv[0]);
-                printf("  --port N         Server port (default: 8000)\n");
+                printf("  --port N         Server port (default: 9000)\n");
                 printf("  --max-tokens N   Max response tokens (default: 8192)\n");
                 printf("  --show-think     Show <think> blocks (dimmed)\n");
                 printf("  --resume ID      Resume a previous session\n");
@@ -536,7 +536,7 @@ int main(int argc, char **argv) {
     }
 
     printf("==================================================\n");
-    printf("  Qwen3.5-397B-A17B Chat (Flash-MoE)\n");
+    printf("  Qwen3.6-35B-A3B Chat (FinchMoE)\n");
     printf("==================================================\n");
     printf("  Server:  http://localhost:%d\n", port);
     printf("  Session: %s%s\n", session_id, resume_id ? " (resumed)" : "");
