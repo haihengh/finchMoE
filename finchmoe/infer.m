@@ -639,7 +639,57 @@ static const char *decode_token(Vocabulary *v, int token_id) {
     if (token_id < 0 || token_id >= v->num_tokens || !v->tokens[token_id]) {
         return "<unk>";
     }
-    return v->tokens[token_id];
+    const char *raw = v->tokens[token_id];
+
+    // Fast path: if the string is pure ASCII (no UTF-8 multi-byte lead bytes),
+    // return it directly — the common case for most tokens.
+    int has_utf8 = 0;
+    for (const char *p = raw; *p; p++) {
+        if ((*p & 0x80)) { has_utf8 = 1; break; }
+    }
+    if (!has_utf8) return raw;
+
+    // Decode GPT-2 byte-fallback encoding:
+    // Bytes 0x00-0xFF are mapped to Unicode U+0100-U+01FF in the vocab.
+    // e.g. space (0x20) → 'Ġ' (U+0120), newline (0x0A) → 'Ċ' (U+010A).
+    // Convert them back to the original bytes.
+    static char decoded[512];
+    char *dst = decoded;
+    const char *src = raw;
+    const char *end = decoded + sizeof(decoded) - 1;
+    while (*src && dst < end) {
+        // Decode a UTF-8 code point
+        unsigned int cp;
+        int advance;
+        if ((*src & 0x80) == 0) {
+            cp = (unsigned char)*src; advance = 1;
+        } else if ((*src & 0xE0) == 0xC0 && (src[1] & 0xC0) == 0x80) {
+            cp = ((unsigned)(*src & 0x1F) << 6) | (src[1] & 0x3F);
+            advance = 2;
+        } else if ((*src & 0xF0) == 0xE0 && (src[1] & 0xC0) == 0x80 && (src[2] & 0xC0) == 0x80) {
+            cp = ((unsigned)(*src & 0x0F) << 12) | ((unsigned)(src[1] & 0x3F) << 6) | (src[2] & 0x3F);
+            advance = 3;
+        } else if ((*src & 0xF8) == 0xF0 && (src[1] & 0xC0) == 0x80 && (src[2] & 0xC0) == 0x80 && (src[3] & 0xC0) == 0x80) {
+            cp = ((unsigned)(*src & 0x07) << 18) | ((unsigned)(src[1] & 0x3F) << 12) | ((unsigned)(src[2] & 0x3F) << 6) | (src[3] & 0x3F);
+            advance = 4;
+        } else {
+            *dst++ = *src++;  // broken sequence, pass through
+            continue;
+        }
+        // Byte-fallback range: U+0100-U+01FF → byte (cp - 0x100)
+        if (cp >= 0x100 && cp <= 0x1FF) {
+            *dst++ = (char)(cp - 0x100);
+        } else if (cp <= 0x7F) {
+            *dst++ = (char)cp;
+        } else {
+            // Non-byte-fallback multi-byte character (e.g. CJK, emoji) — copy verbatim
+            for (int i = 0; i < advance && dst < end; i++)
+                *dst++ = src[i];
+        }
+        src += advance;
+    }
+    *dst = '\0';
+    return decoded;
 }
 
 // ============================================================================
