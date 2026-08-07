@@ -61,9 +61,11 @@ CMD3(prev) → CMD1: attention projections + delta-net  [GPU]
            → CPU: flush results                        [CPU]
            → CMD2: o_proj + norm + routing + shared    [GPU]
            → CPU: softmax + topK routing               [CPU]
-           → I/O: parallel pread K=8 experts           [SSD]
+           → I/O: parallel pread K experts (default 4) [SSD]
            → CMD3: expert forward + combine + norm     [GPU, DEFERRED]
 ```
+
+The model has 8 active experts per token; the engine defaults to K=4 for speed. Use `--k 8` to match the full model configuration.
 
 ### Key Design Decisions (from flash-moe experiments)
 
@@ -109,36 +111,33 @@ Expert layout (same as flash-moe):
 ┌─────────────────────────────────────┐
 │ model_weights.bin (mmap'd, ~1.4 GB) │  ← Read-only, OS-managed
 ├─────────────────────────────────────┤
-│ Metal scratch buffers (~100 MB)     │  ← GPU-accessible
-│  - buf_input [HIDDEN_DIM]           │
-│  - buf_expert_data [EXPERT_SIZE]    │
-│  - buf_expert_input [HIDDEN_DIM]    │
-│  - buf_expert_gate [MOE_INTER]      │
-│  - buf_expert_up [MOE_INTER]        │
-│  - buf_expert_act [MOE_INTER]       │
-│  - buf_expert_out [HIDDEN_DIM]      │
-│  - KV cache (10 attn layers)        │
-│  - GDN recurrent states (30 layers) │
+│ GPU state buffers (~2.2 GB)          │  ← Metal-allocated, resident
+│  - Delta-net recurrent state (30L)  │     ~2.0 GB (30 × 65.9 MB)
+│  - KV caches (10 attn layers)       │     ~0.17 GB (10 × 16.8 MB)
+│  - Attention scores buffer          │     ~0.07 GB
+│  - Expert compute scratch           │     ~0.01 GB
 ├─────────────────────────────────────┤
-│ OS page cache (~14 GB available)    │  ← Expert LRU caching
+│ OS page cache (remaining RAM)       │  ← Expert LRU caching
 └─────────────────────────────────────┘
 ```
 
-Total engine RAM: ~1.6 GB (vs 6 GB for the 397B model)
+Total engine RAM: **~3.4–3.8 GB** (1.4 GB weights + 2.2 GB GPU state + minor overhead).
+On 8 GB this fits without swap (memory compression absorbs pressure). On 16 GB it leaves ~12 GB for OS + page cache.
 
 ### 5.3 Metal Shaders
 
-Reused from flash-moe with dimension updates:
+Reused from flash-moe with dimension updates for Qwen3.6:
 
-| Kernel | Purpose | Changes Needed |
+| Kernel | Purpose | Status |
 |---|---|---|
-| `dequant_matvec_4bit` | 4-bit dequant + matvec (FMA optimized) | Update tile sizes for 2048-dim |
-| `swiglu_fused` | SiLU gating × up projection | Dimension updates |
-| `rms_norm` | Two-pass sum-of-squares + apply | None (generic) |
-| `rms_norm_apply` | Apply pre-computed scale | None (generic) |
-| `batched_attention` | Q@K^T + softmax + scores@V | Head count update (16Q, 2KV) |
-| `rope_fused` | Rotary embeddings with Q deinterleave | Head dim unchanged (256) |
-| `moe_combine_residual` | Weighted sum + residual + sigmoid gate | Expert count update |
+| `dequant_matvec_4bit_v3` | 4-bit dequant + matvec (FMA optimized) | ✅ Verified bit-identical to CPU |
+| `swiglu_fused` | SiLU gating × up projection | ✅ |
+| `rms_norm` / `rms_norm_apply` | Two-pass sum-of-squares + apply | ✅ |
+| `batched_attention` | Q@K^T + softmax + scores@V | ✅ (16Q/2KV heads) |
+| `rope_fused` | Rotary embeddings with Q deinterleave | ✅ |
+| `moe_combine_residual` | Weighted sum + residual + next-layer input norm | ✅ |
+| `delta_net_gpu` | Fused GPU delta-net: conv1d → rms_norm → decay → recur → gate | ✅ (default, `--cpu-linear` to disable) |
+| `gated_rms_norm` | Output gate × RMSNorm for linear attention | ✅ |
 
 ### 5.4 GatedDeltaNet (Linear Attention)
 
@@ -181,7 +180,7 @@ At 4096 tokens: ~8 MB per layer, ~80 MB total
 ```python
 router_logits = gate_proj(hidden)        # [256]
 probs = softmax(router_logits)
-top_k_indices, top_k_weights = top_k(probs, k=8)
+top_k_indices, top_k_weights = top_k(probs, k=8)  # Model: 8 active, engine default: K=4
 # Normalize top-k weights
 top_k_weights = softmax(top_k_weights)
 
@@ -189,17 +188,16 @@ top_k_weights = softmax(top_k_weights)
 shared_out = shared_expert(hidden) * sigmoid(shared_gate(hidden))
 
 # Routed experts (streamed from SSD on demand)
-expert_out = sum(top_k_weights[i] * expert_i(hidden) for i in top_k_indices)
+expert_out = sum(top_k_weights[i] * expert_i(hidden) for i in top_k_indices[:K])
 
 output = expert_out + shared_out + residual
 ```
 
 ## 6. Dimension Adaptation from flash-moe
 
-All changes from the Qwen3.5-397B baseline:
+All constants adapted from the Qwen3.5-397B baseline to Qwen3.6-35B. These are the current values in `infer.m`:
 
 ```c
-// infer.m constant changes
 #define HIDDEN_DIM          2048    // was 4096
 #define NUM_LAYERS          40      // was 60
 #define NUM_ATTN_HEADS      16      // was 32
@@ -207,7 +205,7 @@ All changes from the Qwen3.5-397B baseline:
 #define HEAD_DIM            256     // unchanged
 #define VOCAB_SIZE          248320  // unchanged
 #define NUM_EXPERTS         256     // was 512
-#define NUM_EXPERTS_PER_TOK 8       // was 10
+#define NUM_EXPERTS_PER_TOK 8       // was 10 (model default; engine uses K=4 for speed)
 #define MOE_INTERMEDIATE    512     // was 1024
 #define SHARED_INTERMEDIATE 512     // was 1024
 #define LINEAR_NUM_V_HEADS  32      // was 64
@@ -215,7 +213,7 @@ All changes from the Qwen3.5-397B baseline:
 #define LINEAR_KEY_DIM      128     // unchanged
 #define LINEAR_VALUE_DIM    128     // unchanged
 // Derived:
-// LINEAR_TOTAL_KEY    = 16 * 128 = 2048 (was 2048, unchanged!)
+// LINEAR_TOTAL_KEY    = 16 * 128 = 2048 (was 2048, unchanged)
 // LINEAR_TOTAL_VALUE  = 32 * 128 = 4096 (was 8192)
 // LINEAR_CONV_DIM     = 2048*2 + 4096 = 8192 (was 12288)
 
@@ -236,7 +234,7 @@ Unlike llm-search's middleware approach, FinchMoE will handle tool calling nativ
 
 ## 8. Performance Model
 
-Estimated performance on M4 Mac mini 16GB:
+### Estimated (M4 Mac mini 16 GB, K=4, warm page cache)
 
 | Component | Time (est.) | Notes |
 |---|---|---|
@@ -244,17 +242,19 @@ Estimated performance on M4 Mac mini 16GB:
 | CPU: flush | ~0.01 ms | Unchanged |
 | CMD2: o_proj + norm + routing | ~0.3 ms | Smaller matrices |
 | CPU: softmax + topK | ~0.003 ms | 256 experts vs 512 |
-| I/O: pread K=8 experts | ~0.8 ms | 8 × 0.94 MB = 7.5 MB read |
+| I/O: pread K=4 experts | ~0.4 ms | 4 × 1.69 MB = 6.8 MB read |
 | CMD3: expert compute | ~0.02 ms | Deferred |
-| **Per layer** | **~1.7 ms** | |
-| **Per token (40 layers)** | **~68 ms** | **~14.7 tok/s theoretical** |
+| **Per layer** | **~1.3 ms** | |
+| **Per token (40 layers)** | **~53 ms** | **~18.9 tok/s theoretical** |
 
-Real-world will be lower due to:
-- External SSD latency (not internal NVMe)
-- Page cache misses requiring actual SSD reads
-- M4 GPU being slower than M3 Max GPU
+### Measured
 
-Conservative estimate: **5-10 tok/s** — well above the 3.5 tok/s target.
+| Machine | Per-layer time | tok/s | Notes |
+|---|---|---|---|
+| **M4 16 GB** (TB4 NVMe) | ~2.4 ms | **10–15** | GPU experts default, page cache helps |
+| **M1 8 GB** (TB4 NVMe) | 4.1 ms (warm) – 6.8 ms (cold) | **3.3–8.2** (avg 5.4) | Expert I/O dominates (37%) |
+
+The theoretical model is optimistic — real-world performance is lower due to external SSD latency, page cache misses, and Metal driver overhead. The original conservative estimate of 5–10 tok/s for M4 was close; actual results exceed it.
 
 ## 9. Device-Specific Performance Estimates
 
@@ -262,13 +262,13 @@ All estimates assume 4-bit experts, K=4, short context. Memory-bandwidth-bound.
 
 | Device | Memory Bandwidth | GPU tok/s | CPU tok/s | RAM Usage |
 |---|---|---|---|---|
-| M4 Mac mini 16GB | ~120 GB/s | **12** (measured) | 1.8 (measured) | ~1.8 GB |
-| M3 Max 48GB | ~400 GB/s | 4.4 (flash-moe claim) | — | ~6 GB |
-| M1 Mac mini 8-16GB | ~68 GB/s | **5–8** (est.) | 1–1.5 (est.) | ~1.8 GB |
-| iPhone A18 Pro | ~50-70 GB/s | **3–5** (est.) | 0.5–1 (est.) | ~1.8 GB |
-| iPhone A16/A17 | ~40-50 GB/s | **2–3** (est.) | 0.5–1 (est.) | ~1.8 GB |
+| M4 Mac mini 16 GB | ~120 GB/s | **10–15** (measured) | 1.8 (measured) | ~3.6 GB |
+| M1 Mac mini 8 GB | ~68 GB/s | **3.3–8.2, avg 5.4** (measured) | ~1–1.5 (est.) | ~3.8 GB (measured) |
+| M3 Max 48 GB | ~400 GB/s | 4.4 (flash-moe, 397B model) | — | ~6 GB |
+| iPhone A18 Pro | ~50–70 GB/s | **3–5** (est.) | 0.5–1 (est.) | ~3.5 GB |
+| iPhone A16/A17 | ~40–50 GB/s | **2–3** (est.) | 0.5–1 (est.) | ~3.5 GB |
 
-M4 is significantly faster than M3 Max for this workload because the engine is bandwidth-bound and M4's 120 GB/s serves a 3B-active model more efficiently than M3 Max's 400 GB/s serves a 17B-active model (397B).
+M4 is significantly faster than M3 Max for this workload because the engine is bandwidth-bound and M4's 120 GB/s serves a 3B-active model more efficiently than M3 Max's 400 GB/s serves a 17B-active model (397B). M1's lower throughput vs M4 is attributable to GPU compute and memory bandwidth (~68 vs ~120 GB/s), not storage — both tested with the same Samsung 990 Plus TB4 enclosure.
 
 ## 10. Long Context: 256K Window Analysis
 
@@ -335,15 +335,15 @@ Flash-moe found MTP break-even for the 397B model because expert I/O (6.75 MB ea
 
 ## 12. Optimization Priority
 
-| Priority | Feature | Effort | Impact |
-|---|---|---|---|
-| 1 | Clean model output (self-quantize BF16) | In progress | Baseline |
-| 2 | GPU expert path fix | Debug | 6× speedup |
-| 3 | KV cache Q8_0 | ~60 lines Metal | Saves 2.5 GB, good at 32K+ ctx |
-| 4 | MTP speculative decoding | ~200 lines C | 1.5× speedup |
-| 5 | TurboQuant Q4 KV cache | ~100 lines Metal | Q8 quality at Q4 size |
-| 6 | Flash attention | ~300 lines Metal | 2× long-context speed |
-| 7 | iPhone port | Engineering | Target deployment |
+| Priority | Feature | Effort | Impact | Status |
+|---|---|---|---|---|---|
+| 1 | Clean model output (self-quantize BF16) | Done | Baseline | ✅ |
+| 2 | GPU expert path fix | Done | 6× speedup | ✅ (default, verified bit-identical) |
+| 3 | KV cache Q8_0 | ~60 lines Metal | Saves 2.5 GB, good at 32K+ ctx | |
+| 4 | MTP speculative decoding | ~200 lines C | 1.5× speedup | |
+| 5 | TurboQuant Q4 KV cache | ~100 lines Metal | Q8 quality at Q4 size | |
+| 6 | Flash attention | ~300 lines Metal | 2× long-context speed | |
+| 7 | iPhone port | Engineering | Target deployment | |
 
 ## 13. Appendix: flash-moe Experiments Reference
 
