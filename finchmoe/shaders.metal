@@ -926,7 +926,7 @@ kernel void attn_softmax_batched(
     if (simd_group == 0 && simd_lane < num_simd_groups) {
         global_max = simd_max(shared_max[simd_lane]);
     }
-    threadgroup float broadcast_max;
+    threadgroup float broadcast_max = 0.0f;
     if (lid == 0) broadcast_max = global_max;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     global_max = broadcast_max;
@@ -947,7 +947,7 @@ kernel void attn_softmax_batched(
     if (simd_group == 0 && simd_lane < num_simd_groups) {
         global_sum = simd_sum(shared_sum[simd_lane]);
     }
-    threadgroup float broadcast_sum;
+    threadgroup float broadcast_sum = 0.0f;
     if (lid == 0) broadcast_sum = global_sum;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     global_sum = broadcast_sum;
@@ -1138,7 +1138,7 @@ kernel void rms_norm_qk(
     uint base = head * key_dim;
 
     // RMS norm for q
-    threadgroup float q_sum_sq;
+    threadgroup float q_sum_sq = 0.0f;
     if (tid == 0) q_sum_sq = 0;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1161,7 +1161,7 @@ kernel void rms_norm_qk(
     }
 
     // RMS norm for k
-    threadgroup float k_sum_sq;
+    threadgroup float k_sum_sq = 0.0f;
     float kval = (tid < key_dim) ? k[base + tid] : 0;
     threadgroup float k_partial[128];
     k_partial[tid] = kval * kval;
@@ -1293,4 +1293,31 @@ kernel void moe_combine_residual(
     if (K > 7) moe += params[7] * expert_out7[tid];
 
     hidden_out[tid] = h_mid[tid] + moe + shared_gate * shared_out[tid];
+}
+
+// ============================================================================
+// BF16 GEMV: raw BF16 matrix-vector multiply (no dequantization needed)
+//   out[row] = sum_i(bf16_to_f32(W[row * in_dim + i]) * x[i])
+// Thread: one thread per output row
+// ============================================================================
+kernel void gemv_bf16(
+    const device uint16_t *W    [[buffer(0)]],  // [out_dim, in_dim] BF16
+    const device float    *x    [[buffer(1)]],  // [in_dim]
+    device float          *out  [[buffer(2)]],  // [out_dim]
+    constant uint32_t     &out_dim [[buffer(3)]],
+    constant uint32_t     &in_dim  [[buffer(4)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    uint row = tid;
+    if (row >= out_dim) return;
+
+    float acc = 0.0f;
+    const device uint16_t *w_row = W + row * in_dim;
+    for (uint i = 0; i < in_dim; i++) {
+        // BF16 -> F32 via union (Metal-compatible type punning)
+        union { uint32_t u; float f; } cvt;
+        cvt.u = ((uint32_t)w_row[i]) << 16;
+        acc += cvt.f * x[i];
+    }
+    out[row] = acc;
 }

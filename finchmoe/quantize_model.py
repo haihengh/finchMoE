@@ -14,6 +14,8 @@ def bf16_encode(arr_f32):
     return (arr_f32.view(np.uint32) >> 16).astype(np.uint16)
 
 
+EXPERT_GROUP_SIZE = 64  # Standard group size
+
 def quantize_affine(weights_f32, bits, group_size=64):
     """MLX affine quant: w_q = round((w - min)/scale), scale = (max-min)/(2^bits-1)"""
     out_dim, in_dim = weights_f32.shape
@@ -46,6 +48,35 @@ def quantize_affine(weights_f32, bits, group_size=64):
 
 
 EIGHT_BIT = ['.mlp.gate.weight', '.mlp.shared_expert_gate.weight']
+
+# Attention/recurrent projections + output layers — keep in BF16.
+# L2 normalization + recurrent state update + gated RMSNorm amplifies 4-bit noise
+# catastrophically (cosine similarity drops to 0.26 after 1 layer).
+# lm_head/embed_tokens also protected: vocabulary projection errors directly
+# corrupt token selection.
+KEEP_BF16 = [
+    # GatedDeltaNet attention
+    '.linear_attn.in_proj_qkv.weight',
+    '.linear_attn.in_proj_z.weight',
+    '.linear_attn.in_proj_a.weight',
+    '.linear_attn.in_proj_b.weight',
+    '.linear_attn.out_proj.weight',
+    # Full attention
+    '.self_attn.q_proj.weight',
+    '.self_attn.k_proj.weight',
+    '.self_attn.v_proj.weight',
+    '.self_attn.o_proj.weight',
+    # Routing
+    '.mlp.gate.weight',
+    '.mlp.shared_expert_gate.weight',
+    # Shared expert FFN (per-layer dense, always active)
+    '.mlp.shared_expert.gate_proj.weight',
+    '.mlp.shared_expert.up_proj.weight',
+    '.mlp.shared_expert.down_proj.weight',
+    # Vocabulary projection + embedding
+    'lm_head.weight',
+    'embed_tokens.weight',
+]
 
 
 def main():
@@ -139,7 +170,10 @@ def main():
             is_expert = '.mlp.experts.' in nn
             is_weight = '.weight' in nn or is_expert
 
-            if is_weight and len(shape) >= 2 and shape[-1] % 64 == 0:
+            # Skip quantization for attention weights (keep as raw BF16)
+            keep_bf16 = any(p in nn for p in KEEP_BF16)
+
+            if is_weight and len(shape) >= 2 and shape[-1] % 64 == 0 and not keep_bf16:
                 bits = 8 if any(p in nn for p in EIGHT_BIT) else 4
                 if len(shape) == 2:
                     packed, scales, biases = quantize_affine(arr.reshape(shape[0], shape[1]), bits)
@@ -161,8 +195,8 @@ def main():
                         pl_g, sl_g, bl_g = [], [], []
                         pl_u, sl_u, bl_u = [], [], []
                         for e in range(n_exp):
-                            pg, sg, bg = quantize_affine(w_gate[e].reshape(half, actual_in), bits)
-                            pu, su, bu = quantize_affine(w_up[e].reshape(half, actual_in), bits)
+                            pg, sg, bg = quantize_affine(w_gate[e].reshape(half, actual_in), bits, EXPERT_GROUP_SIZE)
+                            pu, su, bu = quantize_affine(w_up[e].reshape(half, actual_in), bits, EXPERT_GROUP_SIZE)
                             pl_g.append(pg); sl_g.append(sg); bl_g.append(bg)
                             pl_u.append(pu); sl_u.append(su); bl_u.append(bu)
                         # Store as split names: gate_proj + up_proj
@@ -184,7 +218,7 @@ def main():
                         dname = nn.replace('.mlp.experts.down_proj', '.mlp.switch_mlp.down_proj.weight')
                         pl, sl, bl = [], [], []
                         for e in range(n_exp):
-                            p, s, b = quantize_affine(w[e].reshape(out_d, actual_in), bits)
+                            p, s, b = quantize_affine(w[e].reshape(out_d, actual_in), bits, EXPERT_GROUP_SIZE)
                             pl.append(p); sl.append(s); bl.append(b)
                         out[dname] = np.stack(pl)
                         dsn = dname.replace('.weight', '.scales')
@@ -196,7 +230,7 @@ def main():
                     else:
                         pl, sl, bl = [], [], []
                         for e in range(n_exp):
-                            p, s, b = quantize_affine(w[e].reshape(out_d, actual_in), bits)
+                            p, s, b = quantize_affine(w[e].reshape(out_d, actual_in), bits, EXPERT_GROUP_SIZE)
                             pl.append(p); sl.append(s); bl.append(b)
                         out[nn] = np.stack(pl)
                         snn = nn.replace('.weight', '.scales')
