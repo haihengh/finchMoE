@@ -4,7 +4,7 @@
     "0": {
       "gate_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 661772368,
+        "abs_offset": 134247512,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -17,7 +17,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4809282128,
+        "abs_offset": 6160750040,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -30,7 +30,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4800893520,
+        "abs_offset": 6152361432,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -43,7 +43,7 @@
       },
       "up_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 795990096,
+        "abs_offset": 268465240,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -56,7 +56,7 @@
       },
       "up_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4826059344,
+        "abs_offset": 6177527256,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -69,7 +69,7 @@
       },
       "up_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4817670736,
+        "abs_offset": 6169138648,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -82,7 +82,7 @@
       },
       "down_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 527554640,
+        "abs_offset": 29784,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -95,7 +95,7 @@
       },
       "down_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4792504912,
+        "abs_offset": 6143972824,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -108,7 +108,7 @@
       },
       "down_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4784116304,
+        "abs_offset": 6135584216,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -123,7 +123,7 @@
     "1": {
       "gate_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 1083367504,
+        "abs_offset": 536900696,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -136,7 +136,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4862022736,
+        "abs_offset": 6285870936,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -149,7 +149,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4853634128,
+        "abs_offset": 6277482328,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -162,7 +162,7 @@
       },
       "up_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 1217585232,
+        "abs_offset": 671118424,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -175,7 +175,7 @@
       },
       "up_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4878799952,
+        "abs_offset": 6302648152,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -188,7 +188,7 @@
       },
       "up_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4870411344,
+        "abs_offset": 6294259544,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -201,7 +201,7 @@
       },
       "down_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 949149776,
+        "abs_offset": 402682968,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -214,7 +214,7 @@
       },
       "down_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4845245520,
+        "abs_offset": 6269093720,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -227,7 +227,7 @@
       },
       "down_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4836856912,
+        "abs_offset": 6260705112,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -242,7 +242,7 @@
     "2": {
       "gate_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 993193296,
+        "abs_offset": 939554880,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -255,7 +255,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4746390928,
+        "abs_offset": 4766494464,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -268,7 +268,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4738002320,
+        "abs_offset": 4758105856,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -281,7 +281,7 @@
       },
       "up_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 1127411024,
+        "abs_offset": 1073772608,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -294,7 +294,7 @@
       },
       "up_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4763168144,
+        "abs_offset": 4783271680,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -307,7 +307,7 @@
       },
       "up_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4754779536,
+        "abs_offset": 4774883072,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -320,7 +320,7 @@
       },
       "down_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 858975568,
+        "abs_offset": 805337152,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -333,7 +333,7 @@
       },
       "down_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4729613712,
+        "abs_offset": 4749717248,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -346,7 +346,7 @@
       },
       "down_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4721225104,
+        "abs_offset": 4741328640,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -361,7 +361,7 @@
     "3": {
       "gate_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 993718864,
+        "abs_offset": 939553952,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -374,7 +374,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4353182544,
+        "abs_offset": 4365949856,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -387,7 +387,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4344793936,
+        "abs_offset": 4357561248,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -400,7 +400,7 @@
       },
       "up_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 1127936592,
+        "abs_offset": 1073771680,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -413,7 +413,7 @@
       },
       "up_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4369959760,
+        "abs_offset": 4382727072,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -426,7 +426,7 @@
       },
       "up_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4361571152,
+        "abs_offset": 4374338464,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -439,7 +439,7 @@
       },
       "down_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 859501136,
+        "abs_offset": 805336224,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -452,7 +452,7 @@
       },
       "down_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4336405328,
+        "abs_offset": 4349172640,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -465,7 +465,7 @@
       },
       "down_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4328016720,
+        "abs_offset": 4340784032,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -480,7 +480,7 @@
     "4": {
       "gate_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 1414788536,
+        "abs_offset": 1342207024,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -493,7 +493,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4395897016,
+        "abs_offset": 4493167792,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -506,7 +506,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4387508408,
+        "abs_offset": 4484779184,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -519,7 +519,7 @@
       },
       "up_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 1549006264,
+        "abs_offset": 1476424752,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -532,7 +532,7 @@
       },
       "up_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4412674232,
+        "abs_offset": 4509945008,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -545,7 +545,7 @@
       },
       "up_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4404285624,
+        "abs_offset": 4501556400,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -558,7 +558,7 @@
       },
       "down_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 1280570808,
+        "abs_offset": 1207989296,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -571,7 +571,7 @@
       },
       "down_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4379119800,
+        "abs_offset": 4476390576,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -584,7 +584,7 @@
       },
       "down_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4370731192,
+        "abs_offset": 4468001968,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -599,7 +599,7 @@
     "5": {
       "gate_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 1836383672,
+        "abs_offset": 1744860208,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -612,7 +612,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4448637624,
+        "abs_offset": 4618288688,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -625,7 +625,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4440249016,
+        "abs_offset": 4609900080,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -638,7 +638,7 @@
       },
       "up_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 1970601400,
+        "abs_offset": 1879077936,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -651,7 +651,7 @@
       },
       "up_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4465414840,
+        "abs_offset": 4635065904,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -664,7 +664,7 @@
       },
       "up_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4457026232,
+        "abs_offset": 4626677296,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -677,7 +677,7 @@
       },
       "down_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 1702165944,
+        "abs_offset": 1610642480,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -690,7 +690,7 @@
       },
       "down_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4431860408,
+        "abs_offset": 4601511472,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -703,7 +703,7 @@
       },
       "down_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4423471800,
+        "abs_offset": 4593122864,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -718,7 +718,7 @@
     "6": {
       "gate_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 2257978808,
+        "abs_offset": 2147513392,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -731,7 +731,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4501378232,
+        "abs_offset": 4743409584,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -744,7 +744,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4492989624,
+        "abs_offset": 4735020976,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -757,7 +757,7 @@
       },
       "up_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 2392196536,
+        "abs_offset": 2281731120,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -770,7 +770,7 @@
       },
       "up_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4518155448,
+        "abs_offset": 4760186800,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -783,7 +783,7 @@
       },
       "up_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4509766840,
+        "abs_offset": 4751798192,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -796,7 +796,7 @@
       },
       "down_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 2123761080,
+        "abs_offset": 2013295664,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -809,7 +809,7 @@
       },
       "down_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4484601016,
+        "abs_offset": 4726632368,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -822,7 +822,7 @@
       },
       "down_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4476212408,
+        "abs_offset": 4718243760,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -837,7 +837,7 @@
     "7": {
       "gate_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 2662731192,
+        "abs_offset": 2550166576,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -850,7 +850,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4551947576,
+        "abs_offset": 4801093552,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -863,7 +863,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4543558968,
+        "abs_offset": 4792704944,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -876,7 +876,7 @@
       },
       "up_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 2796948920,
+        "abs_offset": 2684384304,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -889,7 +889,7 @@
       },
       "up_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4568724792,
+        "abs_offset": 4817870768,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -902,7 +902,7 @@
       },
       "up_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4560336184,
+        "abs_offset": 4809482160,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -915,7 +915,7 @@
       },
       "down_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 2528513464,
+        "abs_offset": 2415948848,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -928,7 +928,7 @@
       },
       "down_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4535170360,
+        "abs_offset": 4784316336,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -941,7 +941,7 @@
       },
       "down_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4526781752,
+        "abs_offset": 4775927728,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -956,7 +956,7 @@
     "8": {
       "gate_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 3097957816,
+        "abs_offset": 2952819760,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -969,7 +969,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4606393144,
+        "abs_offset": 4980741424,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -982,7 +982,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4598004536,
+        "abs_offset": 4972352816,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -995,7 +995,7 @@
       },
       "up_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 3232175544,
+        "abs_offset": 3087037488,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1008,7 +1008,7 @@
       },
       "up_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4623170360,
+        "abs_offset": 4997518640,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1021,7 +1021,7 @@
       },
       "up_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4614781752,
+        "abs_offset": 4989130032,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1034,7 +1034,7 @@
       },
       "down_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 2963740088,
+        "abs_offset": 2818602032,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1047,7 +1047,7 @@
       },
       "down_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4589615928,
+        "abs_offset": 4963964208,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1060,7 +1060,7 @@
       },
       "down_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4581227320,
+        "abs_offset": 4955575600,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1075,7 +1075,7 @@
     "9": {
       "gate_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 3519552952,
+        "abs_offset": 3355472944,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1088,7 +1088,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4659133752,
+        "abs_offset": 5105862320,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1101,7 +1101,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4650745144,
+        "abs_offset": 5097473712,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1114,7 +1114,7 @@
       },
       "up_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 3653770680,
+        "abs_offset": 3489690672,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1127,7 +1127,7 @@
       },
       "up_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4675910968,
+        "abs_offset": 5122639536,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1140,7 +1140,7 @@
       },
       "up_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4667522360,
+        "abs_offset": 5114250928,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1153,7 +1153,7 @@
       },
       "down_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 3385335224,
+        "abs_offset": 3221255216,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1166,7 +1166,7 @@
       },
       "down_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4642356536,
+        "abs_offset": 5089085104,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1179,7 +1179,7 @@
       },
       "down_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4633967928,
+        "abs_offset": 5080696496,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1194,7 +1194,7 @@
     "10": {
       "gate_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 1504962640,
+        "abs_offset": 939553880,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1207,7 +1207,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4914763344,
+        "abs_offset": 6410991832,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1220,7 +1220,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4906374736,
+        "abs_offset": 6402603224,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1233,7 +1233,7 @@
       },
       "up_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 1639180368,
+        "abs_offset": 1073771608,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1246,7 +1246,7 @@
       },
       "up_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4931540560,
+        "abs_offset": 6427769048,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1259,7 +1259,7 @@
       },
       "up_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4923151952,
+        "abs_offset": 6419380440,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1272,7 +1272,7 @@
       },
       "down_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 1370744912,
+        "abs_offset": 805336152,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1285,7 +1285,7 @@
       },
       "down_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4897986128,
+        "abs_offset": 6394214616,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1298,7 +1298,7 @@
       },
       "down_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4889597520,
+        "abs_offset": 6385826008,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1313,7 +1313,7 @@
     "11": {
       "gate_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 1909715024,
+        "abs_offset": 1342207064,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1326,7 +1326,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4965332688,
+        "abs_offset": 6468675800,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1339,7 +1339,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4956944080,
+        "abs_offset": 6460287192,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1352,7 +1352,7 @@
       },
       "up_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 2043932752,
+        "abs_offset": 1476424792,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1365,7 +1365,7 @@
       },
       "up_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4982109904,
+        "abs_offset": 6485453016,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1378,7 +1378,7 @@
       },
       "up_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4973721296,
+        "abs_offset": 6477064408,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1391,7 +1391,7 @@
       },
       "down_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 1775497296,
+        "abs_offset": 1207989336,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1404,7 +1404,7 @@
       },
       "down_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4948555472,
+        "abs_offset": 6451898584,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1417,7 +1417,7 @@
       },
       "down_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4940166864,
+        "abs_offset": 6443509976,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1432,7 +1432,7 @@
     "12": {
       "gate_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 2344941648,
+        "abs_offset": 1744860248,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1445,7 +1445,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5019778256,
+        "abs_offset": 6648323672,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1458,7 +1458,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5011389648,
+        "abs_offset": 6639935064,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1471,7 +1471,7 @@
       },
       "up_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 2479159376,
+        "abs_offset": 1879077976,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1484,7 +1484,7 @@
       },
       "up_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5036555472,
+        "abs_offset": 6665100888,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1497,7 +1497,7 @@
       },
       "up_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5028166864,
+        "abs_offset": 6656712280,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1510,7 +1510,7 @@
       },
       "down_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 2210723920,
+        "abs_offset": 1610642520,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1523,7 +1523,7 @@
       },
       "down_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5003001040,
+        "abs_offset": 6631546456,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1536,7 +1536,7 @@
       },
       "down_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4994612432,
+        "abs_offset": 6623157848,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1551,7 +1551,7 @@
     "13": {
       "gate_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 2766536784,
+        "abs_offset": 2147513432,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1564,7 +1564,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5072518864,
+        "abs_offset": 6773444568,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1577,7 +1577,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5064130256,
+        "abs_offset": 6765055960,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1590,7 +1590,7 @@
       },
       "up_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 2900754512,
+        "abs_offset": 2281731160,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1603,7 +1603,7 @@
       },
       "up_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5089296080,
+        "abs_offset": 6790221784,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1616,7 +1616,7 @@
       },
       "up_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5080907472,
+        "abs_offset": 6781833176,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1629,7 +1629,7 @@
       },
       "down_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 2632319056,
+        "abs_offset": 2013295704,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1642,7 +1642,7 @@
       },
       "down_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5055741648,
+        "abs_offset": 6756667352,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1655,7 +1655,7 @@
       },
       "down_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5047353040,
+        "abs_offset": 6748278744,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1670,7 +1670,7 @@
     "14": {
       "gate_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 3188131920,
+        "abs_offset": 2550166616,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1683,7 +1683,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5125259472,
+        "abs_offset": 6898565464,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1696,7 +1696,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5116870864,
+        "abs_offset": 6890176856,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1709,7 +1709,7 @@
       },
       "up_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 3322349648,
+        "abs_offset": 2684384344,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1722,7 +1722,7 @@
       },
       "up_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5142036688,
+        "abs_offset": 6915342680,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1735,7 +1735,7 @@
       },
       "up_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5133648080,
+        "abs_offset": 6906954072,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1748,7 +1748,7 @@
       },
       "down_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 3053914192,
+        "abs_offset": 2415948888,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1761,7 +1761,7 @@
       },
       "down_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5108482256,
+        "abs_offset": 6881788248,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1774,7 +1774,7 @@
       },
       "down_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5100093648,
+        "abs_offset": 6873399640,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1789,7 +1789,7 @@
     "15": {
       "gate_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 3592884304,
+        "abs_offset": 2952819800,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1802,7 +1802,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5175828816,
+        "abs_offset": 6956249432,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1815,7 +1815,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5167440208,
+        "abs_offset": 6947860824,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1828,7 +1828,7 @@
       },
       "up_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 3727102032,
+        "abs_offset": 3087037528,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1841,7 +1841,7 @@
       },
       "up_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5192606032,
+        "abs_offset": 6973026648,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1854,7 +1854,7 @@
       },
       "up_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5184217424,
+        "abs_offset": 6964638040,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1867,7 +1867,7 @@
       },
       "down_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 3458666576,
+        "abs_offset": 2818602072,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1880,7 +1880,7 @@
       },
       "down_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5159051600,
+        "abs_offset": 6939472216,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1893,7 +1893,7 @@
       },
       "down_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5150662992,
+        "abs_offset": 6931083608,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1908,7 +1908,7 @@
     "16": {
       "gate_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4028110928,
+        "abs_offset": 3355472984,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1921,7 +1921,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5230274384,
+        "abs_offset": 7135897304,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1934,7 +1934,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5221885776,
+        "abs_offset": 7127508696,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1947,7 +1947,7 @@
       },
       "up_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4162328656,
+        "abs_offset": 3489690712,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1960,7 +1960,7 @@
       },
       "up_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5247051600,
+        "abs_offset": 7152674520,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1973,7 +1973,7 @@
       },
       "up_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5238662992,
+        "abs_offset": 7144285912,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -1986,7 +1986,7 @@
       },
       "down_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 3893893200,
+        "abs_offset": 3221255256,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -1999,7 +1999,7 @@
       },
       "down_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5213497168,
+        "abs_offset": 7119120088,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2012,7 +2012,7 @@
       },
       "down_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5205108560,
+        "abs_offset": 7110731480,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2027,7 +2027,7 @@
     "17": {
       "gate_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4449706064,
+        "abs_offset": 3758126168,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2040,7 +2040,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5283014992,
+        "abs_offset": 7261018200,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2053,7 +2053,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5274626384,
+        "abs_offset": 7252629592,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2066,7 +2066,7 @@
       },
       "up_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4583923792,
+        "abs_offset": 3892343896,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2079,7 +2079,7 @@
       },
       "up_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5299792208,
+        "abs_offset": 7277795416,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2092,7 +2092,7 @@
       },
       "up_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5291403600,
+        "abs_offset": 7269406808,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2105,7 +2105,7 @@
       },
       "down_proj.weight": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 4315488336,
+        "abs_offset": 3623908440,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2118,7 +2118,7 @@
       },
       "down_proj.scales": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5266237776,
+        "abs_offset": 7244240984,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2131,7 +2131,7 @@
       },
       "down_proj.biases": {
         "file": "model-00001-of-00004.safetensors",
-        "abs_offset": 5257849168,
+        "abs_offset": 7235852376,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2146,7 +2146,7 @@
     "18": {
       "gate_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 153214288,
+        "abs_offset": 134248512,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2159,7 +2159,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4641376016,
+        "abs_offset": 4529162624,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2172,7 +2172,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4632987408,
+        "abs_offset": 4520774016,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2185,7 +2185,7 @@
       },
       "up_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 287432016,
+        "abs_offset": 268466240,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2198,7 +2198,7 @@
       },
       "up_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4658153232,
+        "abs_offset": 4545939840,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2211,7 +2211,7 @@
       },
       "up_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4649764624,
+        "abs_offset": 4537551232,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2224,7 +2224,7 @@
       },
       "down_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 18996560,
+        "abs_offset": 30784,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2237,7 +2237,7 @@
       },
       "down_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4624598800,
+        "abs_offset": 4512385408,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2250,7 +2250,7 @@
       },
       "down_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4616210192,
+        "abs_offset": 4503996800,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2265,7 +2265,7 @@
     "19": {
       "gate_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 557966672,
+        "abs_offset": 536901696,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2278,7 +2278,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4691945360,
+        "abs_offset": 4586846592,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2291,7 +2291,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4683556752,
+        "abs_offset": 4578457984,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2304,7 +2304,7 @@
       },
       "up_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 692184400,
+        "abs_offset": 671119424,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2317,7 +2317,7 @@
       },
       "up_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4708722576,
+        "abs_offset": 4603623808,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2330,7 +2330,7 @@
       },
       "up_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4700333968,
+        "abs_offset": 4595235200,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2343,7 +2343,7 @@
       },
       "down_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 423748944,
+        "abs_offset": 402683968,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2356,7 +2356,7 @@
       },
       "down_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4675168144,
+        "abs_offset": 4570069376,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2369,7 +2369,7 @@
       },
       "down_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4666779536,
+        "abs_offset": 4561680768,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2384,7 +2384,7 @@
     "20": {
       "gate_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 1414788432,
+        "abs_offset": 1342208064,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2397,7 +2397,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4799131536,
+        "abs_offset": 4891615360,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2410,7 +2410,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4790742928,
+        "abs_offset": 4883226752,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2423,7 +2423,7 @@
       },
       "up_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 1549006160,
+        "abs_offset": 1476425792,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2436,7 +2436,7 @@
       },
       "up_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4815908752,
+        "abs_offset": 4908392576,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2449,7 +2449,7 @@
       },
       "up_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4807520144,
+        "abs_offset": 4900003968,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2462,7 +2462,7 @@
       },
       "down_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 1280570704,
+        "abs_offset": 1207990336,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2475,7 +2475,7 @@
       },
       "down_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4782354320,
+        "abs_offset": 4874838144,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2488,7 +2488,7 @@
       },
       "down_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4773965712,
+        "abs_offset": 4866449536,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2503,7 +2503,7 @@
     "21": {
       "gate_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 1836383568,
+        "abs_offset": 1744861248,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2516,7 +2516,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4851872144,
+        "abs_offset": 5016736256,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2529,7 +2529,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4843483536,
+        "abs_offset": 5008347648,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2542,7 +2542,7 @@
       },
       "up_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 1970601296,
+        "abs_offset": 1879078976,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2555,7 +2555,7 @@
       },
       "up_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4868649360,
+        "abs_offset": 5033513472,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2568,7 +2568,7 @@
       },
       "up_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4860260752,
+        "abs_offset": 5025124864,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2581,7 +2581,7 @@
       },
       "down_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 1702165840,
+        "abs_offset": 1610643520,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2594,7 +2594,7 @@
       },
       "down_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4835094928,
+        "abs_offset": 4999959040,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2607,7 +2607,7 @@
       },
       "down_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4826706320,
+        "abs_offset": 4991570432,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2622,7 +2622,7 @@
     "22": {
       "gate_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 2257978704,
+        "abs_offset": 2147514432,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2635,7 +2635,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4904612752,
+        "abs_offset": 5141857152,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2648,7 +2648,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4896224144,
+        "abs_offset": 5133468544,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2661,7 +2661,7 @@
       },
       "up_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 2392196432,
+        "abs_offset": 2281732160,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2674,7 +2674,7 @@
       },
       "up_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4921389968,
+        "abs_offset": 5158634368,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2687,7 +2687,7 @@
       },
       "up_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4913001360,
+        "abs_offset": 5150245760,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2700,7 +2700,7 @@
       },
       "down_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 2123760976,
+        "abs_offset": 2013296704,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2713,7 +2713,7 @@
       },
       "down_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4887835536,
+        "abs_offset": 5125079936,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2726,7 +2726,7 @@
       },
       "down_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4879446928,
+        "abs_offset": 5116691328,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2741,7 +2741,7 @@
     "23": {
       "gate_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 2662731088,
+        "abs_offset": 2550167616,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2754,7 +2754,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4955182096,
+        "abs_offset": 5199541120,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2767,7 +2767,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4946793488,
+        "abs_offset": 5191152512,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2780,7 +2780,7 @@
       },
       "up_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 2796948816,
+        "abs_offset": 2684385344,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2793,7 +2793,7 @@
       },
       "up_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4971959312,
+        "abs_offset": 5216318336,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2806,7 +2806,7 @@
       },
       "up_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4963570704,
+        "abs_offset": 5207929728,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2819,7 +2819,7 @@
       },
       "down_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 2528513360,
+        "abs_offset": 2415949888,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2832,7 +2832,7 @@
       },
       "down_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4938404880,
+        "abs_offset": 5182763904,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2845,7 +2845,7 @@
       },
       "down_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4930016272,
+        "abs_offset": 5174375296,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2860,7 +2860,7 @@
     "24": {
       "gate_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 3097957712,
+        "abs_offset": 2952820800,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2873,7 +2873,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5009627664,
+        "abs_offset": 5379188992,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2886,7 +2886,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5001239056,
+        "abs_offset": 5370800384,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2899,7 +2899,7 @@
       },
       "up_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 3232175440,
+        "abs_offset": 3087038528,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2912,7 +2912,7 @@
       },
       "up_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5026404880,
+        "abs_offset": 5395966208,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2925,7 +2925,7 @@
       },
       "up_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5018016272,
+        "abs_offset": 5387577600,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2938,7 +2938,7 @@
       },
       "down_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 2963739984,
+        "abs_offset": 2818603072,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2951,7 +2951,7 @@
       },
       "down_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4992850448,
+        "abs_offset": 5362411776,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2964,7 +2964,7 @@
       },
       "down_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4984461840,
+        "abs_offset": 5354023168,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -2979,7 +2979,7 @@
     "25": {
       "gate_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 3519552848,
+        "abs_offset": 3355473984,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -2992,7 +2992,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5062368272,
+        "abs_offset": 5504309888,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3005,7 +3005,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5053979664,
+        "abs_offset": 5495921280,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3018,7 +3018,7 @@
       },
       "up_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 3653770576,
+        "abs_offset": 3489691712,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3031,7 +3031,7 @@
       },
       "up_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5079145488,
+        "abs_offset": 5521087104,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3044,7 +3044,7 @@
       },
       "up_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5070756880,
+        "abs_offset": 5512698496,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3057,7 +3057,7 @@
       },
       "down_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 3385335120,
+        "abs_offset": 3221256256,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3070,7 +3070,7 @@
       },
       "down_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5045591056,
+        "abs_offset": 5487532672,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3083,7 +3083,7 @@
       },
       "down_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5037202448,
+        "abs_offset": 5479144064,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3098,7 +3098,7 @@
     "26": {
       "gate_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 3941147984,
+        "abs_offset": 3758127168,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3111,7 +3111,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5115108880,
+        "abs_offset": 5629430784,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3124,7 +3124,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5106720272,
+        "abs_offset": 5621042176,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3137,7 +3137,7 @@
       },
       "up_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4075365712,
+        "abs_offset": 3892344896,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3150,7 +3150,7 @@
       },
       "up_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5131886096,
+        "abs_offset": 5646208000,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3163,7 +3163,7 @@
       },
       "up_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5123497488,
+        "abs_offset": 5637819392,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3176,7 +3176,7 @@
       },
       "down_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 3806930256,
+        "abs_offset": 3623909440,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3189,7 +3189,7 @@
       },
       "down_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5098331664,
+        "abs_offset": 5612653568,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3202,7 +3202,7 @@
       },
       "down_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5089943056,
+        "abs_offset": 5604264960,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3217,7 +3217,7 @@
     "27": {
       "gate_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4345374032,
+        "abs_offset": 4160780352,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3230,7 +3230,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5165612560,
+        "abs_offset": 5685013504,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3243,7 +3243,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5157223952,
+        "abs_offset": 5676624896,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3256,7 +3256,7 @@
       },
       "up_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4479591760,
+        "abs_offset": 4294998080,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3269,7 +3269,7 @@
       },
       "up_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5182389776,
+        "abs_offset": 5701790720,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3282,7 +3282,7 @@
       },
       "up_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5174001168,
+        "abs_offset": 5693402112,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3295,7 +3295,7 @@
       },
       "down_proj.weight": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 4211156304,
+        "abs_offset": 4026562624,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3308,7 +3308,7 @@
       },
       "down_proj.scales": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5148835344,
+        "abs_offset": 5668236288,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3321,7 +3321,7 @@
       },
       "down_proj.biases": {
         "file": "model-00002-of-00004.safetensors",
-        "abs_offset": 5140446736,
+        "abs_offset": 5659847680,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3336,7 +3336,7 @@
     "28": {
       "gate_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 167371344,
+        "abs_offset": 134247584,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3349,7 +3349,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4249872592,
+        "abs_offset": 4183144992,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3362,7 +3362,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4241483984,
+        "abs_offset": 4174756384,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3375,7 +3375,7 @@
       },
       "up_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 301589072,
+        "abs_offset": 268465312,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3388,7 +3388,7 @@
       },
       "up_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4266649808,
+        "abs_offset": 4199922208,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3401,7 +3401,7 @@
       },
       "up_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4258261200,
+        "abs_offset": 4191533600,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3414,7 +3414,7 @@
       },
       "down_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 33153616,
+        "abs_offset": 29856,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3427,7 +3427,7 @@
       },
       "down_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4233095376,
+        "abs_offset": 4166367776,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3440,7 +3440,7 @@
       },
       "down_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4224706768,
+        "abs_offset": 4157979168,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3455,7 +3455,7 @@
     "29": {
       "gate_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 588966480,
+        "abs_offset": 536900768,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3468,7 +3468,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4302613200,
+        "abs_offset": 4308265888,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3481,7 +3481,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4294224592,
+        "abs_offset": 4299877280,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3494,7 +3494,7 @@
       },
       "up_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 723184208,
+        "abs_offset": 671118496,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3507,7 +3507,7 @@
       },
       "up_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4319390416,
+        "abs_offset": 4325043104,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3520,7 +3520,7 @@
       },
       "up_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4311001808,
+        "abs_offset": 4316654496,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3533,7 +3533,7 @@
       },
       "down_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 454748752,
+        "abs_offset": 402683040,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3546,7 +3546,7 @@
       },
       "down_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4285835984,
+        "abs_offset": 4291488672,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3559,7 +3559,7 @@
       },
       "down_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4277447376,
+        "abs_offset": 4283100064,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3574,7 +3574,7 @@
     "30": {
       "gate_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 1428945488,
+        "abs_offset": 1342207136,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3587,7 +3587,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4407628112,
+        "abs_offset": 4545597728,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3600,7 +3600,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4399239504,
+        "abs_offset": 4537209120,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3613,7 +3613,7 @@
       },
       "up_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 1563163216,
+        "abs_offset": 1476424864,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3626,7 +3626,7 @@
       },
       "up_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4424405328,
+        "abs_offset": 4562374944,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3639,7 +3639,7 @@
       },
       "up_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4416016720,
+        "abs_offset": 4553986336,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3652,7 +3652,7 @@
       },
       "down_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 1294727760,
+        "abs_offset": 1207989408,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3665,7 +3665,7 @@
       },
       "down_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4390850896,
+        "abs_offset": 4528820512,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3678,7 +3678,7 @@
       },
       "down_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4382462288,
+        "abs_offset": 4520431904,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3693,7 +3693,7 @@
     "31": {
       "gate_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 1833697872,
+        "abs_offset": 1744860320,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3706,7 +3706,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4458197456,
+        "abs_offset": 4603281696,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3719,7 +3719,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4449808848,
+        "abs_offset": 4594893088,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3732,7 +3732,7 @@
       },
       "up_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 1967915600,
+        "abs_offset": 1879078048,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3745,7 +3745,7 @@
       },
       "up_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4474974672,
+        "abs_offset": 4620058912,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3758,7 +3758,7 @@
       },
       "up_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4466586064,
+        "abs_offset": 4611670304,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3771,7 +3771,7 @@
       },
       "down_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 1699480144,
+        "abs_offset": 1610642592,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3784,7 +3784,7 @@
       },
       "down_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4441420240,
+        "abs_offset": 4586504480,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3797,7 +3797,7 @@
       },
       "down_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4433031632,
+        "abs_offset": 4578115872,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3812,7 +3812,7 @@
     "32": {
       "gate_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 2268924496,
+        "abs_offset": 2147513504,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3825,7 +3825,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4512643024,
+        "abs_offset": 4782929568,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3838,7 +3838,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4504254416,
+        "abs_offset": 4774540960,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3851,7 +3851,7 @@
       },
       "up_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 2403142224,
+        "abs_offset": 2281731232,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3864,7 +3864,7 @@
       },
       "up_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4529420240,
+        "abs_offset": 4799706784,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3877,7 +3877,7 @@
       },
       "up_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4521031632,
+        "abs_offset": 4791318176,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3890,7 +3890,7 @@
       },
       "down_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 2134706768,
+        "abs_offset": 2013295776,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3903,7 +3903,7 @@
       },
       "down_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4495865808,
+        "abs_offset": 4766152352,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3916,7 +3916,7 @@
       },
       "down_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4487477200,
+        "abs_offset": 4757763744,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3931,7 +3931,7 @@
     "33": {
       "gate_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 2690519632,
+        "abs_offset": 2550166688,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3944,7 +3944,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4565383632,
+        "abs_offset": 4908050464,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3957,7 +3957,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4556995024,
+        "abs_offset": 4899661856,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3970,7 +3970,7 @@
       },
       "up_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 2824737360,
+        "abs_offset": 2684384416,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -3983,7 +3983,7 @@
       },
       "up_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4582160848,
+        "abs_offset": 4924827680,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -3996,7 +3996,7 @@
       },
       "up_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4573772240,
+        "abs_offset": 4916439072,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4009,7 +4009,7 @@
       },
       "down_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 2556301904,
+        "abs_offset": 2415948960,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4022,7 +4022,7 @@
       },
       "down_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4548606416,
+        "abs_offset": 4891273248,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4035,7 +4035,7 @@
       },
       "down_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4540217808,
+        "abs_offset": 4882884640,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4050,7 +4050,7 @@
     "34": {
       "gate_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 3112114768,
+        "abs_offset": 2952819872,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4063,7 +4063,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4618124240,
+        "abs_offset": 5033171360,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4076,7 +4076,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4609735632,
+        "abs_offset": 5024782752,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4089,7 +4089,7 @@
       },
       "up_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 3246332496,
+        "abs_offset": 3087037600,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4102,7 +4102,7 @@
       },
       "up_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4634901456,
+        "abs_offset": 5049948576,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4115,7 +4115,7 @@
       },
       "up_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4626512848,
+        "abs_offset": 5041559968,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4128,7 +4128,7 @@
       },
       "down_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 2977897040,
+        "abs_offset": 2818602144,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4141,7 +4141,7 @@
       },
       "down_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4601347024,
+        "abs_offset": 5016394144,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4154,7 +4154,7 @@
       },
       "down_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4592958416,
+        "abs_offset": 5008005536,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4169,7 +4169,7 @@
     "35": {
       "gate_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 3516867152,
+        "abs_offset": 3355473056,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4182,7 +4182,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4668693584,
+        "abs_offset": 5090855328,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4195,7 +4195,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4660304976,
+        "abs_offset": 5082466720,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4208,7 +4208,7 @@
       },
       "up_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 3651084880,
+        "abs_offset": 3489690784,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4221,7 +4221,7 @@
       },
       "up_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4685470800,
+        "abs_offset": 5107632544,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4234,7 +4234,7 @@
       },
       "up_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4677082192,
+        "abs_offset": 5099243936,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4247,7 +4247,7 @@
       },
       "down_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 3382649424,
+        "abs_offset": 3221255328,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4260,7 +4260,7 @@
       },
       "down_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4651916368,
+        "abs_offset": 5074078112,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4273,7 +4273,7 @@
       },
       "down_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4643527760,
+        "abs_offset": 5065689504,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4288,7 +4288,7 @@
     "36": {
       "gate_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 3952091728,
+        "abs_offset": 3758126240,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4301,7 +4301,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4723139024,
+        "abs_offset": 5270499104,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4314,7 +4314,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4714750416,
+        "abs_offset": 5262110496,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4327,7 +4327,7 @@
       },
       "up_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4086309456,
+        "abs_offset": 3892343968,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4340,7 +4340,7 @@
       },
       "up_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4739916240,
+        "abs_offset": 5287276320,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4353,7 +4353,7 @@
       },
       "up_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4731527632,
+        "abs_offset": 5278887712,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4366,7 +4366,7 @@
       },
       "down_proj.weight": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 3817874000,
+        "abs_offset": 3623908512,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4379,7 +4379,7 @@
       },
       "down_proj.scales": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4706361808,
+        "abs_offset": 5253721888,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4392,7 +4392,7 @@
       },
       "down_proj.biases": {
         "file": "model-00003-of-00004.safetensors",
-        "abs_offset": 4697973200,
+        "abs_offset": 5245333280,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4407,7 +4407,7 @@
     "37": {
       "gate_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 153214392,
+        "abs_offset": 134247472,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4420,7 +4420,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4238141496,
+        "abs_offset": 4130715056,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4433,7 +4433,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4229752888,
+        "abs_offset": 4122326448,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4446,7 +4446,7 @@
       },
       "up_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 287432120,
+        "abs_offset": 268465200,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4459,7 +4459,7 @@
       },
       "up_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4254918712,
+        "abs_offset": 4147492272,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4472,7 +4472,7 @@
       },
       "up_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4246530104,
+        "abs_offset": 4139103664,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4485,7 +4485,7 @@
       },
       "down_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 18996664,
+        "abs_offset": 29744,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4498,7 +4498,7 @@
       },
       "down_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4221364280,
+        "abs_offset": 4113937840,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4511,7 +4511,7 @@
       },
       "down_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4212975672,
+        "abs_offset": 4105549232,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4526,7 +4526,7 @@
     "38": {
       "gate_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 574809528,
+        "abs_offset": 536900656,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4539,7 +4539,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4290882104,
+        "abs_offset": 4255835952,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4552,7 +4552,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4282493496,
+        "abs_offset": 4247447344,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4565,7 +4565,7 @@
       },
       "up_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 709027256,
+        "abs_offset": 671118384,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4578,7 +4578,7 @@
       },
       "up_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4307659320,
+        "abs_offset": 4272613168,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4591,7 +4591,7 @@
       },
       "up_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4299270712,
+        "abs_offset": 4264224560,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4604,7 +4604,7 @@
       },
       "down_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 440591800,
+        "abs_offset": 402682928,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4617,7 +4617,7 @@
       },
       "down_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4274104888,
+        "abs_offset": 4239058736,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4630,7 +4630,7 @@
       },
       "down_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4265716280,
+        "abs_offset": 4230670128,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4645,7 +4645,7 @@
     "39": {
       "gate_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 979561912,
+        "abs_offset": 939553840,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4658,7 +4658,7 @@
       },
       "gate_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4341451448,
+        "abs_offset": 4313519920,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4671,7 +4671,7 @@
       },
       "gate_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4333062840,
+        "abs_offset": 4305131312,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4684,7 +4684,7 @@
       },
       "up_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 1113779640,
+        "abs_offset": 1073771568,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4697,7 +4697,7 @@
       },
       "up_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4358228664,
+        "abs_offset": 4330297136,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4710,7 +4710,7 @@
       },
       "up_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4349840056,
+        "abs_offset": 4321908528,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4723,7 +4723,7 @@
       },
       "down_proj.weight": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 845344184,
+        "abs_offset": 805336112,
         "expert_stride": 524288,
         "expert_size": 524288,
         "total_size": 134217728,
@@ -4736,7 +4736,7 @@
       },
       "down_proj.scales": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4324674232,
+        "abs_offset": 4296742704,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
@@ -4749,7 +4749,7 @@
       },
       "down_proj.biases": {
         "file": "model-00004-of-00004.safetensors",
-        "abs_offset": 4316285624,
+        "abs_offset": 4288354096,
         "expert_stride": 32768,
         "expert_size": 32768,
         "total_size": 8388608,
