@@ -52,11 +52,16 @@ Key insight: Dense 27B models (Bonsai) have 9× more active params per token tha
 
 | Model | Size | "Hello" (20 tok) | "Poem" (50 tok) | Quality |
 |-------|------|-----------------|-----------------|---------|
-| **FinchMoE 2-bit (ours)** | 21 GB | 8.3 tok/s | ~6 tok/s | "You are a helpful assistant." |
-| **turbo-fieldfare** | 13 GB | **9.4 tok/s** | **10.7 tok/s** | "The salt-crust clings to weathered bone..." |
-| Ternary-Bonsai-27B | ~7 GB | TBD | TBD | TBD |
+| **FinchMoE 2-bit (ours)** | 21 GB | ~2 GB | TBD | 8.3 tok/s | TBD | TBD | TBD | TBD | 8MB/400MB/2GB | "You are a helpful assistant." |
+| **FinchMoE 4-bit** | 36 GB | ~2.5 GB | TBD | 7.5 tok/s | TBD | TBD | TBD | TBD | 8MB/400MB/2GB | "You are a helpful assistant." |
+| **turbo-fieldfare** | 13 GB | ~3 GB | TBD | **10.7 tok/s** | TBD | TBD | TBD | TBD | TBD | "The salt-crust clings..." |
+| Ternary-Bonsai-27B | ~7 GB | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD (downloading) |
+| Bonsai-27B-1bit | 1.7 GB | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD (downloading) |
 
-turbo-fieldfare is faster (smaller model, more efficient Swift/Metal engine) and produces better poetry. Our FinchMoE advantages: lower RAM (2GB vs ~3GB), flexible quantization (2/4/8-bit), and the Qwen architecture's 256K context window vs Gemma's smaller context.
+**PP** = prompt processing (prefill tok/s), **TG** = token generation (decode tok/s).  
+**KV** = KV cache at 1K/50K/256K tokens (10 full-attention layers × 2×K+V × 2 heads × 256d × 4B).  
+GatedDeltaNet layers (30/40) use fixed 2.1MB state — no KV growth with context.  
+All models on Samsung 990 Plus NVMe via TB4 enclosure, M4 Mac mini 16GB.
 
 ## Origin
 
