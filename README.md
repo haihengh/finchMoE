@@ -132,10 +132,11 @@ FinchMoE's GatedDeltaNet layers (30/40) use fixed 2.1MB recurrent state — no K
 | H | 3-bit experts | 21→~16 GB | Low |
 | I | Mixed-precision experts | ~1-2% quality | Low |
 | J | Completions API (`/v1/completions`) | Standard benchmarks | Low |
-| K | **Qwen 3.5 397B-A17B** ✅ | Working at 3.2 tok/s | Done |
+| K | **Qwen 3.5 397B-A17B** ✅ | Working at 3.2 tok/s (4-bit MLX src, degraded quality) | Done |
 |   | → Separate binary `infer_397b.m`, 397b/ weights dir | | |
-|   | → 68 GB packed experts, 5.1 GB model_weights, <1 GB RAM | | |
-|   | → Fix: export_tokenizer fails for 397B tokenizer (use 35B vocab) | | |
+|   | → 73 GB (68 experts + 5.1 weights), <1 GB RAM | | |
+|   | → Quality limited by source MLX 4-bit quantization | | |
+|   | → **Needs BF16 source** for 2-bit custom requantization (est. ~800 GB download) | | |
 | L | **DeepSeek-V4-Flash** (13B active MoE) | New model target | High |
 |   | → 43 layers, 256 experts (6 active), sliding window attn | | |
 |   | → FP4 native experts, hash routing, MTP, 1M context | | |
