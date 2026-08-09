@@ -103,8 +103,9 @@ def main():
     # Sanitize tensor names: remove "language_model." or "model.language_model." prefix
     def sanitize_name(name):
         for prefix in ['model.language_model.', 'language_model.']:
-            if prefix in name:
-                return name.replace(prefix, 'model.' if 'model.' in prefix else '')
+            if name.startswith(prefix):
+                # If stripping 'model.language_model.', keep 'model.'; if just 'language_model.', strip entirely
+                return 'model.' + name[len(prefix):] if prefix.startswith('model.') else name[len(prefix):]
         return name
 
     # Plan the output layout

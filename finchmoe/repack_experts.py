@@ -55,6 +55,21 @@ EXPERT_SIZE_4BIT = 1769472
 EXPERT_SIZE_8BIT = 3342336
 EXPERT_SIZE_1BIT = 589824
 EXPERT_SIZE_2BIT = 983040
+
+# Large-model variants (397B A17B: hidden=4096, intermediate=1024)
+COMPONENTS_4BIT_LARGE = [
+    {"name": "gate_proj.weight",  "offset": 0,        "size": 2097152, "dtype": "U32",  "shape": [1024, 512]},
+    {"name": "gate_proj.scales",  "offset": 2097152,  "size": 131072,  "dtype": "BF16", "shape": [1024, 64]},
+    {"name": "gate_proj.biases",  "offset": 2228224,  "size": 131072,  "dtype": "BF16", "shape": [1024, 64]},
+    {"name": "up_proj.weight",    "offset": 2359296,  "size": 2097152, "dtype": "U32",  "shape": [1024, 512]},
+    {"name": "up_proj.scales",    "offset": 4456448,  "size": 131072,  "dtype": "BF16", "shape": [1024, 64]},
+    {"name": "up_proj.biases",    "offset": 4587520,  "size": 131072,  "dtype": "BF16", "shape": [1024, 64]},
+    {"name": "down_proj.weight",  "offset": 4718592,  "size": 2097152, "dtype": "U32",  "shape": [4096, 256]},
+    {"name": "down_proj.scales",  "offset": 6815744,  "size": 131072,  "dtype": "BF16", "shape": [4096, 16]},
+    {"name": "down_proj.biases",  "offset": 6946816,  "size": 131072,  "dtype": "BF16", "shape": [4096, 16]},
+]
+EXPERT_SIZE_4BIT_LARGE = 7077888
+
 NUM_EXPERTS = 256
 
 # 1-bit expert format: 32 values per uint32
@@ -326,10 +341,22 @@ def main():
     print(f"Layers in index: {len(expert_reads)}")
     output_dir = os.path.join(model_path, dirname)
 
-    # Verify component sizes
+    # Verify component sizes — auto-detect large model (397B) vs standard (35B)
     if not verify_component_sizes(expert_reads, components):
-        print("ABORTING: component size mismatch")
-        sys.exit(1)
+        # Try large-model variants
+        if args.bits == 4:
+            components = COMPONENTS_4BIT_LARGE; expert_size = EXPERT_SIZE_4BIT_LARGE
+        elif args.bits == 8:
+            # Use scaled 8-bit for large model
+            components = [dict(c) for c in COMPONENTS_8BIT]
+            for c in components: c['size'] *= 4  # 4x larger weights
+            expert_size = EXPERT_SIZE_8BIT * 4
+        else:
+            print("ABORTING: large model only supported at 4-bit currently")
+            sys.exit(1)
+        if not verify_component_sizes(expert_reads, components):
+            print("ABORTING: component size mismatch even with large-model layout")
+            sys.exit(1)
 
     os.makedirs(output_dir, exist_ok=True)
     print(f"Output directory: {output_dir}")
