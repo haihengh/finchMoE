@@ -1730,16 +1730,24 @@ kernel void gemv_bf16(
         float4 xv0 = ((const device float4*)x)[base / 4];
         float4 xv1 = ((const device float4*)x)[base / 4 + 1];
 
-        // Load 8 weight values (uint16) and convert to float
-        // Each uint16_t is 2 bytes; we load and convert individually.
-        // Then we combine into float4 for dot().
-        float wf[CHUNK];
-        for (short i = 0; i < CHUNK; i++) {
-            wf[i] = as_type<float>(((uint32_t)w_row[base + i]) << 16);
-        }
+        // Load 8 BF16 weights as one uint4 (128-bit = 16 bytes = 8 × uint16)
+        // Single wide load replaces 8 narrow 2-byte loads
+        const device uint4 *wp = (const device uint4*)(w_row + base);
+        uint4 wu = *wp;
 
-        float4 wv0 = float4(wf[0], wf[1], wf[2], wf[3]);
-        float4 wv1 = float4(wf[4], wf[5], wf[6], wf[7]);
+        // Convert 8 BF16 → 2 float4: lower uint16 shifts up, upper already in place
+        float4 wv0 = float4(
+            as_type<float>(wu.x << 16),
+            as_type<float>(wu.x & 0xFFFF0000u),
+            as_type<float>(wu.y << 16),
+            as_type<float>(wu.y & 0xFFFF0000u)
+        );
+        float4 wv1 = float4(
+            as_type<float>(wu.z << 16),
+            as_type<float>(wu.z & 0xFFFF0000u),
+            as_type<float>(wu.w << 16),
+            as_type<float>(wu.w & 0xFFFF0000u)
+        );
 
         acc += dot(wv0, xv0) + dot(wv1, xv1);
     }
@@ -1767,5 +1775,123 @@ kernel void gemv_bf16(
             tot += sh_partial[sg];
         }
         out[row] = tot;
+    }
+}
+
+// ============================================================================
+// BF16 GEMV x2: 2 output rows per threadgroup (NR0=2).
+//
+// Processes two output rows in one threadgroup, reusing the x-vector
+// registers across rows. This amortizes x-vector loads and halves dispatch
+// overhead. Same interleaved CHUNK=8 pattern as gemv_bf16.
+//
+// Dispatch: (out_dim + 1) / 2 threadgroups, 256 threads each.
+// When out_dim is odd, the last threadgroup computes one row.
+// ============================================================================
+kernel void gemv_bf16_x2(
+    const device uint16_t *W    [[buffer(0)]],  // [out_dim, in_dim] BF16
+    const device float    *x    [[buffer(1)]],  // [in_dim]
+    device float          *out  [[buffer(2)]],  // [out_dim]
+    constant uint32_t     &out_dim [[buffer(3)]],
+    constant uint32_t     &in_dim  [[buffer(4)]],
+    uint  tid   [[thread_position_in_threadgroup]],
+    uint  row0  [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]]
+) {
+    constexpr short N_SIMDGROUPS = 8;   // 256 threads / 32
+    constexpr short NR0 = 2;
+    constexpr short CHUNK = 8;          // elements per thread per iteration
+
+    uint r0 = row0 * NR0;
+    if (r0 >= out_dim) return;
+
+    const device uint16_t *w_row0 = W + (uint64_t)r0 * in_dim;
+    bool has_row1 = (r0 + 1 < out_dim);
+    const device uint16_t *w_row1 = has_row1 ? w_row0 + in_dim : w_row0;
+
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+
+    int n_sweeps = (int)in_dim / (256 * CHUNK);
+
+    for (int sw = 0; sw < n_sweeps; sw++) {
+        int base = sw * 256 * CHUNK + (int)tid * CHUNK;
+
+        // Load 8 x-values once — shared across both rows
+        float4 xv0 = ((const device float4*)x)[base / 4];
+        float4 xv1 = ((const device float4*)x)[base / 4 + 1];
+
+        // ---- Row 0: load 8 BF16 weights as one uint4 (128-bit) ----
+        {
+            const device uint4 *wp0 = (const device uint4*)(w_row0 + base);
+            uint4 wu0 = *wp0;
+            // BF16→float: lower uint16→shift up; upper uint16 already in place
+            float4 wv0_0 = float4(
+                as_type<float>(wu0.x << 16),
+                as_type<float>(wu0.x & 0xFFFF0000u),
+                as_type<float>(wu0.y << 16),
+                as_type<float>(wu0.y & 0xFFFF0000u)
+            );
+            float4 wv0_1 = float4(
+                as_type<float>(wu0.z << 16),
+                as_type<float>(wu0.z & 0xFFFF0000u),
+                as_type<float>(wu0.w << 16),
+                as_type<float>(wu0.w & 0xFFFF0000u)
+            );
+            acc0 += dot(wv0_0, xv0) + dot(wv0_1, xv1);
+        }
+
+        // ---- Row 1: same x-vector, different weights ----
+        if (has_row1) {
+            const device uint4 *wp1 = (const device uint4*)(w_row1 + base);
+            uint4 wu1 = *wp1;
+            float4 wv1_0 = float4(
+                as_type<float>(wu1.x << 16),
+                as_type<float>(wu1.x & 0xFFFF0000u),
+                as_type<float>(wu1.y << 16),
+                as_type<float>(wu1.y & 0xFFFF0000u)
+            );
+            float4 wv1_1 = float4(
+                as_type<float>(wu1.z << 16),
+                as_type<float>(wu1.z & 0xFFFF0000u),
+                as_type<float>(wu1.w << 16),
+                as_type<float>(wu1.w & 0xFFFF0000u)
+            );
+            acc1 += dot(wv1_0, xv0) + dot(wv1_1, xv1);
+        }
+    }
+
+    // ---- Remainder (scalar, one element per thread) ----
+    int rem_start = n_sweeps * 256 * CHUNK;
+    for (int i = rem_start + (int)tid; i < (int)in_dim; i += 256) {
+        float xv = x[i];
+        acc0 += as_type<float>(((uint32_t)w_row0[i]) << 16) * xv;
+        if (has_row1) {
+            acc1 += as_type<float>(((uint32_t)w_row1[i]) << 16) * xv;
+        }
+    }
+
+    // ---- Two-phase reduction (NR0-aware) ----
+    acc0 = simd_sum(acc0);
+    acc1 = simd_sum(acc1);
+
+    threadgroup float sh_partial[N_SIMDGROUPS * NR0];
+    if (tiisg == 0) {
+        sh_partial[sgitg]                    = acc0;
+        sh_partial[N_SIMDGROUPS + sgitg]     = acc1;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg == 0) {
+        float tot0 = 0.0f, tot1 = 0.0f;
+        for (short sg = 0; sg < N_SIMDGROUPS; sg++) {
+            tot0 += sh_partial[sg];
+            tot1 += sh_partial[N_SIMDGROUPS + sg];
+        }
+        if (tiisg == 0) {
+            out[r0] = tot0;
+            if (has_row1) out[r0 + 1] = tot1;
+        }
     }
 }
