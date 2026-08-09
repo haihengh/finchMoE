@@ -9,87 +9,76 @@ A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon, targeting 
 | Output quality | ✅ Coherent — "Hello! How can I help you today?" |
 | Speed (M4, 2-bit, K=2) | **8.3 tok/s** |
 | Speed (M4, 2-bit, K=4) | **7.5 tok/s** |
-| RAM (runtime) | ~2 GB + page cache |
+| Speed (M4, 1-bit, K=2) | **8.1 tok/s** (degraded quality) |
+| RAM (runtime, 1K ctx) | ~400 MB |
+| RAM (runtime, 60K ctx) | ~3.3 GB |
 | Disk (2-bit-dense, active) | **21 GB** |
-| Disk (4-bit-dense) | **36 GB** |
+| Disk (1-bit-dense) | **13.2 GB** |
 
 ## Model Size & Quality Tradeoff
 
-| Model | Safe-tensors | Experts | Total | Speed (K=4) | Quality Loss |
-|-------|-------------|---------|-------|-------------|-------------|
+| Model | Safetensors | Experts | Total | Speed (K=2) | Quality |
+|-------|-------------|---------|-------|-------------|---------|
 | BF16 (source) | 67 GB | — | 67 GB | — | 0% (reference) |
-| 4-bit-dense (active) | 19 GB | 17 GB | **36 GB** | 7.2 tok/s | ~1-2% |
-| 2-bit-dense | 11 GB | 9.4 GB | **21 GB** | 8.3 tok/s | ~5% |
+| 2-bit-dense ✅ | 11 GB | 9.4 GB | **21 GB** | 8.3 tok/s | ~5% |
+| 4-bit-dense | 19 GB | 17 GB | **36 GB** | 7.2 tok/s | ~1-2% |
 | 1-bit-dense | 7.6 GB | 5.6 GB | **13.2 GB** | 8.1 tok/s | ~10-15% (degraded) |
 
 ### Quantization Strategy
 
-| Component | Format | Why |
-|-----------|--------|-----|
-| Embeddings + lm_head | 8-bit | Vocabulary projections — near-lossless |
-| Attention/GDN projections | 4-bit | Large tensors, 4-bit is sufficient |
-| Shared expert | 4-bit | Always active, small dim |
-| Routed experts | 4-bit or 2-bit | MoE is quantization-tolerant: 8/256 fire, errors cancel |
-| Norms + routing gate | BF16 | Tiny, not worth quantizing |
-
-### Why MoE Tolerates Aggressive Quantization
-
-Only 8/256 experts fire per token. If quantization degrades one expert, the router weights it less. The weighted sum of 8 expert outputs smooths individual errors. This is why 2-bit MoE models often match 4-bit quality on benchmarks.
+| Component | Format | Size | Why |
+|-----------|--------|------|-----|
+| Embeddings + lm_head | 8-bit | 1.1 GB | Near-lossless, vocabulary-critical |
+| Attention/GDN projections | 4-bit | 0.7 GB | Large, 4-bit sufficient |
+| Shared expert | 4-bit | 0.07 GB | Always active, small |
+| Routed experts | 2-bit (→1-bit) | 9.4 GB | MoE-tolerant: 8/256 fire, errors cancel |
+| Norms + routing gate | BF16 | 0.0005 GB | Tiny, not worth quantizing |
 
 ## Comparison Models
 
-We track these reference models to benchmark our speed and quality:
+| Model | Arch | Active | Size | TG (M4) | Notes |
+|-------|------|--------|------|----------|-------|
+| **FinchMoE 2-bit** | MoE 35B A3B | 3B | 21 GB | **8.3 tok/s** | Custom C/Metal, 256K context |
+| [turbo-fieldfare](https://github.com/drumih/turbo-fieldfare) | MoE 26B A4B | 4B | 13 GB | **10.7 tok/s** | Swift/Metal, better poetry, 8K max context |
+| [Ternary-Bonsai-27B](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf) | Dense 27B | 27B | 7.1 GB | 0.008 tok/s ❌ | 27B dense = 9× more compute |
+| [Bonsai-27B-1bit](https://huggingface.co/prism-ml/Bonsai-27B-mlx-1bit) | Dense 27B | 27B | 4.8 GB | ~1-3 tok/s (est.) | Runs on iPhone via LM Studio ✅ |
 
-| Model | Arch | Active Params | Size | tok/s (M4) | Notes |
-|-------|------|--------------|------|------------|-------|
-| **FinchMoE 2-bit (ours)** | MoE 35B A3B | 3B | 21 GB | 8.3 (K=2), 7.5 (K=4) | Custom C/Metal engine |
-| [turbo-fieldfare](https://github.com/drumih/turbo-fieldfare) | MoE 26B A4B | 4B | 13 GB | **10.7 tok/s** | Swift/Metal, measured on our M4 |
-| [Ternary-Bonsai-27B](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf) | Dense 27B | 27B | 7.1 GB | 0.008 tok/s ❌ | Q2_g64: 27B dense too slow on M4, CPU-bound |
-| [Bonsai-27B-1bit](https://huggingface.co/prism-ml/Bonsai-27B-mlx-1bit) | Dense 27B | 27B | 4.8 GB | ~1-3 tok/s (est.) | MLX format, runs on iPhone via LM Studio ✅ |
+**Key insight**: Active parameter count dominates speed, not model size. Bonsai is smaller on disk (7.1 GB) but 9× more compute per token. MoE with SSD streaming is the right architecture for low-RAM devices.
 
-Key insight: Dense 27B models (Bonsai) have 9× more active params per token than our MoE 3B — they trade speed for quality. MoE with SSD streaming is the right architecture for low-RAM devices.
+### Benchmarks (M4 Mac mini 16GB, Samsung 990 Plus NVMe TB4)
 
-### Measured on M4 Mac mini 16GB (Aug 2026)
+| Model | Size | RAM | TG (1K) | TG (256K) | KV (256K) | Quality |
+|-------|------|-----|---------|-----------|-----------|---------|
+| **FinchMoE 2-bit** | 21 GB | ~400 MB | **8.3 tok/s** | ~5-8 tok/s (est.) | 5.2 GB | "You are a helpful assistant." |
+| **FinchMoE 1-bit** | 13.2 GB | ~350 MB | **8.1 tok/s** | ~5-8 tok/s (est.) | 5.2 GB | "You are a helpful assistant." (degraded) |
+| **turbo-fieldfare** | 13 GB | ~3 GB | **10.7 tok/s** | N/A (63 GB KV) | 63 GB | "The salt-crust clings..." |
 
-#### Token Generation Speed (TG, decode tok/s)
+**PP (prompt processing)**: 3.6 tok/s at 1K. Estimated ~0.5-1 tok/s at 60K (full attention O(n²) on CPU).
+**TG at 256K**: Estimated from attention scaling. 30 GDN layers unaffected by context length.
+**KV at 256K (FP16)**: FinchMoE 5.2 GB (10 attn layers × 2 KV heads). turbo-fieldfare 63 GB (30 layers × 8 heads).
 
-| Model | Size | RAM | TG (1K ctx) | TG (50K ctx) | TG (256K ctx) | KV (1K/50K/256K) | Quality |
-|-------|------|-----|-------------|--------------|---------------|------------------|---------|
-| **FinchMoE 1-bit** | 13.2 GB | ~1.5 GB | **8.1 tok/s** | TBD | TBD | 0.01/1.0/5.2 GB | "You are a helpful assistant." (degraded) |
-| **FinchMoE 2-bit** | 21 GB | ~2 GB | **8.3 tok/s** | **~2 tok/s** (est.) | **~0.5 tok/s** (est.) | 0.02/1.0/5.2 GB | "You are a helpful assistant." |
-| **FinchMoE 4-bit** | 36 GB | ~2.5 GB | **7.5 tok/s** | ~2 tok/s (est.) | ~0.5 tok/s (est.) | 0.02/1.0/5.2 GB | "You are a helpful assistant." |
-| **turbo-fieldfare** | 13 GB | ~3 GB | **10.7 tok/s** | TBD | N/A (63 GB KV) | 0.3/12/63 GB | "The salt-crust clings..." |
-| Ternary-Bonsai-27B | 7.1 GB | ~11 GB | **0.008 tok/s** | N/A | N/A | TBD | ❌ Too slow (27B dense, CPU-bound) |
-| Bonsai-27B-1bit | 4.8 GB | ~4 GB | **~1–3 tok/s** (est.) | TBD | TBD | TBD | Runs on iPhone via LM Studio ✅ |
+### KV Cache Memory at Context Lengths
 
-**PP (prompt processing)**: FinchMoE 24-token prefill = 3.6 tok/s (6726ms). At 1K tokens: ~3-4 tok/s.  
-**TG at 256K**: Estimated from attention scaling (CPU-bound above 8K). 30 GDN layers unaffected.  
-turbo-fieldfare 256K is N/A — needs 63 GB KV cache, impossible on 16GB.
+| Model | Attn Layers | KV Heads | 1K | 50K | 256K |
+|-------|------------|----------|-----|------|-------|
+| **FinchMoE** | 10/40 | 2 | 0.02 GB | 1.0 GB | 5.2 GB |
+| **turbo-fieldfare** | 30/30 | 8 | 0.3 GB | 12.3 GB | 62.9 GB |
 
-#### KV Cache Memory (FP16)
-
-| Model | Attn Layers | KV Heads | 1K ctx | 50K ctx | 256K ctx | Notes |
-|-------|------------|----------|--------|---------|----------|-------|
-| **FinchMoE** | 10/40 | 2 | 0.02 GB | 1.0 GB | **5.2 GB** | 30 GDN layers = fixed 2.1MB state |
-| **turbo-fieldfare** | 30/30 | 8 | 0.3 GB | 12.3 GB | **62.9 GB** | All layers need KV; 256K impossible on 16GB |
-
-**PP** = prompt processing (prefill tok/s), **TG** = token generation (decode tok/s).  
-FinchMoE KV cache uses FP32 currently; FP16 would halve numbers. GatedDeltaNet layers (30/40) use fixed recurrent state — no KV growth.  
-All models tested on Samsung 990 Plus NVMe via TB4 enclosure, M4 Mac mini 16GB.
+FinchMoE's GatedDeltaNet layers (30/40) use fixed 2.1MB recurrent state — no KV growth. Only the 10 full-attention layers need caching.
 
 ## Optimization History
 
-### Speed Progression (2-bit-dense, K=2 baseline)
+### Speed Progression
 
 | Step | expert_io | total_layer | tok/s | What |
 |------|-----------|-------------|-------|------|
 | Baseline (8-bit, K=4) | 2.04ms | 4.93ms | 5.1 | Starting point |
 | Fused expert kernel | 1.92ms | 4.37ms | 5.7 | gate+up+swiglu → 1 dispatch |
 | 4-bit experts | 1.33ms | 3.81ms | 6.6 | Half I/O volume |
-| Dense quantization | 0.59ms | 2.83ms | 7.2 | Embeds 8-bit, attn 4-bit, less RAM pressure |
+| Dense quantization | 0.59ms | 2.83ms | 7.2 | Embeds 8-bit, attn 4-bit |
 | 2-bit experts (K=4) | 0.38ms | 2.74ms | 7.5 | Half I/O again |
 | **K=2 default** | **0.21ms** | **2.30ms** | **8.3** | Half experts/layer |
-| 1-bit experts | 0.13ms | 2.33ms | 8.1 | Diminishing returns, quality degraded |
+| 1-bit experts | 0.13ms | 2.33ms | 8.1 | Diminishing returns |
 
 ### What Didn't Work
 
@@ -98,494 +87,169 @@ All models tested on Samsung 990 Plus NVMe via TB4 enclosure, M4 Mac mini 16GB.
 | Batched Metal encoders | Slower | Metal cost is per-dispatch, not per-encoder |
 | Multi-expert 2x kernel | Slower | Buffer binding overhead > dispatch savings |
 | Spatial expert prediction | 1.3% hit rate | Adjacent layers pick different experts |
-| Temporal expert prediction | 41% hit rate | Overhead > savings |
-| Predictive I/O overlap | Slower | Prediction validation cost > benefit |
+| Temporal expert prediction | 41% hit rate | Validation overhead > savings |
 | mmap zero-copy Metal buffers | OOM | 17GB Metal buffers exceed 16GB RAM |
 | LZ4 expert compression | 6% ratio | Quantized data near-random |
-| GDN conv1d+norm fusion | ~0.03ms gain | Too complex for marginal benefit |
 
-### Current Bottleneck
-
-At 0.21ms (9% of total), expert I/O is fully optimized. **GPU dispatch overhead** dominates:
+### Current Per-Layer Timing (2-bit, K=2)
 
 | Phase | ms | % | Stuck Because |
 |-------|----|---|---------------|
-| cmd1_wait (GDN GPU) | 0.87 | 38% | 5 Metal dispatches per layer |
-| cmd3_encode (expert dispatch) | 0.67 | 29% | 4 dispatches × K experts, per-dispatch driver cost |
+| cmd1_wait (GDN GPU) | 0.87 | 38% | 5 Metal dispatches per GDN layer |
+| cmd3_encode (expert dispatch) | 0.67 | 29% | Per-dispatch Metal driver cost |
 | cmd2_wait (routing GPU) | 0.49 | 21% | 6 dispatches for o_proj+routing+shared |
-
-**Path to 12+ tok/s**: ICBs (Indirect Command Buffers) or double-buffered async encoding — architectural Metal pipeline changes, not incremental kernel tweaks.
+| expert_io | 0.21 | 9% | ✅ Fully optimized (RAM bandwidth limited) |
+| **Total** | **2.30** | | **× 40 layers = 92ms = 10.9 tok/s theoretical** |
 
 ## Future Implementation Plan
 
-### Priority 1: TG Speed (12+ tok/s)
+### P1: TG Speed (12+ tok/s)
 
-| # | Feature | Gain | Effort | Notes |
-|---|---------|------|--------|-------|
-| A | **ICBs** (Indirect Command Buffers) | cmd3: 0.67→0.05ms | High | Pre-record dispatch sequences at load time, update buffer pointers via argument buffers |
-| B | **Double-buffered async encoding** | CPU wait hidden | High | Semaphore ring buffer, overlapping CPU encode with GPU execute |
-| C | **Single-kernel multi-expert** | 2-4 dispatches→1 | High | Pass expert indices in device buffer, GPU threadgroups index weights dynamically |
+| # | Feature | Gain | Effort |
+|---|---------|------|--------|
+| A | ICBs (Indirect Command Buffers) | cmd3: 0.67→0.05ms | High |
+| B | Double-buffered async encoding | Hide CPU wait | High |
+| C | Single-kernel multi-expert MoE | K dispatches → 1 | High |
 
-### Priority 2: Long Context Performance
+### P2: Long Context
 
-| # | Feature | Gain | Effort | Notes |
-|---|---------|------|--------|-------|
-| D | **KV cache FP16** | 2× capacity, faster attention | Medium | Halves KV memory (10.5→5.2GB at 256K), requires FP16 attention kernels |
-| E | **Batched GPU prefill attention** | 5-10× PP speed | High | All prompt query×key matmuls in one Metal dispatch |
-| F | **GDN chunked prefill** | 2-3× PP speed | Medium | llama.cpp reference implementation in `delta-net-base.cpp:build_delta_net_chunking` |
-| G | **`--gpu-kv-seq` bump** | TG at long ctx | Free | Already implemented, just bump default from 8K to match context |
+| # | Feature | Gain | Effort |
+|---|---------|------|--------|
+| D | KV cache FP16 | 2× capacity | Medium |
+| E | Batched GPU prefill attention | 5-10× PP speed | High |
+| F | GDN chunked prefill | 2-3× PP speed | Medium |
+| G | `--gpu-kv-seq` bump (default 8K→match ctx) | TG at long ctx | Free |
 
-### Priority 3: Model Compression
+### P3: Compression & Quality
 
-| # | Feature | Gain | Effort | Notes |
-|---|---------|------|--------|-------|
-| H | **3-bit experts** | 21→~16 GB | Low | Middle ground between 2-bit (good quality) and 1-bit (degraded) |
-| I | **Mixed-precision experts** | ~1-2% quality | Low | Top-20% most-used experts at 4-bit, rest at 2-bit |
-
-### Priority 4: Quality & Benchmarks
-
-| # | Feature | Gain | Effort | Notes |
-|---|---------|------|--------|-------|
-| J | **Completions API** (`/v1/completions`) | Standard benchmarks | Low | Add loglikelihood endpoint for lm-eval compatibility |
-| K | **GGUF export** | Ecosystem compatibility | Medium | Convert our quantized model to GGUF for llama.cpp comparison |
-
-## Origin
-
-The project started from searching for an LLM that is both capable enough for coding and fast enough on a $599 M4 Mac mini. Gemma 4 E2B was too small (low quality), Bonsai 27B was too slow (dense, all 27B params active per token). turbo-fieldfare proved the MoE + SSD streaming approach works with Gemma 4 26B A4B at 3.5 tok/s. Qwen 3.6 35B A3B was a natural fit — fewer active params (3B vs 4B) means less memory bandwidth, more speed.
-
-[flash-moe](flash-moe/) is the starting codebase — a production C/Metal engine running Qwen3.5-MoE at 4.36 tok/s on M3 Max. It provides:
-
-- **SSD Expert Streaming** — 4-bit expert weights streamed from NVMe on demand
-- **FMA-Optimized Dequant** — fused multiply-add in Metal shaders (+12% throughput)
-- **GatedDeltaNet via Accelerate BLAS** — 64% faster than scalar
-- **GPU Fused Attention** — batched Q@K^T, softmax, scores@V on Metal
-- **Trust the OS Page Cache** — no custom expert cache (every attempt was slower)
-
-## Architecture
-
-### Model: Qwen 3.6 35B A3B
-
-```
-40 layers: 30× GatedDeltaNet + 10× full attention (3:1 pattern)
-Full attention at layers 3, 7, 11, 15, 19, 23, 27, 31, 35, 39
-```
-
-| Parameter | Value |
-|---|---|
-| Hidden dim | 2048 |
-| Attention heads | 16 (GQA: 16Q, 2KV) |
-| Head dim | 256 |
-| Vocab | 248,320 |
-| Experts | 256 (top-8) + 1 shared |
-| MoE intermediate | 512 |
-| Max position | 262,144 |
-| RoPE theta | 10,000,000 |
-| Partial rotary | 0.25 |
-| MRoPE | interleaved [11, 11, 10] |
-
-### GatedDeltaNet Layer
-
-Pure delta-rule recurrence (not Mamba/SSM). Projects input → Q/K/V/Z/A/B, runs depthwise conv1d(kernel=4), then recurrent state update.
-
-| Component | Dimensions |
-|---|---|
-| in_proj_qkv | [8192, 2048] |
-| in_proj_z | [4096, 2048] |
-| in_proj_a / in_proj_b | [32, 2048] |
-| conv1d | [8192, 4, 1] |
-| A_log, dt_bias | [32] |
-| norm | [128] |
-| out_proj | [2048, 4096] |
-| Recurrent state | [32, 128, 128] ≈ 2.1 MB |
-
-### Full Attention Layer
-
-Standard GQA with Q/output-gate fusion (`attn_output_gate: true`).
-
-| Component | Dimensions |
-|---|---|
-| q_proj (doubled) | [4096, 2048] |
-| k_proj / v_proj | [512, 2048] |
-| o_proj | [2048, 2048] |
-
-### MoE Expert (4-bit, per expert)
-
-| Component | Shape | Packed Size |
-|---|---|---|
-| gate_proj | [512, 2048] INT4 | 590 KB |
-| up_proj | [512, 2048] INT4 | 590 KB |
-| down_proj | [2048, 512] INT4 | 590 KB |
-| **Total per expert** | | **~1.69 MB** |
-| **Total experts** | 256 × 40 layers | **~16.9 GB** |
-
-Quantization: MLX affine INT4, group-64, BF16 scale+bias.
+| # | Feature | Gain | Effort |
+|---|---------|------|--------|
+| H | 3-bit experts | 21→~16 GB | Low |
+| I | Mixed-precision experts | ~1-2% quality | Low |
+| J | Completions API (`/v1/completions`) | Standard benchmarks | Low |
 
 ## Project Structure
 
 ```
 finchMoE/
-├── README.md              # This file
-├── BUGS.md                # Bug documentation and lessons learned
-├── design.md              # Detailed design document
-├── finchmoe/              # FinchMoE inference engine (adapted from flash-moe)
-│   ├── infer.m            #   Main engine (~7800 lines C/Metal, includes HTTP server)
-│   ├── shaders.metal      #   Metal compute kernels (~1300 lines)
-│   ├── Makefile           #   Build system
-│   ├── chat.m             #   Interactive chat TUI (streaming markdown, sessions)
-│   ├── tokenizer.h        #   C BPE tokenizer (248K vocab)
-│   ├── linenoise.c/h      #   Line editing + history
-│   ├── extract_weights.py #   Non-expert weight extraction
-│   ├── repack_experts.py  #   Expert weight repacking (dtype-aware)
-│   ├── generate_expert_index.py # Expert index generator
-│   └── quantize_model.py  #   BF16 → MLX 4-bit quantization
-├── flash-moe/             # Starting codebase (Qwen3.5-397B engine, unmodified)
-├── turbo-fieldfare/       # Performance benchmark (Swift, Gemma 4)
-├── omlx/                  # Qwen-specific Metal kernel reference
+├── README.md
+├── BUGS.md                    # 8 bugs documented
+├── design.md                  # Architecture & design decisions
+├── finchmoe/
+│   ├── infer.m                # Main engine (C/Metal, ~8000 lines)
+│   ├── shaders.metal          # Metal compute kernels (~1500 lines)
+│   ├── tokenizer.h            # C BPE tokenizer (248K vocab)
+│   ├── quantize_model.py      # BF16 → 1/2/4/8-bit quantization
+│   ├── extract_weights.py     # Non-expert weight extraction
+│   ├── repack_experts.py      # Expert weight repacking (1/2/4/8-bit)
+│   ├── generate_expert_index.py
+│   ├── compress_experts.py    # LZ4 compression tool
+│   ├── debug_gdn_compare.py   # GDN vs HF reference
+│   ├── debug_full_forward.py  # Full 40-layer forward test
+│   ├── debug_layer_diff.py    # 4-probe per-layer differential
+│   └── debug_e2e_logits.py    # End-to-end logit comparison
 ├── models/
-│   ├── Qwen3.6-35B-A3B-bf16/              # Source model (67 GB)
-│   ├── Qwen3.6-35B-A3B-2bit-dense/        # Active model (21 GB) ✅
-│   ├── Qwen3.6-35B-A3B-4bit-dense/        # Balanced quality (36 GB) ✅
-│   ├── Ternary-Bonsai-27B-PQ2_0.gguf      # Reference: dense 27B @ 2-bit (~7 GB)
-│   └── Bonsai-27B-mlx-1bit/               # Reference: dense 27B @ 1-bit (1.7 GB)
-└── archive/               # Original finchMoE code (pre-reboot)
+│   ├── Qwen3.6-35B-A3B-bf16/          # Source (67 GB)
+│   ├── Qwen3.6-35B-A3B-2bit-dense/    # Active (21 GB) ✅
+│   ├── Qwen3.6-35B-A3B-4bit-dense/    # Higher quality (36 GB)
+│   ├── Qwen3.6-35B-A3B-1bit-dense/    # Ultra-compact (13.2 GB)
+│   ├── Ternary-Bonsai-27B-Q2_g64.gguf # Reference (7.1 GB)
+│   └── Bonsai-27B-mlx-1bit/           # Reference (4.8 GB)
+├── flash-moe/                 # Starting codebase (unmodified)
+├── turbo-fieldfare/           # Benchmark reference
+└── llama.cpp/                 # Ground truth reference
 ```
-
-## Reference Projects
-
-| Project | What We Use It For |
-|---|---|
-| **flash-moe** | Starting codebase — already runs qwen3_5_moe architecture |
-| **turbo-fieldfare** | Performance benchmark — 3.5 tok/s, ~2 GB RAM, M4 mini |
-| **omlx** | Qwen-specific Metal kernel optimizations (GDN, FA256, MoE) |
-
-## Status
-
-- [x] Coherent output — "Hello! How can I help you today?"
-- [x] 8.3 tok/s on M4 (2-bit-dense, K=2), 7.5 tok/s (K=4)
-- [x] Model size: 21 GB (2-bit-dense), 36 GB (4-bit-dense)
-- [x] GDN verified bit-identical to llama.cpp reference
-- [x] Int8/4-bit/2-bit expert support with GPU kernels
-- [x] Dense weight quantization (embeddings 8-bit, attention/shared 4-bit)
-- [x] ChatML template with thinking mode support
-- [x] HTTP server with OpenAI-compatible API
-- [x] Layer-by-layer differential debug scripts
-- [ ] 12-15 tok/s target (needs expert prefetch or further I/O reduction)
-- [ ] iPhone port (A-series chips, ≤3 GB RAM target)
 
 ## Running the Engine
 
 ### Quick Start
 
-If you already have a prepared model (pre-quantized or self-quantized):
-
 ```bash
 cd finchmoe
-make && make chat             # Build engine + chat client
-./finchmoe-infer --serve 9000 # Start OpenAI-compatible API server
+
+# Build
+clang -O2 -Wall -fobjc-arc -framework Metal -framework Foundation \
+      -framework Accelerate -lcompression -lpthread infer.m -o infer
+
+# Prepare model (one-time)
+python3 quantize_model.py --model ../models/Qwen3.6-35B-A3B-bf16 \
+    --output ../models/Qwen3.6-35B-A3B-2bit-dense
+python3 generate_expert_index.py --model ../models/Qwen3.6-35B-A3B-2bit-dense
+python3 repack_experts.py --index ../models/Qwen3.6-35B-A3B-2bit-dense/expert_index.json --bits 2
+python3 extract_weights.py --model ../models/Qwen3.6-35B-A3B-2bit-dense --output .
+python3 export_tokenizer.py ../models/Qwen3.6-35B-A3B-2bit-dense/tokenizer.json vocab.bin
+
+# Run
+./infer --model ../models/Qwen3.6-35B-A3B-2bit-dense --prompt "Hello" --tokens 50 --no-think --temp 0
+
+# Server (OpenAI-compatible API)
+./infer --model ../models/Qwen3.6-35B-A3B-2bit-dense --serve 9000
 ```
 
-Then test it (in another terminal):
+### Key Flags
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--prompt TEXT` | — | Input prompt |
+| `--tokens N` | 20 | Max tokens to generate |
+| `--temp F` | 0.80 | Temperature (0 = greedy) |
+| `--top-k N` | 40 | Top-k sampling |
+| `-k N` | 2 | Active experts per layer (2=speed, 4=quality, 8=best) |
+| `--no-think` | off | Disable thinking mode |
+| `--timing` | off | Per-layer timing breakdown |
+| `--predict` | off | Temporal expert prefetch |
+| `--cpu-linear` | off | CPU GDN path (debugging) |
+| `--cpu-experts` | off | CPU expert path (debugging) |
+| `--serve PORT` | — | HTTP server (OpenAI-compatible API) |
+| `--max-seq-len N` | 262144 | Max context length |
+| `--gpu-kv-seq N` | 8192 | GPU KV buffer size in tokens |
+| `--model PATH` | auto | Model directory |
+
+### Server Mode
 
 ```bash
-# Health check
-curl http://localhost:9000/health
+./infer --serve 9000
 
-# Generate
+# Test
+curl http://localhost:9000/health
 curl -N -X POST http://localhost:9000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"Hello!"}],"max_tokens":100,"stream":true}'
 ```
 
-Or use the built-in TUI (in another terminal, while the server is running):
+Endpoints: `POST /v1/chat/completions` (SSE streaming), `GET /v1/models`, `GET /health`.
+
+### Context Window
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--max-seq-len` | 262,144 (256K) | KV cache allocation (model's RoPE limit) |
+| `--gpu-kv-seq` | 8,192 | GPU-accelerated attention cap. Past this → CPU fallback |
 
 ```bash
-cd finchmoe
-./chat --port 9000
+# 60K agentic context: GPU KV = 2.5 GB (fits in 16GB)
+./infer --serve 9000 --gpu-kv-seq 60000
+# 256K max context: KV = 10.5 GB FP32, 5.2 GB FP16
+./infer --serve 9000 --gpu-kv-seq 256000 --max-seq-len 262144
 ```
 
-### Build
-
-```bash
-cd finchmoe
-make          # Build finchmoe-infer
-make chat     # Build interactive chat TUI
-```
-
-Requires: Xcode Command Line Tools (`xcode-select --install`), macOS 14+.
-
-### Model Preparation
-
-**Option A: Pre-quantized model (recommended)**
-
-Download a pre-quantized model (e.g. from mlx-community), then run the one-time preparation:
-
-```bash
-cd finchmoe
-make extract MODEL_DIR=../models/Qwen3.6-35B-A3B-4bit-custom
-make index MODEL_DIR=../models/Qwen3.6-35B-A3B-4bit-custom
-make repack
-```
-
-**Option B: Self-quantize from BF16**
-
-If you have the original BF16 model (~67 GB):
-
-```bash
-cd finchmoe
-python3 quantize_model.py \
-  --model ../models/Qwen3.6-35B-A3B-bf16 \
-  --output ../models/Qwen3.6-35B-A3B-4bit-custom \
-  --bits 4
-make extract MODEL_DIR=../models/Qwen3.6-35B-A3B-4bit-custom
-make index MODEL_DIR=../models/Qwen3.6-35B-A3B-4bit-custom
-make repack
-```
-
-This produces:
-- `model_weights.bin` / `model_weights.json` — non-expert weights (mmap'd at startup)
-- `expert_index.json` — expert tensor layout, offsets, and shapes
-- `packed_experts/layer_00.bin` … `layer_39.bin` — 4-bit expert weights per layer (~16.9 GB total)
-
-### Basic Usage (CLI)
-
-```bash
-cd finchmoe
-./finchmoe-infer --prompt "Hello world" --tokens 50
-./finchmoe-infer --prompt "Write a haiku about coding." --tokens 200 --timing
-```
-
-The engine auto-detects `model_weights.bin`, `vocab.bin`, and `../models/Qwen3.6-35B-A3B-4bit-custom/packed_experts/` relative to the current directory. Override with `--model`, `--weights`, `--manifest`, or `--vocab`.
-
-**Note:** CLI mode sends prompts as-is (base model completions). For Q&A behavior, use Server Mode which automatically wraps prompts in the Qwen chat template.
-
-### Server Mode (OpenAI-Compatible API)
-
-Start FinchMoE as a standalone HTTP server — works with Open WebUI, Continue.dev, Jan, LM Studio, and any OpenAI-compatible client.
-
-```bash
-cd finchmoe
-
-# Basic server (default context: 256K max, 8K GPU-accelerated)
-./finchmoe-infer --serve 9000
-
-# Agentic workloads: 100K GPU context, full 256K window
-./finchmoe-infer --serve 9000 --gpu-kv-seq 100000 --max-seq-len 262144
-```
-
-Then connect any tool to `http://localhost:9000/v1`.
-
-#### API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/v1/chat/completions` | Streaming chat completions (SSE) |
-| `GET` | `/v1/models` | Model list |
-| `GET` | `/health` | Health check + model name |
-
-#### Chat Completions
-
-```bash
-# Streaming (SSE)
-curl -N -X POST http://localhost:9000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [{"role": "user", "content": "Explain quantum computing in one sentence."}],
-    "max_tokens": 200,
-    "stream": true
-  }'
-
-# Multi-turn with session persistence
-curl -N -X POST http://localhost:9000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [{"role": "user", "content": "Follow-up question..."}],
-    "max_tokens": 200,
-    "stream": true,
-    "session_id": "my-session-42"
-  }'
-```
-
-Each SSE response includes a `usage` block with timing stats in the final chunk:
-
-```json
-{
-  "id": "chatcmpl-1",
-  "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-  "usage": {
-    "prompt_tokens": 25,
-    "completion_tokens": 350,
-    "total_tokens": 375,
-    "prefill_ms": 62,
-    "generation_ms": 23000,
-    "tokens_per_second": 15.2
-  }
-}
-```
-
-#### Request Queue
-
-The server uses a **worker thread + FIFO queue** for concurrent clients:
-
-- **Idle**: Request is picked up immediately, response streams in real-time
-- **Busy**: Request is enqueued (up to 16 deep), connection held open, processed in order
-- **Overflow**: Returns `HTTP 503` with `Retry-After: 3` and `{"error": "server busy", "queue_depth": 16}`
-- **Health checks** (`GET /health`) and **model list** (`GET /v1/models`) always respond instantly — they bypass the queue
-
-This means tools like Open WebUI can fire off multiple requests without connection errors. If the queue overflows, the client gets a proper retry hint rather than a dropped connection.
-
-#### Built-in Chat Client
-
-```bash
-cd finchmoe
-./chat                 # Connect to localhost:9000 (default)
-./chat --port 9000     # Explicit port
-./chat --show-think    # Show <think> blocks (dimmed)
-./chat --resume ID     # Resume a previous session
-./chat --sessions      # List saved sessions
-```
-
-Features: streaming markdown rendering (bold, italic, code blocks, headers), session persistence to `~/.flash-moe/sessions/`, command history via linenoise.
-
-#### System Prompt
-
-Customize the system prompt by creating `~/.flash-moe/system.md`. The server hot-loads it at startup and pre-caches it so every request starts from the cached system prompt state (saves ~6 seconds of prefill).
-
-Default: `"You are a helpful assistant."`
-
-#### Tool Integration Examples
-
-**Open WebUI:**
-```bash
-OPENAI_API_BASE=http://localhost:9000/v1 OPENAI_API_KEY=not-needed open-webui
-```
-
-**Continue.dev (VS Code):**
-```json
-{
-  "models": [{
-    "title": "FinchMoE Qwen3.6",
-    "provider": "openai",
-    "apiBase": "http://localhost:9000/v1",
-    "apiKey": "not-needed"
-  }]
-}
-```
-
-**ChatGPT-style web UI** — any frontend that speaks OpenAI-compatible `/v1/chat/completions` will work. Point it at `http://localhost:9000/v1`.
-
-### Key Flags
-
-| Flag | Purpose |
-|---|---|
-| `--prompt TEXT` | Input prompt text |
-| `--tokens N` | Max tokens to generate (default: 20, max: 32768) |
-| `--timing` | Per-layer timing breakdown |
-| `--k N` | Active experts per layer (default: 4) |
-| `--cache-entries N` | Expert LRU Metal cache size (default: 0 = trust OS page cache) |
-| `--cpu-linear` | CPU delta-net path (disable fused GPU path) |
-| `--cpu-experts` | CPU expert path (~2 tok/s, for debugging correctness) |
-| `--debug-layers` | Print hidden state statistics per layer |
-| `--compare-experts N` | Verify GPU vs CPU expert outputs for layer N |
-| `--freq` | Expert frequency tracking + analysis |
-| `--serve PORT` | Run as HTTP server (OpenAI-compatible API, default port: 9000) |
-| `--max-seq-len N` | Max context length for KV cache (default: 262144 = 256K, model's RoPE limit) |
-| `--gpu-kv-seq N` | GPU KV buffer pre-allocation in tokens (default: 8192, falls back to CPU past this) |
-| `--think-budget N` | Max thinking tokens before force `<`/`think>` (default: 2048, 0=unlimited) |
-| `--model PATH` | Model directory containing `packed_experts/` |
-
-#### Context Window Configuration
-
-The engine has two context-length knobs:
-
-| Flag | Default | What it controls |
-|---|---|---|
-| `--max-seq-len` | 262,144 (256K) | KV cache allocation cap. Matches the model's `max_position_embeddings` — the RoPE embeddings are trained for 256K and cannot generalize beyond without YaRN scaling. |
-| `--gpu-kv-seq` | 8,192 | GPU Metal buffer pre-allocation for accelerated attention. Past this limit, attention **automatically falls back to CPU** — the engine doesn't crash, it just slows down. |
-
-The 256K limit comes directly from the model config (`max_position_embeddings: 262144`). Both Qwen 3.6 35B and Qwen 3.5 397B share this limit. Setting `--max-seq-len` higher won't help — the RoPE embeddings have no signal beyond 256K.
-
-For agentic workloads with long context:
-
-```bash
-# 100K GPU-accelerated context, full 256K max
-./finchmoe-infer --serve 9000 --gpu-kv-seq 100000 --max-seq-len 262144
-```
-
-GPU KV buffers at 100K tokens: ~4.1 GB (10 full-attention layers × 2 (K+V) × 512 dims × 4 bytes × 100K tokens).
-
-The 30 GatedDeltaNet layers have **no length limit** — they use a fixed-size recurrent matrix, not a growing KV cache.
-
-### Running Benchmarks
-
-```bash
-# Generation speed: 100 tokens with per-layer timing
-./finchmoe-infer --prompt "Once upon a time" --tokens 100 --timing
-
-# Prompt processing speed: long prompt, minimal generation
-./finchmoe-infer --prompt "Long text here..." --tokens 5 --timing
-
-# Monitor memory during a run (separate terminal)
-memory_pressure
-vm_stat
-```
-
-## Benchmarks
-
-All benchmarks run from a **Samsung 990 Plus NVMe in a Thunderbolt 4 enclosure** (faster than internal SSD on both M1 and M4 Mac minis).
-
-### M4 Mac mini (16 GB) — Development Machine
-
-| Metric | Value |
-|---|---|
-| Generation speed | **10–15 tok/s** |
-| Memory usage | ~1.6 GB engine + page cache |
-| Storage | Samsung 990 Plus NVMe via TB4 |
-
-### Mac mini M1 (8 GB) — Tested 2026-08-07
-
-Same Samsung 990 Plus NVMe via Thunderbolt 4 enclosure.
-
-| Metric | Value |
-|---|---|
-| **Generation speed (avg 100 tok)** | **5.4 tok/s** |
-| Cold start (first tokens) | 3.3–3.8 tok/s |
-| Warm (page cache filling) | 5–7 tok/s |
-| Hot (fully cached, peak) | 7–8.2 tok/s |
-| **Prompt processing** | **~3–4 tok/s** (270–350 ms/token) |
-| TTFT (11-token prompt) | 5,849 ms |
-| TTFT (103-token prompt) | 30,465 ms |
-| **Memory usage** | **~3.8 GB** engine footprint |
-| System free after runs | ~1.6 GB (52%) |
-| Swap used | **0** (none) |
-| Expert cache in RAM | Not viable (malloc-cache crashes at 500 entries) |
-
-**Per-layer timing (warm, 4.1 ms total):**
-
-| Phase | Time | % |
-|---|---|---|
-| cmd1_wait (GPU attention projections) | 1.6 ms | 40% |
-| expert_io (SSD read + dequant) | 1.5 ms | 37% |
-| cmd2_wait (GPU o_proj + norm + routing + shared) | 0.8 ms | 20% |
-| cmd3_encode (GPU expert compute) | 0.06 ms | 1.5% |
-
-**Key findings:**
-- Both machines use a **Samsung 990 Plus NVMe in a Thunderbolt 4 enclosure**, which is faster than the internal SSDs on M1 and M4 Mac minis. This is significant: the engine's SSD-streaming architecture benefits directly from fast external storage.
-- Generation speed **ramps up** as OS page cache warms (3.3 → 8.2 tok/s over 100 tokens)
-- **Expert I/O from SSD is the bottleneck** (37% of per-layer time), not GPU compute — even on a fast external NVMe
-- Memory compression keeps the 8 GB system from swapping (~2.4 GB compressed pages)
-- On M1 8GB the engine delivers **~40-50% of M4 16GB throughput**, limited primarily by slower GPU compute and lower memory bandwidth, not storage (both share the same external NVMe)
-- The 3.5 tok/s project minimum target is comfortably met even on this entry-level Apple Silicon machine
+30/40 layers use GatedDeltaNet with fixed 2.1MB state — no KV growth. Only 10 full-attention layers need caching.
 
 ## Known Limitations
 
-**Base model behavior**: Qwen 3.6 35B A3B is a base (pre-trained) model, not instruction-tuned. The server automatically wraps prompts in the Qwen chat template (`<|im_start|>system\n...<|im_end|>\n<|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n`). For direct CLI use (`--prompt`), prompts are sent as-is (base model completions) — use `--serve` for Q&A behavior.
-
-**Single-worker generation**: The worker thread processes one request at a time. Concurrent requests are queued (up to 16), then get HTTP 503. This is fine for personal use and agentic workloads (tools typically send one request at a time and wait for the response). For high-throughput multi-user serving, continuous batching would be needed.
-
-**GPU context limit**: GPU-accelerated attention caps at `--gpu-kv-seq` tokens (default: 8,192). Past this, the engine falls back to CPU attention automatically — slower but functionally correct. Increase with `--gpu-kv-seq` if you have GPU memory headroom.
-
-**No sampling controls yet**: Temperature, top-p, top-k are not exposed. The engine always uses greedy decoding (argmax). This is fine for factual/agentic use cases but limits creative diversity.
+- **Single-worker generation**: One request at a time (queued up to 16). Fine for personal/agentic use.
+- **GPU context cap**: Attention falls to CPU above `--gpu-kv-seq` (default 8K). Bump for long contexts.
+- **`/v1/completions` not implemented**: Only chat completions API. lm-eval needs completions for loglikelihood benchmarks.
+- **Chat template applied in CLI**: As of Bug 8 fix, CLI now uses ChatML template for instruct behavior.
 
 ## Bugs & Debugging
 
-All bugs discovered and fixed during development are documented in **[BUGS.md](BUGS.md)** — 6 bugs covering data pipeline errors, quantization format mismatches, and performance issues, plus 6 lessons learned about safetensors offsets, dtype semantics, namespace collisions, and more.
+8 bugs discovered and fixed during development, documented in **[BUGS.md](BUGS.md)**:
+1. INT4 attention weights → catastrophic incoherence
+2. FP16/BF16 format mismatch in MLX community models
+3. Norm weight +1.0 adjustment missing
+4. Compiler warnings hiding unused variable errors
+5. Expert weight extraction namespace collision
+6. Safetensors tensor naming inconsistency
+7. switch_mlp weights excluded from extraction
+8. **Shared expert Metal command buffer sync** (root cause of "Con Con Con" loop)
