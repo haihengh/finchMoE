@@ -44,8 +44,8 @@ We track these reference models to benchmark our speed and quality:
 |-------|------|--------------|------|------------|-------|
 | **FinchMoE 2-bit (ours)** | MoE 35B A3B | 3B | 21 GB | 8.3 (K=2), 7.5 (K=4) | Custom C/Metal engine |
 | [turbo-fieldfare](https://github.com/drumih/turbo-fieldfare) | MoE 26B A4B | 4B | 13 GB | **10.7 tok/s** | Swift/Metal, measured on our M4 |
-| [Ternary-Bonsai-27B](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf) | Dense 27B | 27B | ~7 GB | TBD | GGUF PQ2_0, downloading |
-| [Bonsai-27B-1bit](https://huggingface.co/prism-ml/Bonsai-27B-mlx-1bit) | Dense 27B | 27B | 1.7 GB | TBD | MLX 1-bit, downloading |
+| [Ternary-Bonsai-27B](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf) | Dense 27B | 27B | 7.1 GB | 0.008 tok/s ❌ | Q2_g64: 27B dense too slow on M4, CPU-bound |
+| [Bonsai-27B-1bit](https://huggingface.co/prism-ml/Bonsai-27B-mlx-1bit) | Dense 27B | 27B | 4.8 GB | ~1-3 tok/s (est.) | MLX format, runs on iPhone via LM Studio ✅ |
 
 Key insight: Dense 27B models (Bonsai) have 9× more active params per token than our MoE 3B — they trade speed for quality. MoE with SSD streaming is the right architecture for low-RAM devices.
 
@@ -76,6 +76,45 @@ turbo-fieldfare 256K is N/A — needs 63 GB KV cache, impossible on 16GB.
 **PP** = prompt processing (prefill tok/s), **TG** = token generation (decode tok/s).  
 FinchMoE KV cache uses FP32 currently; FP16 would halve numbers. GatedDeltaNet layers (30/40) use fixed recurrent state — no KV growth.  
 All models tested on Samsung 990 Plus NVMe via TB4 enclosure, M4 Mac mini 16GB.
+
+## Optimization History
+
+### Speed Progression (2-bit-dense, K=2 baseline)
+
+| Step | expert_io | total_layer | tok/s | What |
+|------|-----------|-------------|-------|------|
+| Baseline (8-bit, K=4) | 2.04ms | 4.93ms | 5.1 | Starting point |
+| Fused expert kernel | 1.92ms | 4.37ms | 5.7 | gate+up+swiglu → 1 dispatch |
+| 4-bit experts | 1.33ms | 3.81ms | 6.6 | Half I/O volume |
+| Dense quantization | 0.59ms | 2.83ms | 7.2 | Embeds 8-bit, attn 4-bit, less RAM pressure |
+| 2-bit experts (K=4) | 0.38ms | 2.74ms | 7.5 | Half I/O again |
+| **K=2 default** | **0.21ms** | **2.30ms** | **8.3** | Half experts/layer |
+| 1-bit experts | 0.13ms | 2.33ms | 8.1 | Diminishing returns, quality degraded |
+
+### What Didn't Work
+
+| Attempt | Result | Why |
+|---------|--------|-----|
+| Batched Metal encoders | Slower | Metal cost is per-dispatch, not per-encoder |
+| Multi-expert 2x kernel | Slower | Buffer binding overhead > dispatch savings |
+| Spatial expert prediction | 1.3% hit rate | Adjacent layers pick different experts |
+| Temporal expert prediction | 41% hit rate | Overhead > savings |
+| Predictive I/O overlap | Slower | Prediction validation cost > benefit |
+| mmap zero-copy Metal buffers | OOM | 17GB Metal buffers exceed 16GB RAM |
+| LZ4 expert compression | 6% ratio | Quantized data near-random |
+| GDN conv1d+norm fusion | ~0.03ms gain | Too complex for marginal benefit |
+
+### Current Bottleneck
+
+At 0.21ms (9% of total), expert I/O is fully optimized. **GPU dispatch overhead** dominates:
+
+| Phase | ms | % | Stuck Because |
+|-------|----|---|---------------|
+| cmd1_wait (GDN GPU) | 0.87 | 38% | 5 Metal dispatches per layer |
+| cmd3_encode (expert dispatch) | 0.67 | 29% | 4 dispatches × K experts, per-dispatch driver cost |
+| cmd2_wait (routing GPU) | 0.49 | 21% | 6 dispatches for o_proj+routing+shared |
+
+**Path to 12+ tok/s**: ICBs (Indirect Command Buffers) or double-buffered async encoding — architectural Metal pipeline changes, not incremental kernel tweaks.
 
 ## Origin
 

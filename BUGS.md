@@ -401,3 +401,32 @@ This matches and skips all `model.layers.X.mlp.switch_mlp.*` tensors. As a resul
 
 ### Similarity to Known Architecture
 The switch_mlp is architecturally identical to the `shared_expert` — both are dense FFNs with gate/up/down projections. The shared_expert already works correctly. The switch_mlp forward pass can be modeled directly on the existing shared_expert code.
+
+---
+
+## Bug 8: Shared Expert Metal Command Buffer Synchronization (2026-08-09)
+
+**Symptom**: Model output degenerated into repeated tokens ("Con Con Con") or Chinese gibberish. All individual components verified correct but full pipeline was broken. llama.cpp ground truth (GGUF conversion) confirmed the model weights were fine.
+
+**Root Cause**: In `fused_layer_forward` CMD3, the shared expert SwiGLU activation was dispatched into a Metal command buffer, but the CPU immediately read `buf_shared_act` for the BF16 down-projection BEFORE `[cmd_experts commit]`. The buffer contained stale/zero data, corrupting the shared expert output across all 40 layers.
+
+**Fix** (infer.m, 1 line):
+```c
+// Before: CPU reads stale buffer
+cpu_dequant_matvec(sdw, NULL, NULL, act, out, ...);
+
+// After: commit and wait first
+[cmd_experts commit];
+[cmd_experts waitUntilCompleted];
+float *act = (float *)[g_metal->buf_shared_act contents];
+cpu_dequant_matvec(sdw, NULL, NULL, act, out, ...);
+cmd_experts = [g_metal->queue commandBuffer];  // fresh buffer for remaining dispatches
+```
+
+**Discovery Method**: Systematic bisection — GPU-all vs CPU-linear vs CPU-experts vs both-CPU. Only CPU-experts produced coherent output, isolating the bug to the GPU expert path. GPU-vs-CPU comparison (--compare-experts) showed routed experts matched but didn't test the shared expert path.
+
+**Lessons**:
+1. Test the FULL pipeline, not just individual components. All sub-modules passed unit tests.
+2. Metal command buffers are asynchronous — data written by GPU kernels is NOT visible to CPU until the command buffer completes.
+3. Bisection debugging (binary search over GPU/CPU combinations) is effective for isolating async bugs.
+4. A ground truth reference (llama.cpp GGUF) is invaluable for confirming whether the model or the engine is at fault.
