@@ -31,6 +31,7 @@ archive/
 flash-moe/
 omlx/
 turbo-fieldfare/
+llama.cpp/
 
 # Build artifacts (finchmoe)
 finchmoe/model_weights.bin
@@ -40,3 +41,10 @@ finchmoe/finchmoe-infer
 finchmoe/finchmoe-chat
 finchmoe/expert_index.json
 finchmoe/packed_experts/
+
+# Build artifacts (root level)
+model_weights.bin
+model_weights.json
+vocab.bin
+finchmoe/infer
+*.gguf
