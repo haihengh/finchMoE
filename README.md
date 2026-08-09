@@ -42,8 +42,9 @@ A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon, targeting 
 | [turbo-fieldfare](https://github.com/drumih/turbo-fieldfare) | MoE 26B A4B | 4B | 13 GB | **10.7 tok/s** | Swift/Metal, better poetry, 8K max context |
 | [Ternary-Bonsai-27B](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf) | Dense 27B | 27B | 7.1 GB | 0.008 tok/s ❌ | 27B dense = 9× more compute |
 | [Bonsai-27B-1bit](https://huggingface.co/prism-ml/Bonsai-27B-mlx-1bit) | Dense 27B | 27B | 4.8 GB | ~1-3 tok/s (est.) | Runs on iPhone via LM Studio ✅ |
+| [DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) | MoE ~200B A13B | 13B | ~160 GB BF16 | TBD | FP4 experts, hash routing, MTP, 1M ctx |
 
-**Key insight**: Active parameter count dominates speed, not model size. Bonsai is smaller on disk (7.1 GB) but 9× more compute per token. MoE with SSD streaming is the right architecture for low-RAM devices.
+**Key insight**: Active parameter count dominates speed, not model size. DeepSeek-V4 has 13B active (4× Qwen's 3B) but uses FP4 native quantization and hash-based routing for efficiency.
 
 ### Benchmarks (M4 Mac mini 16GB, Samsung 990 Plus NVMe TB4)
 
@@ -132,9 +133,12 @@ FinchMoE's GatedDeltaNet layers (30/40) use fixed 2.1MB recurrent state — no K
 | I | Mixed-precision experts | ~1-2% quality | Low |
 | J | Completions API (`/v1/completions`) | Standard benchmarks | Low |
 | K | **Qwen 3.5 397B-A17B** support | Better quality + MTP | High |
-|   | → Already downloaded (209 GB BF16 → ~100 GB 4-bit) | | |
-|   | → Has MTP draft head (`mtp_num_hidden_layers: 1`) | | |
-|   | → 60 layers, 512 experts, 10 active — 2× larger than 35B | | |
+|   | → Already repacked (68 GB at 4-bit). Needs runtime dim detection | | |
+|   | → Has MTP draft head. NaN at layer 1 due to hardcoded 35B dims | | |
+| L | **DeepSeek-V4-Flash** (13B active MoE) | New model target | High |
+|   | → 43 layers, 256 experts (6 active), sliding window attn | | |
+|   | → FP4 native experts, hash routing, MTP, 1M context | | |
+|   | → BF16 download: ~160 GB. More advanced but needs engine adaptation | | |
 
 ## Project Structure
 
