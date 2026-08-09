@@ -50,18 +50,30 @@ Key insight: Dense 27B models (Bonsai) have 9× more active params per token tha
 
 ### Measured on M4 Mac mini 16GB (Aug 2026)
 
-| Model | Size | "Hello" (20 tok) | "Poem" (50 tok) | Quality |
-|-------|------|-----------------|-----------------|---------|
-| **FinchMoE 2-bit (ours)** | 21 GB | ~2 GB | TBD | 8.3 tok/s | TBD | TBD | TBD | TBD | 8MB/400MB/2GB | "You are a helpful assistant." |
-| **FinchMoE 4-bit** | 36 GB | ~2.5 GB | TBD | 7.5 tok/s | TBD | TBD | TBD | TBD | 8MB/400MB/2GB | "You are a helpful assistant." |
-| **turbo-fieldfare** | 13 GB | ~3 GB | TBD | **10.7 tok/s** | TBD | TBD | TBD | TBD | TBD | "The salt-crust clings..." |
-| Ternary-Bonsai-27B | ~7 GB | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD (downloading) |
-| Bonsai-27B-1bit | 1.7 GB | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD (downloading) |
+#### Token Generation Speed (TG, decode tok/s)
+
+| Model | Size | RAM | TG (1K ctx) | TG (50K ctx) | TG (256K ctx) | KV (1K/50K/256K) | Quality |
+|-------|------|-----|-------------|--------------|---------------|------------------|---------|
+| **FinchMoE 2-bit** | 21 GB | ~2 GB | **8.3 tok/s** | **~2 tok/s** (est.) | **~0.5 tok/s** (est.) | 0.02/1.0/5.2 GB | "You are a helpful assistant." |
+| **FinchMoE 4-bit** | 36 GB | ~2.5 GB | **7.5 tok/s** | ~2 tok/s (est.) | ~0.5 tok/s (est.) | 0.02/1.0/5.2 GB | "You are a helpful assistant." |
+| **turbo-fieldfare** | 13 GB | ~3 GB | **10.7 tok/s** | TBD | N/A (63 GB KV) | 0.3/12/63 GB | "The salt-crust clings..." |
+| Ternary-Bonsai-27B | 7.1 GB | TBD | TBD | TBD | TBD | TBD | TBD (GGUF Q2_g64) |
+| Bonsai-27B-1bit | 4.8 GB | TBD | TBD | TBD | TBD | TBD | TBD (MLX format) |
+
+**PP (prompt processing)**: FinchMoE 24-token prefill = 3.6 tok/s (6726ms). At 1K tokens: ~3-4 tok/s.  
+**TG at 256K**: Estimated from attention scaling (CPU-bound above 8K). 30 GDN layers unaffected.  
+turbo-fieldfare 256K is N/A — needs 63 GB KV cache, impossible on 16GB.
+
+#### KV Cache Memory (FP16)
+
+| Model | Attn Layers | KV Heads | 1K ctx | 50K ctx | 256K ctx | Notes |
+|-------|------------|----------|--------|---------|----------|-------|
+| **FinchMoE** | 10/40 | 2 | 0.02 GB | 1.0 GB | **5.2 GB** | 30 GDN layers = fixed 2.1MB state |
+| **turbo-fieldfare** | 30/30 | 8 | 0.3 GB | 12.3 GB | **62.9 GB** | All layers need KV; 256K impossible on 16GB |
 
 **PP** = prompt processing (prefill tok/s), **TG** = token generation (decode tok/s).  
-**KV** = KV cache at 1K/50K/256K tokens (10 full-attention layers × 2×K+V × 2 heads × 256d × 4B).  
-GatedDeltaNet layers (30/40) use fixed 2.1MB state — no KV growth with context.  
-All models on Samsung 990 Plus NVMe via TB4 enclosure, M4 Mac mini 16GB.
+FinchMoE KV cache uses FP32 currently; FP16 would halve numbers. GatedDeltaNet layers (30/40) use fixed recurrent state — no KV growth.  
+All models tested on Samsung 990 Plus NVMe via TB4 enclosure, M4 Mac mini 16GB.
 
 ## Origin
 
