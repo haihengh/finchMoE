@@ -53,8 +53,22 @@ COMPONENTS_8BIT = [
 
 EXPERT_SIZE_4BIT = 1769472
 EXPERT_SIZE_8BIT = 3342336
+EXPERT_SIZE_1BIT = 589824
 EXPERT_SIZE_2BIT = 983040
 NUM_EXPERTS = 256
+
+# 1-bit expert format: 32 values per uint32
+COMPONENTS_1BIT = [
+    {"name": "gate_proj.weight",  "offset": 0,        "size": 131072,  "dtype": "U32",  "shape": [512, 64]},
+    {"name": "gate_proj.scales",  "offset": 131072,   "size": 32768,   "dtype": "BF16", "shape": [512, 32]},
+    {"name": "gate_proj.biases",  "offset": 163840,   "size": 32768,   "dtype": "BF16", "shape": [512, 32]},
+    {"name": "up_proj.weight",    "offset": 196608,   "size": 131072,  "dtype": "U32",  "shape": [512, 64]},
+    {"name": "up_proj.scales",    "offset": 327680,   "size": 32768,   "dtype": "BF16", "shape": [512, 32]},
+    {"name": "up_proj.biases",    "offset": 360448,   "size": 32768,   "dtype": "BF16", "shape": [512, 32]},
+    {"name": "down_proj.weight",  "offset": 393216,   "size": 131072,  "dtype": "U32",  "shape": [2048, 16]},
+    {"name": "down_proj.scales",  "offset": 524288,   "size": 32768,   "dtype": "BF16", "shape": [2048, 8]},
+    {"name": "down_proj.biases",  "offset": 557056,   "size": 32768,   "dtype": "BF16", "shape": [2048, 8]},
+]
 
 # 2-bit expert format: 16 values per uint32
 COMPONENTS_2BIT = [
@@ -278,8 +292,8 @@ def main():
                         help='Path to expert_index.json')
     parser.add_argument('--layers', default=None,
                         help='Layer spec: "all", "0-4", "0,5,10" (default: all)')
-    parser.add_argument('--bits', type=int, default=4, choices=[2, 4, 8],
-                        help='Quantization bits: 2, 4, or 8 (default: 4)')
+    parser.add_argument('--bits', type=int, default=4, choices=[1, 2, 4, 8],
+                        help='Quantization bits: 1, 2, 4, or 8 (default: 4)')
     parser.add_argument('--dry-run', action='store_true',
                         help='Verify offsets without writing')
     parser.add_argument('--verify-only', type=int, default=None, metavar='LAYER',
@@ -295,6 +309,10 @@ def main():
         components = COMPONENTS_2BIT
         expert_size = EXPERT_SIZE_2BIT
         dirname = "packed_experts_2bit"
+    elif args.bits == 1:
+        components = COMPONENTS_1BIT
+        expert_size = EXPERT_SIZE_1BIT
+        dirname = "packed_experts_1bit"
     else:
         components = COMPONENTS_4BIT
         expert_size = EXPERT_SIZE_4BIT

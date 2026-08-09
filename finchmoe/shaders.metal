@@ -623,6 +623,65 @@ kernel void dequant_matvec_2bit(
 //
 // For gate/up (packed_cols=512): each thread processes 512/32 = 16 uint32
 //   = 4 uint4 loads per thread
+// ============================================================================
+// Kernel 1e3: 1-bit dequant matvec (32 values/uint32, binary weights)
+// ============================================================================
+// 1-bit affine: w_q = (w > 0) ? max_val : 0, where max_val=1.
+// Dequant: val = uint1 * scale + bias (same as bias just added when bit is 1).
+// packed_cols = in_dim / 32, packed_per_group = group_size / 32.
+
+kernel void dequant_matvec_1bit(
+    device const uint32_t* W_packed   [[buffer(0)]],  // [out_dim, in_dim/32]
+    device const uint16_t* scales     [[buffer(1)]],  // [out_dim, num_groups] bf16
+    device const uint16_t* biases     [[buffer(2)]],  // [out_dim, num_groups] bf16
+    device const float*    x          [[buffer(3)]],  // [in_dim]
+    device float*          out        [[buffer(4)]],  // [out_dim]
+    constant uint&         out_dim    [[buffer(5)]],
+    constant uint&         in_dim     [[buffer(6)]],
+    constant uint&         group_size [[buffer(7)]],
+    uint tgid   [[threadgroup_position_in_grid]],
+    uint lid    [[thread_position_in_threadgroup]],
+    uint simd_lane  [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = tgid * ROWS_PER_TG + simd_group;
+    uint packed_cols = in_dim / 32;  // 32 values per uint32 for 1-bit
+    uint num_groups  = in_dim / group_size;
+
+    threadgroup float x_shared[4096];
+    for (uint i = lid; i < in_dim; i += 256) {
+        x_shared[i] = x[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (row >= out_dim) return;
+
+    device const uint32_t* w_row = W_packed + row * packed_cols;
+    device const uint16_t* s_row = scales + row * num_groups;
+    device const uint16_t* b_row = biases + row * num_groups;
+
+    float acc = 0.0f;
+    for (uint col = simd_lane; col < packed_cols; col += 32) {
+        uint g = col / (group_size / 32);
+        float scale = bf16_to_f32(s_row[g]);
+        float bias  = bf16_to_f32(b_row[g]);
+
+        uint32_t packed = w_row[col];
+        uint x_base = col * 32;
+
+        // 32 x 1-bit extractions. Optimized: (bit == 1) → scale+bias, (bit == 0) → bias.
+        // Pre-compute bias*x sums, then add scale*x only when bit is set.
+        for (uint i = 0; i < 32; i++) {
+            float xv = x_shared[x_base + i];
+            acc += bias * xv;  // always add bias*x
+            if ((packed >> i) & 1u) {
+                acc += scale * xv;  // bit==1: add scale*x on top
+            }
+        }
+    }
+    float sum = simd_sum(acc);
+    if (simd_lane == 0) out[row] = sum;
+}
+
 // For down (packed_cols=128): each thread processes 128/32 = 4 uint32
 //   = 1 uint4 load per thread
 
