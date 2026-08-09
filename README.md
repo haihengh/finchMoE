@@ -7,11 +7,11 @@ A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon, targeting 
 | Metric | Value |
 |---|---|
 | Output quality | ✅ Coherent — "Hello! How can I help you today?" |
-| Speed (M4, 4-bit, K=4) | **7.2 tok/s** |
-| Speed (M4, 4-bit, K=2) | **9.5 tok/s** |
+| Speed (M4, 2-bit, K=2) | **8.3 tok/s** |
+| Speed (M4, 2-bit, K=4) | **7.5 tok/s** |
 | RAM (runtime) | ~2 GB + page cache |
+| Disk (2-bit-dense, active) | **21 GB** |
 | Disk (4-bit-dense) | **36 GB** |
-| Disk (2-bit-dense, WIP) | **~22 GB** |
 
 ## Model Size & Quality Tradeoff
 
@@ -28,18 +28,31 @@ A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon, targeting 
 | Embeddings + lm_head | 8-bit | Vocabulary projections — near-lossless |
 | Attention/GDN projections | 4-bit | Large tensors, 4-bit is sufficient |
 | Shared expert | 4-bit | Always active, small dim |
-| Routed experts | 4-bit (→2-bit WIP) | MoE is quantization-tolerant: 8/256 fire, errors cancel |
+| Routed experts | 4-bit or 2-bit | MoE is quantization-tolerant: 8/256 fire, errors cancel |
 | Norms + routing gate | BF16 | Tiny, not worth quantizing |
 
 ### Why MoE Tolerates Aggressive Quantization
 
 Only 8/256 experts fire per token. If quantization degrades one expert, the router weights it less. The weighted sum of 8 expert outputs smooths individual errors. This is why 2-bit MoE models often match 4-bit quality on benchmarks.
 
-## Why flash-moe?
+## Comparison Models
 
-We evaluated the original `finchmoe_engine` (C++/ObjC++) and found it was built for a pre-release Qwen MoE spec that never shipped. The published Qwen 3.6 has a completely different architecture.
+We track these reference models to benchmark our speed and quality:
 
-[flash-moe](flash-moe/) is a production C/Metal engine that already runs the Qwen3.5-MoE family (same `qwen3_5_moe` model type as Qwen 3.6) at 4.36 tok/s on M3 Max. It implements:
+| Model | Arch | Active Params | Size | tok/s (M4) | Notes |
+|-------|------|--------------|------|------------|-------|
+| **FinchMoE 2-bit (ours)** | MoE 35B A3B | 3B | 21 GB | 8.3 (K=2), 7.5 (K=4) | Custom C/Metal engine |
+| [Ternary-Bonsai-27B](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf) | Dense 27B | 27B | ~7 GB | TBD | GGUF PQ2_0, llama.cpp |
+| [Bonsai-27B-1bit](https://huggingface.co/prism-ml/Bonsai-27B-mlx-1bit) | Dense 27B | 27B | 1.7 GB | TBD | MLX 1-bit, extreme compression |
+| [Gemma 4 26B A4B](https://ai.google.dev) | MoE 26B A4B | 4B | ~12 GB | 3.5 (turbo-fieldfare) | Swift/Metal, M4 mini |
+
+Key insight: Dense 27B models (Bonsai) have 9× more active params per token than our MoE 3B — they trade speed for quality. MoE with SSD streaming is the right architecture for low-RAM devices.
+
+## Origin
+
+The project started from searching for an LLM that is both capable enough for coding and fast enough on a $599 M4 Mac mini. Gemma 4 E2B was too small (low quality), Bonsai 27B was too slow (dense, all 27B params active per token). turbo-fieldfare proved the MoE + SSD streaming approach works with Gemma 4 26B A4B at 3.5 tok/s. Qwen 3.6 35B A3B was a natural fit — fewer active params (3B vs 4B) means less memory bandwidth, more speed.
+
+[flash-moe](flash-moe/) is the starting codebase — a production C/Metal engine running Qwen3.5-MoE at 4.36 tok/s on M3 Max. It provides:
 
 - **SSD Expert Streaming** — 4-bit expert weights streamed from NVMe on demand
 - **FMA-Optimized Dequant** — fused multiply-add in Metal shaders (+12% throughput)
@@ -128,11 +141,11 @@ finchMoE/
 ├── turbo-fieldfare/       # Performance benchmark (Swift, Gemma 4)
 ├── omlx/                  # Qwen-specific Metal kernel reference
 ├── models/
-│   ├── Qwen3.6-35B-A3B-bf16/         # Source model (67 GB)
-│   ├── Qwen3.6-35B-A3B-4bit-dense/   # Active model (36 GB) ✅
-│   ├── Qwen3.6-35B-A3B-2bit-dense/   # Ultra-compact (WIP, ~22 GB)
-│   ├── Qwen3.6-35B-A3B-4bit-custom/  # Old model (39 GB, deprecated)
-│   └── Qwen3.6-35B-A3B-8bit-custom/  # Old model (73 GB, deprecated)
+│   ├── Qwen3.6-35B-A3B-bf16/              # Source model (67 GB)
+│   ├── Qwen3.6-35B-A3B-2bit-dense/        # Active model (21 GB) ✅
+│   ├── Qwen3.6-35B-A3B-4bit-dense/        # Balanced quality (36 GB) ✅
+│   ├── Ternary-Bonsai-27B-PQ2_0.gguf      # Reference: dense 27B @ 2-bit (~7 GB)
+│   └── Bonsai-27B-mlx-1bit/               # Reference: dense 27B @ 1-bit (1.7 GB)
 └── archive/               # Original finchMoE code (pre-reboot)
 ```
 
@@ -147,8 +160,8 @@ finchMoE/
 ## Status
 
 - [x] Coherent output — "Hello! How can I help you today?"
-- [x] 7.2 tok/s on M4 (4-bit-dense, K=4), 9.5 tok/s (K=2)
-- [x] Model size: 36 GB (4-bit-dense), ~22 GB (2-bit-dense WIP)
+- [x] 8.3 tok/s on M4 (2-bit-dense, K=2), 7.5 tok/s (K=4)
+- [x] Model size: 21 GB (2-bit-dense), 36 GB (4-bit-dense)
 - [x] GDN verified bit-identical to llama.cpp reference
 - [x] Int8/4-bit/2-bit expert support with GPU kernels
 - [x] Dense weight quantization (embeddings 8-bit, attention/shared 4-bit)
