@@ -1,17 +1,39 @@
 # FinchMoE
 
-A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon, targeting ≥3.5 tok/s at ≤3 GB RAM — and eventually iPhone.
+A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon, targeting 12 tok/s on M4 and 3-5 tok/s on iPhone.
 
-## Goals
+## Current Status
 
-| Target | Value |
+| Metric | Value |
 |---|---|
-| Model | Qwen 3.6 35B A3B (4-bit MLX quantized) |
-| Hardware | M4 Mac mini 16GB (dev), A-series iPhone (target) |
-| Speed | ≥3.5 tok/s |
-| Memory | ≤3 GB RAM for engine |
-| Disk | ~19 GB model + ~20 GB repacked experts |
-| Features | Text generation + built-in internet search |
+| Output quality | ✅ Coherent — "Hello! How can I help you today?" |
+| Speed (M4, 4-bit, K=4) | **7.2 tok/s** |
+| Speed (M4, 4-bit, K=2) | **9.5 tok/s** |
+| RAM (runtime) | ~2 GB + page cache |
+| Disk (4-bit-dense) | **36 GB** |
+| Disk (2-bit-dense, WIP) | **~22 GB** |
+
+## Model Size & Quality Tradeoff
+
+| Model | Safe-tensors | Experts | Total | Speed (K=4) | Quality Loss |
+|-------|-------------|---------|-------|-------------|-------------|
+| BF16 (source) | 67 GB | — | 67 GB | — | 0% (reference) |
+| 4-bit-dense (active) | 19 GB | 17 GB | **36 GB** | 7.2 tok/s | ~1-2% |
+| 2-bit-dense (WIP) | 11 GB | 10 GB | **~22 GB** | ~8-9 tok/s | ~5% |
+
+### Quantization Strategy
+
+| Component | Format | Why |
+|-----------|--------|-----|
+| Embeddings + lm_head | 8-bit | Vocabulary projections — near-lossless |
+| Attention/GDN projections | 4-bit | Large tensors, 4-bit is sufficient |
+| Shared expert | 4-bit | Always active, small dim |
+| Routed experts | 4-bit (→2-bit WIP) | MoE is quantization-tolerant: 8/256 fire, errors cancel |
+| Norms + routing gate | BF16 | Tiny, not worth quantizing |
+
+### Why MoE Tolerates Aggressive Quantization
+
+Only 8/256 experts fire per token. If quantization degrades one expert, the router weights it less. The weighted sum of 8 expert outputs smooths individual errors. This is why 2-bit MoE models often match 4-bit quality on benchmarks.
 
 ## Why flash-moe?
 
@@ -106,8 +128,11 @@ finchMoE/
 ├── turbo-fieldfare/       # Performance benchmark (Swift, Gemma 4)
 ├── omlx/                  # Qwen-specific Metal kernel reference
 ├── models/
-│   ├── Qwen3.6-35B-A3B-4bit-custom/  # Target model (~19 GB) ✅
-│   └── Qwen3.5-397B-A17B-4bit/       # Baseline model (~209 GB)
+│   ├── Qwen3.6-35B-A3B-bf16/         # Source model (67 GB)
+│   ├── Qwen3.6-35B-A3B-4bit-dense/   # Active model (36 GB) ✅
+│   ├── Qwen3.6-35B-A3B-2bit-dense/   # Ultra-compact (WIP, ~22 GB)
+│   ├── Qwen3.6-35B-A3B-4bit-custom/  # Old model (39 GB, deprecated)
+│   └── Qwen3.6-35B-A3B-8bit-custom/  # Old model (73 GB, deprecated)
 └── archive/               # Original finchMoE code (pre-reboot)
 ```
 
@@ -121,24 +146,17 @@ finchMoE/
 
 ## Status
 
-- [x] Qwen3.6-35B-A3B-bf16 downloaded (67 GB — original BF16)
-- [x] Qwen3.6-35B-A3B-4bit-custom self-quantized (18.5 GB, clean)
-- [x] flash-moe adapted for Qwen3.6 dimensions
-- [x] Self-quantization pipeline working (BF16 → 4bit → extract → repack)
-- [x] FP16/BF16 format mismatch fixed
-- [x] Qwen3_5RMSNorm weights fixed (1+weight_param)
-- [x] GPU expert path verified bit-identical to CPU (`--compare-experts`)
-- [x] Engine runs at **10–15 tok/s** on M4 (GPU experts + GPU delta-net, default)
-- [x] Coherent output — produces grammatical English text completions
-- [x] **HTTP server with OpenAI-compatible API** (`--serve PORT`)
-- [x] **Request queue** — concurrent clients queued, 503 when full
-- [x] **Configurable context window** (`--max-seq-len`, `--gpu-kv-seq`)
-- [x] **Performance stats in SSE stream** (prompt/generation tok/s, prefill time)
-- [x] **Chat template** — `<|im_start|>` wrapping for Q&A behavior
-- [x] **Built-in TUI chat client** (`./chat`)
-- [ ] 397B baseline (downloaded, not yet tested)
-- [ ] KV cache quant, MTP, TurboQuant, flash attention optimizations
-- [ ] iOS port (A-series chips)
+- [x] Coherent output — "Hello! How can I help you today?"
+- [x] 7.2 tok/s on M4 (4-bit-dense, K=4), 9.5 tok/s (K=2)
+- [x] Model size: 36 GB (4-bit-dense), ~22 GB (2-bit-dense WIP)
+- [x] GDN verified bit-identical to llama.cpp reference
+- [x] Int8/4-bit/2-bit expert support with GPU kernels
+- [x] Dense weight quantization (embeddings 8-bit, attention/shared 4-bit)
+- [x] ChatML template with thinking mode support
+- [x] HTTP server with OpenAI-compatible API
+- [x] Layer-by-layer differential debug scripts
+- [ ] 12-15 tok/s target (needs expert prefetch or further I/O reduction)
+- [ ] iPhone port (A-series chips, ≤3 GB RAM target)
 
 ## Running the Engine
 
