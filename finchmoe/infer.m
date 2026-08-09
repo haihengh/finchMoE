@@ -983,7 +983,7 @@ static void cpu_dequant_matvec(
     }
 
     int num_groups = in_dim / group_size;
-    int vals_per_u32 = (bits == 8) ? 4 : 8;
+    int vals_per_u32 = 32 / bits;  // 32 for 1-bit, 16 for 2-bit, 8 for 4-bit, 4 for 8-bit
     int packed_per_group = group_size / vals_per_u32;
     int packed_cols = in_dim / vals_per_u32;
     int shift_per_val = bits;
