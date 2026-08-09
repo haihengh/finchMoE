@@ -1300,24 +1300,89 @@ kernel void moe_combine_residual(
 //   out[row] = sum_i(bf16_to_f32(W[row * in_dim + i]) * x[i])
 // Thread: one thread per output row
 // ============================================================================
+// ============================================================================
+// BF16 GEMV kernel — vectorized with simd_sum + threadgroup reduction
+// ============================================================================
+// Each threadgroup handles 1 output row cooperatively (256 threads).
+// Threads process interleaved chunks of the input dimension.
+// simd_sum reduces within each SIMD group; shared memory across SIMD groups.
+//
+// Target: ~4x speedup over old 1-thread-per-row kernel via:
+//   1. Better memory coalescing (adjacent threads read adjacent weights)
+//   2. SIMD-parallel reduction
+//   3. Amortized x-vector loads (each thread loads its chunk once per row)
+//
+// Dispatch: out_dim threadgroups, 256 threads each.
+
 kernel void gemv_bf16(
     const device uint16_t *W    [[buffer(0)]],  // [out_dim, in_dim] BF16
     const device float    *x    [[buffer(1)]],  // [in_dim]
     device float          *out  [[buffer(2)]],  // [out_dim]
     constant uint32_t     &out_dim [[buffer(3)]],
     constant uint32_t     &in_dim  [[buffer(4)]],
-    uint tid [[thread_position_in_grid]]
+    uint  tid   [[thread_position_in_threadgroup]],
+    uint  row   [[threadgroup_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]]
 ) {
-    uint row = tid;
     if (row >= out_dim) return;
 
-    float acc = 0.0f;
+    constexpr short N_SIMDGROUPS = 8;   // 256 threads / 32
+    constexpr short CHUNK = 8;          // elements per thread per iteration
+
     const device uint16_t *w_row = W + row * in_dim;
-    for (uint i = 0; i < in_dim; i++) {
-        // BF16 -> F32 via union (Metal-compatible type punning)
-        union { uint32_t u; float f; } cvt;
-        cvt.u = ((uint32_t)w_row[i]) << 16;
-        acc += cvt.f * x[i];
+
+    float acc = 0.0f;
+
+    // Each thread processes CHUNK elements per iteration.
+    // Threads are interleaved: thread tid handles elements at offset
+    //   tid*CHUNK, tid*CHUNK+1, ..., tid*CHUNK+7 in each full sweep.
+    // A full sweep covers 256 * 8 = 2048 elements.
+    int n_sweeps = (int)in_dim / (256 * CHUNK);
+
+    for (int sw = 0; sw < n_sweeps; sw++) {
+        int base = sw * 256 * CHUNK + (int)tid * CHUNK;
+
+        // Load 8 x-values as 2 float4s
+        float4 xv0 = ((const device float4*)x)[base / 4];
+        float4 xv1 = ((const device float4*)x)[base / 4 + 1];
+
+        // Load 8 weight values (uint16) and convert to float
+        // Each uint16_t is 2 bytes; we load and convert individually.
+        // Then we combine into float4 for dot().
+        float wf[CHUNK];
+        for (short i = 0; i < CHUNK; i++) {
+            wf[i] = as_type<float>(((uint32_t)w_row[base + i]) << 16);
+        }
+
+        float4 wv0 = float4(wf[0], wf[1], wf[2], wf[3]);
+        float4 wv1 = float4(wf[4], wf[5], wf[6], wf[7]);
+
+        acc += dot(wv0, xv0) + dot(wv1, xv1);
     }
-    out[row] = acc;
+
+    // ---- Remainder ----
+    int rem_start = n_sweeps * 256 * CHUNK;
+    for (int i = rem_start + (int)tid; i < (int)in_dim; i += 256) {
+        acc += as_type<float>(((uint32_t)w_row[i]) << 16) * x[i];
+    }
+
+    // ---- Two-phase reduction ----
+    // Phase 1: simd_sum within each SIMD group
+    acc = simd_sum(acc);
+
+    // Phase 2: cross-simdgroup sum via shared memory
+    threadgroup float sh_partial[N_SIMDGROUPS];
+    if (tiisg == 0) {
+        sh_partial[sgitg] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg == 0 && tiisg == 0) {
+        float tot = 0.0f;
+        for (short sg = 0; sg < N_SIMDGROUPS; sg++) {
+            tot += sh_partial[sg];
+        }
+        out[row] = tot;
+    }
 }

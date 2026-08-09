@@ -99,16 +99,50 @@
 #define PARTIAL_ROTARY      0.25f
 #define ROTARY_DIM          (int)(HEAD_DIM * PARTIAL_ROTARY)  // 64
 
-// Expert packed binary layout (from existing code)
-#define EXPERT_SIZE         1769472
+// Expert packed binary layout — 4-bit (from existing code)
+#define EXPERT_SIZE_4BIT       1769472
+#define GATE_W_OFF_4  0
+#define GATE_S_OFF_4  524288
+#define GATE_B_OFF_4  557056
+#define UP_W_OFF_4    589824
+#define UP_S_OFF_4    1114112
+#define UP_B_OFF_4    1146880
+#define DOWN_W_OFF_4  1179648
+#define DOWN_S_OFF_4  1703936
+#define DOWN_B_OFF_4  1736704
+
+// Expert packed binary layout — 8-bit (from repack_experts.py --bits 8)
+#define EXPERT_SIZE_8BIT       3342336
+#define GATE_W_OFF_8  0
+#define GATE_S_OFF_8  1048576
+#define GATE_B_OFF_8  1081344
+#define UP_W_OFF_8    1114112
+#define UP_S_OFF_8    2162688
+#define UP_B_OFF_8    2195456
+#define DOWN_W_OFF_8  2228224
+#define DOWN_S_OFF_8  3276800
+#define DOWN_B_OFF_8  3309568
 
 // 2-bit expert layout (from repack_experts_2bit.py)
-#define EXPERT_SIZE_2BIT    3932160
+#define EXPERT_SIZE_2BIT       3932160
 #define GATE_W_OFF_2  0
 #define GATE_S_OFF_2  1048576
 #define GATE_B_OFF_2  1179648
 #define UP_W_OFF_2    1310720
 #define UP_S_OFF_2    2359296
+
+// Dynamic offset helpers: pick the right offset based on active format
+#define GATE_W_OFF  (g_use_2bit ? GATE_W_OFF_2  : (g_use_int8 ? GATE_W_OFF_8  : GATE_W_OFF_4))
+#define GATE_S_OFF  (g_use_2bit ? GATE_S_OFF_2  : (g_use_int8 ? GATE_S_OFF_8  : GATE_S_OFF_4))
+#define GATE_B_OFF  (g_use_2bit ? GATE_B_OFF_2  : (g_use_int8 ? GATE_B_OFF_8  : GATE_B_OFF_4))
+#define UP_W_OFF    (g_use_2bit ? UP_W_OFF_2    : (g_use_int8 ? UP_W_OFF_8    : UP_W_OFF_4))
+#define UP_S_OFF    (g_use_2bit ? UP_S_OFF_2    : (g_use_int8 ? UP_S_OFF_8    : UP_S_OFF_4))
+#define UP_B_OFF    (g_use_2bit ? UP_B_OFF_2    : (g_use_int8 ? UP_B_OFF_8    : UP_B_OFF_4))
+#define DOWN_W_OFF  (g_use_2bit ? DOWN_W_OFF_2  : (g_use_int8 ? DOWN_W_OFF_8  : DOWN_W_OFF_4))
+#define DOWN_S_OFF  (g_use_2bit ? DOWN_S_OFF_2  : (g_use_int8 ? DOWN_S_OFF_8  : DOWN_S_OFF_4))
+#define DOWN_B_OFF  (g_use_2bit ? DOWN_B_OFF_2  : (g_use_int8 ? DOWN_B_OFF_8  : DOWN_B_OFF_4))
+#define EXPERT_BITS (g_use_2bit ? 2 : (g_use_int8 ? 8 : 4))
+#define EXPERT_SIZE_MAX 3932160  // max of 4-bit/8-bit/2-bit sizes (2-bit is largest)
 #define UP_B_OFF_2    2490368
 #define DOWN_W_OFF_2  2621440
 #define DOWN_S_OFF_2  3670016
@@ -218,6 +252,7 @@ static int g_use_lz4 = 0;                        // auto-detected from packed_ex
 static int g_expert_freq[NUM_LAYERS][NUM_EXPERTS];  // activation count per (layer, expert)
 static int g_freq_tracking = 0;  // enabled by --freq flag
 static int g_use_2bit = 0;       // enabled by --2bit flag: use packed_experts_2bit/ + 2-bit kernel
+static int g_use_int8 = 0;       // enabled by --int8-experts flag: use 8-bit packed experts
 static int g_cache_telemetry_enabled = 0;  // enabled by --cache-telemetry flag
 static int g_think_budget = 2048; // max thinking tokens before force-emitting </think>
 static float g_temperature = 0.8f;  // sampling temperature (0 = greedy argmax)
@@ -246,7 +281,7 @@ static inline int expert_pick_fd(int layer, int expert, int warm_fd) {
 
 // Active expert size based on quantization mode
 static inline size_t active_expert_size(void) {
-    return g_use_2bit ? EXPERT_SIZE_2BIT : EXPERT_SIZE;
+    return g_use_2bit ? EXPERT_SIZE_2BIT : (g_use_int8 ? EXPERT_SIZE_8BIT : EXPERT_SIZE_4BIT);
 }
 static int g_freq_total_tokens = 0;  // total tokens processed while tracking
 
@@ -1096,7 +1131,7 @@ typedef struct {
     id<MTLBuffer> batch_out[MAX_BATCH_SLOTS];
     // Reusable buffers for expert computation (avoids per-expert alloc)
     // Legacy single-expert buffers (kept for gpu_expert_forward compat)
-    id<MTLBuffer> buf_expert_data;   // holds one expert's packed weights (EXPERT_SIZE bytes)
+    id<MTLBuffer> buf_expert_data;   // holds one expert's packed weights (EXPERT_SIZE_MAX bytes)
     id<MTLBuffer> buf_expert_input;  // h_post input [HIDDEN_DIM floats]
     id<MTLBuffer> buf_expert_gate;   // gate_proj output [MOE_INTERMEDIATE floats]
     id<MTLBuffer> buf_expert_up;     // up_proj output [MOE_INTERMEDIATE floats]
@@ -1108,8 +1143,8 @@ typedef struct {
     // Double-buffered: set A (data) for GPU compute, set B (data_B) for background pread.
     // Gate/up/act/out only need one set (GPU uses them after pread completes).
     #define MAX_K 8
-    id<MTLBuffer> buf_multi_expert_data[MAX_K];   // [EXPERT_SIZE bytes] each — buffer set A
-    id<MTLBuffer> buf_multi_expert_data_B[MAX_K]; // [EXPERT_SIZE bytes] each — buffer set B (prefetch)
+    id<MTLBuffer> buf_multi_expert_data[MAX_K];   // [EXPERT_SIZE_MAX bytes] each — buffer set A
+    id<MTLBuffer> buf_multi_expert_data_B[MAX_K]; // [EXPERT_SIZE_MAX bytes] each — buffer set B (prefetch)
     id<MTLBuffer> buf_multi_expert_gate[MAX_K];   // [MOE_INTERMEDIATE floats]
     id<MTLBuffer> buf_multi_expert_up[MAX_K];     // [MOE_INTERMEDIATE floats]
     id<MTLBuffer> buf_multi_expert_act[MAX_K];    // [MOE_INTERMEDIATE floats]
@@ -1276,7 +1311,7 @@ static MetalCtx *metal_setup(void) {
     }
 
     // Expert computation buffers (reused across all experts and layers)
-    ctx->buf_expert_data  = [ctx->device newBufferWithLength:EXPERT_SIZE
+    ctx->buf_expert_data  = [ctx->device newBufferWithLength:EXPERT_SIZE_MAX
                                                      options:MTLResourceStorageModeShared];
     ctx->buf_expert_input = [ctx->device newBufferWithLength:HIDDEN_DIM * sizeof(float)
                                                      options:MTLResourceStorageModeShared];
@@ -1294,7 +1329,7 @@ static MetalCtx *metal_setup(void) {
     // The pread DMA controller transfers 3.6x faster with 2MB alignment vs 16KB.
     ctx->buf_multi_expert_input = [ctx->device newBufferWithLength:HIDDEN_DIM * sizeof(float)
                                                            options:MTLResourceStorageModeShared];
-    size_t expert_alloc_size = (EXPERT_SIZE + 2*1024*1024 - 1) & ~(2*1024*1024 - 1);  // round up to 2MB
+    size_t expert_alloc_size = (EXPERT_SIZE_MAX + 2*1024*1024 - 1) & ~(2*1024*1024 - 1);  // round up to 2MB
     for (int k = 0; k < MAX_K; k++) {
         // 2MB-aligned allocation for optimal DMA throughput
         void *aligned_data = NULL, *aligned_data_b = NULL;
@@ -1624,7 +1659,7 @@ static void gpu_encode_batch_matvec(
             [enc setBuffer:ctx->batch_out[s->batch_slot] offset:0 atIndex:2];
             [enc setBytes:&s->out_dim length:4 atIndex:3];
             [enc setBytes:&s->in_dim  length:4 atIndex:4];
-            uint32_t tgs = (s->out_dim + 255) / 256;
+            uint32_t tgs = s->out_dim;  // one threadgroup per output row (256 threads cooperate)
             [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             [enc endEncoding];
@@ -1757,11 +1792,14 @@ static void gpu_encode_expert_forward_slot(
         gate_w_off = GATE_W_OFF_2; gate_s_off = GATE_S_OFF_2; gate_b_off = GATE_B_OFF_2;
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
+    } else if (g_use_int8) {
+        gate_w_off = GATE_W_OFF_8; gate_s_off = GATE_S_OFF_8; gate_b_off = GATE_B_OFF_8;
+        up_w_off   = UP_W_OFF_8;   up_s_off   = UP_S_OFF_8;   up_b_off   = UP_B_OFF_8;
+        down_w_off = DOWN_W_OFF_8; down_s_off = DOWN_S_OFF_8; down_b_off = DOWN_B_OFF_8;
     } else {
-        // Qwen3.6 4-bit offsets (EXPERT_SIZE=1769472)
-        gate_w_off = 0;        gate_s_off = 524288;   gate_b_off = 557056;
-        up_w_off   = 589824;   up_s_off   = 1114112;  up_b_off   = 1146880;
-        down_w_off = 1179648;  down_s_off = 1703936;  down_b_off = 1736704;
+        gate_w_off = GATE_W_OFF_4; gate_s_off = GATE_S_OFF_4; gate_b_off = GATE_B_OFF_4;
+        up_w_off   = UP_W_OFF_4;   up_s_off   = UP_S_OFF_4;   up_b_off   = UP_B_OFF_4;
+        down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
     id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : ctx->matvec_v3;
 
@@ -1854,11 +1892,14 @@ static void gpu_encode_expert_forward_slot_buf(
         gate_w_off = GATE_W_OFF_2; gate_s_off = GATE_S_OFF_2; gate_b_off = GATE_B_OFF_2;
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
+    } else if (g_use_int8) {
+        gate_w_off = GATE_W_OFF_8; gate_s_off = GATE_S_OFF_8; gate_b_off = GATE_B_OFF_8;
+        up_w_off   = UP_W_OFF_8;   up_s_off   = UP_S_OFF_8;   up_b_off   = UP_B_OFF_8;
+        down_w_off = DOWN_W_OFF_8; down_s_off = DOWN_S_OFF_8; down_b_off = DOWN_B_OFF_8;
     } else {
-        // Qwen3.6 4-bit offsets (EXPERT_SIZE=1769472)
-        gate_w_off = 0;        gate_s_off = 524288;   gate_b_off = 557056;
-        up_w_off   = 589824;   up_s_off   = 1114112;  up_b_off   = 1146880;
-        down_w_off = 1179648;  down_s_off = 1703936;  down_b_off = 1736704;
+        gate_w_off = GATE_W_OFF_4; gate_s_off = GATE_S_OFF_4; gate_b_off = GATE_B_OFF_4;
+        up_w_off   = UP_W_OFF_4;   up_s_off   = UP_S_OFF_4;   up_b_off   = UP_B_OFF_4;
+        down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
     id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : ctx->matvec_v3;
 
@@ -1955,11 +1996,14 @@ static void gpu_encode_experts_batched(
         gate_w_off = GATE_W_OFF_2; gate_s_off = GATE_S_OFF_2; gate_b_off = GATE_B_OFF_2;
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
+    } else if (g_use_int8) {
+        gate_w_off = GATE_W_OFF_8; gate_s_off = GATE_S_OFF_8; gate_b_off = GATE_B_OFF_8;
+        up_w_off   = UP_W_OFF_8;   up_s_off   = UP_S_OFF_8;   up_b_off   = UP_B_OFF_8;
+        down_w_off = DOWN_W_OFF_8; down_s_off = DOWN_S_OFF_8; down_b_off = DOWN_B_OFF_8;
     } else {
-        // Qwen3.6 4-bit offsets (EXPERT_SIZE=1769472)
-        gate_w_off = 0;        gate_s_off = 524288;   gate_b_off = 557056;
-        up_w_off   = 589824;   up_s_off   = 1114112;  up_b_off   = 1146880;
-        down_w_off = 1179648;  down_s_off = 1703936;  down_b_off = 1736704;
+        gate_w_off = GATE_W_OFF_4; gate_s_off = GATE_S_OFF_4; gate_b_off = GATE_B_OFF_4;
+        up_w_off   = UP_W_OFF_4;   up_s_off   = UP_S_OFF_4;   up_b_off   = UP_B_OFF_4;
+        down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
     id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : ctx->matvec_v3;
 
@@ -2152,7 +2196,7 @@ static void fast_batch_matvec(
 __attribute__((unused))
 static void gpu_expert_forward(
     MetalCtx *ctx,
-    const void *expert_data,     // EXPERT_SIZE bytes (may be buf_expert_data contents)
+    const void *expert_data,     // EXPERT_SIZE_MAX bytes (may be buf_expert_data contents)
     const float *h_post,         // [HIDDEN_DIM] input
     float *expert_out,           // [HIDDEN_DIM] output
     int expert_data_already_in_buffer
@@ -2165,11 +2209,14 @@ static void gpu_expert_forward(
         gate_w_off = GATE_W_OFF_2; gate_s_off = GATE_S_OFF_2; gate_b_off = GATE_B_OFF_2;
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
+    } else if (g_use_int8) {
+        gate_w_off = GATE_W_OFF_8; gate_s_off = GATE_S_OFF_8; gate_b_off = GATE_B_OFF_8;
+        up_w_off   = UP_W_OFF_8;   up_s_off   = UP_S_OFF_8;   up_b_off   = UP_B_OFF_8;
+        down_w_off = DOWN_W_OFF_8; down_s_off = DOWN_S_OFF_8; down_b_off = DOWN_B_OFF_8;
     } else {
-        // Qwen3.6 4-bit offsets (EXPERT_SIZE=1769472)
-        gate_w_off = 0;        gate_s_off = 524288;   gate_b_off = 557056;
-        up_w_off   = 589824;   up_s_off   = 1114112;  up_b_off   = 1146880;
-        down_w_off = 1179648;  down_s_off = 1703936;  down_b_off = 1736704;
+        gate_w_off = GATE_W_OFF_4; gate_s_off = GATE_S_OFF_4; gate_b_off = GATE_B_OFF_4;
+        up_w_off   = UP_W_OFF_4;   up_s_off   = UP_S_OFF_4;   up_b_off   = UP_B_OFF_4;
+        down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
     id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : ctx->matvec_v3;
 
@@ -3012,26 +3059,27 @@ static void moe_forward(
                 }
 
                 uint32_t *gw = (uint32_t *)expert_data;
-                uint16_t *gs_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_S_OFF_2 : 524288));
-                uint16_t *gb_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_B_OFF_2 : 557056));
-                uint32_t *uw = (uint32_t *)((char *)expert_data + (g_use_2bit ? UP_W_OFF_2 : 589824));
-                uint16_t *us_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_S_OFF_2 : 1114112));
-                uint16_t *ub_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_B_OFF_2 : 1146880));
-                uint32_t *dw = (uint32_t *)((char *)expert_data + (g_use_2bit ? DOWN_W_OFF_2 : 1179648));
-                uint16_t *ds_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_S_OFF_2 : 1703936));
-                uint16_t *db_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_B_OFF_2 : 1736704));
+                uint16_t *gs_p = (uint16_t *)((char *)expert_data + GATE_S_OFF);
+                uint16_t *gb_p = (uint16_t *)((char *)expert_data + GATE_B_OFF);
+                uint32_t *uw = (uint32_t *)((char *)expert_data + UP_W_OFF);
+                uint16_t *us_p = (uint16_t *)((char *)expert_data + UP_S_OFF);
+                uint16_t *ub_p = (uint16_t *)((char *)expert_data + UP_B_OFF);
+                uint32_t *dw = (uint32_t *)((char *)expert_data + DOWN_W_OFF);
+                uint16_t *ds_p = (uint16_t *)((char *)expert_data + DOWN_S_OFF);
+                uint16_t *db_p = (uint16_t *)((char *)expert_data + DOWN_B_OFF);
 
                 float *gate_proj_out = malloc(MOE_INTERMEDIATE * sizeof(float));
                 float *up_proj_out = malloc(MOE_INTERMEDIATE * sizeof(float));
                 float *act_out = malloc(MOE_INTERMEDIATE * sizeof(float));
 
+                int ebits = EXPERT_BITS;
                 cpu_dequant_matvec(gw, gs_p, gb_p, h_post, gate_proj_out,
-                                   MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 4);
+                                   MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, ebits);
                 cpu_dequant_matvec(uw, us_p, ub_p, h_post, up_proj_out,
-                                   MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 4);
+                                   MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, ebits);
                 cpu_swiglu(gate_proj_out, up_proj_out, act_out, MOE_INTERMEDIATE);
                 cpu_dequant_matvec(dw, ds_p, db_p, act_out, expert_out,
-                                   HIDDEN_DIM, MOE_INTERMEDIATE, GROUP_SIZE, 4);
+                                   HIDDEN_DIM, MOE_INTERMEDIATE, GROUP_SIZE, ebits);
 
                 free(gate_proj_out);
                 free(up_proj_out);
@@ -3489,7 +3537,7 @@ static int parallel_pread_experts_into(
 typedef struct {
     int layer_idx;
     int expert_idx;
-    id<MTLBuffer> buffer;    // Metal buffer holding EXPERT_SIZE bytes
+    id<MTLBuffer> buffer;    // Metal buffer holding EXPERT_SIZE_MAX bytes
     uint64_t last_used;      // monotonic counter for LRU ordering
 } ExpertCacheEntry;
 
@@ -3648,7 +3696,7 @@ static id<MTLBuffer> expert_cache_insert(ExpertLRUCache *cache, int layer_idx, i
 // ============================================================================
 
 typedef struct {
-    void **data;           // [max_entries] page-aligned malloc'd EXPERT_SIZE buffers
+    void **data;           // [max_entries] page-aligned malloc'd EXPERT_SIZE_MAX buffers
     id<MTLBuffer> __strong *metal_bufs;  // [max_entries] zero-copy Metal buffer wrappers
     int *layer_idx;        // [max_entries] layer index for each entry
     int *expert_idx;       // [max_entries] expert index for each entry
@@ -5207,7 +5255,7 @@ static void fused_layer_forward(
                 [enc setBuffer:g_metal->buf_output offset:0 atIndex:2];
                 [enc setBytes:&o_out_dim  length:4 atIndex:3];
                 [enc setBytes:&o_in_dim   length:4 atIndex:4];
-                uint32_t tgs = (o_out_dim + 255) / 256;
+                uint32_t tgs = o_out_dim;  // one threadgroup per output row
                 [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1)
                     threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             } else {
@@ -7171,6 +7219,7 @@ static void print_usage(const char *prog) {
     printf("  --freq               Enable expert frequency tracking + analysis\n");
     printf("  --cache-telemetry    Report cold vs eviction misses and reuse distance\n");
     printf("  --2bit               Use 2-bit quantized experts (packed_experts_2bit/)\n");
+    printf("  --int8-experts       Use 8-bit quantized experts (packed_experts_8bit/)\n");
     printf("  --gpu-linear         Alias for the fused GPU delta-net path (default)\n");
     printf("  --predict            Enable temporal expert prediction (prefetch during CMD1_wait)\n");
     printf("  --collect-routing F  Log routing data to binary file F (for predictor training)\n");
@@ -7220,6 +7269,7 @@ int main(int argc, char **argv) {
             {"freq",          no_argument,       0, 'F'},
             {"cache-telemetry", no_argument,     0, 'E'},
             {"2bit",          no_argument,       0, '2'},
+            {"int8-experts",  no_argument,       0, '8'},
             {"gpu-linear",    no_argument,       0, 'G'},
             {"think-budget",  required_argument, 0, 'B'},
             {"temperature",   required_argument, 0, 'e'},
@@ -7257,6 +7307,7 @@ int main(int argc, char **argv) {
                 case 'F': g_freq_tracking = 1; break;
                 case 'E': g_cache_telemetry_enabled = 1; break;
                 case '2': g_use_2bit = 1; break;
+                case '8': g_use_int8 = 1; break;
                 case 'G': gpu_linear_attn_enabled = 1; break;
                 case 'D': g_pred_enabled = 1; break;
                 case 'X': g_debug_layers = 1; break;
@@ -7407,23 +7458,33 @@ int main(int argc, char **argv) {
             printf("\n");
         }
 
-        // ---- Auto-detect 2-bit experts ----
-        if (!g_use_2bit) {
+        // ---- Auto-detect expert format ----
+        if (!g_use_2bit && !g_use_int8) {
             char probe[1024];
-            snprintf(probe, sizeof(probe), "%s/packed_experts_2bit/layer_00.bin", model_path);
-            int pfd = open(probe, O_RDONLY);
-            if (pfd >= 0) {
-                close(pfd);
-                snprintf(probe, sizeof(probe), "%s/packed_experts/layer_00.bin", model_path);
-                int pfd4 = open(probe, O_RDONLY);
-                if (pfd4 < 0) {
-                    g_use_2bit = 1;
-                    printf("[auto] Using 2-bit experts (4-bit not found)\n");
-                } else {
-                    close(pfd4);
+            // Check 8-bit first
+            snprintf(probe, sizeof(probe), "%s/packed_experts_8bit/layer_00.bin", model_path);
+            int pfd8 = open(probe, O_RDONLY);
+            if (pfd8 >= 0) { close(pfd8); g_use_int8 = 1; }
+            if (!g_use_int8) {
+                // Check 2-bit
+                snprintf(probe, sizeof(probe), "%s/packed_experts_2bit/layer_00.bin", model_path);
+                int pfd2 = open(probe, O_RDONLY);
+                if (pfd2 >= 0) {
+                    close(pfd2);
+                    // Only use 2-bit if 4-bit not found
+                    snprintf(probe, sizeof(probe), "%s/packed_experts/layer_00.bin", model_path);
+                    int pfd4 = open(probe, O_RDONLY);
+                    if (pfd4 < 0) {
+                        g_use_2bit = 1;
+                        printf("[auto] Using 2-bit experts (4-bit not found)\n");
+                    } else {
+                        close(pfd4);
+                    }
                 }
             }
         }
+        if (g_use_int8) printf("[auto] Using 8-bit experts\n");
+        if (g_use_2bit) printf("[auto] Using 2-bit experts\n");
 
         // ---- Open + mmap packed expert files ----
         // Tiered I/O: two fds per layer file.
@@ -7444,7 +7505,8 @@ int main(int argc, char **argv) {
         for (int i = 0; i < NUM_LAYERS; i++) {
             char path[1024];
             snprintf(path, sizeof(path), "%s/%s/layer_%02d.bin", model_path,
-                     g_use_2bit ? "packed_experts_2bit" : "packed_experts", i);
+                     g_use_2bit ? "packed_experts_2bit" :
+                     g_use_int8 ? "packed_experts_8bit" : "packed_experts", i);
             layer_fds[i] = open(path, O_RDONLY);
             layer_fds_cold[i] = -1;  // no longer used (trust OS page cache)
             layer_mmaps[i] = MAP_FAILED;
@@ -7502,7 +7564,7 @@ int main(int argc, char **argv) {
                     g_use_lz4 = 1;
                     // Allocate compressed read buffers (one per expert slot)
                     for (int k = 0; k < MAX_K; k++) {
-                        g_lz4_comp_bufs[k] = malloc(EXPERT_SIZE + 4096);
+                        g_lz4_comp_bufs[k] = malloc(EXPERT_SIZE_MAX + 4096);
                     }
                     printf("[lz4] %d/%d layers using LZ4 compressed experts\n",
                            lz4_layers, NUM_LAYERS);
