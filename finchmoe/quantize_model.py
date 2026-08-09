@@ -49,6 +49,10 @@ def quantize_affine(weights_f32, bits, group_size=64):
 
 EIGHT_BIT = ['.mlp.gate.weight', '.mlp.shared_expert_gate.weight']
 
+# Routed experts — set to 8-bit for better quality (change to [] for 4-bit)
+# These match HF tensor names (before renaming to switch_mlp)
+INT8_EXPERTS = ['.mlp.experts.gate_up_proj', '.mlp.experts.down_proj']
+
 # Attention/recurrent projections + output layers — keep in BF16.
 # L2 normalization + recurrent state update + gated RMSNorm amplifies 4-bit noise
 # catastrophically (cosine similarity drops to 0.26 after 1 layer).
@@ -174,7 +178,7 @@ def main():
             keep_bf16 = any(p in nn for p in KEEP_BF16)
 
             if is_weight and len(shape) >= 2 and shape[-1] % 64 == 0 and not keep_bf16:
-                bits = 8 if any(p in nn for p in EIGHT_BIT) else 4
+                bits = 8 if (any(p in nn for p in EIGHT_BIT) or any(p in nn for p in INT8_EXPERTS)) else 4
                 if len(shape) == 2:
                     packed, scales, biases = quantize_affine(arr.reshape(shape[0], shape[1]), bits)
                     out[nn] = packed
