@@ -110,6 +110,10 @@ FinchMoE's GatedDeltaNet layers (30/40) use fixed 2.1MB recurrent state — no K
 | A | ICBs (Indirect Command Buffers) | cmd3: 0.67→0.05ms | High |
 | B | Double-buffered async encoding | Hide CPU wait | High |
 | C | Single-kernel multi-expert MoE | K dispatches → 1 | High |
+| D | **MTP speculative decoding** | 1.5-2× TG | High | 
+|   | → Target model: Qwen 3.5 397B-A17B (has `mtp_num_hidden_layers: 1`) | | |
+|   | → Draft head predicts 2 tokens/forward pass, main model verifies | | |
+|   | → At 70% acceptance: effective 1.7× speedup | | |
 
 ### P2: Long Context
 
@@ -120,13 +124,17 @@ FinchMoE's GatedDeltaNet layers (30/40) use fixed 2.1MB recurrent state — no K
 | F | GDN chunked prefill | 2-3× PP speed | Medium |
 | G | `--gpu-kv-seq` bump (default 8K→match ctx) | TG at long ctx | Free |
 
-### P3: Compression & Quality
+### P3: Larger Models & Compression
 
 | # | Feature | Gain | Effort |
 |---|---------|------|--------|
 | H | 3-bit experts | 21→~16 GB | Low |
 | I | Mixed-precision experts | ~1-2% quality | Low |
 | J | Completions API (`/v1/completions`) | Standard benchmarks | Low |
+| K | **Qwen 3.5 397B-A17B** support | Better quality + MTP | High |
+|   | → Already downloaded (209 GB BF16 → ~100 GB 4-bit) | | |
+|   | → Has MTP draft head (`mtp_num_hidden_layers: 1`) | | |
+|   | → 60 layers, 512 experts, 10 active — 2× larger than 35B | | |
 
 ## Project Structure
 
