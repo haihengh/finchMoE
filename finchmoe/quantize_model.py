@@ -70,9 +70,10 @@ FOUR_BIT_DENSE = [
     '.mlp.shared_expert.down_proj.weight',
 ]
 
-# Routed experts: 2-bit for maximum compression (change to INT4_EXPERTS for 4-bit)
-INT2_EXPERTS = ['.mlp.experts.gate_up_proj', '.mlp.experts.down_proj']
-INT4_EXPERTS = []  # disabled — use INT2_EXPERTS instead
+# Routed experts: 1-bit for maximum compression
+INT1_EXPERTS = ['.mlp.experts.gate_up_proj', '.mlp.experts.down_proj']
+INT2_EXPERTS = []
+INT4_EXPERTS = []
 
 # Keep as BF16: tiny tensors where quantization doesn't save meaningful space
 KEEP_BF16 = [
@@ -182,6 +183,8 @@ def main():
                     bits = 8
                 elif any(p in nn for p in FOUR_BIT_DENSE):
                     bits = 4
+                elif any(p in nn for p in INT1_EXPERTS):
+                    bits = 1  # routed experts: 1-bit (binary)
                 elif any(p in nn for p in INT2_EXPERTS):
                     bits = 2  # routed experts: 2-bit
                 elif any(p in nn for p in INT4_EXPERTS):
