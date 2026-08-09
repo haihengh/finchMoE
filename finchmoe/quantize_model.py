@@ -53,23 +53,9 @@ EIGHT_BIT_DENSE = [
 ]
 
 FOUR_BIT_DENSE = [
-    # 4-bit: attention/GDN projections — large, 4-bit is sufficient
-    '.linear_attn.in_proj_qkv.weight',
-    '.linear_attn.in_proj_z.weight',
-    '.linear_attn.in_proj_a.weight',
-    '.linear_attn.in_proj_b.weight',
-    '.linear_attn.out_proj.weight',
-    '.self_attn.q_proj.weight',
-    '.self_attn.k_proj.weight',
-    '.self_attn.v_proj.weight',
-    '.self_attn.o_proj.weight',
-    # 4-bit: shared expert FFN
-    '.mlp.shared_expert.gate_proj.weight',
-    '.mlp.shared_expert.up_proj.weight',
-    '.mlp.shared_expert.down_proj.weight',
-    # 4-bit: embeddings and lm_head (8-bit unsupported in engine dequant)
-    'lm_head.weight',
-    'embed_tokens.weight',
+    # DISABLED: 4-bit dequant too slow for non-expert tensors on CPU (4.2s vs 0.01s BF16).
+    # GPU path also hangs. Keep non-expert tensors as BF16 for now.
+    # Only routed experts benefit from quantization (specialized GPU kernels).
 ]
 
 # Routed experts: 2-bit (sweet spot)
@@ -77,11 +63,30 @@ INT1_EXPERTS = []
 INT2_EXPERTS = ['.mlp.experts.gate_up_proj', '.mlp.experts.down_proj']
 INT4_EXPERTS = []
 
-# Keep as BF16: tiny tensors where quantization doesn't save meaningful space
+# Keep as BF16: non-expert tensors. 4-bit dequant is 400× slower than BF16 on CPU
+# and GPU path hangs for these large tensors. Only routed experts are quantized.
 KEEP_BF16 = [
-    '.mlp.gate.weight',              # routing gate (0.04 GB)
-    '.mlp.shared_expert_gate.weight', # shared expert gate (0.0002 GB)
-    # Norm weights are automatically kept BF16 (detected by 'norm.weight' in name)
+    # GatedDeltaNet attention
+    '.linear_attn.in_proj_qkv.weight',
+    '.linear_attn.in_proj_z.weight',
+    '.linear_attn.in_proj_a.weight',
+    '.linear_attn.in_proj_b.weight',
+    '.linear_attn.out_proj.weight',
+    # Full attention
+    '.self_attn.q_proj.weight',
+    '.self_attn.k_proj.weight',
+    '.self_attn.v_proj.weight',
+    '.self_attn.o_proj.weight',
+    # Routing
+    '.mlp.gate.weight',
+    '.mlp.shared_expert_gate.weight',
+    # Shared expert (always active, small)
+    '.mlp.shared_expert.gate_proj.weight',
+    '.mlp.shared_expert.up_proj.weight',
+    '.mlp.shared_expert.down_proj.weight',
+    # Vocabulary
+    'lm_head.weight',
+    'embed_tokens.weight',
 ]
 
 
