@@ -430,3 +430,17 @@ cmd_experts = [g_metal->queue commandBuffer];  // fresh buffer for remaining dis
 2. Metal command buffers are asynchronous — data written by GPU kernels is NOT visible to CPU until the command buffer completes.
 3. Bisection debugging (binary search over GPU/CPU combinations) is effective for isolating async bugs.
 4. A ground truth reference (llama.cpp GGUF) is invaluable for confirming whether the model or the engine is at fault.
+
+---
+
+## Bug 9: 4-bit Non-Expert Dequant 400× Slower Than BF16 (2026-08-09)
+
+**Symptom**: Self-quantized model (2-bit-dense-v2) with 4-bit attention/GDN/embeddings hangs during inference. GPU path hangs, CPU path takes 500+ seconds per token. Flash-moe BF16 weights work fine.
+
+**Root Cause**: `cpu_dequant_matvec` for large 4-bit packed tensors is pathologically slow. The QKV projection tensor (12288×4096) requires 50 million nibble extractions and BF16 conversions in a scalar C loop — 4.2 seconds per tensor on M4. The BF16 path reads uint16 directly without unpacking — 0.01 seconds. This is a 400× difference.
+
+Four tensors (QKV, Z, A, B) × 30 GDN layers = 120 dequant calls per token. At 4.2s each: 504 seconds/token. The GPU path (`gpu_batch_matvec` → `matvec_v3`) also hangs, likely due to dispatch overhead for 120+ large kernel launches per token.
+
+**Fix**: Keep non-expert tensors as BF16. Only quantize routed experts which use optimized SIMD-stride GPU kernels (`dequant_matvec_4bit_v3`). The model_weights.bin grows from 1.4 GB to ~5 GB, but speed is unchanged.
+
+**Lesson**: Quantization benefits are architecture-dependent. Expert tensors (many small matmuls, specialized kernels) benefit greatly from 4/2/1-bit. Non-expert tensors (few large matmuls, generic dequant path) do not — the dequant overhead dominates any I/O savings. Always measure, don't assume.
