@@ -538,6 +538,7 @@ typedef struct {
     TensorInfo *tensors;
     int num_tensors;
     int capacity;
+    char *model_path;  // from manifest "model" field
 } TensorManifest;
 
 static TensorManifest *load_manifest(const char *json_path) {
@@ -566,6 +567,11 @@ static TensorManifest *load_manifest(const char *json_path) {
         }
 
         TensorManifest *m = calloc(1, sizeof(TensorManifest));
+        // Store the model path from the manifest (for expert file auto-detection)
+        NSString *model_str = root[@"model"];
+        if (model_str) {
+            m->model_path = strdup([model_str UTF8String]);
+        }
         m->capacity = (int)[tensors count] + 16;
         m->tensors = calloc(m->capacity, sizeof(TensorInfo));
         m->num_tensors = 0;
@@ -6373,10 +6379,10 @@ static void fused_layer_forward(
     { float hmid_rms=0, moe_rms=0, shr_rms=0;
       for (int i=0;i<HIDDEN_DIM;i++){hmid_rms+=h_mid[i]*h_mid[i];moe_rms+=moe_out[i]*moe_out[i];shr_rms+=shared_out[i]*shared_out[i];}
       hmid_rms=sqrtf(hmid_rms/HIDDEN_DIM); moe_rms=sqrtf(moe_rms/HIDDEN_DIM); shr_rms=sqrtf(shr_rms/HIDDEN_DIM);
-      if(g_debug_layers || !isfinite(hmid_rms)||!isfinite(moe_rms)||!isfinite(shr_rms) || layer_idx==7) {
+      if(g_debug_layers || !isfinite(hmid_rms)||!isfinite(moe_rms)||!isfinite(shr_rms)) {
         fprintf(stderr,"[CPU-COMBINE] layer=%d h_mid_rms=%.6f moe_rms=%.6f shared_rms=%.6f\n",
           layer_idx, hmid_rms, moe_rms, shr_rms);
-        // Check moe_out first few values
+        // Check moe_out first few values when debugging or NaN detected
         fprintf(stderr,"[CPU-COMBINE] moe_out[0..3]=[%.4f,%.4f,%.4f,%.4f]\n",
           moe_out[0], moe_out[1], moe_out[2], moe_out[3]);
       }
@@ -7615,6 +7621,7 @@ int main(int argc, char **argv) {
         }
 
         const char *model_path = MODEL_PATH_DEFAULT;
+        int model_path_from_user = 0;  // set when --model flag used
         const char *weights_path = NULL;
         const char *manifest_path = NULL;
         const char *vocab_path = NULL;
@@ -7666,7 +7673,7 @@ int main(int argc, char **argv) {
         int c;
         while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:N:Q:e:o:lHLSTFE2GhXUY:V", long_options, NULL)) != -1) {
             switch (c) {
-                case 'm': model_path = optarg; break;
+                case 'm': model_path = optarg; model_path_from_user = 1; break;
                 case 'w': weights_path = optarg; break;
                 case 'j': manifest_path = optarg; break;
                 case 'v': vocab_path = optarg; break;
@@ -7770,8 +7777,6 @@ int main(int argc, char **argv) {
         printf("Manifest: %s\n", manifest_path);
         printf("Vocab:    %s\n", vocab_path);
         printf("K:        %d experts/layer\n", K);
-        printf("Quant:    %s experts (%zu bytes each)\n", g_use_2bit ? "2-bit" : "4-bit", active_expert_size());
-        printf("Linear:   %s\n", gpu_linear_attn_enabled ? "fused GPU delta-net" : "CPU/hybrid fallback");
         printf("Sample:   temp=%.2f top_k=%d%s\n", g_temperature, g_top_k,
                g_temperature <= 0.0f ? " (greedy)" : "");
         printf("Tokens:   %d\n", max_tokens);
@@ -7857,6 +7862,13 @@ int main(int argc, char **argv) {
         if (!wf) {
             fprintf(stderr, "ERROR: Failed to load weights\n");
             return 1;
+        }
+
+        // If user didn't specify --model, use the path from the manifest.
+        // The manifest's "model" field points to the directory containing
+        // packed_experts_2bit/ etc., which is needed for auto-detection.
+        if (!model_path_from_user && wf->manifest->model_path) {
+            model_path = wf->manifest->model_path;
         }
 
         // Wrap weight file for Metal GPU access (zero-copy, requires ~5GB free)
@@ -7954,6 +7966,12 @@ int main(int argc, char **argv) {
         }
         if (g_use_int8) printf("[auto] Using 8-bit experts\n");
         if (g_use_2bit) printf("[auto] Using 2-bit experts\n");
+
+        // Print quant and linear info now that auto-detect has settled
+        printf("Quant:    %s experts (%zu bytes each)\n",
+               g_use_1bit ? "1-bit" : (g_use_2bit ? "2-bit" : (g_use_int8 ? "8-bit" : "4-bit")),
+               active_expert_size());
+        printf("Linear:   %s\n", gpu_linear_attn_enabled ? "fused GPU delta-net" : "CPU/hybrid fallback");
 
         // ---- Open + mmap packed expert files ----
         // Tiered I/O: two fds per layer file.
