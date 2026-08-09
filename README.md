@@ -19,7 +19,7 @@ A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon, targeting 
 |-------|-------------|---------|-------|-------------|-------------|
 | BF16 (source) | 67 GB | — | 67 GB | — | 0% (reference) |
 | 4-bit-dense (active) | 19 GB | 17 GB | **36 GB** | 7.2 tok/s | ~1-2% |
-| 2-bit-dense (WIP) | 11 GB | 10 GB | **~22 GB** | ~8-9 tok/s | ~5% |
+| 2-bit-dense ✅ | 11 GB | 9.4 GB | **21 GB** | 7.5 tok/s | ~5% |
 
 ### Quantization Strategy
 
