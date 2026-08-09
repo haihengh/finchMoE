@@ -42,11 +42,21 @@ We track these reference models to benchmark our speed and quality:
 | Model | Arch | Active Params | Size | tok/s (M4) | Notes |
 |-------|------|--------------|------|------------|-------|
 | **FinchMoE 2-bit (ours)** | MoE 35B A3B | 3B | 21 GB | 8.3 (K=2), 7.5 (K=4) | Custom C/Metal engine |
-| [Ternary-Bonsai-27B](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf) | Dense 27B | 27B | ~7 GB | TBD | GGUF PQ2_0, llama.cpp |
-| [Bonsai-27B-1bit](https://huggingface.co/prism-ml/Bonsai-27B-mlx-1bit) | Dense 27B | 27B | 1.7 GB | TBD | MLX 1-bit, extreme compression |
-| [Gemma 4 26B A4B](https://ai.google.dev) | MoE 26B A4B | 4B | ~12 GB | 3.5 (turbo-fieldfare) | Swift/Metal, M4 mini |
+| [turbo-fieldfare](https://github.com/drumih/turbo-fieldfare) | MoE 26B A4B | 4B | 13 GB | **10.7 tok/s** | Swift/Metal, measured on our M4 |
+| [Ternary-Bonsai-27B](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf) | Dense 27B | 27B | ~7 GB | TBD | GGUF PQ2_0, downloading |
+| [Bonsai-27B-1bit](https://huggingface.co/prism-ml/Bonsai-27B-mlx-1bit) | Dense 27B | 27B | 1.7 GB | TBD | MLX 1-bit, downloading |
 
 Key insight: Dense 27B models (Bonsai) have 9× more active params per token than our MoE 3B — they trade speed for quality. MoE with SSD streaming is the right architecture for low-RAM devices.
+
+### Measured on M4 Mac mini 16GB (Aug 2026)
+
+| Model | Size | "Hello" (20 tok) | "Poem" (50 tok) | Quality |
+|-------|------|-----------------|-----------------|---------|
+| **FinchMoE 2-bit (ours)** | 21 GB | 8.3 tok/s | ~6 tok/s | "You are a helpful assistant." |
+| **turbo-fieldfare** | 13 GB | **9.4 tok/s** | **10.7 tok/s** | "The salt-crust clings to weathered bone..." |
+| Ternary-Bonsai-27B | ~7 GB | TBD | TBD | TBD |
+
+turbo-fieldfare is faster (smaller model, more efficient Swift/Metal engine) and produces better poetry. Our FinchMoE advantages: lower RAM (2GB vs ~3GB), flexible quantization (2/4/8-bit), and the Qwen architecture's 256K context window vs Gemma's smaller context.
 
 ## Origin
 
