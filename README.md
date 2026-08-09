@@ -116,6 +116,39 @@ At 0.21ms (9% of total), expert I/O is fully optimized. **GPU dispatch overhead*
 
 **Path to 12+ tok/s**: ICBs (Indirect Command Buffers) or double-buffered async encoding — architectural Metal pipeline changes, not incremental kernel tweaks.
 
+## Future Implementation Plan
+
+### Priority 1: TG Speed (12+ tok/s)
+
+| # | Feature | Gain | Effort | Notes |
+|---|---------|------|--------|-------|
+| A | **ICBs** (Indirect Command Buffers) | cmd3: 0.67→0.05ms | High | Pre-record dispatch sequences at load time, update buffer pointers via argument buffers |
+| B | **Double-buffered async encoding** | CPU wait hidden | High | Semaphore ring buffer, overlapping CPU encode with GPU execute |
+| C | **Single-kernel multi-expert** | 2-4 dispatches→1 | High | Pass expert indices in device buffer, GPU threadgroups index weights dynamically |
+
+### Priority 2: Long Context Performance
+
+| # | Feature | Gain | Effort | Notes |
+|---|---------|------|--------|-------|
+| D | **KV cache FP16** | 2× capacity, faster attention | Medium | Halves KV memory (10.5→5.2GB at 256K), requires FP16 attention kernels |
+| E | **Batched GPU prefill attention** | 5-10× PP speed | High | All prompt query×key matmuls in one Metal dispatch |
+| F | **GDN chunked prefill** | 2-3× PP speed | Medium | llama.cpp reference implementation in `delta-net-base.cpp:build_delta_net_chunking` |
+| G | **`--gpu-kv-seq` bump** | TG at long ctx | Free | Already implemented, just bump default from 8K to match context |
+
+### Priority 3: Model Compression
+
+| # | Feature | Gain | Effort | Notes |
+|---|---------|------|--------|-------|
+| H | **3-bit experts** | 21→~16 GB | Low | Middle ground between 2-bit (good quality) and 1-bit (degraded) |
+| I | **Mixed-precision experts** | ~1-2% quality | Low | Top-20% most-used experts at 4-bit, rest at 2-bit |
+
+### Priority 4: Quality & Benchmarks
+
+| # | Feature | Gain | Effort | Notes |
+|---|---------|------|--------|-------|
+| J | **Completions API** (`/v1/completions`) | Standard benchmarks | Low | Add loglikelihood endpoint for lm-eval compatibility |
+| K | **GGUF export** | Ecosystem compatibility | Medium | Convert our quantized model to GGUF for llama.cpp comparison |
+
 ## Origin
 
 The project started from searching for an LLM that is both capable enough for coding and fast enough on a $599 M4 Mac mini. Gemma 4 E2B was too small (low quality), Bonsai 27B was too slow (dense, all 27B params active per token). turbo-fieldfare proved the MoE + SSD streaming approach works with Gemma 4 26B A4B at 3.5 tok/s. Qwen 3.6 35B A3B was a natural fit — fewer active params (3B vs 4B) means less memory bandwidth, more speed.
