@@ -58,7 +58,7 @@ Key insight: Dense 27B models (Bonsai) have 9× more active params per token tha
 | **FinchMoE 4-bit** | 36 GB | ~2.5 GB | **7.5 tok/s** | ~2 tok/s (est.) | ~0.5 tok/s (est.) | 0.02/1.0/5.2 GB | "You are a helpful assistant." |
 | **turbo-fieldfare** | 13 GB | ~3 GB | **10.7 tok/s** | TBD | N/A (63 GB KV) | 0.3/12/63 GB | "The salt-crust clings..." |
 | Ternary-Bonsai-27B | 7.1 GB | ~11 GB | **0.008 tok/s** | N/A | N/A | TBD | ❌ Too slow (27B dense, CPU-bound) |
-| Bonsai-27B-1bit | 4.8 GB | TBD | TBD | TBD | TBD | TBD | TBD (MLX format) |
+| Bonsai-27B-1bit | 4.8 GB | ~4 GB | **~1–3 tok/s** (est.) | TBD | TBD | TBD | Runs on iPhone via LM Studio ✅ |
 
 **PP (prompt processing)**: FinchMoE 24-token prefill = 3.6 tok/s (6726ms). At 1K tokens: ~3-4 tok/s.  
 **TG at 256K**: Estimated from attention scaling (CPU-bound above 8K). 30 GDN layers unaffected.  
