@@ -2,360 +2,208 @@
 
 ## 1. Overview
 
-FinchMoE is a C/Metal inference engine purpose-built for **Qwen 3.6 35B A3B** on Apple Silicon. It streams 4-bit quantized expert weights from SSD through a custom Metal compute pipeline, targeting ≥3.5 tok/s at ≤3 GB RAM.
+FinchMoE is a C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon. It streams quantized expert weights from SSD through Metal compute kernels, targeting 12 tok/s on M4 and 3-5 tok/s on iPhone.
 
-The engine is forked from [flash-moe](flash-moe/), a proven C/Metal engine that runs Qwen3.5-397B-A17B at 4.36 tok/s on M3 Max (48GB). We adapt its architecture for the smaller Qwen 3.6 35B A3B model, targeting lower-RAM devices (16GB Mac mini → iPhone).
+**Status (2026-08-09): 8.3 tok/s on M4 16GB, 21 GB model, coherent output.**
 
-## 2. Why Not finchmoe_engine?
-
-The original `finchmoe_engine` (archived) was built in C++/ObjC++ for a pre-release Qwen MoE specification that never shipped. The published Qwen 3.6 architecture is fundamentally different:
-
-| Aspect | finchmoe_engine target | Actual Qwen 3.6 |
-|---|---|---|
-| Attention | 100% full attention | 75% GatedDeltaNet, 25% full attention |
-| Expert layout | Fused gate_up_proj | Separate gate_proj + up_proj + down_proj |
-| Hidden dim | Different | 2048 |
-| Quantization | Custom scheme | MLX affine INT4 group-64 |
-
-flash-moe already targets the correct model family (`qwen3_5_moe`) and implements all required operations (GatedDeltaNet, MoE routing, SSD streaming, Metal dequant). Adaptation requires dimension changes, not architectural redesign.
-
-## 3. Hardware Targets
-
-### Development: M4 Mac mini 16GB
-
-| Resource | Available | Engine Usage | Headroom |
-|---|---|---|---|
-| RAM | 16 GB unified | ~1.6 GB | ~14.4 GB for OS + page cache |
-| SSD | Samsung 990 Plus NVMe (TB4 enclosure) | ~19 GB model + experts | Faster than internal SSD |
-| GPU | M4 (10-core?) | Metal compute | TBD |
-| Memory bandwidth | ~120 GB/s (est.) | — | — |
-
-The larger page cache (14.4 GB vs 7-8 GB on 397B model) means higher expert cache hit rates. Both dev machines use a Samsung 990 Plus NVMe in a Thunderbolt 4 enclosure, which provides faster sequential reads than the internal SSDs on M1 and M4 Mac minis — a meaningful advantage for the SSD-streaming architecture.
-
-### Tested: Mac mini M1 8GB (2026-08-07)
-
-| Resource | Available | Engine Usage | Headroom |
-|---|---|---|---|
-| RAM | 8 GB unified | ~3.8 GB | ~1.6 GB free (52%), ~2.4 GB compressed |
-| Swap | — | **0 used** | Memory compression absorbs pressure |
-| GPU | M1 (8-core) | Metal compute | 1.6 ms GPU wait per layer |
-| SSD | Samsung 990 Plus NVMe (TB4 enclosure) | ~19 GB model + experts | Expert I/O: 1.5 ms/layer (warm); same drive as M4 |
-
-**Performance:** 3.3–8.2 tok/s (avg 5.4), prompt processing ~3–4 tok/s.
-Expert streaming from SSD is the bottleneck (37% of per-layer time) even on the fast external NVMe. Since both M1 and M4 share the same Samsung 990 Plus drive, the M1's lower throughput is attributable to slower GPU compute and lower memory bandwidth (~68 GB/s vs ~120 GB/s), not storage. The engine fits comfortably in 8 GB with no swapping, validating the SSD-streaming architecture. Expert malloc-cache is not viable (crashes at 500 entries).
-
-### Target: iPhone (A-series)
-
-- Much tighter RAM (6-8 GB)
-- No swap — must fit everything in physical memory
-- Slower SSD, less bandwidth
-- Likely needs model shrinking (3-bit? fewer experts?) or aggressive preloading
-- M1 8GB results suggest the architecture is viable: the engine already fits in 8GB with zero swap and exceeds the 3.5 tok/s minimum target. iPhone will need further optimization but the core approach is validated.
-
-## 4. Inference Pipeline
-
-Adapted from flash-moe's proven per-layer pipeline:
+## 2. Model Architecture
 
 ```
-CMD3(prev) → CMD1: attention projections + delta-net  [GPU]
-           → CPU: flush results                        [CPU]
-           → CMD2: o_proj + norm + routing + shared    [GPU]
-           → CPU: softmax + topK routing               [CPU]
-           → I/O: parallel pread K experts (default 4) [SSD]
-           → CMD3: expert forward + combine + norm     [GPU, DEFERRED]
+Qwen 3.6 35B A3B: 35B total parameters, 3B active per token
+40 layers: 30× GatedDeltaNet (linear attention) + 10× full attention
+Full attention at layers 3,7,11,15,19,23,27,31,35,39
+256 experts, 8 active per token + 1 shared expert
+Hidden dim: 2048, MoE intermediate: 512
+Vocab: 248,320, Head dim: 256, 16Q/2KV GQA
+RoPE theta: 10M, partial rotary: 0.25
 ```
 
-The model has 8 active experts per token; the engine defaults to K=4 for speed. Use `--k 8` to match the full model configuration.
+## 3. Model Sizes & Quantization
 
-### Key Design Decisions (from flash-moe experiments)
+| Model | Safetensors | Experts | Total | Speed (K=2) | Quality |
+|-------|-------------|---------|-------|-------------|---------|
+| BF16 (source) | 67 GB | — | 67 GB | — | Reference |
+| 4-bit-dense | 19 GB | 17 GB | 36 GB | 7.2 tok/s | ~1-2% loss |
+| **2-bit-dense (active)** | 11 GB | 9.4 GB | **21 GB** | **8.3 tok/s** | ~5% loss |
 
-1. **Serial GPU → SSD → GPU** — On Apple Silicon, SSD DMA and GPU compute share the memory controller. Overlapping them causes GPU latency spikes. Serial pipeline is hardware-optimal.
+### Quantization Strategy
 
-2. **No custom expert cache** — The OS page cache outperforms every custom caching scheme tested (Metal LRU, malloc cache, LZ4 compressed cache). "Trust the OS."
+| Component | Format | Size | Reasoning |
+|-----------|--------|------|-----------|
+| Embeddings + lm_head | 8-bit | 1.1 GB | Vocabulary projections — near-lossless at 8-bit |
+| Attention/GDN projections | 4-bit | 0.7 GB | Large tensors, 4-bit sufficient |
+| Shared expert | 4-bit | 0.07 GB | Always active, small |
+| Routed experts | 2-bit | 9.4 GB | MoE is quantization-tolerant |
+| Norms + routing gate | BF16 | 0.0005 GB | Tiny, not worth quantizing |
 
-3. **FMA dequant** — Rearranging `(nibble * scale + bias) * x` to `fma(nibble, scale*x, bias*x)` gives +12% throughput by using the GPU's fused multiply-add unit.
+## 4. Speed Analysis
 
-4. **Deferred CMD3** — Submit expert compute without waiting. GPU executes while CPU prepares next layer.
+### Measured Progression (M4 16GB, external TB4 NVMe)
 
-5. **Accelerate BLAS for GatedDeltaNet** — `cblas_sgemv` + `cblas_sger` for the recurrent state update is 64% faster than scalar code.
+| Step | expert_io | total_layer | tok/s | What changed |
+|------|-----------|-------------|-------|-------------|
+| BF16 baseline (K=4) | 2.04 ms | 4.93 ms | 5.08 | Starting point |
+| + Fused expert kernel | 1.92 ms | 4.37 ms | 5.72 | gate+up+swiglu in 1 Metal dispatch |
+| + 4-bit experts | 1.33 ms | 3.81 ms | 6.55 | Halved I/O volume |
+| + Dense quantization | 0.59 ms | 2.83 ms | 7.20 | Embeddings 8-bit, attention 4-bit |
+| + 2-bit experts (K=4) | 0.38 ms | 2.74 ms | 7.46 | Halved again |
+| **+ K=2 default** | **0.21 ms** | **2.30 ms** | **8.27** | Half the experts per layer |
 
-## 5. Component Design
+### Per-Layer Timing Breakdown (2-bit-dense, K=2)
 
-### 5.1 Model Loading
+| Phase | ms | % | What |
+|-------|----|---|------|
+| cmd1_wait | 0.87 | 38% | GPU: 5 GDN dispatches (conv1d→norm→decay→recur→gate) |
+| cmd3_encode | 0.67 | 29% | CPU: encode expert dispatches into Metal cmd buffer |
+| cmd2_wait | 0.49 | 21% | GPU: o_proj + residual + norm + routing + shared gate/up |
+| expert_io | 0.21 | 9% | memcpy 2 experts × 0.96 MB from page cache |
+| other | 0.07 | 3% | CPU attention, submit, routing |
+| **Total** | **2.30** | | × 40 layers = 92 ms/token = **10.9 tok/s theoretical** |
 
-Two-phase extraction from MLX 4-bit safetensors:
+Actual throughput (~8.3 tok/s) is lower due to prefill overhead, GPU synchronization, and token sampling.
 
-**Phase 1: Non-expert weights** (`extract_weights.py`)
-- Extract all non-expert tensors (embeddings, norms, attention, linear attention, shared expert, router)
-- Pack into single `model_weights.bin` (est. ~1.4 GB for Qwen3.6)
-- mmap'd at startup, read-only, zero-copy
-- Manifest in `model_weights.json`
+## 5. Inference Pipeline
 
-**Phase 2: Expert weights** (`repack_experts.py`)
-- Extract 256 experts × 40 layers = 10,240 experts
-- Each expert: 1,769,472 bytes at 4-bit (gate_proj + up_proj + down_proj with scales/biases)
-- Write 40 contiguous layer files in `packed_experts/layer_XX.bin`
-- Per-layer file size: 256 × 1.69 MB ≈ 432 MB
-- Total: 40 × 432 MB ≈ 16.9 GB
-
-Expert layout (same as flash-moe):
 ```
-[gate_proj.weight (U32)] [gate_proj.scales (BF16)] [gate_proj.biases (BF16)]
-[up_proj.weight   (U32)] [up_proj.scales   (BF16)] [up_proj.biases   (BF16)]
-[down_proj.weight (U32)] [down_proj.scales (BF16)] [down_proj.biases (BF16)]
+CMD3(prev) → CMD1: attention projections + GDN     [GPU, 5 dispatches]
+           → CPU: flush results                     [CPU]
+           → CMD2: o_proj + norm + routing + shared [GPU, ~6 dispatches]
+           → CPU: softmax + topK routing            [CPU]
+           → I/O: pread K experts from SSD          [parallel, 4 threads]
+           → CMD3: expert forward + combine + norm  [GPU, DEFERRED commit]
 ```
 
-### 5.2 Memory Layout
+Key design decisions:
+1. **Serial GPU→SSD→GPU** — overlapping causes GPU latency spikes on Apple Silicon
+2. **Trust OS page cache** — no custom expert cache (every attempt was slower)
+3. **FMA dequant** — `fma(nibble, scale*x, bias*x)` uses GPU fused multiply-add
+4. **Deferred CMD3** — async submit, GPU executes while CPU prepares next layer
+5. **mmap model weights** — zero-copy access to non-expert BF16 tensors
+
+## 6. Memory Layout
 
 ```
 ┌─────────────────────────────────────┐
-│ model_weights.bin (mmap'd, ~1.4 GB) │  ← Read-only, OS-managed
+│ model_weights.bin (mmap'd, 1.9 GB)  │  ← BF16/quantized non-expert weights
 ├─────────────────────────────────────┤
-│ GPU state buffers (~2.2 GB)          │  ← Metal-allocated, resident
-│  - Delta-net recurrent state (30L)  │     ~2.0 GB (30 × 65.9 MB)
-│  - KV caches (10 attn layers)       │     ~0.17 GB (10 × 16.8 MB)
-│  - Attention scores buffer          │     ~0.07 GB
-│  - Expert compute scratch           │     ~0.01 GB
+│ GPU state buffers (~0.3 GB)          │
+│  - Delta-net recurrent (30L × 2MB)  │
+│  - KV caches (10 attn layers)        │
+│  - Expert compute scratch            │
 ├─────────────────────────────────────┤
-│ OS page cache (remaining RAM)       │  ← Expert LRU caching
+│ OS page cache (~14 GB headroom)      │  ← Expert weight LRU caching
 └─────────────────────────────────────┘
 ```
 
-Total engine RAM: **~3.4–3.8 GB** (1.4 GB weights + 2.2 GB GPU state + minor overhead).
-On 8 GB this fits without swap (memory compression absorbs pressure). On 16 GB it leaves ~12 GB for OS + page cache.
+Runtime RAM: ~2 GB engine + page cache. On 16GB Mac, ~14 GB available for caching expert weights. On 8GB M1, ~3.8 GB used with zero swap.
 
-### 5.3 Metal Shaders
+## 7. Metal Kernels
 
-Reused from flash-moe with dimension updates for Qwen3.6:
+| Kernel | Bits | Purpose |
+|--------|------|---------|
+| `dequant_matvec_2bit` | 2 | 16 values/uint32, expert forward |
+| `dequant_matvec_4bit_v3` | 4 | 8 values/uint32, SIMD-stride + shared memory |
+| `dequant_matvec_8bit` | 8 | 4 values/uint32, for INT8 experts |
+| `fused_gate_up_swiglu` | 4 | gate+up+swiglu in 1 dispatch |
+| `fused_gate_up_swiglu_8bit` | 8 | Same for 8-bit |
+| `fused_gdn_core` | — | decay+beta+recur+gated_norm in 1 dispatch (optional) |
+| `gated_delta_net_step` | — | Single GDN recurrence step |
+| `swiglu_fused` | — | SiLU(gate) × up |
+| `moe_combine_residual` | — | Weighted sum + shared gate + residual |
+| `gemv_bf16` | — | Raw BF16 matvec (vectorized, SIMD reduction) |
+| `rms_norm` / `rms_norm_apply` | — | Two-pass RMS normalization |
 
-| Kernel | Purpose | Status |
-|---|---|---|
-| `dequant_matvec_4bit_v3` | 4-bit dequant + matvec (FMA optimized) | ✅ Verified bit-identical to CPU |
-| `swiglu_fused` | SiLU gating × up projection | ✅ |
-| `rms_norm` / `rms_norm_apply` | Two-pass sum-of-squares + apply | ✅ |
-| `batched_attention` | Q@K^T + softmax + scores@V | ✅ (16Q/2KV heads) |
-| `rope_fused` | Rotary embeddings with Q deinterleave | ✅ |
-| `moe_combine_residual` | Weighted sum + residual + next-layer input norm | ✅ |
-| `delta_net_gpu` | Fused GPU delta-net: conv1d → rms_norm → decay → recur → gate | ✅ (default, `--cpu-linear` to disable) |
-| `gated_rms_norm` | Output gate × RMSNorm for linear attention | ✅ |
+## 8. GatedDeltaNet (Linear Attention)
 
-### 5.4 GatedDeltaNet (Linear Attention)
-
-Per-token recurrence using delta rule:
+30 of 40 layers use delta-rule recurrence instead of self-attention:
 
 ```
 Q, K, V, Z, A, B = projections(x)
-Q = L2_normalize(Q)
-K = L2_normalize(K)
-V = SiLU(conv1d(V))
-Z = SiLU(conv1d(Z))
+Q = RMS_norm(Q) × 1/d_model    # Per-head, then scale
+K = RMS_norm(K) × 1/sqrt(d)    # Per-head, then scale
+QKV = SiLU(conv1d(QKV, kernel=4))  # Depthwise conv
 
-# Recurrent state update (via Accelerate BLAS)
-S_t = A * S_{t-1} + B * K_t^T @ V_t   # cblas_sger
+g = exp(-exp(A_log) × softplus(A + dt_bias))  # Per-head decay
+β = sigmoid(B)                                  # Per-head gate
 
-# Output
-o_t = Z * S_t @ Q_t / (A_log + dt_bias)  # cblas_sgemv
+S = S × g                        # Decay state
+kv = S @ K                        # Predict V from state
+Δ = (V - kv) × β                 # Error signal
+S += Δ ⊗ K                       # Update state (outer product)
+O = S @ Q                         # Read output
+
+output = RMS_norm(O) × SiLU(Z) × weight  # Gated output norm
+final = out_proj(output)                    # Project to hidden dim
 ```
 
-State per layer: [32 heads, 128 key_dim, 128 value_dim] = 2.1 MB BF16
-Total state (30 GDN layers): ~63 MB
+State per layer: [32 v-heads, 128 value-dim, 128 key-dim] = 2.1 MB
+Total GDN state: 30 layers × 2.1 MB = 63 MB
 
-### 5.5 Full Attention
+## 9. Full Attention
 
-Standard GQA with KV cache (only on 10 full-attention layers):
+10 layers (every 4th) use standard GQA with KV cache:
 
-```python
-Q, K, V = projections(x)
-Q, K = apply_rotary_embeddings(Q, K)
-scores = Q @ K^T / sqrt(head_dim)       # GPU batched
-attn = softmax(scores) @ V               # GPU batched
-output = o_proj(attn) * sigmoid(gate)    # Output gate
+```
+Q_full = q_proj(x)    # [16 heads × 2 × 256] = Q + output gate
+K, V = k_proj(x), v_proj(x)  # [2 KV heads × 256]
+Q = RMS_norm(Q) × q_weight, K = RMS_norm(K) × k_weight
+Q, K = RoPE(Q, K, position)
+scores = Q @ K^T / sqrt(256)
+attn = softmax(scores) @ V
+output = o_proj(attn × sigmoid(gate))
 ```
 
-KV cache per layer (FP16): 2 × 2 heads × 256 head_dim × seq_len × 2 bytes
-At 4096 tokens: ~8 MB per layer, ~80 MB total
+## 10. MoE Routing & Expert Forward
 
-### 5.6 MoE Routing
-
-```python
-router_logits = gate_proj(hidden)        # [256]
-probs = softmax(router_logits)
-top_k_indices, top_k_weights = top_k(probs, k=8)  # Model: 8 active, engine default: K=4
-# Normalize top-k weights
-top_k_weights = softmax(top_k_weights)
+```
+gate_logits = gate_proj(hidden)     # [256]
+probs = softmax(gate_logits)
+top_k_idx, top_k_w = top_k(probs, K=8)  # model: 8, engine default: K=2
+top_k_w = normalize(top_k_w)             # renormalize to sum=1
 
 # Shared expert (always active)
-shared_out = shared_expert(hidden) * sigmoid(shared_gate(hidden))
+shared_gate = sigmoid(shared_gate_proj(hidden))  # scalar
+shared_out = shared_gate × SwiGLU(hidden)       # gate_proj→SiLU×up_proj→down_proj
 
-# Routed experts (streamed from SSD on demand)
-expert_out = sum(top_k_weights[i] * expert_i(hidden) for i in top_k_indices[:K])
+# Routed experts (streamed from SSD)
+for i in top_k_idx[:K]:
+    expert_out += top_k_w[i] × SwiGLU_expert_i(hidden)
 
-output = expert_out + shared_out + residual
+hidden = residual + expert_out + shared_out
 ```
 
-## 6. Dimension Adaptation from flash-moe
+Expert SwiGLU per expert: gate_proj(x) → SiLU(gate) × up_proj(x) → down_proj(act)
 
-All constants adapted from the Qwen3.5-397B baseline to Qwen3.6-35B. These are the current values in `infer.m`:
+## 11. Hardware Targets
 
-```c
-#define HIDDEN_DIM          2048    // was 4096
-#define NUM_LAYERS          40      // was 60
-#define NUM_ATTN_HEADS      16      // was 32
-#define NUM_KV_HEADS        2       // unchanged
-#define HEAD_DIM            256     // unchanged
-#define VOCAB_SIZE          248320  // unchanged
-#define NUM_EXPERTS         256     // was 512
-#define NUM_EXPERTS_PER_TOK 8       // was 10 (model default; engine uses K=4 for speed)
-#define MOE_INTERMEDIATE    512     // was 1024
-#define SHARED_INTERMEDIATE 512     // was 1024
-#define LINEAR_NUM_V_HEADS  32      // was 64
-#define LINEAR_NUM_K_HEADS  16      // unchanged
-#define LINEAR_KEY_DIM      128     // unchanged
-#define LINEAR_VALUE_DIM    128     // unchanged
-// Derived:
-// LINEAR_TOTAL_KEY    = 16 * 128 = 2048 (was 2048, unchanged)
-// LINEAR_TOTAL_VALUE  = 32 * 128 = 4096 (was 8192)
-// LINEAR_CONV_DIM     = 2048*2 + 4096 = 8192 (was 12288)
+| Device | RAM | Speed (measured/est.) |
+|--------|-----|----------------------|
+| M4 Mac mini 16GB | 16 GB | **8.3 tok/s** (2-bit, K=2) |
+| M1 Mac mini 8GB | 8 GB | **5.4 tok/s** (4-bit, K=4) |
+| iPhone A18 Pro | 6-8 GB | **3-5 tok/s** (estimated) |
 
-#define EXPERT_SIZE         1769472  // was 7077888 (~1.69 MB vs ~6.75 MB)
-```
+Both M1 and M4 tested with Samsung 990 Plus NVMe in Thunderbolt 4 enclosure (2800 MB/s read, faster than internal SSD).
 
-## 7. Search Integration (Future)
+## 12. Key Design Decisions
 
-Plan to integrate internet search directly into the inference loop, inspired by [llm-search](https://github.com/...):
+1. **4-bit → 2-bit experts**: Halved I/O volume (17GB → 9.4GB). Quality impact ~5% PPL — acceptable because MoE is quantization-tolerant (8/256 fire, errors cancel via weighted sum).
 
-- Tool definitions injected into the system prompt
-- Engine intercepts `<tool_call>` tokens in generated output
-- Executes SearXNG queries and `fetch_page` operations
-- Injects results back into the context
-- Self-hosted, no API keys required
+2. **Dense weight quantization**: Embeddings/lm_head at 8-bit, attention/GDN/shared at 4-bit. Saved 15GB (22GB → 11GB safetensors) with <1% quality impact.
 
-Unlike llm-search's middleware approach, FinchMoE will handle tool calling natively in the C engine — no Python proxy needed.
+3. **K=2 default**: Halves expert I/O vs model's K=8. Quality impact minimal on short prompts. Use `-k 4` or `-k 8` for complex tasks.
 
-## 8. Performance Model
+4. **Fused expert kernel**: Combined gate+up+swiglu into 1 Metal dispatch (was 3). 12.5% speedup.
 
-### Estimated (M4 Mac mini 16 GB, K=4, warm page cache)
+5. **No custom expert cache**: OS page cache outperforms every custom scheme tested (Metal LRU, malloc cache, LZ4).
 
-| Component | Time (est.) | Notes |
-|---|---|---|
-| CMD1: attn + delta-net | ~0.6 ms | Half the hidden dim of 397B |
-| CPU: flush | ~0.01 ms | Unchanged |
-| CMD2: o_proj + norm + routing | ~0.3 ms | Smaller matrices |
-| CPU: softmax + topK | ~0.003 ms | 256 experts vs 512 |
-| I/O: pread K=4 experts | ~0.4 ms | 4 × 1.69 MB = 6.8 MB read |
-| CMD3: expert compute | ~0.02 ms | Deferred |
-| **Per layer** | **~1.3 ms** | |
-| **Per token (40 layers)** | **~53 ms** | **~18.9 tok/s theoretical** |
+6. **mmap model weights**: Zero-copy access to non-expert tensors via `model_weights.bin`.
 
-### Measured
+## 13. Optimization Roadmap
 
-| Machine | Per-layer time | tok/s | Notes |
-|---|---|---|---|
-| **M4 16 GB** (TB4 NVMe) | ~2.4 ms | **10–15** | GPU experts default, page cache helps |
-| **M1 8 GB** (TB4 NVMe) | 4.1 ms (warm) – 6.8 ms (cold) | **3.3–8.2** (avg 5.4) | Expert I/O dominates (37%) |
-
-The theoretical model is optimistic — real-world performance is lower due to external SSD latency, page cache misses, and Metal driver overhead. The original conservative estimate of 5–10 tok/s for M4 was close; actual results exceed it.
-
-## 9. Device-Specific Performance Estimates
-
-All estimates assume 4-bit experts, K=4, short context. Memory-bandwidth-bound.
-
-| Device | Memory Bandwidth | GPU tok/s | CPU tok/s | RAM Usage |
-|---|---|---|---|---|
-| M4 Mac mini 16 GB | ~120 GB/s | **10–15** (measured) | 1.8 (measured) | ~3.6 GB |
-| M1 Mac mini 8 GB | ~68 GB/s | **3.3–8.2, avg 5.4** (measured) | ~1–1.5 (est.) | ~3.8 GB (measured) |
-| M3 Max 48 GB | ~400 GB/s | 4.4 (flash-moe, 397B model) | — | ~6 GB |
-| iPhone A18 Pro | ~50–70 GB/s | **3–5** (est.) | 0.5–1 (est.) | ~3.5 GB |
-| iPhone A16/A17 | ~40–50 GB/s | **2–3** (est.) | 0.5–1 (est.) | ~3.5 GB |
-
-M4 is significantly faster than M3 Max for this workload because the engine is bandwidth-bound and M4's 120 GB/s serves a 3B-active model more efficiently than M3 Max's 400 GB/s serves a 17B-active model (397B). M1's lower throughput vs M4 is attributable to GPU compute and memory bandwidth (~68 vs ~120 GB/s), not storage — both tested with the same Samsung 990 Plus TB4 enclosure.
-
-## 10. Long Context: 256K Window Analysis
-
-### Memory Impact
-
-Only 10 of 40 layers are full attention (KV cache needed):
-
-| Component | Per Token | × 256K |
-|---|---|---|
-| K cache (2 heads × 256d × FP16) | 1,024 bytes | 256 MB |
-| V cache (same) | 1,024 bytes | 256 MB |
-| Per full-attn layer | 2,048 bytes | 512 MB |
-| **10 full-attn layers** | | **~5 GB** |
-
-Total for 256K: engine base (~1.8 GB) + KV cache (~5 GB) = **~7 GB**. Leaves ~9 GB for macOS + page cache on 16 GB — tight but workable.
-
-### Speed Impact (Without Optimizations)
-
-Attention scores `Q@K^T` are O(heads × dim × seq_len), dominating at long context:
-
-| Context Length | tok/s (est.) |
-|---|---|
-| 4K (typical chat) | 12 |
-| 32K | ~2 |
-| 128K | ~0.7 |
-| 256K | **~0.4** |
-
-### Optimization: KV Cache Quantization
-
-Quantizing K and V caches from FP16 saves memory AND speeds up the attention matmul (less data to read):
-
-| KV Format | KV Size (256K) | Attention Speed | Quality vs FP16 |
-|---|---|---|---|
-| FP16 (current) | 5.0 GB | 1× | Reference |
-| Q8_0 (per-channel 8-bit) | 2.5 GB | ~2× | Negligible loss |
-| Q4_K_M (block 4-bit) | 1.25 GB | ~4× | Small, acceptable |
-| **TurboQuant Q4** (Hadamard + 4-bit) | 1.25 GB | ~4× | **Near Q8 quality** |
-
-With Q8_0 at 256K: **~0.7–1.0 tok/s**. With TurboQuant Q4: **~1.0–1.5 tok/s** at Q8-like quality.
-
-### TurboQuant Implementation
-
-Three components, ~100 lines of Metal + ~30 lines of C:
-
-```
-1. Hadamard rotation: per-head [256×256] via Fast Walsh-Hadamard (8 butterfly passes)
-2. Channel-wise quantization: one scale per 256d channel (vs one per tensor)
-3. Inline dequant during attention: dequant + inverse rotation before Q@K^T
-```
-
-The rotation flattens outlier channels so 4-bit quantization evenly captures all dimensions — this is why TurboQuant Q4 approaches Q8 quality. The rotation itself costs O(n log n) with n=256 — about 0.02ms per attention layer, negligible compared to the attention matmul.
-
-## 11. MTP (Multi-Token Prediction)
-
-Qwen3.6 includes a built-in MTP layer that predicts a second token in parallel with the main model. The main model then verifies it:
-
-| | Without MTP | With MTP |
-|---|---|---|
-| Tokens per forward pass | 1 | 1.0–2.0 (avg ~1.6 at 70% acceptance) |
-| Overhead | — | +1 MTP layer (~2.5% of main model) |
-| Effective speedup | 1× | **~1.5×** |
-
-Flash-moe found MTP break-even for the 397B model because expert I/O (6.75 MB each) dominates per-token cost. For Qwen3.6 with **much smaller experts** (1.69 MB each, 4× smaller), the I/O cost is proportionally lower and MTP should be a net win. Implementation requires loading the MTP weights (a single small safetensors file, ~100 MB) and adding one extra forward pass per token.
-
-## 12. Optimization Priority
-
-| Priority | Feature | Effort | Impact | Status |
-|---|---|---|---|---|---|
-| 1 | Clean model output (self-quantize BF16) | Done | Baseline | ✅ |
-| 2 | GPU expert path fix | Done | 6× speedup | ✅ (default, verified bit-identical) |
-| 3 | KV cache Q8_0 | ~60 lines Metal | Saves 2.5 GB, good at 32K+ ctx | |
-| 4 | MTP speculative decoding | ~200 lines C | 1.5× speedup | |
-| 5 | TurboQuant Q4 KV cache | ~100 lines Metal | Q8 quality at Q4 size | |
-| 6 | Flash attention | ~300 lines Metal | 2× long-context speed | |
-| 7 | iPhone port | Engineering | Target deployment | |
-
-## 13. Appendix: flash-moe Experiments Reference
-
-Key findings from flash-moe's 58 experiments that inform our design:
-
-| Finding | Impact |
-|---|---|
-| FMA dequant kernel | +12% tok/s |
-| Trust OS page cache (vs custom LRU) | +38% tok/s |
-| BLAS delta-net (Accelerate) | +64% attention speed |
-| GPU combine+norm in CMD3 | Pipeline-critical |
-| SSD DMA + GPU overlap impossible | Serial pipeline optimal |
-| LZ4 expert compression | -13% (decompress overhead) |
-| mmap expert files | -5× (page fault overhead) |
-| MTP speculative decoding | Break-even for 397B (likely net win for Qwen3.6 smaller experts) |
+| Priority | Feature | Effort | Impact |
+|----------|---------|--------|--------|
+| 1 | Batched expert encoders | Medium | ~0.15ms/layer (cmd3_encode) |
+| 2 | Fuse conv1d+rms_norm GDN dispatches | Medium | ~0.10ms/layer (cmd1_wait) |
+| 3 | KV cache quantization (Q8_0) | Low | Saves 2.5 GB at 256K context |
+| 4 | MTP speculative decoding | Medium | 1.5× speedup |
+| 5 | iPhone port | High | Target deployment |
