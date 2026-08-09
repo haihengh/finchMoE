@@ -1189,7 +1189,8 @@ typedef struct {
     id<MTLComputePipelineState> matvec_v3;
     id<MTLComputePipelineState> matvec_v5;  // LUT dequant variant
     id<MTLComputePipelineState> matvec_fast;  // for in_dim > 4096
-    id<MTLComputePipelineState> gemv_bf16_pipe;  // raw BF16 GEMV (no dequant)
+    id<MTLComputePipelineState> gemv_bf16_pipe;    // raw BF16 GEMV (no dequant)
+    id<MTLComputePipelineState> gemv_bf16_x2_pipe; // 2 rows/tg (NR0=2), faster for large out_dim
     id<MTLComputePipelineState> matvec_1bit;  // 1-bit expert dequant kernel
     id<MTLComputePipelineState> matvec_2bit;  // 2-bit expert dequant kernel
     id<MTLComputePipelineState> matvec_8bit;  // 8-bit expert dequant kernel
@@ -1348,6 +1349,7 @@ static MetalCtx *metal_setup(void) {
     ctx->fused_gate_up_swiglu_8bit_pipe = makePipe(@"fused_gate_up_swiglu_8bit");
     ctx->fused_gate_up_swiglu_2x_pipe = makePipe(@"fused_gate_up_swiglu_2x");
     ctx->gemv_bf16_pipe = makePipe(@"gemv_bf16");
+    ctx->gemv_bf16_x2_pipe = makePipe(@"gemv_bf16_x2");
     ctx->rms_norm_sum  = makePipe(@"rms_norm_sum_sq");
     ctx->rms_norm_apply = makePipe(@"rms_norm_apply");
     ctx->rms_norm_apply_bf16 = makePipe(@"rms_norm_apply_bf16");
@@ -1731,13 +1733,15 @@ static void gpu_batch_matvec(
             NSUInteger w_off = (NSUInteger)((const char *)s->W - (const char *)[ctx->wf_buf contents]);
             id<MTLBuffer> o_buf = ctx->batch_out[s->batch_slot];
             id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
-            [enc setComputePipelineState:ctx->gemv_bf16_pipe];
+            // Use x2 kernel for out_dim >= 128: 2 rows/tg amortizes x-vector loads
+            int use_x2 = (s->out_dim >= 128 && ctx->gemv_bf16_x2_pipe);
+            [enc setComputePipelineState: use_x2 ? ctx->gemv_bf16_x2_pipe : ctx->gemv_bf16_pipe];
             [enc setBuffer:ctx->wf_buf offset:w_off atIndex:0];
             [enc setBuffer:ctx->buf_input offset:0 atIndex:1];
             [enc setBuffer:o_buf offset:0 atIndex:2];
             [enc setBytes:&s->out_dim length:4 atIndex:3];
             [enc setBytes:&s->in_dim  length:4 atIndex:4];
-            uint32_t tgs = s->out_dim;
+            uint32_t tgs = use_x2 ? (s->out_dim + 1) / 2 : s->out_dim;
             [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             [enc endEncoding];
@@ -1803,14 +1807,15 @@ static void gpu_encode_batch_matvec(
             BatchMatvecSpec *s = &specs[i];
             NSUInteger w_off = (NSUInteger)((const char *)s->W - (const char *)[ctx->wf_buf contents]);
             id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
-            [enc setComputePipelineState:ctx->gemv_bf16_pipe];
+            int use_x2 = (s->out_dim >= 128 && ctx->gemv_bf16_x2_pipe);
+            [enc setComputePipelineState: use_x2 ? ctx->gemv_bf16_x2_pipe : ctx->gemv_bf16_pipe];
             [enc setBuffer:ctx->wf_buf offset:w_off atIndex:0];
             [enc setBuffer:ctx->buf_input offset:0 atIndex:1];
             // output to batch_out slot so gpu_flush_batch_results can copy it
             [enc setBuffer:ctx->batch_out[s->batch_slot] offset:0 atIndex:2];
             [enc setBytes:&s->out_dim length:4 atIndex:3];
             [enc setBytes:&s->in_dim  length:4 atIndex:4];
-            uint32_t tgs = s->out_dim;  // one threadgroup per output row (256 threads cooperate)
+            uint32_t tgs = use_x2 ? (s->out_dim + 1) / 2 : s->out_dim;
             [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             [enc endEncoding];
@@ -5465,14 +5470,15 @@ static void fused_layer_forward(
             id<MTLComputeCommandEncoder> enc = [cmd_fused computeCommandEncoder];
 
             if (!oproj_s || !oproj_b) {
-                // BF16 path: use gemv_bf16 kernel
-                [enc setComputePipelineState:g_metal->gemv_bf16_pipe];
+                // BF16 path: use gemv_bf16_x2 for out_dim >= 128
+                int use_x2 = (o_out_dim >= 128 && g_metal->gemv_bf16_x2_pipe);
+                [enc setComputePipelineState: use_x2 ? g_metal->gemv_bf16_x2_pipe : g_metal->gemv_bf16_pipe];
                 [enc setBuffer:g_metal->wf_buf  offset:w_off atIndex:0];
                 [enc setBuffer:oproj_input      offset:0    atIndex:1];
                 [enc setBuffer:g_metal->buf_output offset:0 atIndex:2];
                 [enc setBytes:&o_out_dim  length:4 atIndex:3];
                 [enc setBytes:&o_in_dim   length:4 atIndex:4];
-                uint32_t tgs = o_out_dim;  // one threadgroup per output row
+                uint32_t tgs = use_x2 ? (o_out_dim + 1) / 2 : o_out_dim;
                 [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1)
                     threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             } else {
