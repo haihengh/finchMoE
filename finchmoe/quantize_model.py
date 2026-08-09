@@ -48,9 +48,8 @@ def quantize_affine(weights_f32, bits, group_size=64):
 
 
 EIGHT_BIT_DENSE = [
-    # 8-bit: embedding & lm_head — quality-critical, 8-bit is safe
-    'lm_head.weight',
-    'embed_tokens.weight',
+    # 8-bit disabled — engine only supports 4-bit dequant for non-expert tensors.
+    # Re-enable after adding 8-bit dequant support to fast_dequant_matvec/gpu_batch_matvec.
 ]
 
 FOUR_BIT_DENSE = [
@@ -68,11 +67,14 @@ FOUR_BIT_DENSE = [
     '.mlp.shared_expert.gate_proj.weight',
     '.mlp.shared_expert.up_proj.weight',
     '.mlp.shared_expert.down_proj.weight',
+    # 4-bit: embeddings and lm_head (8-bit unsupported in engine dequant)
+    'lm_head.weight',
+    'embed_tokens.weight',
 ]
 
-# Routed experts: 1-bit for maximum compression
-INT1_EXPERTS = ['.mlp.experts.gate_up_proj', '.mlp.experts.down_proj']
-INT2_EXPERTS = []
+# Routed experts: 2-bit (sweet spot)
+INT1_EXPERTS = []
+INT2_EXPERTS = ['.mlp.experts.gate_up_proj', '.mlp.experts.down_proj']
 INT4_EXPERTS = []
 
 # Keep as BF16: tiny tensors where quantization doesn't save meaningful space
