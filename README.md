@@ -19,7 +19,8 @@ A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon, targeting 
 |-------|-------------|---------|-------|-------------|-------------|
 | BF16 (source) | 67 GB | — | 67 GB | — | 0% (reference) |
 | 4-bit-dense (active) | 19 GB | 17 GB | **36 GB** | 7.2 tok/s | ~1-2% |
-| 2-bit-dense ✅ | 11 GB | 9.4 GB | **21 GB** | 7.5 tok/s | ~5% |
+| 2-bit-dense | 11 GB | 9.4 GB | **21 GB** | 8.3 tok/s | ~5% |
+| 1-bit-dense | 7.6 GB | 5.6 GB | **13.2 GB** | 8.1 tok/s | ~10-15% (degraded) |
 
 ### Quantization Strategy
 
@@ -54,6 +55,7 @@ Key insight: Dense 27B models (Bonsai) have 9× more active params per token tha
 
 | Model | Size | RAM | TG (1K ctx) | TG (50K ctx) | TG (256K ctx) | KV (1K/50K/256K) | Quality |
 |-------|------|-----|-------------|--------------|---------------|------------------|---------|
+| **FinchMoE 1-bit** | 13.2 GB | ~1.5 GB | **8.1 tok/s** | TBD | TBD | 0.01/1.0/5.2 GB | "You are a helpful assistant." (degraded) |
 | **FinchMoE 2-bit** | 21 GB | ~2 GB | **8.3 tok/s** | **~2 tok/s** (est.) | **~0.5 tok/s** (est.) | 0.02/1.0/5.2 GB | "You are a helpful assistant." |
 | **FinchMoE 4-bit** | 36 GB | ~2.5 GB | **7.5 tok/s** | ~2 tok/s (est.) | ~0.5 tok/s (est.) | 0.02/1.0/5.2 GB | "You are a helpful assistant." |
 | **turbo-fieldfare** | 13 GB | ~3 GB | **10.7 tok/s** | TBD | N/A (63 GB KV) | 0.3/12/63 GB | "The salt-crust clings..." |
