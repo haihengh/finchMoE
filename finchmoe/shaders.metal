@@ -217,6 +217,58 @@ kernel void fused_gate_up_swiglu(
     }
 }
 
+// 8-bit variant: 4 values per uint32, 8-bit extraction
+kernel void fused_gate_up_swiglu_8bit(
+    device const uint32_t* gate_W    [[buffer(0)]],
+    device const uint16_t* gate_s    [[buffer(1)]],
+    device const uint16_t* gate_b    [[buffer(2)]],
+    device const uint32_t* up_W      [[buffer(3)]],
+    device const uint16_t* up_s      [[buffer(4)]],
+    device const uint16_t* up_b      [[buffer(5)]],
+    device const float*    x         [[buffer(6)]],
+    device float*          out       [[buffer(7)]],
+    constant uint&         out_dim   [[buffer(8)]],
+    constant uint&         in_dim    [[buffer(9)]],
+    constant uint&         group_size [[buffer(10)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint lid  [[thread_position_in_threadgroup]],
+    uint tg_size [[threads_per_threadgroup]]
+) {
+    if (tgid >= out_dim) return;
+    uint num_groups = in_dim / group_size;
+    uint packed_per_group = group_size / 4;   // 4 values per uint32 for 8-bit
+    uint packed_cols = in_dim / 4;
+    device const uint32_t* gr = gate_W + tgid * packed_cols;
+    device const uint16_t* gs = gate_s + tgid * num_groups;
+    device const uint16_t* gb = gate_b + tgid * num_groups;
+    device const uint32_t* ur = up_W   + tgid * packed_cols;
+    device const uint16_t* us = up_s   + tgid * num_groups;
+    device const uint16_t* ub = up_b   + tgid * num_groups;
+    float ga = 0.0f, ua = 0.0f;
+    for (uint g = lid; g < num_groups; g += tg_size) {
+        float gsc = bf16_to_f32(gs[g]), gbi = bf16_to_f32(gb[g]);
+        float usc = bf16_to_f32(us[g]), ubi = bf16_to_f32(ub[g]);
+        uint bp = g * packed_per_group, bx = g * group_size;
+        for (uint p = 0; p < packed_per_group; p++) {
+            uint32_t gp = gr[bp+p], up = ur[bp+p];
+            for (uint i = 0; i < 4; i++) {
+                float xv = x[bx + p*4 + i];
+                ga += (float((gp>>(i*8))&0xFF)*gsc+gbi)*xv;
+                ua += (float((up>>(i*8))&0xFF)*usc+ubi)*xv;
+            }
+        }
+    }
+    threadgroup float sg[32], su[32];
+    float rg = simd_sum(ga), ru = simd_sum(ua);
+    uint sl = lid%32, si = lid/32, ns = (tg_size+31)/32;
+    if (sl==0) { sg[si]=rg; su[si]=ru; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (si==0 && sl<ns) {
+        float vg=simd_sum(sg[sl]), vu=simd_sum(su[sl]);
+        if (sl==0) out[tgid] = (vg/(1.0f+exp(-vg))) * vu;
+    }
+}
+
 // ============================================================================
 // Kernel 1c: FULLY OPTIMIZED 4-bit dequant matvec
 // ============================================================================
@@ -1313,6 +1365,90 @@ kernel void gated_rms_norm(
         float w = bf16_to_f32(weight[tid]);
         output[base + tid] = normed * gate * w;
     }
+}
+
+// ============================================================================
+// Fused GDN core: compute_decay_beta + gated_delta_net_step + gated_rms_norm
+// ============================================================================
+// Combines 3 dispatches into 1. Each threadgroup handles one v-head.
+// Dispatch: num_v_heads threadgroups, value_dim threads each (32 × 128).
+// Eliminates intermediate buffer round-trips for g_decay/beta_gate and delta_out.
+
+kernel void fused_gdn_core(
+    device float       *state,          // [num_v_heads * value_dim * key_dim] persistent, UPDATED IN-PLACE
+    device const float *q,              // [num_k_heads * key_dim]
+    device const float *k,              // [num_k_heads * key_dim]
+    device const float *v,              // [num_v_heads * value_dim]
+    device const float *z,              // [num_v_heads * value_dim]
+    device const float *alpha,          // [num_v_heads]
+    device const float *beta,           // [num_v_heads]
+    device const float *A_log,          // [num_v_heads]
+    device const uint16_t *dt_bias,     // [num_v_heads] bf16
+    device const uint16_t *norm_weight, // [value_dim] bf16
+    device float       *output,         // [num_v_heads * value_dim] gated output
+    constant uint &k_heads_per_v,       // = 2
+    constant uint &key_dim,             // = 128
+    constant uint &value_dim,           // = 128
+    constant float &eps,                // = 1e-6
+    uint head [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]]
+) {
+    uint kh = head / k_heads_per_v;
+    uint state_base = head * value_dim * key_dim;
+    uint k_base = kh * key_dim;
+    uint v_base = head * value_dim;
+
+    // ---- Step 1: compute g_decay and beta_gate (thread 0 only) ----
+    threadgroup float g_decay, beta_gate;
+    if (tid == 0) {
+        float a_val = alpha[head];
+        float dt_b  = bf16_to_f32(dt_bias[head]);
+        float A_val = exp(A_log[head]);
+        float softplus_val = log(1.0f + exp(a_val + dt_b));
+        g_decay   = exp(-A_val * softplus_val);
+        beta_gate = 1.0f / (1.0f + exp(-beta[head]));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // ---- Step 2: GDN recurrence (each thread handles one value row) ----
+    // kv_mem[vi] = sum_ki(state[vi,ki] * k[ki])
+    float kv_mem = 0.0f;
+    for (uint ki = 0; ki < key_dim; ki++) {
+        float s = state[state_base + tid * key_dim + ki] * g_decay;
+        state[state_base + tid * key_dim + ki] = s;
+        kv_mem += s * k[k_base + ki];
+    }
+    // delta[vi] = (v[vi] - kv_mem) * beta_gate
+    float delta = (v[v_base + tid] - kv_mem) * beta_gate;
+    // state[vi, ki] += k[ki] * delta
+    for (uint ki = 0; ki < key_dim; ki++) {
+        state[state_base + tid * key_dim + ki] += k[k_base + ki] * delta;
+    }
+    // out[vi] = sum_ki(state[vi, ki] * q[ki])
+    float out_val = 0.0f;
+    for (uint ki = 0; ki < key_dim; ki++) {
+        out_val += state[state_base + tid * key_dim + ki] * q[k_base + ki];
+    }
+
+    // ---- Step 3: Gated RMS norm ----
+    uint base = head * value_dim;
+    // RMS reduction over this v-head's output
+    threadgroup float partial[128];
+    partial[tid] = out_val * out_val;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float s = 0;
+        for (uint i = 0; i < value_dim; i++) s += partial[i];
+        partial[0] = s;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float inv_rms = rsqrt(partial[0] / float(value_dim) + eps);
+
+    float normed = out_val * inv_rms;
+    float zval = z[base + tid];
+    float gate = zval / (1.0f + exp(-zval));  // SiLU
+    float w = bf16_to_f32(norm_weight[tid]);
+    output[base + tid] = normed * gate * w;
 }
 
 

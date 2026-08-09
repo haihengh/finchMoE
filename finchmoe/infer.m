@@ -1114,6 +1114,8 @@ typedef struct {
     id<MTLComputePipelineState> gemv_bf16_pipe;  // raw BF16 GEMV (no dequant)
     id<MTLComputePipelineState> matvec_2bit;  // 2-bit expert dequant kernel
     id<MTLComputePipelineState> matvec_8bit;  // 8-bit expert dequant kernel
+    id<MTLComputePipelineState> fused_gate_up_swiglu_pipe;      // 4-bit fused gate+up+swiglu
+    id<MTLComputePipelineState> fused_gate_up_swiglu_8bit_pipe; // 8-bit fused gate+up+swiglu
     id<MTLComputePipelineState> rms_norm_sum;
     id<MTLComputePipelineState> rms_norm_apply;
     id<MTLComputePipelineState> rms_norm_apply_bf16;
@@ -1183,6 +1185,7 @@ typedef struct {
     id<MTLComputePipelineState> rms_norm_qk;     // per-head RMS normalize for q and k
     id<MTLComputePipelineState> compute_decay_beta; // g_decay and beta_gate for delta-net
     id<MTLComputePipelineState> gated_rms_norm;  // z-gated output normalization
+    id<MTLComputePipelineState> fused_gdn_core;  // fused decay+beta+GDN+gated_norm
     // Persistent GPU state buffers for linear attention layers
     #define NUM_LINEAR_LAYERS 30
     id<MTLBuffer> buf_delta_state[NUM_LINEAR_LAYERS];   // [32*128*128] float per layer
@@ -1260,6 +1263,8 @@ static MetalCtx *metal_setup(void) {
     ctx->matvec_fast   = makePipe(@"dequant_matvec_4bit_fast");
     ctx->matvec_2bit   = makePipe(@"dequant_matvec_2bit");
     ctx->matvec_8bit   = makePipe(@"dequant_matvec_8bit");
+    ctx->fused_gate_up_swiglu_pipe      = makePipe(@"fused_gate_up_swiglu");
+    ctx->fused_gate_up_swiglu_8bit_pipe = makePipe(@"fused_gate_up_swiglu_8bit");
     ctx->gemv_bf16_pipe = makePipe(@"gemv_bf16");
     ctx->rms_norm_sum  = makePipe(@"rms_norm_sum_sq");
     ctx->rms_norm_apply = makePipe(@"rms_norm_apply");
@@ -1276,6 +1281,7 @@ static MetalCtx *metal_setup(void) {
     ctx->rms_norm_qk       = makePipe(@"rms_norm_qk");
     ctx->compute_decay_beta = makePipe(@"compute_decay_beta");
     ctx->gated_rms_norm    = makePipe(@"gated_rms_norm");
+    ctx->fused_gdn_core    = makePipe(@"fused_gdn_core");
     if (!ctx->moe_combine_residual) fprintf(stderr, "[metal] WARNING: moe_combine_residual pipeline failed\n");
     if (!ctx->delta_net_step) fprintf(stderr, "[metal] WARNING: gated_delta_net_step pipeline failed (CPU fallback)\n");
     if (!ctx->conv1d_step)    fprintf(stderr, "[metal] WARNING: conv1d_step pipeline failed (CPU fallback)\n");
@@ -2027,29 +2033,40 @@ static void gpu_encode_experts_batched(
         down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
     id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : (g_use_int8 ? ctx->matvec_8bit : ctx->matvec_v3);
+    id<MTLComputePipelineState> fused_pipe = g_use_2bit ? NULL : (g_use_int8 ? ctx->fused_gate_up_swiglu_8bit_pipe : ctx->fused_gate_up_swiglu_pipe);
 
     uint32_t gate_up_out = MOE_INTERMEDIATE;
     uint32_t gate_up_in  = HIDDEN_DIM;
     uint32_t down_out    = HIDDEN_DIM;
     uint32_t down_in     = MOE_INTERMEDIATE;
     uint32_t gs          = GROUP_SIZE;
-    // 2-bit: packed_cols = in_dim/16, threadgroups = out_dim/8
-    // 4-bit: packed_cols = in_dim/8,  threadgroups = out_dim/8
-    // Threadgroup count is the same (based on out_dim), kernel handles packed_cols internally.
     uint32_t gate_up_tgs = (gate_up_out + 7) / 8;
     uint32_t down_tgs    = (down_out + 7) / 8;
-    uint32_t swiglu_tgs  = (gate_up_out + 255) / 256;
 
-    // Per-expert: Encoder A (gate+up), Encoder B (SwiGLU+down)
-    // Separate encoders per expert enables GPU parallelism across experts.
-    // Within each encoder, operations serialize (gate then up, SwiGLU then down).
+    // Per-expert: single encoder with fused gate+up+swiglu (1 dispatch) + down_proj (1 dispatch)
     for (int k = 0; k < K; k++) {
         if (!valid[k]) continue;
 
-        // Encoder A: gate_proj + up_proj (both read same input, write different outputs)
-        {
-            id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
-            // gate_proj
+        id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
+
+        if (fused_pipe) {
+            // Fused gate+up+swiglu in 1 dispatch — replaces 3 separate dispatches
+            [enc setComputePipelineState:fused_pipe];
+            [enc setBuffer:expert_bufs[k]              offset:gate_w_off  atIndex:0];  // gate_W
+            [enc setBuffer:expert_bufs[k]              offset:gate_s_off  atIndex:1];  // gate_scales
+            [enc setBuffer:expert_bufs[k]              offset:gate_b_off  atIndex:2];  // gate_biases
+            [enc setBuffer:expert_bufs[k]              offset:up_w_off    atIndex:3];  // up_W
+            [enc setBuffer:expert_bufs[k]              offset:up_s_off    atIndex:4];  // up_scales
+            [enc setBuffer:expert_bufs[k]              offset:up_b_off    atIndex:5];  // up_biases
+            [enc setBuffer:ctx->buf_multi_expert_input offset:0           atIndex:6];  // x
+            [enc setBuffer:ctx->buf_multi_expert_act[k] offset:0          atIndex:7];  // out (SwiGLU result)
+            [enc setBytes:&gate_up_out length:4 atIndex:8];
+            [enc setBytes:&gate_up_in  length:4 atIndex:9];
+            [enc setBytes:&gs          length:4 atIndex:10];
+            [enc dispatchThreadgroups:MTLSizeMake(gate_up_tgs, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];  // 128 threads (fused kernel uses different config)
+        } else {
+            // Fallback: separate gate + up dispatches
             [enc setComputePipelineState:expert_pipe];
             [enc setBuffer:expert_bufs[k]                  offset:gate_w_off  atIndex:0];
             [enc setBuffer:expert_bufs[k]                  offset:gate_s_off  atIndex:1];
@@ -2061,41 +2078,37 @@ static void gpu_encode_experts_batched(
             [enc setBytes:&gs          length:4 atIndex:7];
             [enc dispatchThreadgroups:MTLSizeMake(gate_up_tgs, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-            // up_proj (same encoder, serialized after gate — shares encoder overhead)
+            // up_proj
             [enc setBuffer:expert_bufs[k]                  offset:up_w_off  atIndex:0];
             [enc setBuffer:expert_bufs[k]                  offset:up_s_off  atIndex:1];
             [enc setBuffer:expert_bufs[k]                  offset:up_b_off  atIndex:2];
             [enc setBuffer:ctx->buf_multi_expert_up[k]     offset:0          atIndex:4];
             [enc dispatchThreadgroups:MTLSizeMake(gate_up_tgs, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-            [enc endEncoding];
-        }
-
-        // Encoder B: SwiGLU + down_proj (SwiGLU depends on gate+up from Enc A)
-        {
-            id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
             // SwiGLU
             [enc setComputePipelineState:ctx->swiglu];
             [enc setBuffer:ctx->buf_multi_expert_gate[k] offset:0 atIndex:0];
             [enc setBuffer:ctx->buf_multi_expert_up[k]   offset:0 atIndex:1];
             [enc setBuffer:ctx->buf_multi_expert_act[k]  offset:0 atIndex:2];
             [enc setBytes:&gate_up_out length:4 atIndex:3];
-            [enc dispatchThreadgroups:MTLSizeMake(swiglu_tgs, 1, 1)
+            [enc dispatchThreadgroups:MTLSizeMake((gate_up_out + 255) / 256, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-            // down_proj (same encoder, serialized after SwiGLU)
-            [enc setComputePipelineState:expert_pipe];
-            [enc setBuffer:expert_bufs[k]                  offset:down_w_off  atIndex:0];
-            [enc setBuffer:expert_bufs[k]                  offset:down_s_off  atIndex:1];
-            [enc setBuffer:expert_bufs[k]                  offset:down_b_off  atIndex:2];
-            [enc setBuffer:ctx->buf_multi_expert_act[k]    offset:0           atIndex:3];
-            [enc setBuffer:ctx->buf_multi_expert_out[k]    offset:0           atIndex:4];
-            [enc setBytes:&down_out length:4 atIndex:5];
-            [enc setBytes:&down_in  length:4 atIndex:6];
-            [enc setBytes:&gs       length:4 atIndex:7];
-            [enc dispatchThreadgroups:MTLSizeMake(down_tgs, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-            [enc endEncoding];
         }
+
+        // down_proj (always needed)
+        [enc setComputePipelineState:expert_pipe];
+        [enc setBuffer:expert_bufs[k]                  offset:down_w_off  atIndex:0];
+        [enc setBuffer:expert_bufs[k]                  offset:down_s_off  atIndex:1];
+        [enc setBuffer:expert_bufs[k]                  offset:down_b_off  atIndex:2];
+        [enc setBuffer:ctx->buf_multi_expert_act[k]    offset:0           atIndex:3];
+        [enc setBuffer:ctx->buf_multi_expert_out[k]    offset:0           atIndex:4];
+        [enc setBytes:&down_out length:4 atIndex:5];
+        [enc setBytes:&down_in  length:4 atIndex:6];
+        [enc setBytes:&gs       length:4 atIndex:7];
+        [enc dispatchThreadgroups:MTLSizeMake(down_tgs, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+        [enc endEncoding];
     }
 }
 
@@ -4482,52 +4495,74 @@ static void fused_layer_forward(
                 [enc endEncoding];
             }
 
-            // Enc L3: compute_decay_beta — alpha=batch_out[3], beta=batch_out[2], A_log+dt_bias from wf_buf
-            {
+            // Enc L3: FUSED GDN core (decay/beta + delta-net recurrence + gated norm)
+            if (g_metal->fused_gdn_core) {
+                NSUInteger a_log_off   = (NSUInteger)((const char *)lc->A_log   - (const char *)[g_metal->wf_buf contents]);
+                NSUInteger dt_bias_off = (NSUInteger)((const char *)lc->dt_bias  - (const char *)[g_metal->wf_buf contents]);
+                NSUInteger gnorm_w_off = (NSUInteger)((const char *)lc->gated_norm_w - (const char *)[g_metal->wf_buf contents]);
+                uint32_t khpv = LINEAR_NUM_V_HEADS / LINEAR_NUM_K_HEADS;
+                uint32_t kdim = LINEAR_KEY_DIM, vdim = LINEAR_VALUE_DIM;
+                float eps = RMS_NORM_EPS;
+                id<MTLComputeCommandEncoder> enc = [cmd1 computeCommandEncoder];
+                [enc setComputePipelineState:g_metal->fused_gdn_core];
+                [enc setBuffer:g_metal->buf_delta_state[linear_layer_idx] offset:0 atIndex:0];  // state
+                [enc setBuffer:g_metal->buf_conv_output offset:0 atIndex:1];  // q
+                [enc setBuffer:g_metal->buf_conv_output offset:LINEAR_TOTAL_KEY * sizeof(float) atIndex:2];  // k
+                [enc setBuffer:g_metal->buf_conv_output offset:2 * LINEAR_TOTAL_KEY * sizeof(float) atIndex:3];  // v
+                [enc setBuffer:g_metal->batch_out[1]       offset:0          atIndex:4];  // z
+                [enc setBuffer:g_metal->batch_out[3]       offset:0          atIndex:5];  // alpha
+                [enc setBuffer:g_metal->batch_out[2]       offset:0          atIndex:6];  // beta
+                [enc setBuffer:g_metal->wf_buf             offset:a_log_off  atIndex:7];  // A_log
+                [enc setBuffer:g_metal->wf_buf             offset:dt_bias_off atIndex:8];  // dt_bias (bf16)
+                [enc setBuffer:g_metal->wf_buf             offset:gnorm_w_off atIndex:9];  // norm_weight (bf16)
+                [enc setBuffer:g_metal->batch_out[6]       offset:0          atIndex:10]; // output
+                [enc setBytes:&khpv length:sizeof(khpv) atIndex:11];
+                [enc setBytes:&kdim length:sizeof(kdim) atIndex:12];
+                [enc setBytes:&vdim length:sizeof(vdim) atIndex:13];
+                [enc setBytes:&eps  length:sizeof(eps)  atIndex:14];
+                [enc dispatchThreadgroups:MTLSizeMake(LINEAR_NUM_V_HEADS, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(LINEAR_VALUE_DIM, 1, 1)];
+                [enc endEncoding];
+            } else {
+                // Fallback: separate dispatches
                 NSUInteger a_log_off   = (NSUInteger)((const char *)lc->A_log   - (const char *)[g_metal->wf_buf contents]);
                 NSUInteger dt_bias_off = (NSUInteger)((const char *)lc->dt_bias  - (const char *)[g_metal->wf_buf contents]);
                 id<MTLComputeCommandEncoder> enc = [cmd1 computeCommandEncoder];
                 [enc setComputePipelineState:g_metal->compute_decay_beta];
-                [enc setBuffer:g_metal->batch_out[3]       offset:0          atIndex:0]; // alpha
-                [enc setBuffer:g_metal->batch_out[2]       offset:0          atIndex:1]; // beta
-                [enc setBuffer:g_metal->wf_buf             offset:a_log_off  atIndex:2]; // A_log
-                [enc setBuffer:g_metal->wf_buf             offset:dt_bias_off atIndex:3]; // dt_bias (bf16)
-                [enc setBuffer:g_metal->buf_delta_g_decay  offset:0          atIndex:4]; // g_decay output
-                [enc setBuffer:g_metal->buf_delta_beta     offset:0          atIndex:5]; // beta_gate output
+                [enc setBuffer:g_metal->batch_out[3]       offset:0          atIndex:0];
+                [enc setBuffer:g_metal->batch_out[2]       offset:0          atIndex:1];
+                [enc setBuffer:g_metal->wf_buf             offset:a_log_off  atIndex:2];
+                [enc setBuffer:g_metal->wf_buf             offset:dt_bias_off atIndex:3];
+                [enc setBuffer:g_metal->buf_delta_g_decay  offset:0          atIndex:4];
+                [enc setBuffer:g_metal->buf_delta_beta     offset:0          atIndex:5];
                 [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
                     threadsPerThreadgroup:MTLSizeMake(LINEAR_NUM_V_HEADS, 1, 1)];
                 [enc endEncoding];
-            }
 
-            // Enc L4: gated_delta_net_step — the main recurrence
-            {
-                uint32_t khpv = LINEAR_NUM_V_HEADS / LINEAR_NUM_K_HEADS;  // 4
-                id<MTLComputeCommandEncoder> enc = [cmd1 computeCommandEncoder];
+                uint32_t khpv = LINEAR_NUM_V_HEADS / LINEAR_NUM_K_HEADS;
+                enc = [cmd1 computeCommandEncoder];
                 [enc setComputePipelineState:g_metal->delta_net_step];
-                [enc setBuffer:g_metal->buf_delta_state[linear_layer_idx] offset:0 atIndex:0]; // persistent state
-                [enc setBuffer:g_metal->buf_conv_output offset:0 atIndex:1]; // q (first 2048 floats)
-                [enc setBuffer:g_metal->buf_conv_output offset:LINEAR_TOTAL_KEY * sizeof(float) atIndex:2]; // k (next 2048)
-                [enc setBuffer:g_metal->buf_conv_output offset:2 * LINEAR_TOTAL_KEY * sizeof(float) atIndex:3]; // v (next 8192)
+                [enc setBuffer:g_metal->buf_delta_state[linear_layer_idx] offset:0 atIndex:0];
+                [enc setBuffer:g_metal->buf_conv_output offset:0 atIndex:1];
+                [enc setBuffer:g_metal->buf_conv_output offset:LINEAR_TOTAL_KEY * sizeof(float) atIndex:2];
+                [enc setBuffer:g_metal->buf_conv_output offset:2 * LINEAR_TOTAL_KEY * sizeof(float) atIndex:3];
                 [enc setBuffer:g_metal->buf_delta_g_decay offset:0 atIndex:4];
                 [enc setBuffer:g_metal->buf_delta_beta    offset:0 atIndex:5];
-                [enc setBuffer:g_metal->buf_delta_output  offset:0 atIndex:6]; // output [8192]
+                [enc setBuffer:g_metal->buf_delta_output  offset:0 atIndex:6];
                 [enc setBytes:&khpv length:sizeof(khpv) atIndex:7];
                 [enc dispatchThreadgroups:MTLSizeMake(LINEAR_NUM_V_HEADS, 1, 1)
                     threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
                 [enc endEncoding];
-            }
 
-            // Enc L5: gated_rms_norm — normalize+gate delta-net output -> batch_out[6] for CMD2 o_proj
-            {
                 NSUInteger gnorm_w_off = (NSUInteger)((const char *)lc->gated_norm_w - (const char *)[g_metal->wf_buf contents]);
-                uint32_t value_dim = LINEAR_VALUE_DIM;  // 128
+                uint32_t value_dim = LINEAR_VALUE_DIM;
                 float eps = RMS_NORM_EPS;
-                id<MTLComputeCommandEncoder> enc = [cmd1 computeCommandEncoder];
+                enc = [cmd1 computeCommandEncoder];
                 [enc setComputePipelineState:g_metal->gated_rms_norm];
-                [enc setBuffer:g_metal->buf_delta_output offset:0          atIndex:0]; // values [8192]
-                [enc setBuffer:g_metal->batch_out[1]     offset:0          atIndex:1]; // z (z projection output) [8192]
-                [enc setBuffer:g_metal->wf_buf           offset:gnorm_w_off atIndex:2]; // weight (bf16)
-                [enc setBuffer:g_metal->batch_out[6]     offset:0          atIndex:3]; // output -> batch_out[6] for CMD2
+                [enc setBuffer:g_metal->buf_delta_output offset:0          atIndex:0];
+                [enc setBuffer:g_metal->batch_out[1]     offset:0          atIndex:1];
+                [enc setBuffer:g_metal->wf_buf           offset:gnorm_w_off atIndex:2];
+                [enc setBuffer:g_metal->batch_out[6]     offset:0          atIndex:3];
                 [enc setBytes:&value_dim length:4 atIndex:4];
                 [enc setBytes:&eps       length:4 atIndex:5];
                 [enc dispatchThreadgroups:MTLSizeMake(LINEAR_NUM_V_HEADS, 1, 1)
