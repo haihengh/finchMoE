@@ -217,6 +217,66 @@ kernel void fused_gate_up_swiglu(
     }
 }
 
+// 2-expert fused gate+up+swiglu: exactly 2x the single-expert kernel.
+// Each threadgroup processes one output row for BOTH experts simultaneously.
+kernel void fused_gate_up_swiglu_2x(
+    device const uint32_t* gate_W0   [[buffer(0)]],  device const uint16_t* gate_s0 [[buffer(1)]],
+    device const uint16_t* gate_b0   [[buffer(2)]],  device const uint32_t* up_W0   [[buffer(3)]],
+    device const uint16_t* up_s0     [[buffer(4)]],  device const uint16_t* up_b0   [[buffer(5)]],
+    device const uint32_t* gate_W1   [[buffer(6)]],  device const uint16_t* gate_s1 [[buffer(7)]],
+    device const uint16_t* gate_b1   [[buffer(8)]],  device const uint32_t* up_W1   [[buffer(9)]],
+    device const uint16_t* up_s1     [[buffer(10)]], device const uint16_t* up_b1   [[buffer(11)]],
+    device const float*    x         [[buffer(12)]],
+    device float*          out0      [[buffer(13)]], device float* out1 [[buffer(14)]],
+    constant uint& out_dim [[buffer(15)]], constant uint& in_dim [[buffer(16)]],
+    constant uint& group_size [[buffer(17)]],
+    uint tgid [[threadgroup_position_in_grid]], uint lid [[thread_position_in_threadgroup]],
+    uint tg_size [[threads_per_threadgroup]]
+) {
+    if (tgid >= out_dim) return;
+    uint ng = in_dim/group_size, ppg=group_size/8, pcol=in_dim/8;
+
+    device const uint32_t* gr0=gate_W0+tgid*pcol, *ur0=up_W0+tgid*pcol;
+    device const uint32_t* gr1=gate_W1+tgid*pcol, *ur1=up_W1+tgid*pcol;
+    device const uint16_t* gs0=gate_s0+tgid*ng, *gb0=gate_b0+tgid*ng;
+    device const uint16_t* us0=up_s0+tgid*ng, *ub0=up_b0+tgid*ng;
+    device const uint16_t* gs1=gate_s1+tgid*ng, *gb1=gate_b1+tgid*ng;
+    device const uint16_t* us1=up_s1+tgid*ng, *ub1=up_b1+tgid*ng;
+
+    float ga0=0,ua0=0,ga1=0,ua1=0;
+    for (uint g=lid; g<ng; g+=tg_size) {
+        float gsc0=bf16_to_f32(gs0[g]),gbi0=bf16_to_f32(gb0[g]);
+        float usc0=bf16_to_f32(us0[g]),ubi0=bf16_to_f32(ub0[g]);
+        float gsc1=bf16_to_f32(gs1[g]),gbi1=bf16_to_f32(gb1[g]);
+        float usc1=bf16_to_f32(us1[g]),ubi1=bf16_to_f32(ub1[g]);
+        uint bp=g*ppg, bx=g*group_size;
+        for (uint p=0;p<ppg;p++) {
+            uint32_t gp0=gr0[bp+p],up0=ur0[bp+p],gp1=gr1[bp+p],up1=ur1[bp+p];
+            for (uint i=0;i<8;i++) {
+                float xv=x[bx+p*8+i];
+                ga0+=(float((gp0>>(i*4))&0xF)*gsc0+gbi0)*xv;
+                ua0+=(float((up0>>(i*4))&0xF)*usc0+ubi0)*xv;
+                ga1+=(float((gp1>>(i*4))&0xF)*gsc1+gbi1)*xv;
+                ua1+=(float((up1>>(i*4))&0xF)*usc1+ubi1)*xv;
+            }
+        }
+    }
+    // Reduction: 4 values per SIMD group, sum across groups. Matches single-expert pattern.
+    threadgroup float sg0[32], su0[32], sg1[32], su1[32];
+    float rg0=simd_sum(ga0),ru0=simd_sum(ua0),rg1=simd_sum(ga1),ru1=simd_sum(ua1);
+    uint sl=lid%32, si=lid/32, ns=(tg_size+31)/32;
+    if(sl==0){sg0[si]=rg0;su0[si]=ru0;sg1[si]=rg1;su1[si]=ru1;}
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if(si==0&&sl<ns){
+        float vg0=simd_sum(sg0[sl]),vu0=simd_sum(su0[sl]);
+        float vg1=simd_sum(sg1[sl]),vu1=simd_sum(su1[sl]);
+        if(sl==0){
+            out0[tgid]=(vg0/(1+exp(-vg0)))*vu0;
+            out1[tgid]=(vg1/(1+exp(-vg1)))*vu1;
+        }
+    }
+}
+
 // 8-bit variant: 4 values per uint32, 8-bit extraction
 kernel void fused_gate_up_swiglu_8bit(
     device const uint32_t* gate_W    [[buffer(0)]],

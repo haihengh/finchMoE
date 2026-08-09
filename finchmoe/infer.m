@@ -1131,6 +1131,7 @@ typedef struct {
     id<MTLComputePipelineState> matvec_8bit;  // 8-bit expert dequant kernel
     id<MTLComputePipelineState> fused_gate_up_swiglu_pipe;      // 4-bit fused gate+up+swiglu
     id<MTLComputePipelineState> fused_gate_up_swiglu_8bit_pipe; // 8-bit fused gate+up+swiglu
+    id<MTLComputePipelineState> fused_gate_up_swiglu_2x_pipe;   // 2-expert fused gate+up+swiglu
     id<MTLComputePipelineState> rms_norm_sum;
     id<MTLComputePipelineState> rms_norm_apply;
     id<MTLComputePipelineState> rms_norm_apply_bf16;
@@ -1281,6 +1282,7 @@ static MetalCtx *metal_setup(void) {
     ctx->matvec_8bit   = makePipe(@"dequant_matvec_8bit");
     ctx->fused_gate_up_swiglu_pipe      = makePipe(@"fused_gate_up_swiglu");
     ctx->fused_gate_up_swiglu_8bit_pipe = makePipe(@"fused_gate_up_swiglu_8bit");
+    ctx->fused_gate_up_swiglu_2x_pipe = makePipe(@"fused_gate_up_swiglu_2x");
     ctx->gemv_bf16_pipe = makePipe(@"gemv_bf16");
     ctx->rms_norm_sum  = makePipe(@"rms_norm_sum_sq");
     ctx->rms_norm_apply = makePipe(@"rms_norm_apply");
@@ -2059,12 +2061,48 @@ static void gpu_encode_experts_batched(
     uint32_t gate_up_tgs = (gate_up_out + 7) / 8;
     uint32_t down_tgs    = (down_out + 7) / 8;
 
-    // Per-expert: single encoder with fused gate+up+swiglu (1 dispatch) + down_proj (1 dispatch)
-    for (int k = 0; k < K; k++) {
-        if (!valid[k]) continue;
-
+    // 2x path: both experts' gate+up+swiglu in ONE dispatch (K=2, both valid)
+    if (K == 2 && valid[0] && valid[1] && fused_pipe && ctx->fused_gate_up_swiglu_2x_pipe) {
         id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
-
+        [enc setComputePipelineState:ctx->fused_gate_up_swiglu_2x_pipe];
+        [enc setBuffer:expert_bufs[0]              offset:gate_w_off  atIndex:0];
+        [enc setBuffer:expert_bufs[0]              offset:gate_s_off  atIndex:1];
+        [enc setBuffer:expert_bufs[0]              offset:gate_b_off  atIndex:2];
+        [enc setBuffer:expert_bufs[0]              offset:up_w_off    atIndex:3];
+        [enc setBuffer:expert_bufs[0]              offset:up_s_off    atIndex:4];
+        [enc setBuffer:expert_bufs[0]              offset:up_b_off    atIndex:5];
+        [enc setBuffer:expert_bufs[1]              offset:gate_w_off  atIndex:6];
+        [enc setBuffer:expert_bufs[1]              offset:gate_s_off  atIndex:7];
+        [enc setBuffer:expert_bufs[1]              offset:gate_b_off  atIndex:8];
+        [enc setBuffer:expert_bufs[1]              offset:up_w_off    atIndex:9];
+        [enc setBuffer:expert_bufs[1]              offset:up_s_off    atIndex:10];
+        [enc setBuffer:expert_bufs[1]              offset:up_b_off    atIndex:11];
+        [enc setBuffer:ctx->buf_multi_expert_input offset:0           atIndex:12];
+        [enc setBuffer:ctx->buf_multi_expert_act[0] offset:0          atIndex:13];
+        [enc setBuffer:ctx->buf_multi_expert_act[1] offset:0          atIndex:14];
+        [enc setBytes:&gate_up_out length:4 atIndex:15];
+        [enc setBytes:&gate_up_in  length:4 atIndex:16];
+        [enc setBytes:&gs          length:4 atIndex:17];
+        [enc dispatchThreadgroups:MTLSizeMake(gate_up_tgs, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        for (int k = 0; k < 2; k++) {
+            [enc setComputePipelineState:expert_pipe];
+            [enc setBuffer:expert_bufs[k]               offset:down_w_off  atIndex:0];
+            [enc setBuffer:expert_bufs[k]               offset:down_s_off  atIndex:1];
+            [enc setBuffer:expert_bufs[k]               offset:down_b_off  atIndex:2];
+            [enc setBuffer:ctx->buf_multi_expert_act[k] offset:0           atIndex:3];
+            [enc setBuffer:ctx->buf_multi_expert_out[k] offset:0           atIndex:4];
+            [enc setBytes:&down_out length:4 atIndex:5];
+            [enc setBytes:&down_in  length:4 atIndex:6];
+            [enc setBytes:&gs       length:4 atIndex:7];
+            [enc dispatchThreadgroups:MTLSizeMake(down_tgs, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        }
+        [enc endEncoding];
+    } else {
+        for (int k = 0; k < K; k++) {
+        if (!valid[k]) continue;
+        id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
         if (fused_pipe) {
             // Fused gate+up+swiglu in 1 dispatch — replaces 3 separate dispatches
             [enc setComputePipelineState:fused_pipe];
@@ -2126,6 +2164,7 @@ static void gpu_encode_experts_batched(
 
         [enc endEncoding];
     }
+    } // end else (non-2x path)
 }
 
 // Encode one expert forward (gate+up+swiglu+down) into cmdbuf.
