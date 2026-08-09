@@ -668,15 +668,73 @@ kernel void dequant_matvec_1bit(
         uint32_t packed = w_row[col];
         uint x_base = col * 32;
 
-        // 32 x 1-bit extractions. Optimized: (bit == 1) → scale+bias, (bit == 0) → bias.
-        // Pre-compute bias*x sums, then add scale*x only when bit is set.
-        for (uint i = 0; i < 32; i++) {
-            float xv = x_shared[x_base + i];
-            acc += bias * xv;  // always add bias*x
-            if ((packed >> i) & 1u) {
-                acc += scale * xv;  // bit==1: add scale*x on top
-            }
-        }
+        // Unrolled 32 x 1-bit: pre-compute scale*x and bias*x for FMA-like speed
+        // val = bit*scale + bias. When bit=0: bias*x. When bit=1: (scale+bias)*x.
+        float sx0 = scale * x_shared[x_base + 0];   float bx0 = bias * x_shared[x_base + 0];
+        float sx1 = scale * x_shared[x_base + 1];   float bx1 = bias * x_shared[x_base + 1];
+        float sx2 = scale * x_shared[x_base + 2];   float bx2 = bias * x_shared[x_base + 2];
+        float sx3 = scale * x_shared[x_base + 3];   float bx3 = bias * x_shared[x_base + 3];
+        float sx4 = scale * x_shared[x_base + 4];   float bx4 = bias * x_shared[x_base + 4];
+        float sx5 = scale * x_shared[x_base + 5];   float bx5 = bias * x_shared[x_base + 5];
+        float sx6 = scale * x_shared[x_base + 6];   float bx6 = bias * x_shared[x_base + 6];
+        float sx7 = scale * x_shared[x_base + 7];   float bx7 = bias * x_shared[x_base + 7];
+        float sx8 = scale * x_shared[x_base + 8];   float bx8 = bias * x_shared[x_base + 8];
+        float sx9 = scale * x_shared[x_base + 9];   float bx9 = bias * x_shared[x_base + 9];
+        float sx10= scale * x_shared[x_base + 10];  float bx10= bias * x_shared[x_base + 10];
+        float sx11= scale * x_shared[x_base + 11];  float bx11= bias * x_shared[x_base + 11];
+        float sx12= scale * x_shared[x_base + 12];  float bx12= bias * x_shared[x_base + 12];
+        float sx13= scale * x_shared[x_base + 13];  float bx13= bias * x_shared[x_base + 13];
+        float sx14= scale * x_shared[x_base + 14];  float bx14= bias * x_shared[x_base + 14];
+        float sx15= scale * x_shared[x_base + 15];  float bx15= bias * x_shared[x_base + 15];
+        float sx16= scale * x_shared[x_base + 16];  float bx16= bias * x_shared[x_base + 16];
+        float sx17= scale * x_shared[x_base + 17];  float bx17= bias * x_shared[x_base + 17];
+        float sx18= scale * x_shared[x_base + 18];  float bx18= bias * x_shared[x_base + 18];
+        float sx19= scale * x_shared[x_base + 19];  float bx19= bias * x_shared[x_base + 19];
+        float sx20= scale * x_shared[x_base + 20];  float bx20= bias * x_shared[x_base + 20];
+        float sx21= scale * x_shared[x_base + 21];  float bx21= bias * x_shared[x_base + 21];
+        float sx22= scale * x_shared[x_base + 22];  float bx22= bias * x_shared[x_base + 22];
+        float sx23= scale * x_shared[x_base + 23];  float bx23= bias * x_shared[x_base + 23];
+        float sx24= scale * x_shared[x_base + 24];  float bx24= bias * x_shared[x_base + 24];
+        float sx25= scale * x_shared[x_base + 25];  float bx25= bias * x_shared[x_base + 25];
+        float sx26= scale * x_shared[x_base + 26];  float bx26= bias * x_shared[x_base + 26];
+        float sx27= scale * x_shared[x_base + 27];  float bx27= bias * x_shared[x_base + 27];
+        float sx28= scale * x_shared[x_base + 28];  float bx28= bias * x_shared[x_base + 28];
+        float sx29= scale * x_shared[x_base + 29];  float bx29= bias * x_shared[x_base + 29];
+        float sx30= scale * x_shared[x_base + 30];  float bx30= bias * x_shared[x_base + 30];
+        float sx31= scale * x_shared[x_base + 31];  float bx31= bias * x_shared[x_base + 31];
+
+        acc += ((packed >>  0) & 1u) ? (sx0 +bx0 ) : bx0 ;
+        acc += ((packed >>  1) & 1u) ? (sx1 +bx1 ) : bx1 ;
+        acc += ((packed >>  2) & 1u) ? (sx2 +bx2 ) : bx2 ;
+        acc += ((packed >>  3) & 1u) ? (sx3 +bx3 ) : bx3 ;
+        acc += ((packed >>  4) & 1u) ? (sx4 +bx4 ) : bx4 ;
+        acc += ((packed >>  5) & 1u) ? (sx5 +bx5 ) : bx5 ;
+        acc += ((packed >>  6) & 1u) ? (sx6 +bx6 ) : bx6 ;
+        acc += ((packed >>  7) & 1u) ? (sx7 +bx7 ) : bx7 ;
+        acc += ((packed >>  8) & 1u) ? (sx8 +bx8 ) : bx8 ;
+        acc += ((packed >>  9) & 1u) ? (sx9 +bx9 ) : bx9 ;
+        acc += ((packed >> 10) & 1u) ? (sx10+bx10) : bx10;
+        acc += ((packed >> 11) & 1u) ? (sx11+bx11) : bx11;
+        acc += ((packed >> 12) & 1u) ? (sx12+bx12) : bx12;
+        acc += ((packed >> 13) & 1u) ? (sx13+bx13) : bx13;
+        acc += ((packed >> 14) & 1u) ? (sx14+bx14) : bx14;
+        acc += ((packed >> 15) & 1u) ? (sx15+bx15) : bx15;
+        acc += ((packed >> 16) & 1u) ? (sx16+bx16) : bx16;
+        acc += ((packed >> 17) & 1u) ? (sx17+bx17) : bx17;
+        acc += ((packed >> 18) & 1u) ? (sx18+bx18) : bx18;
+        acc += ((packed >> 19) & 1u) ? (sx19+bx19) : bx19;
+        acc += ((packed >> 20) & 1u) ? (sx20+bx20) : bx20;
+        acc += ((packed >> 21) & 1u) ? (sx21+bx21) : bx21;
+        acc += ((packed >> 22) & 1u) ? (sx22+bx22) : bx22;
+        acc += ((packed >> 23) & 1u) ? (sx23+bx23) : bx23;
+        acc += ((packed >> 24) & 1u) ? (sx24+bx24) : bx24;
+        acc += ((packed >> 25) & 1u) ? (sx25+bx25) : bx25;
+        acc += ((packed >> 26) & 1u) ? (sx26+bx26) : bx26;
+        acc += ((packed >> 27) & 1u) ? (sx27+bx27) : bx27;
+        acc += ((packed >> 28) & 1u) ? (sx28+bx28) : bx28;
+        acc += ((packed >> 29) & 1u) ? (sx29+bx29) : bx29;
+        acc += ((packed >> 30) & 1u) ? (sx30+bx30) : bx30;
+        acc += ((packed >> 31) & 1u) ? (sx31+bx31) : bx31;
     }
     float sum = simd_sum(acc);
     if (simd_lane == 0) out[row] = sum;
