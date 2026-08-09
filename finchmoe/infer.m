@@ -719,6 +719,17 @@ typedef struct {
     int num_tokens;
 } Vocabulary;
 
+static uint32_t read_u32_vocab(FILE *f) {
+    uint32_t v;
+    if (fread(&v, 4, 1, f) != 1) return 0;
+    return v;
+}
+static uint16_t read_u16_vocab(FILE *f) {
+    uint16_t v;
+    if (fread(&v, 2, 1, f) != 1) return 0;
+    return v;
+}
+
 static Vocabulary *load_vocab(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -726,28 +737,84 @@ static Vocabulary *load_vocab(const char *path) {
         return NULL;
     }
 
-    uint32_t num_entries, max_id;
-    fread(&num_entries, 4, 1, f);
-    fread(&max_id, 4, 1, f);
+    // Parse BPET format (same as tokenizer.bin):
+    //   magic "BPET" (4 bytes)
+    //   version    (uint32_t)
+    //   vocab_size (uint32_t)
+    //   num_merges (uint32_t)
+    //   num_added  (uint32_t)
+    //   vocab entries: { uint32_t id, uint16_t len, char[len] str }
+    //   merge entries: { uint16_t len_a, char[len_a], uint16_t len_b, char[len_b] }
+    //   added tokens:  { uint32_t id, uint16_t len, char[len] }
+    char magic[4];
+    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "BPET", 4) != 0) {
+        fprintf(stderr, "ERROR: %s is not a BPET vocab file (bad magic)\n", path);
+        fclose(f);
+        return NULL;
+    }
+    uint32_t version = read_u32_vocab(f);
+    if (version != 1) {
+        fprintf(stderr, "ERROR: %s BPET version %u, expected 1\n", path, version);
+        fclose(f);
+        return NULL;
+    }
+    uint32_t vocab_size  = read_u32_vocab(f);
+    uint32_t num_merges  = read_u32_vocab(f);
+    uint32_t num_added   = read_u32_vocab(f);
 
+    // Find the maximum token id so we can size the lookup array.
+    // We'll read all entries once to find max_id, then again to populate.
+    // Actually, read into a temporary array, then build the final lookup.
     Vocabulary *v = calloc(1, sizeof(Vocabulary));
-    v->num_tokens = num_entries;
-    v->tokens = calloc(num_entries, sizeof(char *));
-    v->lengths = calloc(num_entries, sizeof(int));
+    v->num_tokens = vocab_size + num_added + 256;  // generous: cover all potential ids
+    v->tokens = calloc(v->num_tokens, sizeof(char *));
+    v->lengths = calloc(v->num_tokens, sizeof(int));
 
-    for (uint32_t i = 0; i < num_entries; i++) {
-        uint16_t byte_len;
-        fread(&byte_len, 2, 1, f);
-        if (byte_len > 0) {
-            v->tokens[i] = malloc(byte_len + 1);
-            fread(v->tokens[i], 1, byte_len, f);
-            v->tokens[i][byte_len] = '\0';
-            v->lengths[i] = byte_len;
+    // Read vocab entries
+    for (uint32_t i = 0; i < vocab_size; i++) {
+        uint32_t id   = read_u32_vocab(f);
+        uint16_t len  = read_u16_vocab(f);
+        if (len > 0 && id < v->num_tokens) {
+            v->tokens[id] = malloc(len + 1);
+            if (fread(v->tokens[id], 1, len, f) != len) break;
+            v->tokens[id][len] = '\0';
+            v->lengths[id] = len;
+        } else if (len > 0) {
+            // Token id exceeds allocated range — skip its data
+            fseek(f, len, SEEK_CUR);
+        }
+    }
+
+    // Skip merge entries (2 × uint16_t len + char data per merge)
+    for (uint32_t i = 0; i < num_merges; i++) {
+        uint16_t len_a = read_u16_vocab(f);
+        if (len_a > 0) fseek(f, len_a, SEEK_CUR);
+        uint16_t len_b = read_u16_vocab(f);
+        if (len_b > 0) fseek(f, len_b, SEEK_CUR);
+    }
+
+    // Read added tokens (may have ids beyond vocab_size)
+    for (uint32_t i = 0; i < num_added; i++) {
+        uint32_t id  = read_u32_vocab(f);
+        uint16_t len = read_u16_vocab(f);
+        if (len > 0 && id < v->num_tokens && !v->tokens[id]) {
+            v->tokens[id] = malloc(len + 1);
+            if (fread(v->tokens[id], 1, len, f) != len) break;
+            v->tokens[id][len] = '\0';
+            v->lengths[id] = len;
+        } else if (len > 0) {
+            fseek(f, len, SEEK_CUR);
         }
     }
 
     fclose(f);
-    printf("[vocab] Loaded %d tokens\n", num_entries);
+
+    // Find the actual highest token id with a valid string
+    uint32_t max_valid = 0;
+    for (uint32_t i = 0; i < v->num_tokens; i++) {
+        if (v->tokens[i]) max_valid = i;
+    }
+    printf("[vocab] Loaded %u tokens (max_id=%u) from %s\n", vocab_size + num_added, max_valid, path);
     return v;
 }
 
