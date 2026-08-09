@@ -100,10 +100,11 @@ def main():
         filepath = model_path / filename
         header_cache[filename] = parse_safetensors_header(str(filepath))
 
-    # Sanitize tensor names: remove "language_model." prefix for the C engine
+    # Sanitize tensor names: remove "language_model." or "model.language_model." prefix
     def sanitize_name(name):
-        if name.startswith("language_model."):
-            return name[len("language_model."):]
+        for prefix in ['model.language_model.', 'language_model.']:
+            if prefix in name:
+                return name.replace(prefix, 'model.' if 'model.' in prefix else '')
         return name
 
     # Plan the output layout

@@ -341,6 +341,76 @@ kernel void dequant_matvec_4bit_v3(
 
 
 // ============================================================================
+// Kernel 1e2: 8-bit dequant matvec (same structure as v3, for INT8 experts)
+// ============================================================================
+// Packs 4 x 8-bit values per uint32. Dequant: val = uint8 * scale + bias.
+// packed_cols = in_dim / 4, packed_per_group = group_size / 4.
+// Dispatch: out_dim/ROWS_PER_TG threadgroups, 256 threads each.
+
+kernel void dequant_matvec_8bit(
+    device const uint32_t* W_packed   [[buffer(0)]],  // [out_dim, in_dim/4]
+    device const uint16_t* scales     [[buffer(1)]],  // [out_dim, num_groups] bf16
+    device const uint16_t* biases     [[buffer(2)]],  // [out_dim, num_groups] bf16
+    device const float*    x          [[buffer(3)]],  // [in_dim]
+    device float*          out        [[buffer(4)]],  // [out_dim]
+    constant uint&         out_dim    [[buffer(5)]],
+    constant uint&         in_dim     [[buffer(6)]],
+    constant uint&         group_size [[buffer(7)]],
+    uint tgid   [[threadgroup_position_in_grid]],
+    uint lid    [[thread_position_in_threadgroup]],    // 0..255
+    uint simd_lane  [[thread_index_in_simdgroup]],    // 0..31
+    uint simd_group [[simdgroup_index_in_threadgroup]] // 0..7
+) {
+    uint row = tgid * ROWS_PER_TG + simd_group;
+
+    uint packed_cols = in_dim / 4;      // 4 x 8-bit values per uint32
+    uint num_groups  = in_dim / group_size;
+    uint packed_per_group = group_size / 4;
+
+    // Cache input vector in threadgroup shared memory
+    threadgroup float x_shared[4096];
+    for (uint i = lid; i < in_dim; i += 256) {
+        x_shared[i] = x[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (row >= out_dim) return;
+
+    device const uint32_t* w_row = W_packed + row * packed_cols;
+    device const uint16_t* s_row = scales + row * num_groups;
+    device const uint16_t* b_row = biases + row * num_groups;
+
+    float acc = 0.0f;
+
+    // Each lane processes a strided slice of packed columns
+    for (uint col = simd_lane; col < packed_cols; col += 32) {
+        uint g = col / packed_per_group;
+        float scale = bf16_to_f32(s_row[g]);
+        float bias  = bf16_to_f32(b_row[g]);
+
+        uint32_t packed = w_row[col];
+        uint x_base = col * 4;
+
+        // Pre-compute scale*x and bias*x for folded FMA (4 values per uint32)
+        float sx0 = scale * x_shared[x_base + 0];  float bx0 = bias * x_shared[x_base + 0];
+        float sx1 = scale * x_shared[x_base + 1];  float bx1 = bias * x_shared[x_base + 1];
+        float sx2 = scale * x_shared[x_base + 2];  float bx2 = bias * x_shared[x_base + 2];
+        float sx3 = scale * x_shared[x_base + 3];  float bx3 = bias * x_shared[x_base + 3];
+
+        acc += fma(float((packed >>  0) & 0xFF), sx0, bx0);
+        acc += fma(float((packed >>  8) & 0xFF), sx1, bx1);
+        acc += fma(float((packed >> 16) & 0xFF), sx2, bx2);
+        acc += fma(float((packed >> 24) & 0xFF), sx3, bx3);
+    }
+
+    float sum = simd_sum(acc);
+    if (simd_lane == 0) {
+        out[row] = sum;
+    }
+}
+
+
+// ============================================================================
 // Kernel 1f: 4-bit dequant matvec with LUT (eliminates uint→float conversions)
 // ============================================================================
 // Instead of converting each nibble to float (expensive conversion instruction),

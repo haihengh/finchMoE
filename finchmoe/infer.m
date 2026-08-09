@@ -1113,6 +1113,7 @@ typedef struct {
     id<MTLComputePipelineState> matvec_fast;  // for in_dim > 4096
     id<MTLComputePipelineState> gemv_bf16_pipe;  // raw BF16 GEMV (no dequant)
     id<MTLComputePipelineState> matvec_2bit;  // 2-bit expert dequant kernel
+    id<MTLComputePipelineState> matvec_8bit;  // 8-bit expert dequant kernel
     id<MTLComputePipelineState> rms_norm_sum;
     id<MTLComputePipelineState> rms_norm_apply;
     id<MTLComputePipelineState> rms_norm_apply_bf16;
@@ -1258,6 +1259,7 @@ static MetalCtx *metal_setup(void) {
     ctx->matvec_v5     = makePipe(@"dequant_matvec_4bit_v5");  // LUT variant (no uint→float conversions)
     ctx->matvec_fast   = makePipe(@"dequant_matvec_4bit_fast");
     ctx->matvec_2bit   = makePipe(@"dequant_matvec_2bit");
+    ctx->matvec_8bit   = makePipe(@"dequant_matvec_8bit");
     ctx->gemv_bf16_pipe = makePipe(@"gemv_bf16");
     ctx->rms_norm_sum  = makePipe(@"rms_norm_sum_sq");
     ctx->rms_norm_apply = makePipe(@"rms_norm_apply");
@@ -1593,6 +1595,25 @@ static void gpu_batch_matvec(
 
     for (int i = 0; i < num_specs; i++) {
         BatchMatvecSpec *s = &specs[i];
+
+        // BF16 path: use gemv_bf16 kernel (scales/biases are NULL for unquantized weights)
+        if (!s->scales || !s->biases) {
+            NSUInteger w_off = (NSUInteger)((const char *)s->W - (const char *)[ctx->wf_buf contents]);
+            id<MTLBuffer> o_buf = ctx->batch_out[s->batch_slot];
+            id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
+            [enc setComputePipelineState:ctx->gemv_bf16_pipe];
+            [enc setBuffer:ctx->wf_buf offset:w_off atIndex:0];
+            [enc setBuffer:ctx->buf_input offset:0 atIndex:1];
+            [enc setBuffer:o_buf offset:0 atIndex:2];
+            [enc setBytes:&s->out_dim length:4 atIndex:3];
+            [enc setBytes:&s->in_dim  length:4 atIndex:4];
+            uint32_t tgs = s->out_dim;
+            [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            [enc endEncoding];
+            continue;
+        }
+
         NSUInteger w_off = (NSUInteger)((const char *)s->W      - (const char *)[ctx->wf_buf contents]);
         NSUInteger s_off = (NSUInteger)((const char *)s->scales  - (const char *)[ctx->wf_buf contents]);
         NSUInteger b_off = (NSUInteger)((const char *)s->biases  - (const char *)[ctx->wf_buf contents]);
@@ -1801,7 +1822,7 @@ static void gpu_encode_expert_forward_slot(
         up_w_off   = UP_W_OFF_4;   up_s_off   = UP_S_OFF_4;   up_b_off   = UP_B_OFF_4;
         down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
-    id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : ctx->matvec_v3;
+    id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : (g_use_int8 ? ctx->matvec_8bit : ctx->matvec_v3);
 
     uint32_t gate_up_out = MOE_INTERMEDIATE;
     uint32_t gate_up_in  = HIDDEN_DIM;
@@ -1901,7 +1922,7 @@ static void gpu_encode_expert_forward_slot_buf(
         up_w_off   = UP_W_OFF_4;   up_s_off   = UP_S_OFF_4;   up_b_off   = UP_B_OFF_4;
         down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
-    id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : ctx->matvec_v3;
+    id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : (g_use_int8 ? ctx->matvec_8bit : ctx->matvec_v3);
 
     uint32_t gate_up_out = MOE_INTERMEDIATE;
     uint32_t gate_up_in  = HIDDEN_DIM;
@@ -2005,7 +2026,7 @@ static void gpu_encode_experts_batched(
         up_w_off   = UP_W_OFF_4;   up_s_off   = UP_S_OFF_4;   up_b_off   = UP_B_OFF_4;
         down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
-    id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : ctx->matvec_v3;
+    id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : (g_use_int8 ? ctx->matvec_8bit : ctx->matvec_v3);
 
     uint32_t gate_up_out = MOE_INTERMEDIATE;
     uint32_t gate_up_in  = HIDDEN_DIM;
@@ -2218,7 +2239,7 @@ static void gpu_expert_forward(
         up_w_off   = UP_W_OFF_4;   up_s_off   = UP_S_OFF_4;   up_b_off   = UP_B_OFF_4;
         down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
-    id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : ctx->matvec_v3;
+    id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : (g_use_int8 ? ctx->matvec_8bit : ctx->matvec_v3);
 
     // Copy expert weights into Metal buffer only if not already there
     if (!expert_data_already_in_buffer) {
@@ -5716,11 +5737,15 @@ static void fused_layer_forward(
                     g_metal->buf_shared_act, g_metal->buf_shared_out,
                     HIDDEN_DIM, SHARED_INTERMEDIATE, GROUP_SIZE);
             } else {
-                // BF16 CPU fallback
+                // BF16: commit swiglu first so buf_shared_act is ready for CPU read
+                [cmd_experts commit];
+                [cmd_experts waitUntilCompleted];
                 float *act = (float *)[g_metal->buf_shared_act contents];
                 float *out = (float *)[g_metal->buf_shared_out contents];
                 cpu_dequant_matvec(sdw, NULL, NULL, act, out,
                                    HIDDEN_DIM, SHARED_INTERMEDIATE, GROUP_SIZE, 0);
+                // Start a new command buffer for remaining dispatches
+                cmd_experts = [g_metal->queue commandBuffer];
             }
         }
 
@@ -5857,15 +5882,15 @@ static void fused_layer_forward(
                 void *expert_data = malloc(esz);
                 memcpy(expert_data, [expert_bufs[k] contents], esz);
 
-                uint32_t *gw = (uint32_t *)expert_data;
-                uint16_t *gs_p = (uint16_t *)((char *)expert_data + 524288);
-                uint16_t *gb_p = (uint16_t *)((char *)expert_data + 557056);
-                uint32_t *uw = (uint32_t *)((char *)expert_data + 589824);
-                uint16_t *us_p = (uint16_t *)((char *)expert_data + 1114112);
-                uint16_t *ub_p = (uint16_t *)((char *)expert_data + 1146880);
-                uint32_t *dw = (uint32_t *)((char *)expert_data + 1179648);
-                uint16_t *ds_p = (uint16_t *)((char *)expert_data + 1703936);
-                uint16_t *db_p = (uint16_t *)((char *)expert_data + 1736704);
+                uint32_t *gw = (uint32_t *)((char *)expert_data + (g_use_int8 ? GATE_W_OFF_8 : GATE_W_OFF_4));
+                uint16_t *gs_p = (uint16_t *)((char *)expert_data + (g_use_int8 ? GATE_S_OFF_8 : GATE_S_OFF_4));
+                uint16_t *gb_p = (uint16_t *)((char *)expert_data + (g_use_int8 ? GATE_B_OFF_8 : GATE_B_OFF_4));
+                uint32_t *uw = (uint32_t *)((char *)expert_data + (g_use_int8 ? UP_W_OFF_8 : UP_W_OFF_4));
+                uint16_t *us_p = (uint16_t *)((char *)expert_data + (g_use_int8 ? UP_S_OFF_8 : UP_S_OFF_4));
+                uint16_t *ub_p = (uint16_t *)((char *)expert_data + (g_use_int8 ? UP_B_OFF_8 : UP_B_OFF_4));
+                uint32_t *dw = (uint32_t *)((char *)expert_data + (g_use_int8 ? DOWN_W_OFF_8 : DOWN_W_OFF_4));
+                uint16_t *ds_p = (uint16_t *)((char *)expert_data + (g_use_int8 ? DOWN_S_OFF_8 : DOWN_S_OFF_4));
+                uint16_t *db_p = (uint16_t *)((char *)expert_data + (g_use_int8 ? DOWN_B_OFF_8 : DOWN_B_OFF_4));
 
                 // --- CPU compute ---
                 float *cpu_gate = malloc(MOE_INTERMEDIATE * sizeof(float));
@@ -5873,10 +5898,11 @@ static void fused_layer_forward(
                 float *cpu_act  = malloc(MOE_INTERMEDIATE * sizeof(float));
                 float *cpu_out  = malloc(HIDDEN_DIM * sizeof(float));
 
-                cpu_dequant_matvec(gw, gs_p, gb_p, h_post, cpu_gate, MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 4);
-                cpu_dequant_matvec(uw, us_p, ub_p, h_post, cpu_up,   MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 4);
+                int cmp_bits = g_use_int8 ? 8 : 4;
+                cpu_dequant_matvec(gw, gs_p, gb_p, h_post, cpu_gate, MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, cmp_bits);
+                cpu_dequant_matvec(uw, us_p, ub_p, h_post, cpu_up,   MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, cmp_bits);
                 cpu_swiglu(cpu_gate, cpu_up, cpu_act, MOE_INTERMEDIATE);
-                cpu_dequant_matvec(dw, ds_p, db_p, cpu_act, cpu_out, HIDDEN_DIM, MOE_INTERMEDIATE, GROUP_SIZE, 4);
+                cpu_dequant_matvec(dw, ds_p, db_p, cpu_act, cpu_out, HIDDEN_DIM, MOE_INTERMEDIATE, GROUP_SIZE, cmp_bits);
 
                 // --- Read GPU results ---
                 float *gpu_gate = malloc(MOE_INTERMEDIATE * sizeof(float));
@@ -5979,28 +6005,46 @@ static void fused_layer_forward(
                 continue;
             }
 
-            // CPU fallback offsets — use 4-bit layout (2-bit CPU path not yet implemented)
-            uint32_t *gw = (uint32_t *)expert_data;
-            uint16_t *gs_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_S_OFF_2 : 524288));
-            uint16_t *gb_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_B_OFF_2 : 557056));
-            uint32_t *uw = (uint32_t *)((char *)expert_data + (g_use_2bit ? UP_W_OFF_2 : 589824));
-            uint16_t *us_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_S_OFF_2 : 1114112));
-            uint16_t *ub_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_B_OFF_2 : 1146880));
-            uint32_t *dw = (uint32_t *)((char *)expert_data + (g_use_2bit ? DOWN_W_OFF_2 : 1179648));
-            uint16_t *ds_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_S_OFF_2 : 1703936));
-            uint16_t *db_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_B_OFF_2 : 1736704));
+            // CPU fallback offsets — use correct layout based on quantization mode
+            NSUInteger c_gate_w, c_gate_s, c_gate_b, c_up_w, c_up_s, c_up_b, c_down_w, c_down_s, c_down_b;
+            int c_bits;
+            if (g_use_2bit) {
+                c_gate_w = GATE_W_OFF_2; c_gate_s = GATE_S_OFF_2; c_gate_b = GATE_B_OFF_2;
+                c_up_w   = UP_W_OFF_2;   c_up_s   = UP_S_OFF_2;   c_up_b   = UP_B_OFF_2;
+                c_down_w = DOWN_W_OFF_2; c_down_s = DOWN_S_OFF_2; c_down_b = DOWN_B_OFF_2;
+                c_bits = 2;
+            } else if (g_use_int8) {
+                c_gate_w = GATE_W_OFF_8; c_gate_s = GATE_S_OFF_8; c_gate_b = GATE_B_OFF_8;
+                c_up_w   = UP_W_OFF_8;   c_up_s   = UP_S_OFF_8;   c_up_b   = UP_B_OFF_8;
+                c_down_w = DOWN_W_OFF_8; c_down_s = DOWN_S_OFF_8; c_down_b = DOWN_B_OFF_8;
+                c_bits = 8;
+            } else {
+                c_gate_w = GATE_W_OFF_4; c_gate_s = GATE_S_OFF_4; c_gate_b = GATE_B_OFF_4;
+                c_up_w   = UP_W_OFF_4;   c_up_s   = UP_S_OFF_4;   c_up_b   = UP_B_OFF_4;
+                c_down_w = DOWN_W_OFF_4; c_down_s = DOWN_S_OFF_4; c_down_b = DOWN_B_OFF_4;
+                c_bits = 4;
+            }
+            uint32_t *gw = (uint32_t *)((char *)expert_data + c_gate_w);
+            uint16_t *gs_p = (uint16_t *)((char *)expert_data + c_gate_s);
+            uint16_t *gb_p = (uint16_t *)((char *)expert_data + c_gate_b);
+            uint32_t *uw = (uint32_t *)((char *)expert_data + c_up_w);
+            uint16_t *us_p = (uint16_t *)((char *)expert_data + c_up_s);
+            uint16_t *ub_p = (uint16_t *)((char *)expert_data + c_up_b);
+            uint32_t *dw = (uint32_t *)((char *)expert_data + c_down_w);
+            uint16_t *ds_p = (uint16_t *)((char *)expert_data + c_down_s);
+            uint16_t *db_p = (uint16_t *)((char *)expert_data + c_down_b);
 
             float *gate_proj_out = malloc(MOE_INTERMEDIATE * sizeof(float));
             float *up_proj_out = malloc(MOE_INTERMEDIATE * sizeof(float));
             float *act_out = malloc(MOE_INTERMEDIATE * sizeof(float));
 
             cpu_dequant_matvec(gw, gs_p, gb_p, h_post, gate_proj_out,
-                               MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 4);
+                               MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, c_bits);
             cpu_dequant_matvec(uw, us_p, ub_p, h_post, up_proj_out,
-                               MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 4);
+                               MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, c_bits);
             cpu_swiglu(gate_proj_out, up_proj_out, act_out, MOE_INTERMEDIATE);
             cpu_dequant_matvec(dw, ds_p, db_p, act_out, expert_out_cpu,
-                               HIDDEN_DIM, MOE_INTERMEDIATE, GROUP_SIZE, 4);
+                               HIDDEN_DIM, MOE_INTERMEDIATE, GROUP_SIZE, c_bits);
 
             if (layer_idx == 7) {
                 float gr=0, ur=0, ar=0, er=0;
@@ -7431,8 +7475,8 @@ int main(int argc, char **argv) {
         PromptTokens *pt = NULL;
         if (serve_port == 0) {
             if (prompt_text) {
-                // Try without chat template first — base model completions
-                pt = encode_prompt_text_to_tokens(prompt_text);
+                // Use ChatML template for instruct model
+                pt = tokenize_chat_message(prompt_text);
                 if (!pt) {
                     fprintf(stderr, "ERROR: Failed to encode prompt. Make sure encode_prompt.py exists.\n");
                     return 1;
