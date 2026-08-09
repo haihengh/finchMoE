@@ -53,7 +53,21 @@ COMPONENTS_8BIT = [
 
 EXPERT_SIZE_4BIT = 1769472
 EXPERT_SIZE_8BIT = 3342336
+EXPERT_SIZE_2BIT = 983040
 NUM_EXPERTS = 256
+
+# 2-bit expert format: 16 values per uint32
+COMPONENTS_2BIT = [
+    {"name": "gate_proj.weight",  "offset": 0,        "size": 262144,  "dtype": "U32",  "shape": [512, 128]},
+    {"name": "gate_proj.scales",  "offset": 262144,   "size": 32768,   "dtype": "BF16", "shape": [512, 32]},
+    {"name": "gate_proj.biases",  "offset": 294912,   "size": 32768,   "dtype": "BF16", "shape": [512, 32]},
+    {"name": "up_proj.weight",    "offset": 327680,   "size": 262144,  "dtype": "U32",  "shape": [512, 128]},
+    {"name": "up_proj.scales",    "offset": 589824,   "size": 32768,   "dtype": "BF16", "shape": [512, 32]},
+    {"name": "up_proj.biases",    "offset": 622592,   "size": 32768,   "dtype": "BF16", "shape": [512, 32]},
+    {"name": "down_proj.weight",  "offset": 655360,   "size": 262144,  "dtype": "U32",  "shape": [2048, 32]},
+    {"name": "down_proj.scales",  "offset": 917504,   "size": 32768,   "dtype": "BF16", "shape": [2048, 8]},
+    {"name": "down_proj.biases",  "offset": 950272,   "size": 32768,   "dtype": "BF16", "shape": [2048, 8]},
+]
 NUM_LAYERS = 40
 
 
@@ -264,8 +278,8 @@ def main():
                         help='Path to expert_index.json')
     parser.add_argument('--layers', default=None,
                         help='Layer spec: "all", "0-4", "0,5,10" (default: all)')
-    parser.add_argument('--bits', type=int, default=4, choices=[4, 8],
-                        help='Quantization bits: 4 or 8 (default: 4)')
+    parser.add_argument('--bits', type=int, default=4, choices=[2, 4, 8],
+                        help='Quantization bits: 2, 4, or 8 (default: 4)')
     parser.add_argument('--dry-run', action='store_true',
                         help='Verify offsets without writing')
     parser.add_argument('--verify-only', type=int, default=None, metavar='LAYER',
@@ -276,23 +290,29 @@ def main():
     if args.bits == 8:
         components = COMPONENTS_8BIT
         expert_size = EXPERT_SIZE_8BIT
+        dirname = "packed_experts_8bit"
+    elif args.bits == 2:
+        components = COMPONENTS_2BIT
+        expert_size = EXPERT_SIZE_2BIT
+        dirname = "packed_experts_2bit"
     else:
         components = COMPONENTS_4BIT
         expert_size = EXPERT_SIZE_4BIT
+        dirname = "packed_experts"
 
-    print(f"Using {args.bits}-bit expert format (expert_size={expert_size} bytes)")
+    print(f"Using {args.bits}-bit expert format (expert_size={expert_size} bytes, dir={dirname})")
 
     print("Loading expert index...")
     expert_reads, model_path = load_index(args.index)
     print(f"Model path: {model_path}")
     print(f"Layers in index: {len(expert_reads)}")
+    output_dir = os.path.join(model_path, dirname)
 
     # Verify component sizes
     if not verify_component_sizes(expert_reads, components):
         print("ABORTING: component size mismatch")
         sys.exit(1)
 
-    output_dir = os.path.join(model_path, "packed_experts" if args.bits == 4 else "packed_experts_8bit")
     os.makedirs(output_dir, exist_ok=True)
     print(f"Output directory: {output_dir}")
 

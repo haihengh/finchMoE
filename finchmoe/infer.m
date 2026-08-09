@@ -123,13 +123,18 @@
 #define DOWN_S_OFF_8  3276800
 #define DOWN_B_OFF_8  3309568
 
-// 2-bit expert layout (from repack_experts_2bit.py)
-#define EXPERT_SIZE_2BIT       3932160
+// 2-bit expert layout: 16 values/uint32, weights 1/4 of 4-bit, scales/biases same
+// gate/up: [512, 2048] → 512×128 uint32, down: [2048, 512] → 2048×32 uint32
+#define EXPERT_SIZE_2BIT       983040
 #define GATE_W_OFF_2  0
-#define GATE_S_OFF_2  1048576
-#define GATE_B_OFF_2  1179648
-#define UP_W_OFF_2    1310720
-#define UP_S_OFF_2    2359296
+#define GATE_S_OFF_2  262144
+#define GATE_B_OFF_2  294912
+#define UP_W_OFF_2    327680
+#define UP_S_OFF_2    589824
+#define UP_B_OFF_2    622592
+#define DOWN_W_OFF_2  655360
+#define DOWN_S_OFF_2  917504
+#define DOWN_B_OFF_2  950272
 
 // Dynamic offset helpers: pick the right offset based on active format
 #define GATE_W_OFF  (g_use_2bit ? GATE_W_OFF_2  : (g_use_int8 ? GATE_W_OFF_8  : GATE_W_OFF_4))
@@ -142,11 +147,7 @@
 #define DOWN_S_OFF  (g_use_2bit ? DOWN_S_OFF_2  : (g_use_int8 ? DOWN_S_OFF_8  : DOWN_S_OFF_4))
 #define DOWN_B_OFF  (g_use_2bit ? DOWN_B_OFF_2  : (g_use_int8 ? DOWN_B_OFF_8  : DOWN_B_OFF_4))
 #define EXPERT_BITS (g_use_2bit ? 2 : (g_use_int8 ? 8 : 4))
-#define EXPERT_SIZE_MAX 3932160  // max of 4-bit/8-bit/2-bit sizes (2-bit is largest)
-#define UP_B_OFF_2    2490368
-#define DOWN_W_OFF_2  2621440
-#define DOWN_S_OFF_2  3670016
-#define DOWN_B_OFF_2  3801088
+#define EXPERT_SIZE_MAX 3932160  // max of all expert sizes (8-bit is 3.3MB, rest are smaller)
 
 // KV cache maximum context length — configurable via CLI for agentic workloads
 // Qwen 3.6 35B A3B has max_position_embeddings=262144 (256K). This default matches the model.
