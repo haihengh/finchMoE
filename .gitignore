@@ -47,4 +47,5 @@ model_weights.bin
 model_weights.json
 vocab.bin
 finchmoe/infer
+finchmoe/infer_*
 *.gguf

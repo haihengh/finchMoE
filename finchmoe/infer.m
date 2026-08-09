@@ -38,7 +38,7 @@
  *   Double-buffered expert data (buf_multi_expert_data / data_B) for future
  *   async pread overlap with GPU compute.
  *
- * Build:  clang -O2 -Wall -fobjc-arc -framework Metal -framework Foundation -lpthread infer.m -o infer
+ * Build:  clang -O2 -Wall -fobjc-arc -framework Metal -framework Foundation -framework Accelerate -lcompression -lpthread infer.m -o infer
  * Run:    ./infer --prompt "Explain relativity" --tokens 50
  */
 
@@ -64,6 +64,63 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <compression.h>
+#include <mach/mach_host.h>
+#include <mach/mach_init.h>
+#include <mach/vm_statistics.h>
+
+// ============================================================================
+// Memory safety: guard rails to prevent SIGKILL/jetsam on unified-memory
+// systems without swap. These are critical on 16GB machines running large
+// models (14+ GB) where Metal buffer wrapping can trigger OOM kills.
+// ============================================================================
+
+// Safety margin for Metal buffer wrapping: the kernel needs headroom beyond
+// the raw weight file size for GPU page tables, IOMMU mappings, and general
+// system operation. 2GB is conservative for 16GB machines.
+#define METAL_SAFETY_MARGIN_BYTES (2ULL * 1024 * 1024 * 1024)  // 2GB
+
+// Returns available memory in bytes (free + inactive + purgeable + speculative).
+// Inactive pages are clean file-backed pages the kernel can free instantly.
+// Purgeable pages are clean file-backed pages the kernel can discard without
+// I/O. Speculative pages are read-ahead pages that haven't been accessed yet.
+// On Apple Silicon, these are effectively "available" for new allocations.
+static size_t get_available_memory(void) {
+    mach_port_t host = mach_host_self();
+    vm_size_t page_size = 16384;  // Apple Silicon default
+    host_page_size(host, &page_size);
+
+    vm_statistics64_data_t vm_stat;
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+
+    if (host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vm_stat, &count) != KERN_SUCCESS) {
+        return 0;  // can't determine — caller should assume unsafe
+    }
+
+    size_t free_bytes        = (size_t)vm_stat.free_count * page_size;
+    size_t inactive_bytes    = (size_t)vm_stat.inactive_count * page_size;
+    size_t purgeable_bytes   = (size_t)vm_stat.purgeable_count * page_size;
+    size_t speculative_bytes = (size_t)vm_stat.speculative_count * page_size;
+
+    // Inactive pages are clean file-backed pages the kernel can free instantly
+    // without I/O. They are effectively "available" for new allocations.
+    return free_bytes + inactive_bytes + purgeable_bytes + speculative_bytes;
+}
+
+// Returns a human-readable memory size string (e.g. "5.52 GB")
+// Uses a rotating buffer to allow up to 3 calls in a single printf.
+static const char *format_mem_size(size_t bytes) {
+    static char buf[3][32];
+    static int idx = 0;
+    char *b = buf[idx]; idx = (idx + 1) % 3;
+    if (bytes >= (1ULL << 30)) {
+        snprintf(b, 32, "%.2f GB", (double)bytes / (1ULL << 30));
+    } else if (bytes >= (1ULL << 20)) {
+        snprintf(b, 32, "%.1f MB", (double)bytes / (1ULL << 20));
+    } else {
+        snprintf(b, 32, "%.1f KB", (double)bytes / 1024.0);
+    }
+    return b;
+}
 
 // ============================================================================
 // Model constants
@@ -272,6 +329,7 @@ static int g_think_budget = 2048; // max thinking tokens before force-emitting <
 static float g_temperature = 0.8f;  // sampling temperature (0 = greedy argmax)
 static int g_top_k = 40;            // top-k sampling (1 = greedy)
 static int g_no_think = 0;          // 0 = thinking mode on, 1 = skip think block
+static int g_low_memory = 0;       // enabled by --low-memory: skip Metal weight wrap, use CPU fallback
 
 // Tiered I/O: cold fds (F_NOCACHE) for first reads, warm fds (page cached) for repeats
 static int *g_layer_fds_cold = NULL;    // [NUM_LAYERS] cold fds (set in main)
@@ -614,8 +672,14 @@ static WeightFile *open_weights(const char *bin_path, const char *json_path) {
         return NULL;
     }
 
-    // Advise sequential access
-    madvise(data, size, MADV_SEQUENTIAL);
+    // No madvise: kernel default (demand-paging) is safest.
+    // MADV_SEQUENTIAL triggers aggressive readahead — on unified-memory
+    // systems without swap, this can cause the kernel to eagerly page in
+    // the entire multi-GB file, spiking memory pressure and triggering jetsam
+    // (SIGKILL) when the file is later wrapped as a Metal buffer.
+    // MADV_RANDOM disables readahead (tested: hurts for matmul patterns).
+    // Kernel default demand-paging is the best balance: pages fault in as
+    // the GPU accesses them through the unified memory controller.
 
     TensorManifest *manifest = load_manifest(json_path);
     if (!manifest) {
@@ -1477,23 +1541,65 @@ static void reset_delta_net_state(void) {
 // Wrap the mmap'd weight file as a Metal buffer (zero-copy on unified memory)
 // mmap returns page-aligned addresses, Metal requires the same.
 // On Apple Silicon, page size is 16KB.
+//
+// MEMORY SAFETY: This function checks available system memory before wrapping.
+// On machines without swap (or with limited swap), wrapping a multi-GB file
+// can trigger SIGKILL/jetsam if the kernel can't find enough physical pages.
+// When memory is tight, we refuse the wrap and let the caller fall back to
+// per-tensor dispatch (slower but won't crash).
 static void metal_set_weights(MetalCtx *ctx, void *data, size_t size) {
     // Round size up to page boundary (16KB)
     size_t page_size = 16384;
     size_t aligned_size = (size + page_size - 1) & ~(page_size - 1);
+
+    // ---- Memory safety check ----
+    size_t avail_mem = get_available_memory();
+    size_t needed = aligned_size + METAL_SAFETY_MARGIN_BYTES;
+
+    printf("[metal] Available memory: %s, weight file: %s, safety margin: %s\n",
+           format_mem_size(avail_mem), format_mem_size(aligned_size),
+           format_mem_size(METAL_SAFETY_MARGIN_BYTES));
+
+    if (avail_mem > 0 && avail_mem < needed) {
+        // Tight memory — wrapping the entire file risks SIGKILL.
+        // The Metal driver needs to establish GPU page-table mappings for
+        // the entire range, which may require reserving physical pages even
+        // before the GPU touches them. Without swap, this can trigger jetsam.
+        fprintf(stderr,
+                "\n"
+                "╔══════════════════════════════════════════════════════════════╗\n"
+                "║  MEMORY WARNING: Tight memory — refusing Metal weight wrap  ║\n"
+                "╠══════════════════════════════════════════════════════════════╣\n"
+                "║  Available:  %7s  (free + purgeable + speculative)       ║\n"
+                "║  Needed:     %7s  (weights + %s safety margin)  ║\n"
+                "║  Shortfall:  %7s                                      ║\n"
+                "╠══════════════════════════════════════════════════════════════╣\n"
+                "║  GPU matmuls will fall back to CPU (slower, safe).          ║\n"
+                "║  To restore full speed: free memory or add swap (4-8GB).    ║\n"
+                "╠══════════════════════════════════════════════════════════════╣\n"
+                "║  Quick fixes:                                                ║\n"
+                "║    --gpu-kv-seq 512   (reduce KV cache from 16.8MB each)   ║\n"
+                "║    Close other apps   (browsers, IDEs use 2-4GB each)      ║\n"
+                "╚══════════════════════════════════════════════════════════════╝\n"
+                "\n",
+                format_mem_size(avail_mem), format_mem_size(needed),
+                format_mem_size(METAL_SAFETY_MARGIN_BYTES),
+                format_mem_size(needed - avail_mem));
+        return;  // ctx->wf_buf stays nil → caller uses safe path
+    }
 
     ctx->wf_buf = [ctx->device newBufferWithBytesNoCopy:data
                                                  length:aligned_size
                                                 options:MTLResourceStorageModeShared
                                             deallocator:nil];
     if (!ctx->wf_buf) {
-        fprintf(stderr, "WARNING: Cannot wrap weight file as Metal buffer (size=%.2f GB)\n",
-                size / 1e9);
-        fprintf(stderr, "  data=%p, aligned_size=%zu -- GPU matmul will fall back to CPU\n",
+        fprintf(stderr, "WARNING: Cannot wrap weight file as Metal buffer (size=%s)\n",
+                format_mem_size(aligned_size));
+        fprintf(stderr, "  data=%p, aligned_size=%zu — GPU matmul will fall back to per-tensor dispatch\n",
                 data, aligned_size);
     } else {
-        printf("[metal] Weight file wrapped as Metal buffer (%.2f GB)\n",
-               aligned_size / 1e9);
+        printf("[metal] Weight file wrapped as Metal buffer (%s, zero-copy)\n",
+               format_mem_size(aligned_size));
     }
 }
 
@@ -7368,12 +7474,73 @@ static void print_usage(const char *prog) {
     printf("  --serve PORT         Run HTTP server (OpenAI-compatible API)\n");
     printf("  --max-seq-len N      Max context length for KV cache (default: 262144 = 256K, model limit)\n");
     printf("  --gpu-kv-seq N       GPU KV buffer pre-allocation in tokens (default: 8192)\n");
+    printf("  --low-memory         Skip Metal weight buffer wrap (slower, safe for 16GB)\n");
     printf("  --help               This message\n");
 }
 
 int main(int argc, char **argv) {
+    // Unbuffered output — critical for diagnosing early-exit issues
+    setlinebuf(stdout);
+    setlinebuf(stderr);
+
     srand48(time(NULL));
     @autoreleasepool {
+        // ---- Ultra-early memory safety check ----
+        // Before ANY allocation, verify the system has enough free memory.
+        // On machines without swap, Metal buffer allocation + large mmap
+        // can trigger jetsam (SIGKILL) if the system can't find physical pages.
+        // This check runs before Metal init, before mmap, before everything.
+        {
+            size_t avail = get_available_memory();
+            printf("[bootstrap] Available memory: %s (free + purgeable + speculative)\n",
+                   format_mem_size(avail));
+
+            // Hard limits:
+            //   < 3GB: REFUSE to run — mmap alone needs ~3GB of address space
+            //                    backing; SIGKILL is virtually certain.
+            //   3-7GB: WARN but allow — may work with --low-memory + small KV,
+            //          but the weight file mmap still risks jetsam.
+            //   >= 7GB: Safe for full Metal zero-copy.
+            size_t hard_min_memory  = 3ULL * 1024 * 1024 * 1024;  // 3GB — absolute floor
+            size_t soft_min_memory  = 7ULL * 1024 * 1024 * 1024;  // 7GB — safe for full speed
+
+            if (avail > 0 && avail < hard_min_memory) {
+                fprintf(stderr,
+                        "\n"
+                        "╔══════════════════════════════════════════════════════════════════╗\n"
+                        "║  FATAL: Not enough physical memory to run safely               ║\n"
+                        "╠══════════════════════════════════════════════════════════════════╣\n"
+                        "║  Available: %7s  (need at least %s)                    ║\n"
+                        "║  Metal GPU buffers require wired (non-swappable) physical pages ║\n"
+                        "║  on Apple Silicon unified memory. The 5GB weight file + GPU     ║\n"
+                        "║  buffers need ~3GB of immediately available physical pages.     ║\n"
+                        "╠══════════════════════════════════════════════════════════════════╣\n"
+                        "║  Fixes:                                                         ║\n"
+                        "║  1. Close memory-heavy apps (Claude Code = ~2GB)                ║\n"
+                        "║  2. Wait 5-10 min for system to settle after restart            ║\n"
+                        "║     (Spotlight indexing, caches rebuilding etc.)                ║\n"
+                        "║  3. Use --low-memory --gpu-kv-seq 512 for minimal GPU footprint ║\n"
+                        "╚══════════════════════════════════════════════════════════════════╝\n"
+                        "\n",
+                        format_mem_size(avail), format_mem_size(hard_min_memory));
+                return 1;
+            }
+
+            if (avail > 0 && avail < soft_min_memory) {
+                fprintf(stderr,
+                        "\n"
+                        "╔══════════════════════════════════════════════════════════════════╗\n"
+                        "║  WARNING: Tight memory — may trigger SIGKILL/jetsam            ║\n"
+                        "╠══════════════════════════════════════════════════════════════════╣\n"
+                        "║  Available: %7s  (recommended minimum: %s)             ║\n"
+                        "║  Consider: --low-memory --gpu-kv-seq 512 for safest path        ║\n"
+                        "╚══════════════════════════════════════════════════════════════════╝\n"
+                        "\n",
+                        format_mem_size(avail), format_mem_size(soft_min_memory));
+                // Continue with warning — per-phase checks provide finer guards
+            }
+        }
+
         const char *model_path = MODEL_PATH_DEFAULT;
         const char *weights_path = NULL;
         const char *manifest_path = NULL;
@@ -7418,12 +7585,13 @@ int main(int argc, char **argv) {
             {"collect-routing", required_argument, 0, 'Z'},
             {"max-seq-len",   required_argument, 0, 'N'},
             {"gpu-kv-seq",    required_argument, 0, 'Q'},
+            {"low-memory",    no_argument,       0, 'l'},
             {"help",          no_argument,       0, 'h'},
             {0, 0, 0, 0}
         };
 
         int c;
-        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:N:Q:e:o:HLSTFE2GhXUY:V", long_options, NULL)) != -1) {
+        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:N:Q:e:o:lHLSTFE2GhXUY:V", long_options, NULL)) != -1) {
             switch (c) {
                 case 'm': model_path = optarg; break;
                 case 'w': weights_path = optarg; break;
@@ -7459,6 +7627,7 @@ int main(int argc, char **argv) {
                 case 'e': g_temperature = atof(optarg); break;
                 case 'o': g_top_k = atoi(optarg); break;
                 case 'H': g_no_think = 1; break;
+                case 'l': g_low_memory = 1; break;
                 case 'N': g_max_seq_len = atoi(optarg); break;
                 case 'Q': g_gpu_kv_seq = atoi(optarg); break;
                 case 'R': serve_port = atoi(optarg); break;
@@ -7500,9 +7669,12 @@ int main(int argc, char **argv) {
         }
 
         // ---- Initialize Metal ----
+        printf("[phase] Initializing Metal (device + shaders + GPU buffers)...\n");
         g_metal = metal_setup();
         if (!g_metal) {
             fprintf(stderr, "WARNING: Metal init failed, falling back to CPU\n");
+        } else {
+            printf("[phase] Metal initialization complete\n");
         }
 
         // ---- Initialize persistent I/O thread pool ----
@@ -7540,21 +7712,104 @@ int main(int argc, char **argv) {
         printf("Context:  max_seq=%d (%.0fK tokens), GPU_KV=%d tokens\n",
                g_max_seq_len, g_max_seq_len / 1000.0, g_gpu_kv_seq);
 
+        // ---- Memory budget report ----
+        // Compute expected GPU memory usage before loading weights.
+        // This helps users tune flags to avoid OOM on memory-constrained machines.
+        {
+            // Stat weight file to get its size
+            struct stat wf_st;
+            size_t wf_size = 0;
+            if (stat(weights_path, &wf_st) == 0) wf_size = wf_st.st_size;
+
+            size_t kv_dim = NUM_KV_HEADS * HEAD_DIM;  // 512
+            size_t kv_cache_mem = NUM_FULL_ATTN_LAYERS * 2 * kv_dim * g_gpu_kv_seq * sizeof(float);
+            size_t delta_state_mem = NUM_LINEAR_LAYERS * (32*128*128 + 3*LINEAR_CONV_DIM) * sizeof(float);
+            size_t delta_scratch_mem = (2048+2048+8192+64+64+8192+12288+12288) * sizeof(float);
+            size_t attn_mem = (NUM_ATTN_HEADS * HEAD_DIM * 3 +
+                               (size_t)NUM_ATTN_HEADS * g_gpu_kv_seq +
+                               NUM_ATTN_HEADS * HEAD_DIM * 2) * sizeof(float);
+            size_t expert_mem_per_slot = ((EXPERT_SIZE_MAX + 2*1024*1024 - 1) & ~(2*1024*1024 - 1)) +
+                                         4 * MOE_INTERMEDIATE * sizeof(float) + HIDDEN_DIM * sizeof(float);
+            size_t expert_mem = MAX_K * 2 * expert_mem_per_slot;
+            size_t shared_expert_mem = (3 * SHARED_INTERMEDIATE + HIDDEN_DIM) * sizeof(float);
+            size_t misc_mem = (HIDDEN_DIM * 4 + sizeof(float) * 3 + 10 * sizeof(float) +
+                               LINEAR_TOTAL_VALUE * sizeof(float) + VOCAB_SIZE * sizeof(float) +
+                               MAX_BATCH_SLOTS * (NUM_ATTN_HEADS * HEAD_DIM * 2) * sizeof(float));
+            size_t total_gpu_mem = kv_cache_mem + delta_state_mem + delta_scratch_mem +
+                                   attn_mem + expert_mem + shared_expert_mem + misc_mem;
+
+            printf("\n");
+            printf("  ┌─ GPU Memory Budget ─────────────────────────────────────┐\n");
+            printf("  │ Weight file (mmap):          %7s                     │\n", format_mem_size(wf_size));
+            printf("  │ Weight Metal wrap (if safe): %7s  (zero-copy)         │\n", format_mem_size(wf_size));
+            printf("  │ KV caches (%d layers):       %7s  (%.1f MB each)     │\n",
+                   NUM_FULL_ATTN_LAYERS, format_mem_size(kv_cache_mem),
+                   (double)(2 * kv_dim * g_gpu_kv_seq * sizeof(float)) / 1e6);
+            printf("  │ Delta-net state (%d layers): %7s                     │\n",
+                   NUM_LINEAR_LAYERS, format_mem_size(delta_state_mem));
+            printf("  │ Delta-net scratch:           %7s                     │\n",
+                   format_mem_size(delta_scratch_mem));
+            printf("  │ Expert multi-buf (%d slots): %7s  (2MB-aligned)      │\n",
+                   MAX_K * 2, format_mem_size(expert_mem));
+            printf("  │ Other GPU bufs:              %7s                     │\n",
+                   format_mem_size(attn_mem + shared_expert_mem + misc_mem));
+            printf("  ├────────────────────────────────────────────────────────┤\n");
+            printf("  │ GPU bufs (excl. weights):    %7s                     │\n",
+                   format_mem_size(total_gpu_mem));
+            printf("  │ GPU bufs + weight wrap:      %7s                     │\n",
+                   format_mem_size(total_gpu_mem + wf_size));
+            printf("  └────────────────────────────────────────────────────────┘\n");
+
+            size_t avail = get_available_memory();
+            if (avail > 0 && wf_size > 0) {
+                size_t peak = total_gpu_mem + wf_size;
+                if (avail < peak) {
+                    printf("  ⚠️  Available memory (%s) < peak GPU usage (%s)\n",
+                           format_mem_size(avail), format_mem_size(peak));
+                    printf("     Suggestions: --gpu-kv-seq 512 (saves %s), close other apps\n",
+                           format_mem_size(kv_cache_mem - (NUM_FULL_ATTN_LAYERS * 2 * kv_dim * 512 * sizeof(float))));
+                } else {
+                    printf("  ✅ Available memory (%s) >= peak GPU usage (%s)\n",
+                           format_mem_size(avail), format_mem_size(peak));
+                }
+            }
+            printf("\n");
+        }
+
         double t0 = now_ms();
 
         // ---- Load weights ----
+        printf("[phase] Loading weights (mmap + manifest)...\n");
         WeightFile *wf = open_weights(weights_path, manifest_path);
         if (!wf) {
             fprintf(stderr, "ERROR: Failed to load weights\n");
             return 1;
         }
 
-        // Wrap weight file for Metal GPU access
-        if (g_metal) {
+        // Wrap weight file for Metal GPU access (zero-copy, requires ~5GB free)
+        // When --low-memory is set, skip wrapping: all GPU matmuls fall back
+        // to CPU (reading directly from mmap). This is slower (1-3 tok/s vs
+        // 10-15 tok/s) but won't trigger OOM/jetsam on 16GB machines.
+        if (g_metal && !g_low_memory) {
             metal_set_weights(g_metal, wf->data, wf->size);
+        } else if (g_metal && g_low_memory) {
+            printf("[metal] --low-memory: skipping weight buffer wrap (CPU fallback)\n");
+        }
+
+        // Print GPU matmul mode
+        if (g_metal && g_metal->wf_buf) {
+            printf("[mode]  GPU matmuls: zero-copy (fast, %.2f GB Metal buffer)\n",
+                   (double)wf->size / 1e9);
+        } else if (g_metal) {
+            printf("[mode]  GPU matmuls: fallback (safe, CPU reads from mmap, slower)\n");
+        } else {
+            printf("[mode]  GPU matmuls: CPU only (no Metal device)\n");
         }
 
         // ---- Load vocabulary ----
+        fflush(stdout); fflush(stderr);
+        printf("[phase] Loading vocabulary...\n");
+        fflush(stdout);
         Vocabulary *vocab = load_vocab(vocab_path);
         if (!vocab) {
             fprintf(stderr, "ERROR: Failed to load vocabulary\n");
