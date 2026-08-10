@@ -294,6 +294,7 @@ static void debug_print_hidden(const char *tag, int layer_idx, const float *h, i
 // Temporal prediction pipeline counters (declared early for timing_print access)
 static int g_pred_enabled = 0;
 static int g_pred_generating = 0;   // only set to 1 after prefill (predictions only help during generation)
+static int g_use_mtp = 0;           // --mtp: enable MTP speculative decoding
 static uint64_t g_pred_hits = 0;
 static uint64_t g_pred_misses = 0;
 static uint64_t g_pred_layers = 0;
@@ -4588,6 +4589,338 @@ static void build_layer_cache(WeightFile *wf) {
 }
 
 // ============================================================================
+// MTP (Multi-Token Prediction) — speculative decoding head
+// ============================================================================
+
+typedef struct {
+    // Pre-fc norms (combine embedding and hidden before transformer layer)
+    uint16_t *pre_fc_norm_embedding_w;  // [2048] BF16
+    uint16_t *pre_fc_norm_hidden_w;     // [2048] BF16
+
+    // Transformer layer (identical structure to main model layers)
+    uint16_t *input_layernorm_w;        // [2048] BF16
+    uint16_t *post_attn_norm_w;         // [2048] BF16
+
+    // Attention (GQA, same as main model full-attention layers)
+    uint32_t *q_w;  uint16_t *q_s, *q_b;  // [8192, 2048] 4-bit
+    uint32_t *k_w;  uint16_t *k_s, *k_b;  // [512, 2048] 4-bit
+    uint32_t *v_w;  uint16_t *v_s, *v_b;  // [512, 2048] 4-bit
+    uint32_t *o_w;  uint16_t *o_s, *o_b;  // [2048, 4096] 4-bit
+    uint16_t *k_norm_w, *q_norm_w;        // [256] BF16
+
+    // Routing gate
+    uint32_t *gate_w;  uint16_t *gate_s, *gate_b;  // [256, 2048] 8-bit
+
+    // Shared expert
+    uint32_t *shared_gate_w;         // [512, 2048] 4-bit
+    uint16_t *shared_gate_s, *shared_gate_b;
+    uint32_t *shared_up_w;           // [512, 2048] 4-bit
+    uint16_t *shared_up_s, *shared_up_b;
+    uint32_t *shared_down_w;         // [2048, 512] 4-bit
+    uint16_t *shared_down_s, *shared_down_b;
+    uint32_t *shared_gate_gate_w;         // [1, 2048] 8-bit
+    uint16_t *shared_gate_gate_s, *shared_gate_gate_b;
+
+    // Output projection
+    uint32_t *fc_w;       uint16_t *fc_s, *fc_b;  // [2048, 512] 4-bit (packed [2048, 4096])
+    uint16_t *final_norm_w;  // [2048] BF16
+
+    // Expert file for routed experts
+    int expert_fd;             // fd for layer_40.bin
+    int expert_bits;           // 4 (matching main model)
+
+    int loaded;
+} MTPWeights;
+
+static MTPWeights g_mtp = { .loaded = 0 };
+
+static void mtp_init(WeightFile *wf) {
+    if (g_mtp.loaded) return;
+
+    char name[256];
+    #define MTP_T(fmt) (snprintf(name, sizeof(name), fmt, 0), (void*)get_tensor_ptr(wf, name))
+
+    g_mtp.pre_fc_norm_embedding_w = (uint16_t *)MTP_T("mtp.pre_fc_norm_embedding.weight");
+    g_mtp.pre_fc_norm_hidden_w    = (uint16_t *)MTP_T("mtp.pre_fc_norm_hidden.weight");
+
+    g_mtp.input_layernorm_w       = (uint16_t *)MTP_T("mtp.layers.%d.input_layernorm.weight");
+    g_mtp.post_attn_norm_w        = (uint16_t *)MTP_T("mtp.layers.%d.post_attention_layernorm.weight");
+
+    g_mtp.q_w = (uint32_t *)MTP_T("mtp.layers.%d.self_attn.q_proj.weight");
+    g_mtp.q_s = (uint16_t *)MTP_T("mtp.layers.%d.self_attn.q_proj.scales");
+    g_mtp.q_b = (uint16_t *)MTP_T("mtp.layers.%d.self_attn.q_proj.biases");
+    g_mtp.k_w = (uint32_t *)MTP_T("mtp.layers.%d.self_attn.k_proj.weight");
+    g_mtp.k_s = (uint16_t *)MTP_T("mtp.layers.%d.self_attn.k_proj.scales");
+    g_mtp.k_b = (uint16_t *)MTP_T("mtp.layers.%d.self_attn.k_proj.biases");
+    g_mtp.v_w = (uint32_t *)MTP_T("mtp.layers.%d.self_attn.v_proj.weight");
+    g_mtp.v_s = (uint16_t *)MTP_T("mtp.layers.%d.self_attn.v_proj.scales");
+    g_mtp.v_b = (uint16_t *)MTP_T("mtp.layers.%d.self_attn.v_proj.biases");
+    g_mtp.o_w = (uint32_t *)MTP_T("mtp.layers.%d.self_attn.o_proj.weight");
+    g_mtp.o_s = (uint16_t *)MTP_T("mtp.layers.%d.self_attn.o_proj.scales");
+    g_mtp.o_b = (uint16_t *)MTP_T("mtp.layers.%d.self_attn.o_proj.biases");
+    g_mtp.k_norm_w = (uint16_t *)MTP_T("mtp.layers.%d.self_attn.k_norm.weight");
+    g_mtp.q_norm_w = (uint16_t *)MTP_T("mtp.layers.%d.self_attn.q_norm.weight");
+
+    g_mtp.gate_w = (uint32_t *)MTP_T("mtp.layers.%d.mlp.gate.weight");
+    g_mtp.gate_s = (uint16_t *)MTP_T("mtp.layers.%d.mlp.gate.scales");
+    g_mtp.gate_b = (uint16_t *)MTP_T("mtp.layers.%d.mlp.gate.biases");
+
+    g_mtp.shared_gate_w = (uint32_t *)MTP_T("mtp.layers.%d.mlp.shared_expert.gate_proj.weight");
+    g_mtp.shared_gate_s = (uint16_t *)MTP_T("mtp.layers.%d.mlp.shared_expert.gate_proj.scales");
+    g_mtp.shared_gate_b = (uint16_t *)MTP_T("mtp.layers.%d.mlp.shared_expert.gate_proj.biases");
+    g_mtp.shared_up_w   = (uint32_t *)MTP_T("mtp.layers.%d.mlp.shared_expert.up_proj.weight");
+    g_mtp.shared_up_s   = (uint16_t *)MTP_T("mtp.layers.%d.mlp.shared_expert.up_proj.scales");
+    g_mtp.shared_up_b   = (uint16_t *)MTP_T("mtp.layers.%d.mlp.shared_expert.up_proj.biases");
+    g_mtp.shared_down_w = (uint32_t *)MTP_T("mtp.layers.%d.mlp.shared_expert.down_proj.weight");
+    g_mtp.shared_down_s = (uint16_t *)MTP_T("mtp.layers.%d.mlp.shared_expert.down_proj.scales");
+    g_mtp.shared_down_b = (uint16_t *)MTP_T("mtp.layers.%d.mlp.shared_expert.down_proj.biases");
+    g_mtp.shared_gate_gate_w = (uint32_t *)MTP_T("mtp.layers.%d.mlp.shared_expert_gate.weight");
+    g_mtp.shared_gate_gate_s = (uint16_t *)MTP_T("mtp.layers.%d.mlp.shared_expert_gate.scales");
+    g_mtp.shared_gate_gate_b = (uint16_t *)MTP_T("mtp.layers.%d.mlp.shared_expert_gate.biases");
+
+    g_mtp.fc_w = (uint32_t *)MTP_T("mtp.fc.weight");
+    g_mtp.fc_s = (uint16_t *)MTP_T("mtp.fc.scales");
+    g_mtp.fc_b = (uint16_t *)MTP_T("mtp.fc.biases");
+    g_mtp.final_norm_w = (uint16_t *)MTP_T("mtp.norm.weight");
+
+    #undef MTP_T
+
+    // Check critical tensors
+    int ok = (g_mtp.pre_fc_norm_embedding_w && g_mtp.pre_fc_norm_hidden_w &&
+              g_mtp.fc_w && g_mtp.final_norm_w && g_mtp.input_layernorm_w);
+    if (ok) {
+        g_mtp.loaded = 1;
+        // Try to open MTP expert file
+        char path[512];
+        snprintf(path, sizeof(path), "packed_experts/layer_40.bin");
+        g_mtp.expert_fd = open(path, O_RDONLY);
+        if (g_mtp.expert_fd >= 0) {
+            fcntl(g_mtp.expert_fd, F_RDAHEAD, 0);
+            g_mtp.expert_bits = 4;
+            fprintf(stderr, "[mtp] MTP weights loaded, expert file: %s\n", path);
+        } else {
+            fprintf(stderr, "[mtp] MTP weights loaded, expert file NOT FOUND: %s\n", path);
+        }
+    } else {
+        fprintf(stderr, "[mtp] MTP weights NOT FOUND — speculative decoding disabled\n");
+    }
+}
+
+// MTP forward pass: predicts next token from hidden state + current token embedding.
+// Returns 1 if a token was generated, 0 if MTP is not available.
+// The predicted token is written to *next_token and hidden is updated in-place.
+static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
+                       int *next_token, float *logits_buf) {
+    if (!g_mtp.loaded || g_mtp.expert_fd < 0) return 0;
+
+    // Step 1: Get embedding for current token
+    float embed_buf[HIDDEN_DIM];
+    embed_lookup(wf, current_token, embed_buf);
+
+    // Step 2: Pre-norm embedding and hidden
+    float emb_normed[HIDDEN_DIM], hidden_normed[HIDDEN_DIM];
+    cpu_rms_norm(embed_buf, g_mtp.pre_fc_norm_embedding_w, emb_normed, HIDDEN_DIM, RMS_NORM_EPS);
+    cpu_rms_norm(hidden,    g_mtp.pre_fc_norm_hidden_w,    hidden_normed, HIDDEN_DIM, RMS_NORM_EPS);
+
+    // Step 3: Combine
+    float h[HIDDEN_DIM];
+    for (int i = 0; i < HIDDEN_DIM; i++) h[i] = emb_normed[i] + hidden_normed[i];
+
+    // Step 4: Input norm
+    float normed[HIDDEN_DIM];
+    cpu_rms_norm(h, g_mtp.input_layernorm_w, normed, HIDDEN_DIM, RMS_NORM_EPS);
+
+    // Step 5: Full attention (CPU path for simplicity — single layer, single token)
+    // Q projection
+    float q_buf[8192], k_buf[512], v_buf[512];
+    cpu_dequant_matvec(g_mtp.q_w, g_mtp.q_s, g_mtp.q_b, normed, q_buf,
+                       8192, HIDDEN_DIM, GROUP_SIZE, 4);
+    cpu_dequant_matvec(g_mtp.k_w, g_mtp.k_s, g_mtp.k_b, normed, k_buf,
+                       512, HIDDEN_DIM, GROUP_SIZE, 4);
+    cpu_dequant_matvec(g_mtp.v_w, g_mtp.v_s, g_mtp.v_b, normed, v_buf,
+                       512, HIDDEN_DIM, GROUP_SIZE, 4);
+
+    // Q/K norms
+    for (int i = 0; i < 256; i++) {
+        q_buf[i] *= bf16_to_f32(g_mtp.q_norm_w[i]);  // per-head Q norm
+    }
+    for (int i = 0; i < 256; i++) {
+        k_buf[i] *= bf16_to_f32(g_mtp.k_norm_w[i]);  // per-head K norm
+    }
+
+    // Simplified attention: single query, no KV cache (MTP starts fresh)
+    // 32 Q heads, 2 KV heads — GQA with 16 Q heads per KV head
+    float attn_out[HIDDEN_DIM];
+    memset(attn_out, 0, sizeof(attn_out));
+    int num_q_heads = 32, num_kv_heads = 2, head_dim = 256;
+    float inv_sqrt_dh = 1.0f / sqrtf((float)head_dim);
+
+    for (int qh = 0; qh < num_q_heads; qh++) {
+        int kvh = qh * num_kv_heads / num_q_heads;  // GQA group assignment
+        float *q_head = q_buf + qh * head_dim;
+        float *k_head = k_buf + kvh * head_dim;
+        float *v_head = v_buf + kvh * head_dim;
+
+        // Compute attention score (single query token)
+        float score = 0;
+        for (int d = 0; d < head_dim; d++) {
+            score += q_head[d] * k_head[d];
+        }
+        score *= inv_sqrt_dh;
+        // Single token → softmax is trivial: attention weight = 1.0
+        // (only one key, so full attention goes to it)
+
+        // Apply to value
+        float *o_head = attn_out + qh * head_dim;
+        for (int d = 0; d < head_dim; d++) {
+            o_head[d] = v_head[d];  // weight = 1.0 for single token
+        }
+    }
+
+    // O projection
+    float attn_proj[HIDDEN_DIM];
+    cpu_dequant_matvec(g_mtp.o_w, g_mtp.o_s, g_mtp.o_b, attn_out, attn_proj,
+                       HIDDEN_DIM, 8192, GROUP_SIZE, 4);
+
+    // Residual
+    for (int i = 0; i < HIDDEN_DIM; i++) h[i] += attn_proj[i];
+
+    // Post-attention norm
+    float h_post[HIDDEN_DIM];
+    cpu_rms_norm(h, g_mtp.post_attn_norm_w, h_post, HIDDEN_DIM, RMS_NORM_EPS);
+
+    // Step 6: MoE routing
+    float gate_scores[256];
+    cpu_dequant_matvec(g_mtp.gate_w, g_mtp.gate_s, g_mtp.gate_b, h_post, gate_scores,
+                       256, HIDDEN_DIM, GROUP_SIZE, 8);
+    cpu_softmax(gate_scores, 256);
+
+    int K = 2;  // same as main model default
+    int expert_indices[8];
+    float expert_weights[8];
+    cpu_topk(gate_scores, 256, K, expert_indices, expert_weights);
+    cpu_normalize_weights(expert_weights, K);
+
+    // Step 7: Shared expert gate
+    float shared_gate_score;
+    cpu_dequant_matvec(g_mtp.shared_gate_gate_w, g_mtp.shared_gate_gate_s,
+                       g_mtp.shared_gate_gate_b, h_post, &shared_gate_score,
+                       1, HIDDEN_DIM, GROUP_SIZE, 8);
+    float shared_weight = 1.0f / (1.0f + expf(-shared_gate_score));  // sigmoid
+
+    // Step 8: Shared expert gate/up
+    float shared_gate[SHARED_INTERMEDIATE], shared_up[SHARED_INTERMEDIATE];
+    cpu_dequant_matvec(g_mtp.shared_gate_w, g_mtp.shared_gate_s, g_mtp.shared_gate_b,
+                       h_post, shared_gate, 512, HIDDEN_DIM, GROUP_SIZE, 4);
+    cpu_dequant_matvec(g_mtp.shared_up_w, g_mtp.shared_up_s, g_mtp.shared_up_b,
+                       h_post, shared_up, 512, HIDDEN_DIM, GROUP_SIZE, 4);
+
+    // Shared expert SwiGLU
+    float shared_act[SHARED_INTERMEDIATE];
+    cpu_swiglu(shared_gate, shared_up, shared_act, 512);
+
+    // Shared expert down
+    float shared_out[HIDDEN_DIM];
+    cpu_dequant_matvec(g_mtp.shared_down_w, g_mtp.shared_down_s, g_mtp.shared_down_b,
+                       shared_act, shared_out, HIDDEN_DIM, 512, GROUP_SIZE, 4);
+
+    // Step 9: Routed experts (load from layer_40.bin)
+    size_t esz = active_expert_size();
+    float *moe_out = calloc(HIDDEN_DIM, sizeof(float));
+    void *expert_data = malloc(esz);
+
+    static int mtp_expert_dbg = 0;
+    for (int k = 0; k < K; k++) {
+        int eidx = expert_indices[k];
+        float weight = expert_weights[k];
+
+        ssize_t n = pread(g_mtp.expert_fd, expert_data, esz, (off_t)eidx * esz);
+        if (n != (ssize_t)esz) { fprintf(stderr, "[mtp] expert %d pread fail: %zd/%zu\n", eidx, n, esz); continue; }
+
+        if (mtp_expert_dbg < 1) {
+            // Check first few bytes of expert data
+            uint32_t *ed32 = (uint32_t *)expert_data;
+            uint16_t *gs = (uint16_t *)((char *)expert_data + GATE_S_OFF_4);
+            uint16_t *gb = (uint16_t *)((char *)expert_data + GATE_B_OFF_4);
+            fprintf(stderr, "[mtp-dbg] expert %d: gate_W[0]=0x%08X gate_S[0]=%.6f gate_B[0]=%.6f\n",
+                    eidx, ed32[0],
+                    bf16_to_f32(gs[0]), bf16_to_f32(gb[0]));
+            mtp_expert_dbg++;
+        }
+
+        uint32_t *ew = (uint32_t *)expert_data;
+        uint16_t *es = (uint16_t *)((char *)expert_data + GATE_W_OFF_4);
+        uint16_t *eb = (uint16_t *)((char *)expert_data + GATE_S_OFF_4);
+        uint32_t *uw = (uint32_t *)((char *)expert_data + UP_W_OFF_4);
+        uint16_t *us = (uint16_t *)((char *)expert_data + UP_S_OFF_4);
+        uint16_t *ub = (uint16_t *)((char *)expert_data + UP_B_OFF_4);
+        uint32_t *dw = (uint32_t *)((char *)expert_data + DOWN_W_OFF_4);
+        uint16_t *ds = (uint16_t *)((char *)expert_data + DOWN_S_OFF_4);
+        uint16_t *db = (uint16_t *)((char *)expert_data + DOWN_B_OFF_4);
+
+        float gate_out[MOE_INTERMEDIATE], up_out[MOE_INTERMEDIATE];
+        cpu_dequant_matvec(ew, es, eb, h_post, gate_out, MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 4);
+        cpu_dequant_matvec(uw, us, ub, h_post, up_out,   MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 4);
+
+        float act_out[MOE_INTERMEDIATE];
+        cpu_swiglu(gate_out, up_out, act_out, MOE_INTERMEDIATE);
+
+        float expert_out[HIDDEN_DIM];
+        cpu_dequant_matvec(dw, ds, db, act_out, expert_out, HIDDEN_DIM, MOE_INTERMEDIATE, GROUP_SIZE, 4);
+
+        for (int i = 0; i < HIDDEN_DIM; i++) moe_out[i] += weight * expert_out[i];
+    }
+    free(expert_data);
+
+    // Step 10: Combine
+    for (int i = 0; i < HIDDEN_DIM; i++) {
+        h[i] = h[i] + moe_out[i] + shared_weight * shared_out[i];
+    }
+    free(moe_out);
+
+    // Step 11: Final norm
+    float final_hidden[HIDDEN_DIM];
+    cpu_rms_norm(h, g_mtp.final_norm_w, final_hidden, HIDDEN_DIM, RMS_NORM_EPS);
+
+    // Step 12: FC projection to logits
+    cpu_dequant_matvec(g_mtp.fc_w, g_mtp.fc_s, g_mtp.fc_b, final_hidden, logits_buf,
+                       VOCAB_SIZE, HIDDEN_DIM, GROUP_SIZE, 4);
+
+    // Debug: trace NaN in MTP forward pass
+    static int mtp_dbg = 0;
+    if (mtp_dbg < 1) {
+        fprintf(stderr, "[mtp-dbg] embed_rms=%.4f hidden_in_rms=%.4f\n",
+                vec_rms(embed_buf, HIDDEN_DIM), vec_rms(hidden, HIDDEN_DIM));
+        fprintf(stderr, "[mtp-dbg] after_input_norm=%.4f\n", vec_rms(normed, HIDDEN_DIM));
+        fprintf(stderr, "[mtp-dbg] q_rms=%.4f attn_out_rms=%.4f attn_proj_rms=%.4f\n",
+                vec_rms(q_buf, 8192), vec_rms(attn_out, HIDDEN_DIM),
+                vec_rms(attn_proj, HIDDEN_DIM));
+        fprintf(stderr, "[mtp-dbg] shared_out_rms=%.4f moe_out_rms=%.4f\n",
+                vec_rms(shared_out, HIDDEN_DIM), vec_rms(moe_out, HIDDEN_DIM));
+        fprintf(stderr, "[mtp-dbg] fc_in rms=%.4f logits rms=%.4f top5: ",
+                vec_rms(final_hidden, HIDDEN_DIM), vec_rms(logits_buf, VOCAB_SIZE));
+        // Find top 5
+        int top5[5] = {0}; float topv[5] = {-1e30f,-1e30f,-1e30f,-1e30f,-1e30f};
+        for (int i = 0; i < VOCAB_SIZE; i++) {
+            int min_k = 0;
+            for (int k = 1; k < 5; k++) if (topv[k] < topv[min_k]) min_k = k;
+            if (logits_buf[i] > topv[min_k]) { topv[min_k] = logits_buf[i]; top5[min_k] = i; }
+        }
+        for (int i = 0; i < 5; i++) fprintf(stderr, "%d(%.1f) ", top5[i], topv[i]);
+        fprintf(stderr, "\n");
+        mtp_dbg++;
+    }
+
+    // Step 13: Sample
+    *next_token = cpu_sample_temp(logits_buf, VOCAB_SIZE, g_temperature, g_top_k);
+
+    // Update hidden for potential next MTP step (chain)
+    memcpy(hidden, h, HIDDEN_DIM * sizeof(float));
+
+    return 1;
+}
+
+// ============================================================================
 // Deferred expert state: holds state for async GPU expert compute.
 // GPU experts are submitted async (commit without wait), and the wait+combine
 // happens at the start of the NEXT layer. This overlaps ~1ms of GPU expert
@@ -8119,6 +8452,7 @@ int main(int argc, char **argv) {
             {"no-think",      no_argument,       0, 'H'},
             {"serve",         required_argument, 0, 'R'},
             {"predict",       no_argument,       0, 'D'},
+            {"mtp",           no_argument,       0, 'J'},
             {"debug-layers",  no_argument,       0, 'X'},
             {"gpu-experts",   no_argument,       0, 'U'},
             {"cpu-experts",   no_argument,       0, 'V'},
@@ -8133,7 +8467,7 @@ int main(int argc, char **argv) {
         };
 
         int c;
-        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:N:Q:e:o:I:lHLSTFE2GhXUY:V", long_options, NULL)) != -1) {
+        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:N:Q:e:o:I:lHLSTFE2GhXUY:VJ", long_options, NULL)) != -1) {
             switch (c) {
                 case 'm': model_path = optarg; model_path_from_user = 1; break;
                 case 'w': weights_path = optarg; break;
@@ -8154,6 +8488,7 @@ int main(int argc, char **argv) {
                 case '8': g_use_int8 = 1; break;
                 case 'G': gpu_linear_attn_enabled = 1; break;
                 case 'D': g_pred_enabled = 1; break;
+                case 'J': g_use_mtp = 1; break;
                 case 'X': g_debug_layers = 1; break;
                 case 'U': g_gpu_experts = 1; break;
                 case 'V': g_cpu_experts = 1; break;
@@ -8353,6 +8688,9 @@ int main(int argc, char **argv) {
         } else {
             printf("[mode]  GPU matmuls: CPU only (no Metal device)\n");
         }
+
+        // Initialize MTP (Multi-Token Prediction) speculative decoding head
+        mtp_init(wf);
 
         // ---- Load vocabulary ----
         fflush(stdout); fflush(stderr);
@@ -8803,8 +9141,19 @@ int main(int argc, char **argv) {
             double tok_time = t_gen_end - t_gen_start;
 
             // Print progress to stderr
-            fprintf(stderr, "  [gen %d/%d] token_id=%d (%.0f ms, %.2f tok/s)\n",
+            fprintf(stderr, "  [gen %d/%d] token_id=%d (%.0f ms, %.2f tok/s)",
                     gen, max_tokens, next_token, tok_time, 1000.0 / tok_time);
+
+            // MTP speculative prediction (evaluation mode)
+            if (g_use_mtp && g_mtp.loaded) {
+                float mtp_logits[VOCAB_SIZE];
+                int mtp_token;
+                if (mtp_forward(wf, hidden, next_token, &mtp_token, mtp_logits)) {
+                    fprintf(stderr, "  mtp=%d(\"%s\")", mtp_token,
+                            decode_token(vocab, mtp_token));
+                }
+            }
+            fprintf(stderr, "\n");
         }
 
         if (g_timing_enabled) timing_print();
