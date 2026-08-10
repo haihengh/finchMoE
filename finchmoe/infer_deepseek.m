@@ -718,7 +718,8 @@ static void deepseek_moe(
                 float scale = ue8m0_to_f32(sr[blk]);
                 int base = blk * w1_blk;
                 for (int j = 0; j < w1_blk; j++)
-                    acc += (float)(int)wr[base+j] * scale * x[base+j];  // x[0:2048]
+                    // I8 stored as signed, interpreted as unsigned (0-255)
+                    acc += (float)((int)(uint8_t)wr[base+j]) * scale * x[base+j];
             }
             gate_out[row] = acc;
         }
@@ -764,16 +765,17 @@ static void deepseek_moe(
             }
         }
 
-        // SwiGLU: act = clamp(silu(gate) * up, ±SWIGLU_LIMIT)
-        // w1 produces 2048, w3 produces 2048, SwiGLU = 2048
-        float *act = calloc(w1_out, sizeof(float));
-        for (int i = 0; i < w1_out; i++) {
-            float g = gate_out[i];
-            float u = up_out[i];
-            float val = (g / (1.0f + expf(-g))) * u;  // silu(g) * up
+        // MegaMoE SwiGLU: w1_out [2048] = gate[0:1024] + up[1024:2048]
+        // w2 takes SwiGLU output [1024] and produces [4096]
+        int half = w1_out / 2;  // 1024
+        float *act = calloc(half, sizeof(float));
+        for (int i = 0; i < half; i++) {
+            float g = gate_out[i];           // w1 rows [0:1024] = gate
+            float u = gate_out[i + half];    // w1 rows [1024:2048] = up
+            float val = (g / (1.0f + expf(-g))) * u;
             act[i] = fmaxf(-SWIGLU_LIMIT, fminf(SWIGLU_LIMIT, val));
         }
-        free(gate_out); free(up_out);
+        free(gate_out); free(up_out);  // w3 output not used (separate path in MegaMoE)
 
         // w2: [4096, 1024] — takes first 1024 of SwiGLU output (2048-dim)
         snprintf(wname, sizeof(wname), "layers.%d.ffn.experts.%d.w2.weight", layer_idx, eid);
@@ -880,6 +882,13 @@ static void deepseek_layer_forward(
     write(2, "4", 1);
     float *moe_out = calloc(HIDDEN_DIM, sizeof(float));
     deepseek_moe(m, layer_idx, h_post, moe_out, token_id);
+    static int mdbg = 0;
+    if (mdbg < 3 && layer_idx == 0) {
+        float mr = 0; for (int i=0;i<HIDDEN_DIM;i++) mr+=moe_out[i]*moe_out[i];
+        char buf[128]; int n=snprintf(buf,sizeof(buf),"[M] L%d moe_rms=%.2f\n",layer_idx,sqrtf(mr/HIDDEN_DIM));
+        if(n>0)write(2,buf,n);
+        mdbg++;
+    }
     for (int i = 0; i < HIDDEN_DIM; i++) hidden[i] += moe_out[i];
     free(moe_out);
     free(h_post);
