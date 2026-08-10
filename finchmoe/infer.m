@@ -2017,7 +2017,11 @@ static void gpu_encode_expert_forward_slot(
     NSUInteger gate_w_off, gate_s_off, gate_b_off;
     NSUInteger up_w_off, up_s_off, up_b_off;
     NSUInteger down_w_off, down_s_off, down_b_off;
-    if (g_use_2bit) {
+    if (g_use_1bit) {
+        gate_w_off = GATE_W_OFF_1; gate_s_off = GATE_S_OFF_1; gate_b_off = GATE_B_OFF_1;
+        up_w_off   = UP_W_OFF_1;   up_s_off   = UP_S_OFF_1;   up_b_off   = UP_B_OFF_1;
+        down_w_off = DOWN_W_OFF_1; down_s_off = DOWN_S_OFF_1; down_b_off = DOWN_B_OFF_1;
+    } else if (g_use_2bit) {
         gate_w_off = GATE_W_OFF_2; gate_s_off = GATE_S_OFF_2; gate_b_off = GATE_B_OFF_2;
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
@@ -2117,7 +2121,11 @@ static void gpu_encode_expert_forward_slot_buf(
     NSUInteger gate_w_off, gate_s_off, gate_b_off;
     NSUInteger up_w_off, up_s_off, up_b_off;
     NSUInteger down_w_off, down_s_off, down_b_off;
-    if (g_use_2bit) {
+    if (g_use_1bit) {
+        gate_w_off = GATE_W_OFF_1; gate_s_off = GATE_S_OFF_1; gate_b_off = GATE_B_OFF_1;
+        up_w_off   = UP_W_OFF_1;   up_s_off   = UP_S_OFF_1;   up_b_off   = UP_B_OFF_1;
+        down_w_off = DOWN_W_OFF_1; down_s_off = DOWN_S_OFF_1; down_b_off = DOWN_B_OFF_1;
+    } else if (g_use_2bit) {
         gate_w_off = GATE_W_OFF_2; gate_s_off = GATE_S_OFF_2; gate_b_off = GATE_B_OFF_2;
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
@@ -2221,7 +2229,11 @@ static void gpu_encode_experts_batched(
     NSUInteger gate_w_off, gate_s_off, gate_b_off;
     NSUInteger up_w_off, up_s_off, up_b_off;
     NSUInteger down_w_off, down_s_off, down_b_off;
-    if (g_use_2bit) {
+    if (g_use_1bit) {
+        gate_w_off = GATE_W_OFF_1; gate_s_off = GATE_S_OFF_1; gate_b_off = GATE_B_OFF_1;
+        up_w_off   = UP_W_OFF_1;   up_s_off   = UP_S_OFF_1;   up_b_off   = UP_B_OFF_1;
+        down_w_off = DOWN_W_OFF_1; down_s_off = DOWN_S_OFF_1; down_b_off = DOWN_B_OFF_1;
+    } else if (g_use_2bit) {
         gate_w_off = GATE_W_OFF_2; gate_s_off = GATE_S_OFF_2; gate_b_off = GATE_B_OFF_2;
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
@@ -2235,7 +2247,7 @@ static void gpu_encode_experts_batched(
         down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
     id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : (g_use_1bit ? ctx->matvec_1bit : (g_use_int8 ? ctx->matvec_8bit : ctx->matvec_v3));
-    id<MTLComputePipelineState> fused_pipe = g_use_2bit ? NULL : (g_use_int8 ? ctx->fused_gate_up_swiglu_8bit_pipe : ctx->fused_gate_up_swiglu_pipe);
+    id<MTLComputePipelineState> fused_pipe = (g_use_1bit || g_use_2bit) ? NULL : (g_use_int8 ? ctx->fused_gate_up_swiglu_8bit_pipe : ctx->fused_gate_up_swiglu_pipe);
 
     uint32_t gate_up_out = MOE_INTERMEDIATE;
     uint32_t gate_up_in  = HIDDEN_DIM;
@@ -2478,7 +2490,11 @@ static void gpu_expert_forward(
     NSUInteger gate_w_off, gate_s_off, gate_b_off;
     NSUInteger up_w_off, up_s_off, up_b_off;
     NSUInteger down_w_off, down_s_off, down_b_off;
-    if (g_use_2bit) {
+    if (g_use_1bit) {
+        gate_w_off = GATE_W_OFF_1; gate_s_off = GATE_S_OFF_1; gate_b_off = GATE_B_OFF_1;
+        up_w_off   = UP_W_OFF_1;   up_s_off   = UP_S_OFF_1;   up_b_off   = UP_B_OFF_1;
+        down_w_off = DOWN_W_OFF_1; down_s_off = DOWN_S_OFF_1; down_b_off = DOWN_B_OFF_1;
+    } else if (g_use_2bit) {
         gate_w_off = GATE_W_OFF_2; gate_s_off = GATE_S_OFF_2; gate_b_off = GATE_B_OFF_2;
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
@@ -6283,7 +6299,12 @@ static void fused_layer_forward(
             // CPU fallback offsets — use correct layout based on quantization mode
             NSUInteger c_gate_w, c_gate_s, c_gate_b, c_up_w, c_up_s, c_up_b, c_down_w, c_down_s, c_down_b;
             int c_bits;
-            if (g_use_2bit) {
+            if (g_use_1bit) {
+                c_gate_w = GATE_W_OFF_1; c_gate_s = GATE_S_OFF_1; c_gate_b = GATE_B_OFF_1;
+                c_up_w   = UP_W_OFF_1;   c_up_s   = UP_S_OFF_1;   c_up_b   = UP_B_OFF_1;
+                c_down_w = DOWN_W_OFF_1; c_down_s = DOWN_S_OFF_1; c_down_b = DOWN_B_OFF_1;
+                c_bits = 1;
+            } else if (g_use_2bit) {
                 c_gate_w = GATE_W_OFF_2; c_gate_s = GATE_S_OFF_2; c_gate_b = GATE_B_OFF_2;
                 c_up_w   = UP_W_OFF_2;   c_up_s   = UP_S_OFF_2;   c_up_b   = UP_B_OFF_2;
                 c_down_w = DOWN_W_OFF_2; c_down_s = DOWN_S_OFF_2; c_down_b = DOWN_B_OFF_2;
