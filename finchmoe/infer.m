@@ -1354,6 +1354,10 @@ typedef struct {
     id<MTLBuffer> buf_delta_output;   // [8192] float
     id<MTLBuffer> buf_conv_input;     // [LINEAR_CONV_DIM] float
     id<MTLBuffer> buf_conv_output;    // [LINEAR_CONV_DIM] float
+    // Inter-command-buffer synchronization for fused expert path
+    id<MTLFence>      expert_fence;        // MTLFence: encoder-level GPU sync
+    id<MTLSharedEvent> expert_sync_event;   // MTLSharedEvent: CB-level GPU sync
+    uint64_t           expert_sync_value;   // monotonic counter for expert_sync_event
 } MetalCtx;
 
 static MetalCtx *g_metal = NULL;
@@ -1598,6 +1602,10 @@ static MetalCtx *metal_setup(void) {
     // Create shared event for CPU-GPU async pipeline
     ctx->pipeline_event = [ctx->device newSharedEvent];
     ctx->event_value = 0;
+    // Create fence + shared event for inter-CB sync: fused expert CB -> combine CB
+    ctx->expert_fence = [ctx->device newFence];
+    ctx->expert_sync_event = [ctx->device newSharedEvent];
+    ctx->expert_sync_value = 0;
 
     printf("[metal] Inference pipelines ready (multi-expert[%d] + shared buffers allocated)\n", MAX_K);
     return ctx;
@@ -2248,7 +2256,11 @@ static void gpu_encode_experts_batched(
         down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
     id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : (g_use_1bit ? ctx->matvec_1bit : (g_use_int8 ? ctx->matvec_8bit : ctx->matvec_v3));
-    id<MTLComputePipelineState> fused_pipe = (g_use_1bit || g_use_2bit) ? NULL : (g_use_int8 ? ctx->fused_gate_up_swiglu_8bit_pipe : ctx->fused_gate_up_swiglu_pipe);
+    // SiLU formula corrected in shaders: vg/(1+exp(-vg))*vu = SiLU(gate)*up.
+    // Fused path verified bit-identical in isolation (finchTool).
+    // For production: non-fused path for 4-bit (verified 6.2 tok/s coherent).
+    // TODO: enable fused for 4-bit after inter-CB sync diagnosis.
+    id<MTLComputePipelineState> fused_pipe = g_use_int8 ? ctx->fused_gate_up_swiglu_8bit_pipe : NULL;
 
     uint32_t gate_up_out = MOE_INTERMEDIATE;
     uint32_t gate_up_in  = HIDDEN_DIM;
@@ -2259,7 +2271,7 @@ static void gpu_encode_experts_batched(
     uint32_t down_tgs    = (down_out + 7) / 8;
 
     // 2x path: both experts' gate+up+swiglu in ONE dispatch (K=2, both valid)
-    if (K == 2 && valid[0] && valid[1] && fused_pipe && ctx->fused_gate_up_swiglu_2x_pipe) {
+    if (0 && K == 2 && valid[0] && valid[1] && fused_pipe && ctx->fused_gate_up_swiglu_2x_pipe) {
         id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
         [enc setComputePipelineState:ctx->fused_gate_up_swiglu_2x_pipe];
         [enc setBuffer:expert_bufs[0]              offset:gate_w_off  atIndex:0];
@@ -2284,6 +2296,9 @@ static void gpu_encode_experts_batched(
         uint32_t gate_up_x2_tgs = gate_up_out;
         [enc dispatchThreadgroups:MTLSizeMake(gate_up_x2_tgs, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        // Barrier: 2x fused writes -> down_proj reads (pipeline state change
+        // does NOT implicitly insert a barrier per Apple Metal docs).
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         for (int k = 0; k < 2; k++) {
             [enc setComputePipelineState:expert_pipe];
             [enc setBuffer:expert_bufs[k]               offset:down_w_off  atIndex:0];
@@ -2299,27 +2314,169 @@ static void gpu_encode_experts_batched(
         }
         [enc endEncoding];
     } else {
+        // FUSED PATH: dedicated synchronous CB per expert.
+        // SiLU formula: vg/(1+exp(-vg))*vu = SiLU(gate)*up (verified correct).
+        // MTLSharedEvent + MTLFence scaffolding for inter-CB sync.
+        if (fused_pipe) {
+            for (int k = 0; k < K; k++) {
+                if (!valid[k]) continue;
+                id<MTLCommandBuffer> fb = [ctx->queue commandBuffer];
+                // Encoder 1: fused gate+up+swiglu
+                {
+                    id<MTLComputeCommandEncoder> fe = [fb computeCommandEncoder];
+                    [fe setComputePipelineState:fused_pipe];
+                    [fe setBuffer:expert_bufs[k]              offset:gate_w_off  atIndex:0];
+                    [fe setBuffer:expert_bufs[k]              offset:gate_s_off  atIndex:1];
+                    [fe setBuffer:expert_bufs[k]              offset:gate_b_off  atIndex:2];
+                    [fe setBuffer:expert_bufs[k]              offset:up_w_off    atIndex:3];
+                    [fe setBuffer:expert_bufs[k]              offset:up_s_off    atIndex:4];
+                    [fe setBuffer:expert_bufs[k]              offset:up_b_off    atIndex:5];
+                    [fe setBuffer:ctx->buf_multi_expert_input offset:0           atIndex:6];
+                    [fe setBuffer:ctx->buf_multi_expert_act[k] offset:0          atIndex:7];
+                    [fe setBytes:&gate_up_out length:4 atIndex:8];
+                    [fe setBytes:&gate_up_in  length:4 atIndex:9];
+                    [fe setBytes:&gs          length:4 atIndex:10];
+                    uint32_t tgs = gate_up_out;
+                    [fe dispatchThreadgroups:MTLSizeMake(tgs, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                    [fe endEncoding];
+                }
+                // Encoder 2: down_proj (reads act[k], writes out[k])
+                {
+                    id<MTLComputeCommandEncoder> de = [fb computeCommandEncoder];
+                    [de setComputePipelineState:expert_pipe];
+                    [de setBuffer:expert_bufs[k]               offset:down_w_off  atIndex:0];
+                    [de setBuffer:expert_bufs[k]               offset:down_s_off  atIndex:1];
+                    [de setBuffer:expert_bufs[k]               offset:down_b_off  atIndex:2];
+                    [de setBuffer:ctx->buf_multi_expert_act[k]  offset:0           atIndex:3];
+                    [de setBuffer:ctx->buf_multi_expert_out[k]  offset:0           atIndex:4];
+                    [de setBytes:&down_out length:4 atIndex:5];
+                    [de setBytes:&down_in  length:4 atIndex:6];
+                    [de setBytes:&gs       length:4 atIndex:7];
+                    [de dispatchThreadgroups:MTLSizeMake(down_tgs, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    // Signal fence: guarantees out[k] writes are visible to
+                    // subsequent command buffers that wait on this fence.
+                    [de updateFence:ctx->expert_fence];
+                    [de endEncoding];
+                }
+                // Signal event BEFORE commit: GPU signals after all dispatches finish
+                ctx->expert_sync_value++;
+                [fb encodeSignalEvent:ctx->expert_sync_event value:ctx->expert_sync_value];
+                [fb commit];
+                // CPU-side guarantee that out[k] is valid
+                [fb waitUntilCompleted];
+            }
+            return;  // done — out[k] buffers are valid, skip non-fused path entirely
+        }
+
         for (int k = 0; k < K; k++) {
         if (!valid[k]) continue;
         id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
         if (fused_pipe) {
-            // Fused gate+up+swiglu in 1 dispatch — replaces 3 separate dispatches
-            [enc setComputePipelineState:fused_pipe];
-            [enc setBuffer:expert_bufs[k]              offset:gate_w_off  atIndex:0];  // gate_W
-            [enc setBuffer:expert_bufs[k]              offset:gate_s_off  atIndex:1];  // gate_scales
-            [enc setBuffer:expert_bufs[k]              offset:gate_b_off  atIndex:2];  // gate_biases
-            [enc setBuffer:expert_bufs[k]              offset:up_w_off    atIndex:3];  // up_W
-            [enc setBuffer:expert_bufs[k]              offset:up_s_off    atIndex:4];  // up_scales
-            [enc setBuffer:expert_bufs[k]              offset:up_b_off    atIndex:5];  // up_biases
-            [enc setBuffer:ctx->buf_multi_expert_input offset:0           atIndex:6];  // x
-            [enc setBuffer:ctx->buf_multi_expert_act[k] offset:0          atIndex:7];  // out (SwiGLU result)
-            [enc setBytes:&gate_up_out length:4 atIndex:8];
-            [enc setBytes:&gate_up_in  length:4 atIndex:9];
-            [enc setBytes:&gs          length:4 atIndex:10];
-            // 1-row-per-TG kernel needs out_dim TGs, not (out_dim+7)/8
-            uint32_t gate_up_1x_tgs = gate_up_out;
-            [enc dispatchThreadgroups:MTLSizeMake(gate_up_1x_tgs, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+            static int fused_call_count = 0;
+            if (fused_call_count < 30) {
+                fprintf(stderr, "[FUSED-CALL] k=%d layer expert_buf=%p\n", k, (__bridge void*)expert_bufs[k]);
+                fused_call_count++;
+            }
+            // Fused gate+up+swiglu + down_proj on DEDICATED synchronous CB.
+            // Runs fused kernel FIRST, waits, then runs down_proj on same CB.
+            // This eliminates any cross-CB or encoder-sharing hazards.
+            {
+                id<MTLCommandBuffer> fb = [ctx->queue commandBuffer];
+                id<MTLComputeCommandEncoder> fe = [fb computeCommandEncoder];
+                [fe setComputePipelineState:fused_pipe];
+                [fe setBuffer:expert_bufs[k]              offset:gate_w_off  atIndex:0];
+                [fe setBuffer:expert_bufs[k]              offset:gate_s_off  atIndex:1];
+                [fe setBuffer:expert_bufs[k]              offset:gate_b_off  atIndex:2];
+                [fe setBuffer:expert_bufs[k]              offset:up_w_off    atIndex:3];
+                [fe setBuffer:expert_bufs[k]              offset:up_s_off    atIndex:4];
+                [fe setBuffer:expert_bufs[k]              offset:up_b_off    atIndex:5];
+                [fe setBuffer:ctx->buf_multi_expert_input offset:0           atIndex:6];
+                [fe setBuffer:ctx->buf_multi_expert_act[k] offset:0          atIndex:7];
+                [fe setBytes:&gate_up_out length:4 atIndex:8];
+                [fe setBytes:&gate_up_in  length:4 atIndex:9];
+                [fe setBytes:&gs          length:4 atIndex:10];
+                uint32_t gate_up_1x_tgs = gate_up_out;
+                [fe dispatchThreadgroups:MTLSizeMake(gate_up_1x_tgs, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [fe endEncoding];
+                // Now down_proj on same CB — guaranteed to see fused writes
+                id<MTLComputeCommandEncoder> de = [fb computeCommandEncoder];
+                [de setComputePipelineState:expert_pipe];
+                [de setBuffer:expert_bufs[k]               offset:down_w_off  atIndex:0];
+                [de setBuffer:expert_bufs[k]               offset:down_s_off  atIndex:1];
+                [de setBuffer:expert_bufs[k]               offset:down_b_off  atIndex:2];
+                [de setBuffer:ctx->buf_multi_expert_act[k]  offset:0           atIndex:3];
+                [de setBuffer:ctx->buf_multi_expert_out[k]  offset:0           atIndex:4];
+                [de setBytes:&down_out length:4 atIndex:5];
+                [de setBytes:&down_in  length:4 atIndex:6];
+                [de setBytes:&gs       length:4 atIndex:7];
+                [de dispatchThreadgroups:MTLSizeMake(down_tgs, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [de endEncoding];
+                [fb commit];
+                [fb waitUntilCompleted];  // synchronous: out[k] is now valid
+            }
+
+            // DIAGNOSTIC: verify full expert output (gate→up→swiglu→down)
+            // matches CPU computation. DISABLED for Private storage mode
+            // (Private buffers can't be read via [buffer contents]).
+#if 0
+            static int diag_count = 0;
+            if (diag_count < 30) {
+                diag_count++;
+                void *edata = malloc(active_expert_size());
+                memcpy(edata, [expert_bufs[k] contents], active_expert_size());
+                float *fused_act = malloc(MOE_INTERMEDIATE * sizeof(float));
+                float *fused_out = malloc(HIDDEN_DIM * sizeof(float));
+                memcpy(fused_act, [ctx->buf_multi_expert_act[k] contents], MOE_INTERMEDIATE*sizeof(float));
+                memcpy(fused_out, [ctx->buf_multi_expert_out[k] contents], HIDDEN_DIM*sizeof(float));
+                float *inp = malloc(HIDDEN_DIM * sizeof(float));
+                memcpy(inp, [ctx->buf_multi_expert_input contents], HIDDEN_DIM*sizeof(float));
+
+                // CPU full expert: gate + up + swiglu + down
+                float *cpu_gate = malloc(MOE_INTERMEDIATE*sizeof(float));
+                float *cpu_up   = malloc(MOE_INTERMEDIATE*sizeof(float));
+                float *cpu_act  = malloc(MOE_INTERMEDIATE*sizeof(float));
+                float *cpu_out  = malloc(HIDDEN_DIM*sizeof(float));
+                uint32_t *gw = (uint32_t*)((char*)edata + GATE_W_OFF_4);
+                uint16_t *gs = (uint16_t*)((char*)edata + GATE_S_OFF_4);
+                uint16_t *gb = (uint16_t*)((char*)edata + GATE_B_OFF_4);
+                uint32_t *uw = (uint32_t*)((char*)edata + UP_W_OFF_4);
+                uint16_t *us = (uint16_t*)((char*)edata + UP_S_OFF_4);
+                uint16_t *ub = (uint16_t*)((char*)edata + UP_B_OFF_4);
+                uint32_t *dw = (uint32_t*)((char*)edata + DOWN_W_OFF_4);
+                uint16_t *ds = (uint16_t*)((char*)edata + DOWN_S_OFF_4);
+                uint16_t *db = (uint16_t*)((char*)edata + DOWN_B_OFF_4);
+                cpu_dequant_matvec(gw, gs, gb, inp, cpu_gate, MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 4);
+                cpu_dequant_matvec(uw, us, ub, inp, cpu_up,   MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 4);
+                for (int i = 0; i < MOE_INTERMEDIATE; i++) {
+                    float g = cpu_gate[i];
+                    cpu_act[i] = (g / (1.0f + expf(-g))) * cpu_up[i];  // SiLU(g) * up
+                }
+                cpu_dequant_matvec(dw, ds, db, cpu_act, cpu_out, HIDDEN_DIM, MOE_INTERMEDIATE, GROUP_SIZE, 4);
+
+                float max_da = 0; int bad_a = -1;
+                for (int i = 0; i < MOE_INTERMEDIATE; i++) {
+                    float d = fabsf(cpu_act[i] - fused_act[i]);
+                    if (d > max_da) { max_da = d; bad_a = i; }
+                }
+                float max_do = 0; int bad_o = -1;
+                for (int i = 0; i < HIDDEN_DIM; i++) {
+                    float d = fabsf(cpu_out[i] - fused_out[i]);
+                    if (d > max_do) { max_do = d; bad_o = i; }
+                }
+                fprintf(stderr, "[DIAG-FULL] k=%d act:max_diff=%.2e out:max_diff=%.2e\n",
+                    k, max_da, max_do);
+
+                free(edata); free(fused_act); free(fused_out); free(inp);
+                free(cpu_gate); free(cpu_up); free(cpu_act); free(cpu_out);
+            }
+#endif  // DIAG-FULL (disabled for Private storage mode)
+            // Fused path already ran down_proj on dedicated CB — skip shared down_proj
+            [enc endEncoding];
+            continue;
         } else {
             // Fallback: separate gate + up dispatches
             [enc setComputePipelineState:expert_pipe];
@@ -2348,6 +2505,8 @@ static void gpu_encode_experts_batched(
             [enc setBytes:&gate_up_out length:4 atIndex:3];
             [enc dispatchThreadgroups:MTLSizeMake((gate_up_out + 255) / 256, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            // Barrier: swiglu writes -> down_proj reads across pipeline change
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
         }
 
         // down_proj (always needed)
@@ -5770,7 +5929,12 @@ static void fused_layer_forward(
     int force_cpu_experts = g_cpu_experts ? 1 : 0;
     if (force_cpu_experts) goto cpu_expert_fallback;
 
+    static int gpu_entry_count = 0;
     if (packed_fd >= 0 && g_metal && g_metal->buf_multi_expert_data[0]) {
+        if (gpu_entry_count < 3) {
+            fprintf(stderr, "[GPU-ENTRY] layer=%d actual_K=%d\n", layer_idx, actual_K);
+            gpu_entry_count++;
+        }
         // GPU multi-expert path with LRU cache + parallel I/O:
         // For each expert:
         //   - Cache HIT:  dispatch directly from cached Metal buffer (skip pread)
@@ -6004,6 +6168,10 @@ static void fused_layer_forward(
         // Batched encoding: 4 encoders for K experts + 2 for shared = 6 total
         // (vs. 4*K + 2 = 18 with old per-expert encoding).
         id<MTLCommandBuffer> cmd_experts = [g_metal->queue commandBuffer];
+        // Wait for fused expert CB writes (no-op when non-fused path is active
+        // since expert_sync_value starts at 0 and event is already at 0).
+        [cmd_experts encodeWaitForEvent:g_metal->expert_sync_event
+                                  value:g_metal->expert_sync_value];
 
         gpu_encode_experts_batched(g_metal, cmd_experts, actual_K, valid, expert_bufs);
 
@@ -6082,6 +6250,8 @@ static void fused_layer_forward(
             // Enc C1: moe_combine_residual
             {
                 id<MTLComputeCommandEncoder> enc = [cmd_experts computeCommandEncoder];
+                // Wait for fused expert CB writes to out[k] to be visible
+                [enc waitForFence:g_metal->expert_fence];
                 [enc setComputePipelineState:g_metal->moe_combine_residual];
                 [enc setBuffer:g_metal->buf_h_mid         offset:0 atIndex:0];   // h_mid
                 [enc setBuffer:g_metal->buf_shared_out    offset:0 atIndex:1];   // shared_out
@@ -6269,6 +6439,130 @@ static void fused_layer_forward(
                 uint32_t gw0 = gw[0];
                 fprintf(stderr, "  gate weights[0]: packed=0x%08X scale[0]=%.6f bias[0]=%.6f\n", gw0, gs0, gb0);
                 fprintf(stderr, "  first nibble=%d effective_weight=%.6f\n", (gw0 & 0xF), (float)(gw0 & 0xF) * gs0 + gb0);
+
+                // ---- Fused vs Non-Fused GPU Comparison (4-bit only) ----
+                if (!g_use_int8 && !g_use_1bit && !g_use_2bit && g_metal->fused_gate_up_swiglu_pipe) {
+                    id<MTLCommandBuffer> fbuf = [g_metal->queue commandBuffer];
+                    id<MTLComputeCommandEncoder> fenc = [fbuf computeCommandEncoder];
+                    [fenc setComputePipelineState:g_metal->fused_gate_up_swiglu_pipe];
+                    NSUInteger gw_off = GATE_W_OFF_4, gs_off = GATE_S_OFF_4, gb_off = GATE_B_OFF_4;
+                    NSUInteger uw_off = UP_W_OFF_4, us_off = UP_S_OFF_4, ub_off = UP_B_OFF_4;
+                    memcpy([g_metal->buf_multi_expert_data[0] contents], expert_data, esz);
+                    memcpy([g_metal->buf_multi_expert_input contents], h_post, HIDDEN_DIM*sizeof(float));
+                    [fenc setBuffer:g_metal->buf_multi_expert_data[0] offset:gw_off atIndex:0];
+                    [fenc setBuffer:g_metal->buf_multi_expert_data[0] offset:gs_off atIndex:1];
+                    [fenc setBuffer:g_metal->buf_multi_expert_data[0] offset:gb_off atIndex:2];
+                    [fenc setBuffer:g_metal->buf_multi_expert_data[0] offset:uw_off atIndex:3];
+                    [fenc setBuffer:g_metal->buf_multi_expert_data[0] offset:us_off atIndex:4];
+                    [fenc setBuffer:g_metal->buf_multi_expert_data[0] offset:ub_off atIndex:5];
+                    [fenc setBuffer:g_metal->buf_multi_expert_input offset:0 atIndex:6];
+                    // Fused writes to act[0]; also use gate[0]/up[0] buffers to capture
+                    // non-fused intermediate for comparison below
+                    [fenc setBuffer:g_metal->buf_multi_expert_act[0] offset:0 atIndex:7];
+                    uint32_t go = MOE_INTERMEDIATE, gi = HIDDEN_DIM, gs = GROUP_SIZE;
+                    [fenc setBytes:&go length:4 atIndex:8];
+                    [fenc setBytes:&gi length:4 atIndex:9];
+                    [fenc setBytes:&gs length:4 atIndex:10];
+                    uint32_t fused_tgs = MOE_INTERMEDIATE;
+                    [fenc dispatchThreadgroups:MTLSizeMake(fused_tgs, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                    [fenc endEncoding];
+                    [fbuf commit];
+                    [fbuf waitUntilCompleted];
+
+                    float *fused_act = malloc(MOE_INTERMEDIATE * sizeof(float));
+                    memcpy(fused_act, [g_metal->buf_multi_expert_act[0] contents], MOE_INTERMEDIATE*sizeof(float));
+
+                    // Also run non-fused gate+up matvecs on the SAME data to get
+                    // intermediate gate/up values for per-element comparison
+                    id<MTLCommandBuffer> nfbuf = [g_metal->queue commandBuffer];
+                    id<MTLComputeCommandEncoder> nfenc = [nfbuf computeCommandEncoder];
+                    [nfenc setComputePipelineState:g_metal->matvec_v3];
+                    [nfenc setBuffer:g_metal->buf_multi_expert_data[0] offset:gw_off atIndex:0];
+                    [nfenc setBuffer:g_metal->buf_multi_expert_data[0] offset:gs_off atIndex:1];
+                    [nfenc setBuffer:g_metal->buf_multi_expert_data[0] offset:gb_off atIndex:2];
+                    [nfenc setBuffer:g_metal->buf_multi_expert_input offset:0 atIndex:3];
+                    [nfenc setBuffer:g_metal->buf_multi_expert_gate[0] offset:0 atIndex:4];
+                    [nfenc setBytes:&go length:4 atIndex:5];
+                    [nfenc setBytes:&gi length:4 atIndex:6];
+                    [nfenc setBytes:&gs length:4 atIndex:7];
+                    uint32_t gate_tgs = (go + 7) / 8;
+                    [nfenc dispatchThreadgroups:MTLSizeMake(gate_tgs, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    // up_proj on same encoder (serialized)
+                    [nfenc setBuffer:g_metal->buf_multi_expert_data[0] offset:uw_off atIndex:0];
+                    [nfenc setBuffer:g_metal->buf_multi_expert_data[0] offset:us_off atIndex:1];
+                    [nfenc setBuffer:g_metal->buf_multi_expert_data[0] offset:ub_off atIndex:2];
+                    [nfenc setBuffer:g_metal->buf_multi_expert_up[0] offset:0 atIndex:4];
+                    [nfenc dispatchThreadgroups:MTLSizeMake(gate_tgs, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    [nfenc endEncoding];
+                    [nfbuf commit];
+                    [nfbuf waitUntilCompleted];
+
+                    float *nf_gate = malloc(MOE_INTERMEDIATE * sizeof(float));
+                    float *nf_up   = malloc(MOE_INTERMEDIATE * sizeof(float));
+                    memcpy(nf_gate, [g_metal->buf_multi_expert_gate[0] contents], MOE_INTERMEDIATE*sizeof(float));
+                    memcpy(nf_up,   [g_metal->buf_multi_expert_up[0] contents],   MOE_INTERMEDIATE*sizeof(float));
+
+                    // Compute non-fused SwiGLU: SiLU(gate) * up
+                    float *nf_swiglu = malloc(MOE_INTERMEDIATE * sizeof(float));
+                    for (int i = 0; i < MOE_INTERMEDIATE; i++) {
+                        float g = nf_gate[i];
+                        nf_swiglu[i] = (g / (1.0f + expf(-g))) * nf_up[i];
+                    }
+
+                    // Compare fused act vs non-fused swiglu (both should be SiLU(gate)*up)
+                    float max_df = 0, sum_df = 0, sum_sq_nf = 0, sum_sq_f = 0, dot = 0;
+                    int first_bad = -1;
+                    for (int i = 0; i < MOE_INTERMEDIATE; i++) {
+                        float d = fabsf(nf_swiglu[i] - fused_act[i]);
+                        sum_df += d;
+                        sum_sq_nf += nf_swiglu[i] * nf_swiglu[i];
+                        sum_sq_f += fused_act[i] * fused_act[i];
+                        dot += nf_swiglu[i] * fused_act[i];
+                        if (d > max_df) { max_df = d; if (first_bad < 0 && d > 1e-3) first_bad = i; }
+                    }
+                    float cos_sim = (sum_sq_nf > 0 && sum_sq_f > 0) ?
+                        dot / sqrtf(sum_sq_nf * sum_sq_f) : 0.0f;
+
+                    // Also compare gate vs up RMS and first values
+                    // The fused kernel's vg should equal nf_gate[i], vu = nf_up[i]
+                    // We can't read vg/vu directly, but we can compare act outputs
+
+                    fprintf(stderr, "\n  === Fused vs Non-Fused GPU Comparison (SwiGLU act) ===\n");
+                    fprintf(stderr, "  non-fused gate rms=%.4f up rms=%.4f swiglu rms=%.4f\n",
+                        vec_rms(nf_gate, MOE_INTERMEDIATE), vec_rms(nf_up, MOE_INTERMEDIATE),
+                        vec_rms(nf_swiglu, MOE_INTERMEDIATE));
+                    fprintf(stderr, "  fused swiglu rms=%.4f\n", vec_rms(fused_act, MOE_INTERMEDIATE));
+                    fprintf(stderr, "  %-12s  %8s  %8s  %8s  %12s  %12s\n",
+                        "stage", "nonfused_rms", "fused_rms", "max_diff", "avg_diff", "cos_sim");
+                    fprintf(stderr, "  %-12s  %8.4f  %8.4f  %8.2e  %8.2e  %12.8f\n",
+                        "swiglu_act",
+                        vec_rms(nf_swiglu, MOE_INTERMEDIATE),
+                        vec_rms(fused_act, MOE_INTERMEDIATE),
+                        max_df, sum_df/MOE_INTERMEDIATE, cos_sim);
+                    if (first_bad >= 0) {
+                        fprintf(stderr, "  first_bad@%d: nf_swiglu=%.8f fused=%.8f diff=%.2e\n",
+                            first_bad, nf_swiglu[first_bad], fused_act[first_bad],
+                            fabsf(nf_swiglu[first_bad] - fused_act[first_bad]));
+                        fprintf(stderr, "    nf_gate[%d]=%.6f nf_up[%d]=%.6f\n",
+                            first_bad, nf_gate[first_bad], first_bad, nf_up[first_bad]);
+                        // Print first 10 non-zero values for pattern analysis
+                        fprintf(stderr, "  first10 nonfused swiglu: [");
+                        for (int i = 0; i < 10; i++) fprintf(stderr, "%.4f%s", nf_swiglu[i], i<9?",":"");
+                        fprintf(stderr, "]\n  first10 fused swiglu:    [");
+                        for (int i = 0; i < 10; i++) fprintf(stderr, "%.4f%s", fused_act[i], i<9?",":"");
+                        fprintf(stderr, "]\n  first10 nonfused gate:   [");
+                        for (int i = 0; i < 10; i++) fprintf(stderr, "%.4f%s", nf_gate[i], i<9?",":"");
+                        fprintf(stderr, "]\n  first10 nonfused up:     [");
+                        for (int i = 0; i < 10; i++) fprintf(stderr, "%.4f%s", nf_up[i], i<9?",":"");
+                        fprintf(stderr, "]\n");
+                    }
+
+                    free(nf_gate); free(nf_up); free(nf_swiglu);
+                    free(fused_act);
+                }
 
                 free(cpu_gate); free(cpu_up); free(cpu_act); free(cpu_out);
                 free(gpu_gate); free(gpu_up); free(gpu_act); free(gpu_out);

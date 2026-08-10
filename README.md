@@ -152,6 +152,11 @@ finchMoE/
 ├── finchmoe/
 │   ├── infer.m                # Main engine (C/Metal, ~8000 lines)
 │   ├── shaders.metal          # Metal compute kernels (~1500 lines)
+│   ├── finchTool/             # 🔧 Metal Engine Verification & Diagnostic Suite
+│   │   ├── main.m             #   Kernel isolation, pipeline audit, parity checks
+│   │   ├── engine_utils.h/m   #   Shared Metal setup + CPU reference functions
+│   │   ├── verify_core.h/m    #   Standardized ParityReport metrics
+│   │   └── README.md          #   Full documentation
 │   ├── tokenizer.h            # C BPE tokenizer (248K vocab)
 │   ├── quantize_model.py      # BF16 → 1/2/4/8-bit quantization
 │   ├── extract_weights.py     # Non-expert weight extraction
@@ -173,6 +178,54 @@ finchMoE/
 ├── turbo-fieldfare/           # Benchmark reference
 └── llama.cpp/                 # Ground truth reference
 ```
+
+## finchTool — Diagnostic Suite
+
+`finchTool` is a standalone Metal kernel verification and diagnostic tool that shares the same `shaders.metal` as the production engine. It runs kernel isolation tests, pipeline synchronization audits, and tensor parity checks — **without requiring model weights or running full generation**.
+
+### Why It Exists
+
+During development, debugging shader bugs required manually adding `fprintf` diagnostics to `infer.m`, rebuilding, running, and then removing dead code. This process was slow and a **SiLU formula regression** (`vg*vg` instead of `vg`) went undetected for hours because the inline diagnostic code had the same bug as the kernel under test.
+
+`finchTool` replaces this with structured, reproducible tests that use an **independent CPU reference implementation** — the CPU is always the oracle.
+
+### Quick Start
+
+```bash
+cd finchmoe/finchTool
+make
+./finchTool kernel --test all      # Run all kernel isolation tests
+./finchTool pipeline --test inter-cb-sync  # Audit GPU synchronization
+```
+
+### Key Capabilities
+
+| Command | What It Tests |
+|---------|---------------|
+| `kernel --test fused_mlp` | Fused gate+up+SiLU vs non-fused path — validates our most complex kernel |
+| `kernel --test matvec` | Dequant matvec at 1/2/4/8-bit vs CPU reference |
+| `kernel --test swiglu` | SiLU activation gate×σ(gate)×up |
+| `pipeline --test inter-cb-sync` | 4-step GPU cache coherency audit (single CB → separate CBs → MTLFence → MTLSharedEvent) |
+| `parity --a X.bin --b Y.bin` | Compare any two float32 tensor files |
+
+### Parity Status Levels
+
+| Status | CosSim | MaxDiff | Meaning |
+|--------|--------|---------|---------|
+| `PASS (exact)` | ≥ 0.999999 | < 1e-5 | Bit-identical (same rounding) |
+| `PASS (acceptable)` | ≥ 0.999 | < 1e-2 | FP accumulation reordering (harmless) |
+| `WARN (degraded)` | ≥ 0.98 | < 1e-1 | Quantization or precision loss |
+| `FAIL` | < 0.98 | any | Math bug, memory hazard, or corrupt data |
+
+### Design
+
+- **Separate binary, shared shaders** — links same `shaders.metal` as production but has own minimal Metal setup
+- **Synchronous by default** — all tests commit+wait, eliminating timing-dependent bugs
+- **Fresh buffers per test** — no buffer recycling, no stale-data hazards
+- **CPU is the oracle** — every GPU test computes an independent CPU reference
+- **Zero model dependency** — kernel tests use synthetic data; only layer tests need model files
+
+Full documentation: [`finchmoe/finchTool/README.md`](finchmoe/finchTool/README.md)
 
 ## Running the Engine
 
@@ -267,3 +320,5 @@ Endpoints: `POST /v1/chat/completions` (SSE streaming), `GET /v1/models`, `GET /
 6. Safetensors tensor naming inconsistency
 7. switch_mlp weights excluded from extraction
 8. **Shared expert Metal command buffer sync** (root cause of "Con Con Con" loop)
+
+For ongoing kernel validation and regression detection, use **[finchTool](finchmoe/finchTool/README.md)** — the standalone Metal verification suite that runs kernel isolation tests, pipeline audits, and tensor parity checks without requiring model weights or full generation.

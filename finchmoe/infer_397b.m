@@ -2049,7 +2049,10 @@ static void gpu_encode_experts_batched(
         down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
     id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : (g_use_1bit ? ctx->matvec_1bit : (g_use_int8 ? ctx->matvec_8bit : ctx->matvec_v3));
-    id<MTLComputePipelineState> fused_pipe = g_use_2bit ? NULL : (g_use_int8 ? ctx->fused_gate_up_swiglu_8bit_pipe : ctx->fused_gate_up_swiglu_pipe);
+    // 1-bit and 2-bit use non-fused path (different bit packing).
+    // 4-bit and 8-bit use fused gate+up+swiglu kernel (SIMD-safe reduction fixed).
+    id<MTLComputePipelineState> fused_pipe = (g_use_1bit || g_use_2bit) ? NULL :
+        (g_use_int8 ? ctx->fused_gate_up_swiglu_8bit_pipe : ctx->fused_gate_up_swiglu_pipe);
 
     uint32_t gate_up_out = MOE_INTERMEDIATE;
     uint32_t gate_up_in  = HIDDEN_DIM;
