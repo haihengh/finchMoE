@@ -206,15 +206,20 @@ kernel void fused_gate_up_swiglu(
             }
         }
     }
-    threadgroup float sg[32], su[32];
+    threadgroup float sg[32] = {0}, su[32] = {0};
     float rg = simd_sum(ga), ru = simd_sum(ua);
     uint sl = lid%32, si = lid/32, ns = (tg_size+31)/32;
     if (sl==0) { sg[si]=rg; su[si]=ru; }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (si==0 && sl<ns) {
-        float vg=simd_sum(sg[sl]), vu=simd_sum(su[sl]);
-        if (sl==0) out[tgid] = (vg/(1.0f+exp(-vg))) * vu;
-    }
+    // Use select (no branch divergence) so ALL 32 lanes of SIMD group 0
+    // participate in simd_sum. Lanes >= ns contribute 0.0f (identity).
+    // Without this, the divergent simd_sum is UB and can produce NaN.
+    float part_g = (si==0 && sl<ns) ? sg[sl] : 0.0f;
+    float part_u = (si==0 && sl<ns) ? su[sl] : 0.0f;
+    float vg = simd_sum(part_g);
+    float vu = simd_sum(part_u);
+    // SiLU(gate) * up = gate * sigmoid(gate) * up = gate / (1+exp(-gate)) * up
+    if (si==0 && sl==0) out[tgid] = (vg/(1.0f+exp(-vg))) * vu;
 }
 
 // 2-expert fused gate+up+swiglu: exactly 2x the single-expert kernel.
@@ -261,19 +266,20 @@ kernel void fused_gate_up_swiglu_2x(
             }
         }
     }
-    // Reduction: 4 values per SIMD group, sum across groups. Matches single-expert pattern.
-    threadgroup float sg0[32], su0[32], sg1[32], su1[32];
+    // Reduction: SIMD-safe cross-group sum. Use select instead of branch
+    // so all 32 lanes participate in simd_sum (divergent simd_sum is UB).
+    threadgroup float sg0[32] = {0}, su0[32] = {0}, sg1[32] = {0}, su1[32] = {0};
     float rg0=simd_sum(ga0),ru0=simd_sum(ua0),rg1=simd_sum(ga1),ru1=simd_sum(ua1);
     uint sl=lid%32, si=lid/32, ns=(tg_size+31)/32;
     if(sl==0){sg0[si]=rg0;su0[si]=ru0;sg1[si]=rg1;su1[si]=ru1;}
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if(si==0&&sl<ns){
-        float vg0=simd_sum(sg0[sl]),vu0=simd_sum(su0[sl]);
-        float vg1=simd_sum(sg1[sl]),vu1=simd_sum(su1[sl]);
-        if(sl==0){
-            out0[tgid]=(vg0/(1+exp(-vg0)))*vu0;
-            out1[tgid]=(vg1/(1+exp(-vg1)))*vu1;
-        }
+    float pg0=(si==0&&sl<ns)?sg0[sl]:0.0f, pu0=(si==0&&sl<ns)?su0[sl]:0.0f;
+    float pg1=(si==0&&sl<ns)?sg1[sl]:0.0f, pu1=(si==0&&sl<ns)?su1[sl]:0.0f;
+    float vg0=simd_sum(pg0),vu0=simd_sum(pu0);
+    float vg1=simd_sum(pg1),vu1=simd_sum(pu1);
+    if(si==0&&sl==0){
+        out0[tgid]=(vg0/(1+exp(-vg0)))*vu0;  // SiLU(gate0) * up0
+        out1[tgid]=(vg1/(1+exp(-vg1)))*vu1;  // SiLU(gate1) * up1
     }
 }
 
@@ -318,15 +324,20 @@ kernel void fused_gate_up_swiglu_8bit(
             }
         }
     }
-    threadgroup float sg[32], su[32];
+    threadgroup float sg[32] = {0}, su[32] = {0};
     float rg = simd_sum(ga), ru = simd_sum(ua);
     uint sl = lid%32, si = lid/32, ns = (tg_size+31)/32;
     if (sl==0) { sg[si]=rg; su[si]=ru; }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (si==0 && sl<ns) {
-        float vg=simd_sum(sg[sl]), vu=simd_sum(su[sl]);
-        if (sl==0) out[tgid] = (vg/(1.0f+exp(-vg))) * vu;
-    }
+    // Use select (no branch divergence) so ALL 32 lanes of SIMD group 0
+    // participate in simd_sum. Lanes >= ns contribute 0.0f (identity).
+    // Without this, the divergent simd_sum is UB and can produce NaN.
+    float part_g = (si==0 && sl<ns) ? sg[sl] : 0.0f;
+    float part_u = (si==0 && sl<ns) ? su[sl] : 0.0f;
+    float vg = simd_sum(part_g);
+    float vu = simd_sum(part_u);
+    // SiLU(gate) * up = gate * sigmoid(gate) * up = gate / (1+exp(-gate)) * up
+    if (si==0 && sl==0) out[tgid] = (vg/(1.0f+exp(-vg))) * vu;
 }
 
 // ============================================================================
