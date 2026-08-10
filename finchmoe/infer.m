@@ -3679,12 +3679,15 @@ static void lm_head_forward(WeightFile *wf, const float *hidden, float *logits) 
         return;
     }
 
-    // 4-bit path (GPU-accelerated)
+    // 4-bit path (GPU-accelerated). Use actual tensor shape for in_dim.
     if (s_info && b_info) {
         uint32_t *W = (uint32_t *)((char *)wf->data + w_info->offset);
         uint16_t *S = (uint16_t *)((char *)wf->data + s_info->offset);
         uint16_t *B = (uint16_t *)((char *)wf->data + b_info->offset);
-        fast_dequant_matvec(W, S, B, hidden, logits, VOCAB_SIZE, HIDDEN_DIM, GROUP_SIZE);
+        // in_dim = packed_cols * 8 (4-bit: 8 values per uint32)
+        int in_dim = w_info->shape[1] * 8;
+        int group_size = in_dim / s_info->shape[1];  // use actual group size from scale shape
+        fast_dequant_matvec(W, S, B, hidden, logits, VOCAB_SIZE, in_dim, group_size);
         return;
     }
 
