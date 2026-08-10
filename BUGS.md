@@ -495,3 +495,56 @@ for pair in merges:
 **Discovery Method**: Compared Python tokenizer output against C tokenizer output for the same prompt string. Python produced 26 correct tokens; C produced 25 wrong tokens. Traced the discrepancy to the merge table: `ht_lookup` for "assistant" correctly returned 74455 in the vocab hash, but BPE couldn't merge that far because all second-level merges were missing. Wrote a trace of the `bpe_process` merge loop which revealed that merges like "as"+"si" returned 0xFFFFFFFF (not found). Checked `export_tokenizer.py` and immediately saw `pair[0], pair[1]` on a string.
 
 **Lesson**: Python string indexing and string splitting are dangerously confusable. `pair[0]` on `"a s"` gives `"a"` (first char), which looks correct at a glance but is only correct by accident for single-character tokens. `pair.split(' ')` is the correct operation. Always verify tokenizer output against a reference implementation (Python `tokenizers` library) before trusting the C tokenizer.
+
+---
+
+## Bug 12: Chat Template Think Tag Causes Repetition Loops (2026-08-10)
+
+**Symptom**: Model output `</think>` as first token (closing empty think block), then leaked reasoning as regular text and degraded into repetition loops ("I'll make sure it's good." ×50).
+
+**Root Cause**: The prompt template in `tokenize_chat_message()` prepended `<think>\n` after `<|im_start|>assistant\n`. When the model saw `<think>\n` already in the prompt, it interpreted this as "thinking already started, I need to close it" and output `</think>` immediately. The model's reasoning then leaked as regular output, and without the think→answer structure, it degraded into repetition.
+
+Without `<think>` in the prompt, the model:
+1. Outputs `<think>` on its own
+2. Plans the response inside the think block
+3. Outputs `</think>`
+4. Writes the actual answer
+
+**Fix in `infer.m`**:
+```c
+// OLD: prepend <think> — model closes it immediately
+snprintf(buf, bufsz, "<think>\n");
+
+// NEW: let model output <think> itself
+buf[0] = '\0';
+```
+
+**Verification**:
+- Before fix: `</think>\nThe user wants a 450 word essay... I'll make sure it's good.` ×50
+- After fix: `<think>\nThe user wants a short paragraph...\n</think>\n"Air conditioning revolutionized comfort. Willis Carrier invented it in 1902..."`
+
+**Discovery Method**: Tested raw text completion (no chat template) — model produced 80+ coherent tokens. Tested chat template without think tag — model output `<think>` itself and produced proper think→plan→answer flow. Tested with think tag — model immediately closed it. Isolated to the `<think>\n` string in the prompt.
+
+**Lesson**: The quantized model can't distinguish "think block is already open" from "think block was just opened by me." Letting it control think tag boundaries eliminates the confusion. The official Qwen chat template includes `<think>\n` but the quantized model handles it poorly.
+
+---
+
+## Bug 13: Memory Safety Margin Blocks GPU Zero-Copy (2026-08-10)
+
+**Symptom**: After running a few tests, model fell back to CPU matmuls at ~800ms/token (30× slower than GPU 170ms/token). Output became garbage. Available memory was 4-5 GB on a 16 GB M4 — plenty for a 5 GB model, but the check refused to wrap the weight file.
+
+**Root Cause**: `metal_set_weights()` required `available_memory >= weight_file_size + 2GB_safety_margin`. With 4.62 GB weights + 2 GB margin = 6.62 GB needed. Available memory dropped to 4-5 GB after several runs (page cache from previous mmaps), blocking GPU zero-copy.
+
+The 2 GB safety margin (`METAL_SAFETY_MARGIN_BYTES`) was designed for 17 GB weight files (Qwen 3.5 397B) and discrete GPUs with separate VRAM. On Apple Silicon unified memory, `newBufferWithBytesNoCopy` with `MTLResourceStorageModeShared` is zero-copy — it creates GPU page-table mappings into the mmap'd file without allocating physical pages. A 2 GB margin is unnecessary.
+
+**Fix** (2 changes):
+1. Reduce `METAL_SAFETY_MARGIN_BYTES` from 2 GB to 256 MB
+2. Attempt GPU wrap even when below margin (warn but don't block). Only block at <256 MB (critical memory pressure).
+
+**Verification**:
+- Before fix: `⚠️ Available memory (4.53 GB) < peak GPU usage (5.06 GB)` → fallback, 800ms/token prefill
+- After fix: `[metal] Weight file wrapped as Metal buffer (4.62 GB, zero-copy)` at 4.53 GB available, 170ms/token prefill
+
+**Lesson**: Apple Silicon unified memory is fundamentally different from discrete GPU architectures. Zero-copy Metal buffers don't allocate physical pages — they just create GPU page-table mappings. Memory safety margins designed for discrete GPUs are unnecessarily conservative and can block correct operation. Always test on target hardware.
+
+**Remaining**: Weight file is 4.96 GB (BF16 non-expert weights). Should be ~1.5 GB with non-expert quantization (embeddings + lm_head at 8-bit saves 1 GB, full 4-bit saves ~3.5 GB). This is the real fix for fitting in 2 GB RAM.
