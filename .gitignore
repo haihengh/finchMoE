@@ -50,5 +50,6 @@ model_weights.bin
 model_weights.json
 vocab.bin
 finchmoe/infer
-finchmoe/infer_*
+finchmoe/infer_397b.m
+finchmoe/finchmoe-deepseek
 *.gguf
