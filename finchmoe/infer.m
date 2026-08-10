@@ -9168,23 +9168,18 @@ int main(int argc, char **argv) {
             fprintf(stderr, "  [gen %d/%d] token_id=%d (%.0f ms, %.2f tok/s)",
                     gen, max_tokens, next_token, tok_time, 1000.0 / tok_time);
 
-            // MTP speculative draft: predict next token, verify with main model
-            // Measure acceptance rate without emitting drafts (quality-preserving)
+            // MTP speculative draft
             static int mtp_attempts = 0, mtp_accepted = 0;
             if (g_use_mtp && g_mtp.loaded && total_generated < max_tokens - 1) {
-                float mtp_logits[VOCAB_SIZE];
+                float *mtp_logits = malloc(VOCAB_SIZE * sizeof(float));
                 int mtp_token;
                 float saved_hidden[HIDDEN_DIM];
                 memcpy(saved_hidden, hidden, HIDDEN_DIM * sizeof(float));
 
                 if (mtp_forward(wf, hidden, next_token, &mtp_token, mtp_logits)) {
                     mtp_attempts++;
-                    // Run main model forward on the SAME token to get verification
-                    // We already have the main model's next token in `next_token`
-                    // Compare MTP draft against what main model actually predicted
                     int draft_match = (mtp_token == next_token);
                     if (draft_match) mtp_accepted++;
-
                     if (mtp_attempts % 10 == 0 || draft_match) {
                         fprintf(stderr, "  mtp=%d draft=%d %s (rate=%d/%d=%.0f%%)\n",
                                 next_token, mtp_token,
@@ -9192,10 +9187,9 @@ int main(int argc, char **argv) {
                                 mtp_accepted, mtp_attempts,
                                 100.0 * mtp_accepted / mtp_attempts);
                     }
-
-                    // Restore hidden (MTP modified it)
                     memcpy(hidden, saved_hidden, HIDDEN_DIM * sizeof(float));
                 }
+                free(mtp_logits);
             }
             fprintf(stderr, "\n");
         }

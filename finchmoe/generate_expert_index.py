@@ -44,20 +44,23 @@ def main():
         if '.switch_mlp.' not in tensor_name:
             continue
 
-        # Skip MTP (Multi-Token Prediction) layers — we only want the main model experts
-        if tensor_name.startswith('mtp.') or '.mtp.' in tensor_name:
-            continue
+        # Handle MTP tensors: map to layer 40 (special MTP layer index)
+        is_mtp = tensor_name.startswith('mtp.') or '.mtp.' in tensor_name
 
         parts = tensor_name.split('.')
-        # Find layer index: look for 'layers' preceded by 'model' (not 'mtp')
         layer_idx = None
-        for i, p in enumerate(parts):
-            if p == 'layers' and i + 1 < len(parts) and i > 0 and parts[i-1] == 'model':
-                try:
-                    layer_idx = int(parts[i + 1])
-                except ValueError:
-                    pass
-                break
+        if is_mtp:
+            # MTP tensors: mtp.layers.0.mlp.switch_mlp.* → layer 40
+            layer_idx = 40
+        else:
+            # Main model: model.layers.N.mlp.switch_mlp.*
+            for i, p in enumerate(parts):
+                if p == 'layers' and i + 1 < len(parts) and i > 0 and parts[i-1] == 'model':
+                    try:
+                        layer_idx = int(parts[i + 1])
+                    except ValueError:
+                        pass
+                    break
 
         if layer_idx is None:
             continue
