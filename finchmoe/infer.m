@@ -2279,7 +2279,9 @@ static void gpu_encode_experts_batched(
         [enc setBytes:&gate_up_out length:4 atIndex:15];
         [enc setBytes:&gate_up_in  length:4 atIndex:16];
         [enc setBytes:&gs          length:4 atIndex:17];
-        [enc dispatchThreadgroups:MTLSizeMake(gate_up_tgs, 1, 1)
+        // 2x kernel: 1 row per threadgroup (no ROWS_PER_TG), needs out_dim TGs.
+        uint32_t gate_up_x2_tgs = gate_up_out;
+        [enc dispatchThreadgroups:MTLSizeMake(gate_up_x2_tgs, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         for (int k = 0; k < 2; k++) {
             [enc setComputePipelineState:expert_pipe];
