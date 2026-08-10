@@ -9197,7 +9197,7 @@ int main(int argc, char **argv) {
                     mtp_attempts++;
                     int draft_match = (mtp_token == next_token);
                     if (draft_match) mtp_accepted++;
-                    if (mtp_attempts % 10 == 0 || draft_match) {
+                    if (mtp_attempts % 10 == 0 || draft_match || mtp_attempts < 5) {
                         fprintf(stderr, "  mtp=%d draft=%d %s (rate=%d/%d=%.0f%%)\n",
                                 next_token, mtp_token,
                                 draft_match ? "ACCEPT" : "reject",
