@@ -65,13 +65,33 @@ static inline float bf16_to_f32(uint16_t bf16) {
 }
 
 // FP4 e2m1: 2 exponent bits, 1 mantissa bit
-// Values: 0, 0.5, 1.0, 1.5 (and their negatives for sign=1)
 static const float e2m1_table[16] = {
-     0.0f, 0.5f, 1.0f, 1.5f,  // 0000-0011
-     2.0f, 3.0f, 4.0f, 6.0f,  // 0100-0111 (sign=0, exp=10,11 -> larger values)
-    -0.0f,-0.5f,-1.0f,-1.5f,   // 1000-1011
-    -2.0f,-3.0f,-4.0f,-6.0f    // 1100-1111
+     0.0f, 0.5f, 1.0f, 1.5f,
+     2.0f, 3.0f, 4.0f, 6.0f,
+    -0.0f,-0.5f,-1.0f,-1.5f,
+    -2.0f,-3.0f,-4.0f,-6.0f
 };
+
+// FP8 e4m3: 1 sign + 4 exponent + 3 mantissa
+static inline float f8_e4m3_to_f32(uint8_t v) {
+    if (v == 0) return 0.0f;
+    int sign = (v >> 7) & 1;
+    int exp  = (v >> 2) & 0x1F;  // 5 bits (e4m3 uses only 4 exponent bits with special values)
+    int mant = v & 0x3;           // 2 bits (e4m3 has 3 mantissa bits? No — e4m3: 1 sign + 4 exp + 3 mantissa = 8 bits)
+    // e4m3: 1|4|3 format. Bit layout: s|eeee|mmm
+    mant = v & 0x7;  // 3 mantissa bits
+    exp  = (v >> 3) & 0xF;  // 4 exponent bits
+    if (exp == 0) {
+        // Subnormal
+        float val = (float)mant / 8.0f * powf(2.0f, -6.0f);
+        return sign ? -val : val;
+    }
+    if (exp == 0xF) {
+        return sign ? -INFINITY : INFINITY;  // NaN/Inf
+    }
+    float val = (1.0f + (float)mant / 8.0f) * powf(2.0f, (float)exp - 7.0f);
+    return sign ? -val : val;
+}
 
 // ue8m0 scale: unsigned 8-bit exponent, no mantissa
 static inline float ue8m0_to_f32(uint8_t scale) {
@@ -259,6 +279,9 @@ static SSModel *ss_load(const char *model_path) {
                 NSString *dtype = tmeta[@"dtype"];
                 if ([dtype isEqualToString:@"F32"]) t->dtype = 1;
                 else if ([dtype isEqualToString:@"F4_E2M1"] || [dtype isEqualToString:@"F4"]) t->dtype = 2;
+                else if ([dtype isEqualToString:@"F8_E4M3"]) t->dtype = 3;
+                else if ([dtype isEqualToString:@"I8"]) t->dtype = 4;  // INT8 quant
+                else if ([dtype isEqualToString:@"I64"]) t->dtype = 5; // INT64 (tid2eid)
                 else t->dtype = 0;
             }
             t->fd = (sidx >= 0) ? m->shard_fds[sidx] : -1;
@@ -282,7 +305,7 @@ static const void *ss_get(SSModel *m, const char *name, int *out_dtype, int *out
             // Safetensors format: 8 bytes header_len + header_len bytes JSON + data
             uint64_t header_len = *(const uint64_t *)t->mmap_base;
             size_t header_bytes = header_len;
-            if (out_dtype) *out_dtype = t->dtype;
+            if (out_dtype) *out_dtype = t->dtype;  // 0=BF16, 1=F32, 2=FP4, 3=F8_E4M3
             if (out_nelem) {
                 int n = 1;
                 for (int d = 0; d < t->ndim; d++) n *= t->shape[d];
@@ -306,6 +329,9 @@ static float *ss_get_f32(SSModel *m, const char *name, int *out_nelem) {
     } else if (dtype == 0) {  // BF16
         const uint16_t *src = (const uint16_t *)data;
         for (int i = 0; i < nelem; i++) buf[i] = bf16_to_f32(src[i]);
+    } else if (dtype == 3) {  // F8_E4M3
+        const uint8_t *src = (const uint8_t *)data;
+        for (int i = 0; i < nelem; i++) buf[i] = f8_e4m3_to_f32(src[i]);
     } else {
         free(buf); return NULL;  // FP4 not supported as F32
     }
@@ -426,38 +452,43 @@ static void deepseek_attention(
     SSModel *m, int layer_idx,
     const float *x,              // [HIDDEN_DIM] input
     float *attn_out,             // [HIDDEN_DIM] output
-    // KV cache (simple: just store single-token K,V for now)
     float *kv_k_cache, float *kv_v_cache,
     int *kv_len, int position)
 {
+    write(2, "A", 1);
     int q_dim = NUM_Q_HEADS * HEAD_DIM;   // 32768
     int kv_dim = NUM_KV_HEADS * HEAD_DIM;  // 512
 
-    // Load LoRA Q weights
+    // Load LoRA Q weights (may be F8_E4M3 — large allocations)
     char name[256];
+    int q_dtype = 0;
     snprintf(name, sizeof(name), "layers.%d.attn.wq_a.weight", layer_idx);
+    const void *wq_a_raw = ss_get(m, name, &q_dtype, NULL);
+    // Skip F8 attention for now — pass through
+    if (q_dtype == 3) {
+        write(2, "A8", 2);  // F8 attention — skip
+        memcpy(attn_out, x, HIDDEN_DIM * sizeof(float));
+        return;
+    }
     float *wq_a = ss_get_f32(m, name, NULL);
     snprintf(name, sizeof(name), "layers.%d.attn.wq_b.weight", layer_idx);
     float *wq_b = ss_get_f32(m, name, NULL);
 
-    // Load LoRA O weights
     snprintf(name, sizeof(name), "layers.%d.attn.wo_a.weight", layer_idx);
     float *wo_a = ss_get_f32(m, name, NULL);
     snprintf(name, sizeof(name), "layers.%d.attn.wo_b.weight", layer_idx);
     float *wo_b = ss_get_f32(m, name, NULL);
 
-    // Load WKV (combined K/V projection)
     snprintf(name, sizeof(name), "layers.%d.attn.wkv.weight", layer_idx);
     float *wkv = ss_get_f32(m, name, NULL);
 
-    // Load norms
     snprintf(name, sizeof(name), "layers.%d.attn.q_norm.weight", layer_idx);
     float *q_norm = ss_get_f32(m, name, NULL);
     snprintf(name, sizeof(name), "layers.%d.attn.kv_norm.weight", layer_idx);
     float *kv_norm = ss_get_f32(m, name, NULL);
 
     if (!wq_a || !wq_b || !wo_a || !wo_b || !wkv || !q_norm || !kv_norm) {
-        // Fallback: pass through
+        write(2, "A0", 2);
         memcpy(attn_out, x, HIDDEN_DIM * sizeof(float));
         free(wq_a); free(wq_b); free(wo_a); free(wo_b); free(wkv); free(q_norm); free(kv_norm);
         return;
@@ -623,76 +654,151 @@ static void deepseek_moe(
         int eid = selected[k];
         float weight = weights[k];
 
-        // Load expert weights (FP4 MXFP4 format)
+        // Load expert weights (I8 with F8_E8M0 scale)
+        // w1: [out, in] I8, scale: [out, in/block_size] F8_E8M0
         snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w1.weight", layer_idx, eid);
-        int dtype = 0, nelem = 0;
-        const void *w1_data = ss_get(m, name, &dtype, &nelem);
-        if (!w1_data || dtype != 2) continue;  // skip if not FP4
+        int w1_dt = 0;
+        const int8_t *w1_i8 = (const int8_t *)ss_get(m, name, &w1_dt, NULL);
+        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w1.scale", layer_idx, eid);
+        int s1_dt = 0;
+        const uint8_t *w1_scale = ss_get(m, name, &s1_dt, NULL);
+        if (!w1_i8 || !w1_scale) { write(2, "e", 1); continue; }
 
-        // w1 shape: [2*MOE_INTERMEDIATE, HIDDEN_DIM] = [4096, 4096]
-        // Get actual shape from tensor
-        int w1_out = MOE_INTERMEDIATE * 2, w1_in = HIDDEN_DIM;
+        // Get actual shapes
+        int w1_out = MOE_INTERMEDIATE * 2, w1_in = HIDDEN_DIM, w1_blk = 16;
         for (int i = 0; i < m->num_tensors; i++) {
             if (strcmp(m->tensors[i].tensor_name, name) == 0) {
                 w1_out = m->tensors[i].shape[0];
-                w1_in  = m->tensors[i].shape[1] * MXFP4_BLOCK_SIZE;
+                w1_in  = m->tensors[i].shape[1];
+                w1_blk = w1_in / m->tensors[i].shape[1];  // will fix below
                 break;
             }
         }
-
-        // w1 matvec: gate_up = w1 @ x
-        float *gate_up = calloc(w1_out, sizeof(float));
-        mxfp4_dequant_matvec((const uint8_t *)w1_data, x, gate_up, w1_out, w1_in);
-
-        // w2 matvec: down = w2 @ act
-        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w2.weight", layer_idx, eid);
-        const void *w2_data = ss_get(m, name, NULL, NULL);
-        int w2_out = MOE_INTERMEDIATE, w2_in = w1_out; // w2 takes w1 output
+        // Re-fetch w1 weight shape
+        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w1.weight", layer_idx, eid);
         for (int i = 0; i < m->num_tensors; i++) {
             if (strcmp(m->tensors[i].tensor_name, name) == 0) {
-                w2_out = m->tensors[i].shape[0];
-                w2_in  = m->tensors[i].shape[1] * MXFP4_BLOCK_SIZE;
+                w1_out = m->tensors[i].shape[0];
+                w1_in  = m->tensors[i].shape[1];
                 break;
             }
         }
+        // Get scale shape
+        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w1.scale", layer_idx, eid);
+        int w1_scale_cols = 128;
+        for (int i = 0; i < m->num_tensors; i++) {
+            if (strcmp(m->tensors[i].tensor_name, name) == 0) {
+                w1_scale_cols = m->tensors[i].shape[1];
+                break;
+            }
+        }
+        w1_blk = w1_in / w1_scale_cols;  // block size along input dim
 
-        // SwiGLU on gate_up: act = clamp(silu(first_half) * second_half, ±SWIGLU_LIMIT)
-        float *act = calloc(w1_out / 2, sizeof(float));
-        for (int i = 0; i < w1_out / 2; i++) {
+        // I8 dequant matvec: out = (w_i8 * scale) @ x
+        float *gate_up = calloc(w1_out, sizeof(float));
+        for (int row = 0; row < w1_out; row++) {
+            float acc = 0;
+            const int8_t *wr = w1_i8 + (size_t)row * w1_in;
+            const uint8_t *sr = w1_scale + (size_t)row * w1_scale_cols;
+            for (int blk = 0; blk < w1_scale_cols; blk++) {
+                float scale = ue8m0_to_f32(sr[blk]);
+                int base = blk * w1_blk;
+                for (int j = 0; j < w1_blk; j++) {
+                    acc += (float)(int)wr[base + j] * scale * x[base + j];
+                }
+            }
+            gate_up[row] = acc;
+        }
+
+        // SwiGLU: act = clamp(silu(first_half) * second_half, ±SWIGLU_LIMIT)
+        int half = w1_out / 2;
+        float *act = calloc(half, sizeof(float));
+        for (int i = 0; i < half; i++) {
             float g = gate_up[i];
             float silu_g = g / (1.0f + expf(-g));
-            float val = silu_g * gate_up[i + w1_out / 2];
+            float val = silu_g * gate_up[i + half];
             act[i] = fmaxf(-SWIGLU_LIMIT, fminf(SWIGLU_LIMIT, val));
         }
         free(gate_up);
 
-        float *down = calloc(w2_out, sizeof(float));
-        if (w2_data) {
-            mxfp4_dequant_matvec((const uint8_t *)w2_data, act, down, w2_out, w2_in);
-        }
-
-        // w3 matvec: out = w3 @ down
-        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w3.weight", layer_idx, eid);
-        const void *w3_data = ss_get(m, name, NULL, NULL);
-        int w3_out = HIDDEN_DIM, w3_in = w2_out;
+        // w2: [out, half] I8 with scale
+        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w2.weight", layer_idx, eid);
+        const int8_t *w2_i8 = (const int8_t *)ss_get(m, name, NULL, NULL);
+        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w2.scale", layer_idx, eid);
+        const uint8_t *w2_scale = ss_get(m, name, NULL, NULL);
+        int w2_out = MOE_INTERMEDIATE, w2_in = half, w2_blk = 16, w2_scols = 64;
         for (int i = 0; i < m->num_tensors; i++) {
-            if (strcmp(m->tensors[i].tensor_name, name) == 0) {
-                w3_out = m->tensors[i].shape[0];
-                w3_in  = m->tensors[i].shape[1] * MXFP4_BLOCK_SIZE;
-                break;
+            if (strstr(m->tensors[i].tensor_name, "w2.weight") && strstr(m->tensors[i].tensor_name, "ffn.experts")) {
+                int l = -1, e = -1;
+                sscanf(m->tensors[i].tensor_name, "layers.%d.ffn.experts.%d.w2.weight", &l, &e);
+                if (l == layer_idx && e == eid) { w2_out = m->tensors[i].shape[0]; w2_in = m->tensors[i].shape[1]; break; }
             }
         }
+        // Get w2 scale cols
+        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w2.scale", layer_idx, eid);
+        for (int i = 0; i < m->num_tensors; i++) {
+            if (strstr(m->tensors[i].tensor_name, name)) {
+                w2_scols = m->tensors[i].shape[1]; break;
+            }
+        }
+        w2_blk = w2_in / w2_scols;
+
+        float *down = calloc(w2_out, sizeof(float));
+        if (w2_i8 && w2_scale) {
+            for (int row = 0; row < w2_out; row++) {
+                float acc = 0;
+                const int8_t *wr = w2_i8 + (size_t)row * w2_in;
+                const uint8_t *sr = w2_scale + (size_t)row * w2_scols;
+                for (int blk = 0; blk < w2_scols; blk++) {
+                    float scale = ue8m0_to_f32(sr[blk]);
+                    int base = blk * w2_blk;
+                    for (int j = 0; j < w2_blk; j++) {
+                        acc += (float)(int)wr[base + j] * scale * act[base + j];
+                    }
+                }
+                down[row] = acc;
+            }
+        }
+        free(act);
+
+        // w3: [out, w2_out] I8 with scale
+        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w3.weight", layer_idx, eid);
+        const int8_t *w3_i8 = (const int8_t *)ss_get(m, name, NULL, NULL);
+        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w3.scale", layer_idx, eid);
+        const uint8_t *w3_scale = ss_get(m, name, NULL, NULL);
+        int w3_out = HIDDEN_DIM, w3_in = w2_out, w3_blk = 16, w3_scols = 128;
+        for (int i = 0; i < m->num_tensors; i++) {
+            if (strstr(m->tensors[i].tensor_name, "w3.weight") && strstr(m->tensors[i].tensor_name, "ffn.experts")) {
+                int l = -1, e = -1;
+                sscanf(m->tensors[i].tensor_name, "layers.%d.ffn.experts.%d.w3.weight", &l, &e);
+                if (l == layer_idx && e == eid) { w3_out = m->tensors[i].shape[0]; w3_in = m->tensors[i].shape[1]; break; }
+            }
+        }
+        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w3.scale", layer_idx, eid);
+        for (int i = 0; i < m->num_tensors; i++) {
+            if (strstr(m->tensors[i].tensor_name, name)) { w3_scols = m->tensors[i].shape[1]; break; }
+        }
+        w3_blk = w3_in / w3_scols;
 
         float *expert_out = calloc(w3_out, sizeof(float));
-        if (w3_data) {
-            mxfp4_dequant_matvec((const uint8_t *)w3_data, down, expert_out, w3_out, w3_in);
+        if (w3_i8 && w3_scale) {
+            for (int row = 0; row < w3_out; row++) {
+                float acc = 0;
+                const int8_t *wr = w3_i8 + (size_t)row * w3_in;
+                const uint8_t *sr = w3_scale + (size_t)row * w3_scols;
+                for (int blk = 0; blk < w3_scols; blk++) {
+                    float scale = ue8m0_to_f32(sr[blk]);
+                    int base = blk * w3_blk;
+                    for (int j = 0; j < w3_blk; j++) {
+                        acc += (float)(int)wr[base + j] * scale * down[base + j];
+                    }
+                }
+                expert_out[row] = acc;
+            }
         }
-        free(down); free(act);
+        free(down);
 
-        // Accumulate weighted output
-        for (int i = 0; i < w3_out; i++) {
-            moe_out[i] += weight * expert_out[i];
-        }
+        for (int i = 0; i < w3_out; i++) moe_out[i] += weight * expert_out[i];
         free(expert_out);
     }
 }
@@ -707,10 +813,12 @@ static void deepseek_layer_forward(
     float *kv_k_cache, float *kv_v_cache,
     int *kv_len, int position, int token_id)
 {
+    write(2, "L", 1);
     char name[256];
     float buf[HIDDEN_DIM];
 
     // 1. Input norm
+    write(2, "1", 1);
     snprintf(name, sizeof(name), "layers.%d.attn_norm.weight", layer_idx);
     float *attn_norm = ss_get_f32(m, name, NULL);
     float *normed = malloc(HIDDEN_DIM * sizeof(float));
@@ -722,6 +830,7 @@ static void deepseek_layer_forward(
     free(attn_norm);
 
     // 2. Attention (with residual)
+    write(2, "2", 1);
     float *attn_out = calloc(HIDDEN_DIM, sizeof(float));
     deepseek_attention(m, layer_idx, normed, attn_out,
                        kv_k_cache, kv_v_cache, kv_len, position);
@@ -729,6 +838,7 @@ static void deepseek_layer_forward(
     free(attn_out);
 
     // 3. FFN norm
+    write(2, "3", 1);
     snprintf(name, sizeof(name), "layers.%d.ffn_norm.weight", layer_idx);
     float *ffn_norm = ss_get_f32(m, name, NULL);
     float *h_post = malloc(HIDDEN_DIM * sizeof(float));
@@ -740,6 +850,7 @@ static void deepseek_layer_forward(
     free(ffn_norm);
 
     // 4. MoE (with residual)
+    write(2, "4", 1);
     float *moe_out = calloc(HIDDEN_DIM, sizeof(float));
     deepseek_moe(m, layer_idx, h_post, moe_out, token_id);
     for (int i = 0; i < HIDDEN_DIM; i++) hidden[i] += moe_out[i];
