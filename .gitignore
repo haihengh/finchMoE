@@ -9,6 +9,9 @@ build/
 *.a
 *.metallib
 *.air
+finchmoe/finchmoe-infer
+finchmoe/finchTool/finchTool
+finchmoe/chat
 
 # Downloaded models
 models/
