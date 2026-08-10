@@ -4829,7 +4829,6 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
     float *moe_out = calloc(HIDDEN_DIM, sizeof(float));
     void *expert_data = malloc(esz);
 
-    static int mtp_expert_dbg = 0;
     for (int k = 0; k < K; k++) {
         int eidx = expert_indices[k];
         float weight = expert_weights[k];
@@ -4837,20 +4836,10 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
         ssize_t n = pread(g_mtp.expert_fd, expert_data, esz, (off_t)eidx * esz);
         if (n != (ssize_t)esz) { fprintf(stderr, "[mtp] expert %d pread fail: %zd/%zu\n", eidx, n, esz); continue; }
 
-        if (mtp_expert_dbg < 1) {
-            // Check first few bytes of expert data
-            uint32_t *ed32 = (uint32_t *)expert_data;
-            uint16_t *gs = (uint16_t *)((char *)expert_data + GATE_S_OFF_4);
-            uint16_t *gb = (uint16_t *)((char *)expert_data + GATE_B_OFF_4);
-            fprintf(stderr, "[mtp-dbg] expert %d: gate_W[0]=0x%08X gate_S[0]=%.6f gate_B[0]=%.6f\n",
-                    eidx, ed32[0],
-                    bf16_to_f32(gs[0]), bf16_to_f32(gb[0]));
-            mtp_expert_dbg++;
-        }
 
-        uint32_t *ew = (uint32_t *)expert_data;
-        uint16_t *es = (uint16_t *)((char *)expert_data + GATE_W_OFF_4);
-        uint16_t *eb = (uint16_t *)((char *)expert_data + GATE_S_OFF_4);
+        uint32_t *ew = (uint32_t *)expert_data;  // gate_W at offset 0
+        uint16_t *es = (uint16_t *)((char *)expert_data + GATE_S_OFF_4);  // gate scales
+        uint16_t *eb = (uint16_t *)((char *)expert_data + GATE_B_OFF_4);  // gate biases
         uint32_t *uw = (uint32_t *)((char *)expert_data + UP_W_OFF_4);
         uint16_t *us = (uint16_t *)((char *)expert_data + UP_S_OFF_4);
         uint16_t *ub = (uint16_t *)((char *)expert_data + UP_B_OFF_4);
@@ -4882,32 +4871,24 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
     float final_hidden[HIDDEN_DIM];
     cpu_rms_norm(h, g_mtp.final_norm_w, final_hidden, HIDDEN_DIM, RMS_NORM_EPS);
 
-    // Step 12: FC projection to logits
-    cpu_dequant_matvec(g_mtp.fc_w, g_mtp.fc_s, g_mtp.fc_b, final_hidden, logits_buf,
-                       VOCAB_SIZE, HIDDEN_DIM, GROUP_SIZE, 4);
+    // Step 12: FC projection — maps [hidden; embedding] -> hidden
+    // fc.weight shape: [2048, 4096] 4-bit packed = [2048, 512] uint32
+    // Input: concatenate final_hidden (2048) + embed_normed (2048)
+    float fc_in[4096];
+    memcpy(fc_in, final_hidden, HIDDEN_DIM * sizeof(float));
+    memcpy(fc_in + HIDDEN_DIM, emb_normed, HIDDEN_DIM * sizeof(float));
+    float fc_out[HIDDEN_DIM];
+    cpu_dequant_matvec(g_mtp.fc_w, g_mtp.fc_s, g_mtp.fc_b, fc_in, fc_out,
+                       HIDDEN_DIM, 4096, GROUP_SIZE, 4);
+    // Use lm_head to project fc_out to vocabulary logits
+    lm_head_forward(wf, fc_out, logits_buf);
 
-    // Debug: trace NaN in MTP forward pass
+    // Debug: trace MTP forward pass (first call only)
     static int mtp_dbg = 0;
     if (mtp_dbg < 1) {
-        fprintf(stderr, "[mtp-dbg] embed_rms=%.4f hidden_in_rms=%.4f\n",
-                vec_rms(embed_buf, HIDDEN_DIM), vec_rms(hidden, HIDDEN_DIM));
-        fprintf(stderr, "[mtp-dbg] after_input_norm=%.4f\n", vec_rms(normed, HIDDEN_DIM));
-        fprintf(stderr, "[mtp-dbg] q_rms=%.4f attn_out_rms=%.4f attn_proj_rms=%.4f\n",
-                vec_rms(q_buf, 8192), vec_rms(attn_out, HIDDEN_DIM),
-                vec_rms(attn_proj, HIDDEN_DIM));
-        fprintf(stderr, "[mtp-dbg] shared_out_rms=%.4f moe_out_rms=%.4f\n",
-                vec_rms(shared_out, HIDDEN_DIM), vec_rms(moe_out, HIDDEN_DIM));
-        fprintf(stderr, "[mtp-dbg] fc_in rms=%.4f logits rms=%.4f top5: ",
-                vec_rms(final_hidden, HIDDEN_DIM), vec_rms(logits_buf, VOCAB_SIZE));
-        // Find top 5
-        int top5[5] = {0}; float topv[5] = {-1e30f,-1e30f,-1e30f,-1e30f,-1e30f};
-        for (int i = 0; i < VOCAB_SIZE; i++) {
-            int min_k = 0;
-            for (int k = 1; k < 5; k++) if (topv[k] < topv[min_k]) min_k = k;
-            if (logits_buf[i] > topv[min_k]) { topv[min_k] = logits_buf[i]; top5[min_k] = i; }
-        }
-        for (int i = 0; i < 5; i++) fprintf(stderr, "%d(%.1f) ", top5[i], topv[i]);
-        fprintf(stderr, "\n");
+        fprintf(stderr, "[mtp-dbg] embed_rms=%.4f hidden_rms=%.4f moe_out_rms=%.4f logits_rms=%.4f\n",
+                vec_rms(embed_buf, HIDDEN_DIM), vec_rms(hidden, HIDDEN_DIM),
+                vec_rms(moe_out, HIDDEN_DIM), vec_rms(logits_buf, VOCAB_SIZE));
         mtp_dbg++;
     }
 
