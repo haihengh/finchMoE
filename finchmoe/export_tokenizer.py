@@ -57,7 +57,7 @@ def main():
 
         # Merges
         for pair in merges:
-            a, b = pair[0], pair[1]
+            a, b = pair.split(' ')
             ab = a.encode('utf-8')
             bb = b.encode('utf-8')
             f.write(struct.pack('<H', len(ab)))
