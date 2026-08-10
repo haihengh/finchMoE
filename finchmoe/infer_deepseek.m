@@ -314,6 +314,14 @@ static const void *ss_get(SSModel *m, const char *name, int *out_dtype, int *out
             return (const uint8_t *)t->mmap_base + 8 + header_bytes + t->data_offset;
         }
     }
+    // Debug: print first failed lookup
+    static int ss_miss = 0;
+    if (ss_miss < 3 && name && name[0]) {
+        char buf[512];
+        int n = snprintf(buf, sizeof(buf), "[ss_miss] '%s'\n", name);
+        if (n > 0) write(2, buf, n);
+        ss_miss++;
+    }
     return NULL;
 }
 
@@ -368,8 +376,20 @@ static int32_t *hash_load_tid2eid(SSModel *m, int layer_idx, int *out_topk) {
     }
     if (out_topk) *out_topk = topk;
 
+    // Check actual dtype: I64 (8 bytes) vs I32 (4 bytes)
+    int is_i64 = 0;
+    for (int i = 0; i < m->num_tensors; i++) {
+        if (strcmp(m->tensors[i].tensor_name, name) == 0) {
+            is_i64 = (m->tensors[i].dtype == 5); break;
+        }
+    }
     int32_t *buf = malloc(nelem * sizeof(int32_t));
-    memcpy(buf, data, nelem * sizeof(int32_t));
+    if (is_i64) {
+        const int64_t *src64 = (const int64_t *)data;
+        for (int i = 0; i < nelem; i++) buf[i] = (int32_t)src64[i];
+    } else {
+        memcpy(buf, data, nelem * sizeof(int32_t));
+    }
     return buf;
 }
 
