@@ -1,5 +1,5 @@
 {
-  "model": "../models/Qwen3.6-35B-A3B-4bit-mtp",
+  "model": "../models/Qwen3.6-35B-A3B-2bit-dense-v2",
   "num_tensors": 632,
   "tensors": {
     "lm_head.weight": {
