@@ -4730,11 +4730,103 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
     float normed[HIDDEN_DIM];
     cpu_rms_norm(h, g_mtp.input_layernorm_w, normed, HIDDEN_DIM, RMS_NORM_EPS);
 
-    // Step 5: Attention skipped — MTP attention architecture differs from
-    // main model (O projection expects 4096 input, Q produces 8192 output).
-    // The main model hidden state already encodes full context from 40 layers.
-    // TODO: implement proper MTP attention with correct GQA dims (64 Q heads
-    // × 128 dim, 4 KV heads × 128 dim, O maps 4096→2048).
+    // Step 5: MTP attention with KV cache (32 Q heads, 2 KV heads, 256 dim)
+    // Q: [8192, 2048] BF16, K/V: [512, 2048] BF16, O: [2048, 4096] BF16
+    // O takes 16 heads × 256 = 4096 input (first 16 of 32 Q heads)
+    #define MTP_N_Q_HEADS 32
+    #define MTP_N_KV_HEADS 2
+    #define MTP_HEAD_DIM 256
+    #define MTP_Q_DIM (MTP_N_Q_HEADS * MTP_HEAD_DIM)    // 8192
+    #define MTP_KV_DIM (MTP_N_KV_HEADS * MTP_HEAD_DIM)  // 512
+    #define MTP_O_IN_DIM (16 * MTP_HEAD_DIM)             // 4096
+    #define MTP_KV_CACHE_MAX 64
+
+    static float *mtp_k_cache = NULL, *mtp_v_cache = NULL;
+    static int mtp_cache_len = 0;
+    if (!mtp_k_cache) {
+        mtp_k_cache = calloc(MTP_KV_CACHE_MAX * MTP_KV_DIM, sizeof(float));
+        mtp_v_cache = calloc(MTP_KV_CACHE_MAX * MTP_KV_DIM, sizeof(float));
+        mtp_cache_len = 0;
+    }
+
+    // Q, K, V projections (BF16 weights, no scales → cpu_dequant_matvec with bits=0)
+    float q_buf[MTP_Q_DIM], k_buf[MTP_KV_DIM], v_buf[MTP_KV_DIM];
+    cpu_dequant_matvec(g_mtp.q_w, NULL, NULL, normed, q_buf, MTP_Q_DIM, HIDDEN_DIM, GROUP_SIZE, 0);
+    cpu_dequant_matvec(g_mtp.k_w, NULL, NULL, normed, k_buf, MTP_KV_DIM, HIDDEN_DIM, GROUP_SIZE, 0);
+    cpu_dequant_matvec(g_mtp.v_w, NULL, NULL, normed, v_buf, MTP_KV_DIM, HIDDEN_DIM, GROUP_SIZE, 0);
+
+    // Per-head Q/K norms
+    for (int h = 0; h < MTP_N_Q_HEADS; h++) {
+        float *qh = q_buf + h * MTP_HEAD_DIM;
+        for (int d = 0; d < MTP_HEAD_DIM; d++)
+            qh[d] *= bf16_to_f32(g_mtp.q_norm_w[d]);
+    }
+    for (int h = 0; h < MTP_N_KV_HEADS; h++) {
+        float *kh = k_buf + h * MTP_HEAD_DIM;
+        for (int d = 0; d < MTP_HEAD_DIM; d++)
+            kh[d] *= bf16_to_f32(g_mtp.k_norm_w[d]);
+    }
+
+    // Append K, V to cache
+    if (mtp_cache_len < MTP_KV_CACHE_MAX) {
+        memcpy(mtp_k_cache + mtp_cache_len * MTP_KV_DIM, k_buf, MTP_KV_DIM * sizeof(float));
+        memcpy(mtp_v_cache + mtp_cache_len * MTP_KV_DIM, v_buf, MTP_KV_DIM * sizeof(float));
+        mtp_cache_len++;
+    }
+
+    // Multi-head attention with softmax over cached tokens
+    int n_ctx = mtp_cache_len;
+    float attn_out[MTP_O_IN_DIM];  // 4096: first 16 Q heads output
+    memset(attn_out, 0, sizeof(attn_out));
+    float inv_sqrt_dh = 1.0f / sqrtf((float)MTP_HEAD_DIM);
+
+    // For each of the first 16 Q heads (O projection input)
+    for (int qh = 0; qh < 16; qh++) {
+        int kvh = qh * MTP_N_KV_HEADS / MTP_N_Q_HEADS;  // GQA: 16 Q heads per KV head
+        float *q_head = q_buf + qh * MTP_HEAD_DIM;
+
+        // Attention scores against all cached keys
+        float scores[MTP_KV_CACHE_MAX];
+        float max_s = -1e30f;
+        for (int t = 0; t < n_ctx; t++) {
+            float *k_head = mtp_k_cache + t * MTP_KV_DIM + kvh * MTP_HEAD_DIM;
+            float s = 0;
+            for (int d = 0; d < MTP_HEAD_DIM; d++) s += q_head[d] * k_head[d];
+            s *= inv_sqrt_dh;
+            scores[t] = s;
+            if (s > max_s) max_s = s;
+        }
+
+        // Softmax
+        float sum_exp = 0;
+        for (int t = 0; t < n_ctx; t++) {
+            scores[t] = expf(scores[t] - max_s);
+            sum_exp += scores[t];
+        }
+
+        // Weighted sum of V
+        float *o_head = attn_out + qh * MTP_HEAD_DIM;
+        for (int t = 0; t < n_ctx; t++) {
+            float *v_head = mtp_v_cache + t * MTP_KV_DIM + kvh * MTP_HEAD_DIM;
+            float w = scores[t] / sum_exp;
+            for (int d = 0; d < MTP_HEAD_DIM; d++) o_head[d] += w * v_head[d];
+        }
+    }
+
+    // O projection: [2048, 4096] BF16
+    float attn_proj[HIDDEN_DIM];
+    cpu_dequant_matvec(g_mtp.o_w, NULL, NULL, attn_out, attn_proj, HIDDEN_DIM, MTP_O_IN_DIM, GROUP_SIZE, 0);
+
+    // Residual
+    for (int i = 0; i < HIDDEN_DIM; i++) h[i] += attn_proj[i];
+
+    #undef MTP_N_Q_HEADS
+    #undef MTP_N_KV_HEADS
+    #undef MTP_HEAD_DIM
+    #undef MTP_Q_DIM
+    #undef MTP_KV_DIM
+    #undef MTP_O_IN_DIM
+    #undef MTP_KV_CACHE_MAX
 
     // Post-attention norm
     float h_post[HIDDEN_DIM];
