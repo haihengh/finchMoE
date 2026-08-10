@@ -639,16 +639,17 @@ static void deepseek_moe(
                 for (int i = 0; i < HIDDEN_DIM; i++) acc += gr[i] * x[i];
                 logits[e] = acc;
             }
-            // Top-6 via simple selection
+            // Top-6 via simple selection (with NaN guard)
             for (int k = 0; k < ACTIVE_EXPERTS; k++) {
                 int best = -1;
-                float best_v = -1e30f;
+                float best_v = -INFINITY;
                 for (int e = 0; e < 256; e++) {
-                    if (logits[e] > best_v) { best_v = logits[e]; best = e; }
+                    if (isfinite(logits[e]) && logits[e] > best_v) { best_v = logits[e]; best = e; }
                 }
+                if (best < 0) best = k % 256;  // NaN fallback
                 selected[k] = best;
                 weights[k] = best_v;
-                logits[best] = -1e30f;  // remove
+                logits[best] = -INFINITY;
             }
             // Softmax
             float max_w = weights[0];
@@ -674,45 +675,32 @@ static void deepseek_moe(
         int eid = selected[k];
         float weight = weights[k];
 
-        // Load expert weights (I8 with F8_E8M0 scale)
-        // w1: [out, in] I8, scale: [out, in/block_size] F8_E8M0
-        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w1.weight", layer_idx, eid);
-        int w1_dt = 0;
-        const int8_t *w1_i8 = (const int8_t *)ss_get(m, name, &w1_dt, NULL);
-        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w1.scale", layer_idx, eid);
-        int s1_dt = 0;
-        const uint8_t *w1_scale = ss_get(m, name, &s1_dt, NULL);
+        // Load expert weights via DIRECT tensor array lookup (ss_get has name bug)
+        char wname[256];
+        snprintf(wname, sizeof(wname), "layers.%d.ffn.experts.%d.w1.weight", layer_idx, eid);
+        const int8_t *w1_i8 = NULL; int w1_out = 4096, w1_in = 2048;
+        for (int i = 0; i < m->num_tensors; i++) {
+            if (strcmp(m->tensors[i].tensor_name, wname) == 0 && m->tensors[i].mmap_base) {
+                SSTensor *t = &m->tensors[i];
+                uint64_t hl = *(uint64_t*)t->mmap_base;
+                w1_i8 = (const int8_t *)((const uint8_t *)t->mmap_base + 8 + hl + t->data_offset);
+                w1_out = t->shape[0]; w1_in = t->shape[1];
+                break;
+            }
+        }
+        snprintf(wname, sizeof(wname), "layers.%d.ffn.experts.%d.w1.scale", layer_idx, eid);
+        const uint8_t *w1_scale = NULL; int w1_scale_cols = 128;
+        for (int i = 0; i < m->num_tensors; i++) {
+            if (strcmp(m->tensors[i].tensor_name, wname) == 0 && m->tensors[i].mmap_base) {
+                SSTensor *t = &m->tensors[i];
+                uint64_t hl = *(uint64_t*)t->mmap_base;
+                w1_scale = (const uint8_t *)t->mmap_base + 8 + hl + t->data_offset;
+                w1_scale_cols = t->shape[1];
+                break;
+            }
+        }
         if (!w1_i8 || !w1_scale) { write(2, "e", 1); continue; }
-
-        // Get actual shapes
-        int w1_out = MOE_INTERMEDIATE * 2, w1_in = HIDDEN_DIM, w1_blk = 16;
-        for (int i = 0; i < m->num_tensors; i++) {
-            if (strcmp(m->tensors[i].tensor_name, name) == 0) {
-                w1_out = m->tensors[i].shape[0];
-                w1_in  = m->tensors[i].shape[1];
-                w1_blk = w1_in / m->tensors[i].shape[1];  // will fix below
-                break;
-            }
-        }
-        // Re-fetch w1 weight shape
-        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w1.weight", layer_idx, eid);
-        for (int i = 0; i < m->num_tensors; i++) {
-            if (strcmp(m->tensors[i].tensor_name, name) == 0) {
-                w1_out = m->tensors[i].shape[0];
-                w1_in  = m->tensors[i].shape[1];
-                break;
-            }
-        }
-        // Get scale shape
-        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w1.scale", layer_idx, eid);
-        int w1_scale_cols = 128;
-        for (int i = 0; i < m->num_tensors; i++) {
-            if (strcmp(m->tensors[i].tensor_name, name) == 0) {
-                w1_scale_cols = m->tensors[i].shape[1];
-                break;
-            }
-        }
-        w1_blk = w1_in / w1_scale_cols;  // block size along input dim
+        int w1_blk = w1_in / w1_scale_cols;
 
         // I8 dequant matvec: out = (w_i8 * scale) @ x
         float *gate_up = calloc(w1_out, sizeof(float));
@@ -742,26 +730,29 @@ static void deepseek_moe(
         free(gate_up);
 
         // w2: [out, half] I8 with scale
-        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w2.weight", layer_idx, eid);
-        const int8_t *w2_i8 = (const int8_t *)ss_get(m, name, NULL, NULL);
-        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w2.scale", layer_idx, eid);
-        const uint8_t *w2_scale = ss_get(m, name, NULL, NULL);
-        int w2_out = MOE_INTERMEDIATE, w2_in = half, w2_blk = 16, w2_scols = 64;
+        snprintf(wname, sizeof(wname), "layers.%d.ffn.experts.%d.w2.weight", layer_idx, eid);
+        const int8_t *w2_i8 = NULL; int w2_out = 2048, w2_in = half, w2_scols = 64;
         for (int i = 0; i < m->num_tensors; i++) {
-            if (strstr(m->tensors[i].tensor_name, "w2.weight") && strstr(m->tensors[i].tensor_name, "ffn.experts")) {
-                int l = -1, e = -1;
-                sscanf(m->tensors[i].tensor_name, "layers.%d.ffn.experts.%d.w2.weight", &l, &e);
-                if (l == layer_idx && e == eid) { w2_out = m->tensors[i].shape[0]; w2_in = m->tensors[i].shape[1]; break; }
+            if (strcmp(m->tensors[i].tensor_name, wname) == 0 && m->tensors[i].mmap_base) {
+                SSTensor *t = &m->tensors[i];
+                uint64_t hl = *(uint64_t*)t->mmap_base;
+                w2_i8 = (const int8_t *)((const uint8_t *)t->mmap_base + 8 + hl + t->data_offset);
+                w2_out = t->shape[0]; w2_in = t->shape[1];
+                break;
             }
         }
-        // Get w2 scale cols
-        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w2.scale", layer_idx, eid);
+        snprintf(wname, sizeof(wname), "layers.%d.ffn.experts.%d.w2.scale", layer_idx, eid);
+        const uint8_t *w2_scale = NULL;
         for (int i = 0; i < m->num_tensors; i++) {
-            if (strstr(m->tensors[i].tensor_name, name)) {
-                w2_scols = m->tensors[i].shape[1]; break;
+            if (strcmp(m->tensors[i].tensor_name, wname) == 0 && m->tensors[i].mmap_base) {
+                SSTensor *t = &m->tensors[i];
+                uint64_t hl = *(uint64_t*)t->mmap_base;
+                w2_scale = (const uint8_t *)t->mmap_base + 8 + hl + t->data_offset;
+                w2_scols = t->shape[1];
+                break;
             }
         }
-        w2_blk = w2_in / w2_scols;
+        int w2_blk = w2_in / w2_scols;
 
         float *down = calloc(w2_out, sizeof(float));
         if (w2_i8 && w2_scale) {
@@ -782,23 +773,29 @@ static void deepseek_moe(
         free(act);
 
         // w3: [out, w2_out] I8 with scale
-        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w3.weight", layer_idx, eid);
-        const int8_t *w3_i8 = (const int8_t *)ss_get(m, name, NULL, NULL);
-        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w3.scale", layer_idx, eid);
-        const uint8_t *w3_scale = ss_get(m, name, NULL, NULL);
-        int w3_out = HIDDEN_DIM, w3_in = w2_out, w3_blk = 16, w3_scols = 128;
+        snprintf(wname, sizeof(wname), "layers.%d.ffn.experts.%d.w3.weight", layer_idx, eid);
+        const int8_t *w3_i8 = NULL; int w3_out = HIDDEN_DIM, w3_in = w2_out, w3_scols = 128;
         for (int i = 0; i < m->num_tensors; i++) {
-            if (strstr(m->tensors[i].tensor_name, "w3.weight") && strstr(m->tensors[i].tensor_name, "ffn.experts")) {
-                int l = -1, e = -1;
-                sscanf(m->tensors[i].tensor_name, "layers.%d.ffn.experts.%d.w3.weight", &l, &e);
-                if (l == layer_idx && e == eid) { w3_out = m->tensors[i].shape[0]; w3_in = m->tensors[i].shape[1]; break; }
+            if (strcmp(m->tensors[i].tensor_name, wname) == 0 && m->tensors[i].mmap_base) {
+                SSTensor *t = &m->tensors[i];
+                uint64_t hl = *(uint64_t*)t->mmap_base;
+                w3_i8 = (const int8_t *)((const uint8_t *)t->mmap_base + 8 + hl + t->data_offset);
+                w3_out = t->shape[0]; w3_in = t->shape[1];
+                break;
             }
         }
-        snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.w3.scale", layer_idx, eid);
+        snprintf(wname, sizeof(wname), "layers.%d.ffn.experts.%d.w3.scale", layer_idx, eid);
+        const uint8_t *w3_scale = NULL;
         for (int i = 0; i < m->num_tensors; i++) {
-            if (strstr(m->tensors[i].tensor_name, name)) { w3_scols = m->tensors[i].shape[1]; break; }
+            if (strcmp(m->tensors[i].tensor_name, wname) == 0 && m->tensors[i].mmap_base) {
+                SSTensor *t = &m->tensors[i];
+                uint64_t hl = *(uint64_t*)t->mmap_base;
+                w3_scale = (const uint8_t *)t->mmap_base + 8 + hl + t->data_offset;
+                w3_scols = t->shape[1];
+                break;
+            }
         }
-        w3_blk = w3_in / w3_scols;
+        int w3_blk = w3_in / w3_scols;
 
         float *expert_out = calloc(w3_out, sizeof(float));
         if (w3_i8 && w3_scale) {
@@ -849,12 +846,17 @@ static void deepseek_layer_forward(
     }
     free(attn_norm);
 
-    // 2. Attention (with residual)
-    write(2, "2", 1);
+    // 2. Attention (with residual — skip if pass-through identity)
     float *attn_out = calloc(HIDDEN_DIM, sizeof(float));
     deepseek_attention(m, layer_idx, normed, attn_out,
                        kv_k_cache, kv_v_cache, kv_len, position);
-    for (int i = 0; i < HIDDEN_DIM; i++) hidden[i] += attn_out[i];
+    // Detect identity (F8 pass-through): don't double hidden each layer
+    int is_id = 1;
+    for (int i = 0; i < HIDDEN_DIM; i++) if (fabsf(attn_out[i] - normed[i]) > 1e-6f) { is_id = 0; break; }
+    if (is_id)
+        memcpy(hidden, normed, HIDDEN_DIM * sizeof(float));  // replace
+    else
+        for (int i = 0; i < HIDDEN_DIM; i++) hidden[i] += attn_out[i];
     free(attn_out);
 
     // 3. FFN norm
