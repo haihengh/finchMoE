@@ -444,3 +444,54 @@ Four tensors (QKV, Z, A, B) × 30 GDN layers = 120 dequant calls per token. At 4
 **Fix**: Keep non-expert tensors as BF16. Only quantize routed experts which use optimized SIMD-stride GPU kernels (`dequant_matvec_4bit_v3`). The model_weights.bin grows from 1.4 GB to ~5 GB, but speed is unchanged.
 
 **Lesson**: Quantization benefits are architecture-dependent. Expert tensors (many small matmuls, specialized kernels) benefit greatly from 4/2/1-bit. Non-expert tensors (few large matmuls, generic dequant path) do not — the dequant overhead dominates any I/O savings. Always measure, don't assume.
+
+---
+
+## Bug 10: Vocab BPET Format Parsing (2026-08-09)
+
+**Symptom**: `load_vocab` read the BPET magic bytes as `num_entries=1.4 billion`, causing a 93 GB malloc that corrupted VM state and triggered SIGKILL. The kernel killed the process (and sometimes neighboring processes) due to memory pressure.
+
+**Root Cause**: The `load_vocab` function in `infer.m` read the 4-byte BPET magic (`"BPET"`) as the first `uint32_t` value (vocab_size). The ASCII bytes `B` `P` `E` `T` interpreted as little-endian uint32 = 0x54455042 = 1,414,992,962 entries. The subsequent malloc(1.4B * sizeof(entry)) requested ~93 GB, which macOS rejects by sending SIGKILL.
+
+**Fix**: Properly parse the BPET header: read 4-byte magic, 4-byte version, THEN read vocab_size, num_merges, num_added as subsequent uint32 fields.
+
+**Lesson**: Always verify magic bytes BEFORE reading size fields. A format change or corrupted file will produce absurd allocation sizes that crash the entire system, not just the process.
+
+---
+
+## Bug 11: BPE Merge Table Corruption in export_tokenizer.py (2026-08-10)
+
+**Symptom**: Model produced grammatically correct but completely wrong token salad. "The capital of France is" → "'m ysterious to me!" Token 846 ("user") appeared where token 74455 ("assistant") should be. The chat template `<|im_start|>assistant\n<think>\n` was being tokenized as `<|im_start|>user\nThe`, making the model think it should complete a USER turn instead of responding as assistant.
+
+**Root Cause**: **1-line bug in `export_tokenizer.py` line 60:**
+
+```python
+# BROKEN: string indexing returns CHARACTERS
+for pair in merges:
+    a, b = pair[0], pair[1]
+```
+
+The tokenizer JSON stores BPE merges as space-separated strings like `"Ġ Ġ"`, `"a s"`, `"as s"`. Python string indexing `pair[0], pair[1]` extracts individual CHARACTERS, not the space-delimited tokens. For merge `"a s"`:
+- Expected: `a="a"`, `b="s"`
+- Actual: `a="a"`, `b=" "` (a space character!)
+
+**ALL 247,587 merges** had their second part replaced with a single space character. The C tokenizer could merge individual bytes into pair-level tokens ("a"+"s"→"as") since the first round used the merge priority correctly, but all subsequent multi-level merges ("as"+"s"→"ass", "ass"+"i"→"assi", etc.) failed because the merge keys were corrupted.
+
+Compound tokens couldn't be formed:
+- "assistant" → 5 tokens: `299 6122 267 276 83` (should be 1: `74455`)
+- "user" → 2 tokens: `350 261` (should be 1: `846`)
+
+**Verification**: Before fix `vocab.bin` was 5.9 MB (corrupted — all merge b-parts were 1-byte spaces). After fix `vocab.bin` is 7.8 MB (correct merge key lengths). C tokenizer output now matches Python `tokenizers` library exactly.
+
+**Fix**:
+```python
+# CORRECT: split on space delimiter
+for pair in merges:
+    a, b = pair.split(' ')
+```
+
+**Impact**: This bug was present since `export_tokenizer.py` was created. EVERY model run used corrupted tokenization. The model weights and inference pipeline were correct all along — only the tokenizer was producing garbage input tokens. The `finchTool` kernel verifier tests matmul correctness but doesn't test tokenization.
+
+**Discovery Method**: Compared Python tokenizer output against C tokenizer output for the same prompt string. Python produced 26 correct tokens; C produced 25 wrong tokens. Traced the discrepancy to the merge table: `ht_lookup` for "assistant" correctly returned 74455 in the vocab hash, but BPE couldn't merge that far because all second-level merges were missing. Wrote a trace of the `bpe_process` merge loop which revealed that merges like "as"+"si" returned 0xFFFFFFFF (not found). Checked `export_tokenizer.py` and immediately saw `pair[0], pair[1]` on a string.
+
+**Lesson**: Python string indexing and string splitting are dangerously confusable. `pair[0]` on `"a s"` gives `"a"` (first char), which looks correct at a glance but is only correct by accident for single-character tokens. `pair.split(' ')` is the correct operation. Always verify tokenizer output against a reference implementation (Python `tokenizers` library) before trusting the C tokenizer.
