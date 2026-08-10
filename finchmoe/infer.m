@@ -4749,11 +4749,13 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
         mtp_cache_len = 0;
     }
 
-    // Q, K, V projections (BF16 weights, no scales → cpu_dequant_matvec with bits=0)
+    // Q, K, V projections (4-bit if scales present, BF16 if NULL)
+    int q_bits = (g_mtp.q_s && g_mtp.q_b) ? 4 : 0;
+    int kv_bits = (g_mtp.k_s && g_mtp.k_b) ? 4 : 0;
     float q_buf[MTP_Q_DIM], k_buf[MTP_KV_DIM], v_buf[MTP_KV_DIM];
-    cpu_dequant_matvec(g_mtp.q_w, NULL, NULL, normed, q_buf, MTP_Q_DIM, HIDDEN_DIM, GROUP_SIZE, 0);
-    cpu_dequant_matvec(g_mtp.k_w, NULL, NULL, normed, k_buf, MTP_KV_DIM, HIDDEN_DIM, GROUP_SIZE, 0);
-    cpu_dequant_matvec(g_mtp.v_w, NULL, NULL, normed, v_buf, MTP_KV_DIM, HIDDEN_DIM, GROUP_SIZE, 0);
+    cpu_dequant_matvec(g_mtp.q_w, g_mtp.q_s, g_mtp.q_b, normed, q_buf, MTP_Q_DIM, HIDDEN_DIM, GROUP_SIZE, q_bits);
+    cpu_dequant_matvec(g_mtp.k_w, g_mtp.k_s, g_mtp.k_b, normed, k_buf, MTP_KV_DIM, HIDDEN_DIM, GROUP_SIZE, kv_bits);
+    cpu_dequant_matvec(g_mtp.v_w, g_mtp.v_s, g_mtp.v_b, normed, v_buf, MTP_KV_DIM, HIDDEN_DIM, GROUP_SIZE, kv_bits);
 
     // Per-head Q/K norms
     for (int h = 0; h < MTP_N_Q_HEADS; h++) {
@@ -4813,9 +4815,10 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
         }
     }
 
-    // O projection: [2048, 4096] BF16
+    // O projection: 4-bit if scales present, BF16 if NULL
+    int o_bits = (g_mtp.o_s && g_mtp.o_b) ? 4 : 0;
     float attn_proj[HIDDEN_DIM];
-    cpu_dequant_matvec(g_mtp.o_w, NULL, NULL, attn_out, attn_proj, HIDDEN_DIM, MTP_O_IN_DIM, GROUP_SIZE, 0);
+    cpu_dequant_matvec(g_mtp.o_w, g_mtp.o_s, g_mtp.o_b, attn_out, attn_proj, HIDDEN_DIM, MTP_O_IN_DIM, GROUP_SIZE, o_bits);
 
     // Residual
     for (int i = 0; i < HIDDEN_DIM; i++) h[i] += attn_proj[i];
