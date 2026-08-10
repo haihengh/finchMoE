@@ -7470,9 +7470,12 @@ static const char *CORS_RESPONSE =
 // Thinking OFF: <think>\n\n</think>\n\n (empty think block — skip reasoning)
 static void build_think_suffix(char *buf, size_t bufsz) {
     if (g_no_think) {
+        // Empty think block: tells model thinking is done, answer directly
         snprintf(buf, bufsz, "<think>\n\n</think>\n\n");
     } else {
-        snprintf(buf, bufsz, "<think>\n");
+        // Let model output <think> itself — prepending <think>\n confuses
+        // the quantized model into closing the think block immediately.
+        buf[0] = '\0';
     }
 }
 
