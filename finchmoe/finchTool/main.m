@@ -663,11 +663,185 @@ static int test_parity(const char *path_a, const char *path_b, float tolerance) 
 // CLI
 // ============================================================================
 
+// ============================================================================
+// Model integrity check — verifies safetensors shards and tensor access
+// ============================================================================
+
+#import <fcntl.h>
+#import <unistd.h>
+#import <sys/mman.h>
+#import <sys/stat.h>
+
+static int test_model_integrity(const char *model_path, bool verbose) {
+    fprintf(stderr, "\n=== Model Integrity: %s ===\n", model_path);
+
+    char idx_path[1024];
+    snprintf(idx_path, sizeof(idx_path), "%s/model.safetensors.index.json", model_path);
+
+    @autoreleasepool {
+        NSData *data = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:idx_path]];
+        if (!data) { fprintf(stderr, "FAIL: Cannot read index.json\n"); return 1; }
+        NSDictionary *root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        if (!root) { fprintf(stderr, "FAIL: Invalid index.json\n"); return 1; }
+        NSDictionary *wm = root[@"weight_map"];
+        if (!wm) { fprintf(stderr, "FAIL: No weight_map\n"); return 1; }
+
+        int n_tensors = (int)[wm count];
+        fprintf(stderr, "  Tensors in index: %d\n", n_tensors);
+
+        // Step 1: List all shard files
+        NSMutableSet *shardSet = [NSMutableSet set];
+        for (NSString *f in [wm allValues]) [shardSet addObject:f];
+        NSArray *sortedShards = [[shardSet allObjects] sortedArrayUsingSelector:@selector(compare:)];
+        int n_shards = (int)[shardSet count];
+        fprintf(stderr, "  Unique shards: %d\n", n_shards);
+
+        // Step 2: Try to open and mmap each shard
+        int open_ok = 0, mmap_ok = 0, header_ok = 0;
+        for (int i = 0; i < n_shards; i++) {
+            NSString *sf = sortedShards[i];
+            char spath[1024];
+            snprintf(spath, sizeof(spath), "%s/%s", model_path, [sf UTF8String]);
+
+            int fd = open(spath, O_RDONLY);
+            if (fd < 0) {
+                fprintf(stderr, "  FAIL: cannot open %s\n", [sf UTF8String]);
+                continue;
+            }
+            open_ok++;
+
+            struct stat st;
+            fstat(fd, &st);
+            void *mm = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+            close(fd);
+            if (mm == MAP_FAILED) {
+                fprintf(stderr, "  FAIL: mmap failed for %s (%lld bytes)\n",
+                        [sf UTF8String], (long long)st.st_size);
+                continue;
+            }
+            mmap_ok++;
+
+            // Read safetensors header
+            uint64_t header_len = *(uint64_t *)mm;
+            if (header_len == 0 || header_len > (uint64_t)st.st_size) {
+                fprintf(stderr, "  FAIL: bad header_len=%llu in %s\n",
+                        (unsigned long long)header_len, [sf UTF8String]);
+                munmap(mm, st.st_size);
+                continue;
+            }
+
+            char *hbuf = malloc(header_len + 1);
+            memcpy(hbuf, (char *)mm + 8, header_len);
+            hbuf[header_len] = 0;
+            NSData *jd = [NSData dataWithBytesNoCopy:hbuf length:header_len freeWhenDone:YES];
+            NSDictionary *hdr = [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil];
+            if (!hdr) {
+                fprintf(stderr, "  FAIL: JSON parse failed in %s header\n", [sf UTF8String]);
+                munmap(mm, st.st_size);
+                continue;
+            }
+            header_ok++;
+
+            if (verbose) {
+                int n_t = 0;
+                for (NSString *k in hdr) if (![k isEqualToString:@"__metadata__"]) n_t++;
+                fprintf(stderr, "  OK: %s (%lld MB, %d tensors, header=%llu bytes)\n",
+                        [sf UTF8String], (long long)st.st_size / 1048576,
+                        n_t, (unsigned long long)header_len);
+            }
+            munmap(mm, st.st_size);
+        }
+
+        fprintf(stderr, "\n  Shard access: %d/%d open, %d/%d mmap, %d/%d header parse\n",
+                open_ok, n_shards, mmap_ok, n_shards, header_ok, n_shards);
+
+        // Step 3: Check dtype coverage
+        fprintf(stderr, "\n  Parsing all shard headers for dtype audit...\n");
+        NSMutableDictionary *allMeta = [NSMutableDictionary dictionary];
+        NSMutableSet *allDtypes = [NSMutableSet set];
+        for (int i = 0; i < n_shards; i++) {
+            NSString *sf = sortedShards[i];
+            char spath[1024];
+            snprintf(spath, sizeof(spath), "%s/%s", model_path, [sf UTF8String]);
+            int fd = open(spath, O_RDONLY);
+            if (fd < 0) continue;
+            uint64_t hl;
+            if (read(fd, &hl, 8) != 8) { close(fd); continue; }
+            char *hb = malloc(hl + 1);
+            if (read(fd, hb, hl) != (ssize_t)hl) { free(hb); close(fd); continue; }
+            hb[hl] = 0;
+            close(fd);
+            NSData *jd = [NSData dataWithBytesNoCopy:hb length:hl freeWhenDone:YES];
+            NSDictionary *hdr = [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil];
+            if (!hdr) continue;
+            for (NSString *k in hdr) {
+                if ([k isEqualToString:@"__metadata__"]) continue;
+                allMeta[k] = hdr[k];
+                NSString *dt = hdr[k][@"dtype"];
+                if (dt) [allDtypes addObject:dt];
+            }
+        }
+        fprintf(stderr, "  Total metadata entries: %d\n", (int)[allMeta count]);
+        fprintf(stderr, "  Unique dtypes: ");
+        for (NSString *dt in [[allDtypes allObjects] sortedArrayUsingSelector:@selector(compare:)]) {
+            fprintf(stderr, "%s ", [dt UTF8String]);
+        }
+        fprintf(stderr, "\n");
+
+        // Step 4: Spot-check key tensors
+        fprintf(stderr, "\n  Spot-checking key tensors...\n");
+        const char *checks[] = {
+            "embed.weight", "head.weight", "norm.weight",
+            "layers.0.attn_norm.weight", "layers.0.attn.wq_a.weight",
+            "layers.0.ffn.gate.weight", "layers.0.ffn.gate.tid2eid",
+            "layers.0.ffn.experts.0.w1.weight", "layers.0.ffn.experts.0.w1.scale",
+            "layers.42.ffn.experts.255.w3.weight",
+            NULL
+        };
+        int found = 0, missing = 0;
+        for (const char **chk = checks; *chk; chk++) {
+            NSString *name = [NSString stringWithUTF8String:*chk];
+            NSString *shard = wm[name];
+            if (!shard) {
+                fprintf(stderr, "  MISSING: %s (not in weight_map)\n", *chk);
+                missing++;
+                continue;
+            }
+            NSDictionary *meta = allMeta[name];
+            if (!meta) {
+                fprintf(stderr, "  MISSING: %s (no metadata in shard header)\n", *chk);
+                missing++;
+                continue;
+            }
+            NSArray *shape = meta[@"shape"];
+            NSString *dtype = meta[@"dtype"];
+            NSArray *offsets = meta[@"data_offsets"];
+            size_t dsize = [offsets[1] longLongValue] - [offsets[0] longLongValue];
+            if (verbose) {
+                fprintf(stderr, "  OK: %s shape=[", *chk);
+                for (int d = 0; d < (int)[shape count]; d++)
+                    fprintf(stderr, "%d%s", [shape[d] intValue], d < (int)[shape count]-1 ? "," : "");
+                fprintf(stderr, "] dtype=%s size=%zu shard=%s\n",
+                        [dtype UTF8String], dsize, [shard UTF8String]);
+            }
+            found++;
+        }
+        fprintf(stderr, "  Found: %d  Missing: %d\n", found, missing);
+
+        int all_ok = (open_ok == n_shards && mmap_ok == n_shards && header_ok == n_shards && missing == 0);
+        fprintf(stderr, "\n%s Model integrity check: %d/%d shards accessible, %d/%d key tensors found\n",
+                all_ok ? "PASS" : "FAIL",
+                header_ok, n_shards, found, found + missing);
+        return all_ok ? 0 : 1;
+    }
+}
+
 static void print_usage(void) {
     fprintf(stderr, "\nfinchTool — Metal Engine Verification & Diagnostic Suite\n\n");
     fprintf(stderr, "Usage:\n");
     fprintf(stderr, "  ./finchTool kernel --test <name> [options]\n");
     fprintf(stderr, "  ./finchTool pipeline --test <name> [options]\n");
+    fprintf(stderr, "  ./finchTool model --model <path> [--verbose]\n");
     fprintf(stderr, "  ./finchTool parity --a <file> --b <file> [options]\n\n");
     fprintf(stderr, "Kernel tests:\n");
     fprintf(stderr, "  fused_mlp     Fused gate+up+SiLU vs non-fused comparison\n");
@@ -677,6 +851,8 @@ static void print_usage(void) {
     fprintf(stderr, "Pipeline tests:\n");
     fprintf(stderr, "  inter-cb-sync Inter-command-buffer synchronization audit\n");
     fprintf(stderr, "  all           Run all pipeline tests\n\n");
+    fprintf(stderr, "Model checks:\n");
+    fprintf(stderr, "  model         Verify safetensors shards, mmap, dtypes, key tensors\n\n");
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  --quant, -q   Quantization: 4bit (default), 8bit, 2bit, 1bit\n");
     fprintf(stderr, "  --dim-in, -i  Input dimension (default: 2048)\n");
@@ -711,6 +887,7 @@ int main(int argc, char **argv) {
     static struct option long_options[] = {
         {"test",      required_argument, 0, 't'},
         {"quant",     required_argument, 0, 'q'},
+        {"model",     required_argument, 0, 'm'},
         {"dim-in",    required_argument, 0, 'i'},
         {"dim-out",   required_argument, 0, 'o'},
         {"dim",       required_argument, 0, 'd'},
@@ -732,7 +909,7 @@ int main(int argc, char **argv) {
     fake_argv[fake_argc] = NULL;
 
     int c;
-    while ((c = getopt_long(fake_argc, fake_argv, "t:q:i:o:d:A:B:T:vh",
+    while ((c = getopt_long(fake_argc, fake_argv, "t:q:m:i:o:d:A:B:T:vh",
                             long_options, NULL)) != -1) {
         switch (c) {
             case 't': test_name  = optarg; break;
@@ -743,6 +920,7 @@ int main(int argc, char **argv) {
                 else if (strcmp(optarg, "1bit") == 0 || strcmp(optarg, "1") == 0) quant = 1;
                 else { fprintf(stderr, "Unknown quant: %s\n", optarg); return 1; }
                 break;
+            case 'm': path_a  = optarg; break;  // model path (reuse path_a)
             case 'i': dim_in  = atoi(optarg); break;
             case 'o': dim_out = atoi(optarg); break;
             case 'd': dim     = atoi(optarg); break;
@@ -807,6 +985,13 @@ int main(int argc, char **argv) {
         }
 
         diag_metal_free(ctx);
+
+    } else if (strcmp(subcommand, "model") == 0) {
+        if (!path_a) {
+            fprintf(stderr, "ERROR: --model PATH required for model subcommand\n");
+            return 1;
+        }
+        result = test_model_integrity(path_a, verbose);
 
     } else if (strcmp(subcommand, "parity") == 0) {
         if (!path_a || !path_b) {
