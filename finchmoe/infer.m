@@ -77,7 +77,7 @@
 // Safety margin for Metal buffer wrapping: the kernel needs headroom beyond
 // the raw weight file size for GPU page tables, IOMMU mappings, and general
 // system operation. 2GB is conservative for 16GB machines.
-#define METAL_SAFETY_MARGIN_BYTES (2ULL * 1024 * 1024 * 1024)  // 2GB
+#define METAL_SAFETY_MARGIN_BYTES (256ULL * 1024 * 1024)  // 256MB (was 2GB — far too conservative for 3B active models)
 
 // Returns available memory in bytes (free + inactive + purgeable + speculative).
 // Inactive pages are clean file-backed pages the kernel can free instantly.
@@ -1646,31 +1646,27 @@ static void metal_set_weights(MetalCtx *ctx, void *data, size_t size) {
            format_mem_size(METAL_SAFETY_MARGIN_BYTES));
 
     if (avail_mem > 0 && avail_mem < needed) {
-        // Tight memory — wrapping the entire file risks SIGKILL.
-        // The Metal driver needs to establish GPU page-table mappings for
-        // the entire range, which may require reserving physical pages even
-        // before the GPU touches them. Without swap, this can trigger jetsam.
+        // Tight memory — but on Apple Silicon unified memory, wrapping is
+        // zero-copy (just GPU page-table mappings, no physical allocation).
+        // Warn but attempt the wrap anyway. Only block if extremely tight
+        // (less than 256 MB available — system is about to jetsam anyway).
+        if (avail_mem < 256ULL * 1024 * 1024) {
+            fprintf(stderr,
+                    "\n"
+                    "╔══════════════════════════════════════════════════════════════╗\n"
+                    "║  MEMORY CRITICAL: < 256MB available — refusing Metal wrap  ║\n"
+                    "╠══════════════════════════════════════════════════════════════╣\n"
+                    "║  Available:  %7s                                      ║\n"
+                    "║  Close apps or restart to restore GPU acceleration.         ║\n"
+                    "╚══════════════════════════════════════════════════════════════╝\n"
+                    "\n",
+                    format_mem_size(avail_mem));
+            return;
+        }
         fprintf(stderr,
-                "\n"
-                "╔══════════════════════════════════════════════════════════════╗\n"
-                "║  MEMORY WARNING: Tight memory — refusing Metal weight wrap  ║\n"
-                "╠══════════════════════════════════════════════════════════════╣\n"
-                "║  Available:  %7s  (free + purgeable + speculative)       ║\n"
-                "║  Needed:     %7s  (weights + %s safety margin)  ║\n"
-                "║  Shortfall:  %7s                                      ║\n"
-                "╠══════════════════════════════════════════════════════════════╣\n"
-                "║  GPU matmuls will fall back to CPU (slower, safe).          ║\n"
-                "║  To restore full speed: free memory or add swap (4-8GB).    ║\n"
-                "╠══════════════════════════════════════════════════════════════╣\n"
-                "║  Quick fixes:                                                ║\n"
-                "║    --gpu-kv-seq 512   (reduce KV cache from 16.8MB each)   ║\n"
-                "║    Close other apps   (browsers, IDEs use 2-4GB each)      ║\n"
-                "╚══════════════════════════════════════════════════════════════╝\n"
-                "\n",
-                format_mem_size(avail_mem), format_mem_size(needed),
-                format_mem_size(METAL_SAFETY_MARGIN_BYTES),
-                format_mem_size(needed - avail_mem));
-        return;  // ctx->wf_buf stays nil → caller uses safe path
+                "[metal] Memory tight (%s available) but attempting GPU wrap anyway\n"
+                "        (Apple Silicon unified memory — zero-copy, no physical allocation)\n",
+                format_mem_size(avail_mem));
     }
 
     ctx->wf_buf = [ctx->device newBufferWithBytesNoCopy:data
