@@ -6895,6 +6895,27 @@ static char *extract_last_content(char *buf) {
     return last;
 }
 
+// Extract "prompt" from JSON body (/v1/completions).
+// Returns malloc'd string (caller frees), or NULL if not found.
+static char *extract_prompt(const char *buf) {
+    const char *p = strstr(buf, "\"prompt\"");
+    if (!p) return NULL;
+    p += 8; // skip "prompt"
+    // skip whitespace and colon
+    while (*p == ' ' || *p == '\t' || *p == ':') p++;
+    if (*p != '"') return NULL;
+    p++; // skip opening quote
+    char *result = malloc(65536);
+    if (!result) return NULL;
+    int i = 0;
+    while (*p && *p != '"' && i < 65535) {
+        if (*p == '\\') { p++; if (*p) result[i++] = *p++; }
+        else result[i++] = *p++;
+    }
+    result[i] = '\0';
+    return result;
+}
+
 // Extract "max_tokens" or "max_completion_tokens" from JSON body. Returns value or default.
 static int extract_max_tokens(const char *buf, int default_val) {
     const char *p = strstr(buf, "\"max_completion_tokens\"");
@@ -7005,6 +7026,48 @@ static void sse_send_done(int fd, const char *request_id,
     int n = snprintf(chunk, sizeof(chunk),
         "data: {\"id\":\"%s\",\"object\":\"chat.completion.chunk\","
         "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,"
+        "\"total_tokens\":%d,\"prefill_ms\":%.0f,\"generation_ms\":%.0f,"
+        "\"tokens_per_second\":%.1f}}\n\n"
+        "data: [DONE]\n\n",
+        request_id,
+        prompt_tokens, completion_tokens, prompt_tokens + completion_tokens,
+        prefill_ms, gen_ms,
+        completion_tokens > 0 ? completion_tokens * 1000.0 / gen_ms : 0.0);
+    http_write(fd, chunk, n);
+}
+
+// Send SSE delta for /v1/completions format (text_completion instead of chat.completion.chunk)
+static int sse_send_delta_completion(int fd, const char *request_id, const char *token_text) {
+    char chunk[4096];
+    char escaped[2048];
+    char *w = escaped;
+    for (const char *r = token_text; *r && w < escaped + sizeof(escaped) - 8; r++) {
+        switch (*r) {
+            case '"':  *w++ = '\\'; *w++ = '"';  break;
+            case '\\': *w++ = '\\'; *w++ = '\\'; break;
+            case '\n': *w++ = '\\'; *w++ = 'n';  break;
+            case '\r': *w++ = '\\'; *w++ = 'r';  break;
+            case '\t': *w++ = '\\'; *w++ = 't';  break;
+            default:   *w++ = *r; break;
+        }
+    }
+    *w = '\0';
+    int n = snprintf(chunk, sizeof(chunk),
+        "data: {\"id\":\"%s\",\"object\":\"text_completion\","
+        "\"choices\":[{\"index\":0,\"text\":\"%s\",\"finish_reason\":null}]}\n\n",
+        request_id, escaped);
+    ssize_t wr = write(fd, chunk, n);
+    return (wr <= 0) ? -1 : 0;
+}
+
+static void sse_send_done_completion(int fd, const char *request_id,
+                                     int prompt_tokens, int completion_tokens,
+                                     double prefill_ms, double gen_ms) {
+    char chunk[2048];
+    int n = snprintf(chunk, sizeof(chunk),
+        "data: {\"id\":\"%s\",\"object\":\"text_completion\","
+        "\"choices\":[{\"index\":0,\"text\":\"\",\"finish_reason\":\"stop\"}],"
         "\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,"
         "\"total_tokens\":%d,\"prefill_ms\":%.0f,\"generation_ms\":%.0f,"
         "\"tokens_per_second\":%.1f}}\n\n"
@@ -7188,6 +7251,7 @@ typedef struct {
     char session_id[64];
     int has_session;
     char request_id[64];
+    int is_completion;      // 1 = /v1/completions (raw prompt), 0 = chat
 } ServeQueueEntry;
 
 typedef struct {
@@ -7233,7 +7297,7 @@ typedef struct {
 static void process_chat_request(ServeState *s, int client_fd,
                                  const char *content, int max_gen,
                                  const char *session_id, int has_session,
-                                 const char *request_id);
+                                 const char *request_id, int is_completion);
 
 // ============================================================================
 // Worker thread: dequeues requests and processes them sequentially
@@ -7259,7 +7323,7 @@ static void *serve_worker(void *arg) {
         process_chat_request(s, e.client_fd,
                              e.content, e.max_gen,
                              e.has_session ? e.session_id : NULL, e.has_session,
-                             e.request_id);
+                             e.request_id, e.is_completion);
 
         free(e.content);
     }
@@ -7274,7 +7338,7 @@ static void *serve_worker(void *arg) {
 static void process_chat_request(ServeState *s, int client_fd,
                                  const char *content, int max_gen,
                                  const char *session_id, int has_session,
-                                 const char *request_id) {
+                                 const char *request_id, int is_completion) {
 
     float *hidden = calloc(HIDDEN_DIM, sizeof(float));
     float *logits = calloc(VOCAB_SIZE, sizeof(float));
@@ -7283,14 +7347,18 @@ static void process_chat_request(ServeState *s, int client_fd,
                            s->active_session_id[0] != '\0' &&
                            strcmp(session_id, s->active_session_id) == 0);
 
-    fprintf(stderr, "[serve] %s content=%zu chars, max_tokens=%d, session=%s%s\n",
+    fprintf(stderr, "[serve] %s content=%zu chars, max_tokens=%d, session=%s%s%s\n",
             request_id, strlen(content), max_gen,
             has_session ? session_id : "(none)",
-            is_continuation ? " [CONTINUE]" : " [NEW]");
+            is_continuation ? " [CONTINUE]" : " [NEW]",
+            is_completion ? " [COMPLETION]" : "");
 
     // ---- Tokenize ----
     PromptTokens *pt;
-    if (is_continuation) {
+    if (is_completion) {
+        // Raw prompt — no chat template wrapping
+        pt = encode_prompt_text_to_tokens(content);
+    } else if (is_continuation) {
         pt = tokenize_continuation_turn(content);
     } else {
         pt = tokenize_user_turn(content);
@@ -7370,6 +7438,7 @@ static void process_chat_request(ServeState *s, int client_fd,
     if (g_cache_telemetry_enabled) cache_telemetry_reset();
 
     // ---- Send SSE headers ----
+    // Send SSE headers (same for both chat and completions)
     http_write_str(client_fd, SSE_HEADERS);
 
     // ---- Batch prefill ----
@@ -7484,7 +7553,12 @@ static void process_chat_request(ServeState *s, int client_fd,
             gen_resp_len += tlen;
             gen_response[gen_resp_len] = 0;
         }
-        if (sse_send_delta(client_fd, request_id, tok_str) < 0) {
+        int disconnected;
+        if (is_completion)
+            disconnected = (sse_send_delta_completion(client_fd, request_id, tok_str) < 0);
+        else
+            disconnected = (sse_send_delta(client_fd, request_id, tok_str) < 0);
+        if (disconnected) {
             fprintf(stderr, "[serve] %s client disconnected, stopping generation\n", request_id);
             break;
         }
@@ -7515,8 +7589,12 @@ static void process_chat_request(ServeState *s, int client_fd,
     }
 
     double gen_ms = now_ms() - t_gen;
-    sse_send_done(client_fd, request_id,
-                  pt->count, gen_count, prefill_ms, gen_ms);
+    if (is_completion)
+        sse_send_done_completion(client_fd, request_id,
+                                  pt->count, gen_count, prefill_ms, gen_ms);
+    else
+        sse_send_done(client_fd, request_id,
+                      pt->count, gen_count, prefill_ms, gen_ms);
 
     free(gen_response);
     // Save session position for potential continuation
@@ -7573,7 +7651,7 @@ static void serve_loop(
     }
 
     printf("[serve] Listening on http://0.0.0.0:%d\n", port);
-    printf("[serve] Endpoints: POST /v1/chat/completions, GET /v1/models, GET /health\n");
+    printf("[serve] Endpoints: POST /v1/chat/completions, POST /v1/completions, GET /v1/models, GET /health\n");
     printf("[serve] Queue: max %d pending requests\n", SERVE_QUEUE_MAX);
     fflush(stdout);
 
@@ -7822,6 +7900,69 @@ static void serve_loop(
                     request_id, qdepth, SERVE_QUEUE_MAX);
             free(reqbuf);
             // Note: client_fd is NOT closed — worker thread will close it after generation
+            continue;
+        }
+
+        // POST /v1/completions — raw text completion (no chat template)
+        if (strcmp(method, "POST") == 0 && strcmp(path, "/v1/completions") == 0) {
+            char *body = strstr(reqbuf, "\r\n\r\n");
+            if (!body) {
+                http_write_str(client_fd,
+                    "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"
+                    "{\"error\":\"no body\"}\n");
+                free(reqbuf); close(client_fd); continue;
+            }
+            body += 4;
+
+            int max_gen = extract_max_tokens(body, 16);  // completions default: 16 tokens
+            if (max_gen > 32768) max_gen = 32768;
+
+            char *prompt = extract_prompt(body);
+            if (!prompt || strlen(prompt) == 0) {
+                http_write_str(client_fd,
+                    "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"
+                    "{\"error\":\"no prompt field\"}\n");
+                free(prompt); free(reqbuf); close(client_fd); continue;
+            }
+
+            char request_id[64];
+            snprintf(request_id, sizeof(request_id), "cmpl-%llu", ++req_counter);
+
+            // Enqueue
+            pthread_mutex_lock(&g_serve_queue.mutex);
+            if (g_serve_queue.count >= SERVE_QUEUE_MAX) {
+                pthread_mutex_unlock(&g_serve_queue.mutex);
+                char busy_resp[512];
+                int nr = snprintf(busy_resp, sizeof(busy_resp),
+                    "HTTP/1.1 503 Service Unavailable\r\n"
+                    "Content-Type: application/json\r\n"
+                    "Access-Control-Allow-Origin: *\r\n"
+                    "Retry-After: 3\r\nConnection: close\r\n\r\n"
+                    "{\"error\":\"server busy\",\"queue_depth\":%d,\"retry_after_s\":3}\n",
+                    SERVE_QUEUE_MAX);
+                http_write(client_fd, busy_resp, nr);
+                free(prompt); free(reqbuf); close(client_fd); continue;
+            }
+
+            int slot = g_serve_queue.tail;
+            g_serve_queue.entries[slot].client_fd = client_fd;
+            g_serve_queue.entries[slot].content = prompt;  // raw prompt, no chat template
+            g_serve_queue.entries[slot].max_gen = max_gen;
+            g_serve_queue.entries[slot].has_session = 0;
+            g_serve_queue.entries[slot].session_id[0] = '\0';
+            g_serve_queue.entries[slot].is_completion = 1;
+            strncpy(g_serve_queue.entries[slot].request_id, request_id, 63);
+            g_serve_queue.entries[slot].request_id[63] = '\0';
+
+            g_serve_queue.tail = (g_serve_queue.tail + 1) % SERVE_QUEUE_MAX;
+            g_serve_queue.count++;
+            pthread_cond_signal(&g_serve_queue.cond);
+            int qdepth = g_serve_queue.count;
+            pthread_mutex_unlock(&g_serve_queue.mutex);
+
+            fprintf(stderr, "[serve] %s completions enqueued prompt=%zu chars max_tokens=%d (depth=%d/%d)\n",
+                    request_id, strlen(prompt), max_gen, qdepth, SERVE_QUEUE_MAX);
+            free(reqbuf);
             continue;
         }
 
