@@ -139,8 +139,8 @@ FinchMoE's GatedDeltaNet layers (30/40) use fixed 2.1MB recurrent state — no K
 |   | → **Needs BF16 source** for 2-bit custom requantization (est. ~800 GB download) | | |
 | L | **DeepSeek-V4-Flash** (13B active MoE) | New model target | High |
 |   | → 43 layers, 256 experts (6 active), sliding window attn | | |
-|   | → FP4 native experts, hash routing, MTP, 1M context | | |
-|   | → BF16 download: ~160 GB. More advanced but needs engine adaptation | | |
+|   | → FP4 native experts, hash routing, DSPark, 1M context | | |
+|   | → BF16 download: ~155 GB. **[Design doc](finchmoe/design_deepseek.md)** | | |
 
 ## Project Structure
 
