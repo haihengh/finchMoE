@@ -4867,10 +4867,18 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
     cpu_dequant_matvec(g_mtp.shared_down_w, g_mtp.shared_down_s, g_mtp.shared_down_b,
                        shared_act, shared_out, HIDDEN_DIM, 512, GROUP_SIZE, 4);
 
-    // Step 9: Routed experts (load from layer_40.bin)
+    // Step 9: Routed experts (persistent buffers, allocated once)
+    static float *moe_out = NULL;
+    static void *expert_data = NULL;
+    static size_t expert_data_sz = 0;
     size_t esz = active_expert_size();
-    float *moe_out = calloc(HIDDEN_DIM, sizeof(float));
-    void *expert_data = malloc(esz);
+    if (!moe_out) moe_out = calloc(HIDDEN_DIM, sizeof(float));
+    if (!expert_data || expert_data_sz != esz) {
+        free(expert_data);
+        expert_data = malloc(esz);
+        expert_data_sz = esz;
+    }
+    memset(moe_out, 0, HIDDEN_DIM * sizeof(float));
 
     for (int k = 0; k < K; k++) {
         int eidx = expert_indices[k];
@@ -4902,13 +4910,12 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
 
         for (int i = 0; i < HIDDEN_DIM; i++) moe_out[i] += weight * expert_out[i];
     }
-    free(expert_data);
+    // Buffers are persistent (static) — no free needed
 
     // Step 10: Combine
     for (int i = 0; i < HIDDEN_DIM; i++) {
         h[i] = h[i] + moe_out[i] + shared_weight * shared_out[i];
     }
-    free(moe_out);
 
     // Step 11: Final norm
     float final_hidden[HIDDEN_DIM];
@@ -9168,10 +9175,14 @@ int main(int argc, char **argv) {
             fprintf(stderr, "  [gen %d/%d] token_id=%d (%.0f ms, %.2f tok/s)",
                     gen, max_tokens, next_token, tok_time, 1000.0 / tok_time);
 
-            // MTP speculative draft
+            // MTP speculative draft (persistent buffer, allocated once)
             static int mtp_attempts = 0, mtp_accepted = 0;
-            if (g_use_mtp && g_mtp.loaded && total_generated < max_tokens - 1) {
-                float *mtp_logits = malloc(VOCAB_SIZE * sizeof(float));
+            static float *mtp_logits = NULL;
+            if (!mtp_logits) {
+                mtp_logits = malloc(VOCAB_SIZE * sizeof(float));
+                fprintf(stderr, "[MTP] logits buffer alloc: %p\n", (void*)mtp_logits);
+            }
+            if (g_use_mtp && g_mtp.loaded && mtp_logits && total_generated < max_tokens - 1) {
                 int mtp_token;
                 float saved_hidden[HIDDEN_DIM];
                 memcpy(saved_hidden, hidden, HIDDEN_DIM * sizeof(float));
@@ -9189,7 +9200,6 @@ int main(int argc, char **argv) {
                     }
                     memcpy(hidden, saved_hidden, HIDDEN_DIM * sizeof(float));
                 }
-                free(mtp_logits);
             }
             fprintf(stderr, "\n");
         }
