@@ -330,6 +330,7 @@ static float g_temperature = 0.8f;  // sampling temperature (0 = greedy argmax)
 static int g_top_k = 40;            // top-k sampling (1 = greedy)
 static int g_no_think = 0;          // 0 = thinking mode on, 1 = skip think block
 static int g_low_memory = 0;       // enabled by --low-memory: skip Metal weight wrap, use CPU fallback
+static const char *g_dump_logits_path = NULL;  // --dump-logits FILE: save first-token logits for cross-validation
 
 // Tiered I/O: cold fds (F_NOCACHE) for first reads, warm fds (page cached) for repeats
 static int *g_layer_fds_cold = NULL;    // [NUM_LAYERS] cold fds (set in main)
@@ -2315,8 +2316,10 @@ static void gpu_encode_experts_batched(
             [enc setBytes:&gate_up_out length:4 atIndex:8];
             [enc setBytes:&gate_up_in  length:4 atIndex:9];
             [enc setBytes:&gs          length:4 atIndex:10];
-            [enc dispatchThreadgroups:MTLSizeMake(gate_up_tgs, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];  // 128 threads (fused kernel uses different config)
+            // 1-row-per-TG kernel needs out_dim TGs, not (out_dim+7)/8
+            uint32_t gate_up_1x_tgs = gate_up_out;
+            [enc dispatchThreadgroups:MTLSizeMake(gate_up_1x_tgs, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         } else {
             // Fallback: separate gate + up dispatches
             [enc setComputePipelineState:expert_pipe];
@@ -7689,12 +7692,13 @@ int main(int argc, char **argv) {
             {"max-seq-len",   required_argument, 0, 'N'},
             {"gpu-kv-seq",    required_argument, 0, 'Q'},
             {"low-memory",    no_argument,       0, 'l'},
+            {"dump-logits",   required_argument, 0, 'I'},
             {"help",          no_argument,       0, 'h'},
             {0, 0, 0, 0}
         };
 
         int c;
-        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:N:Q:e:o:lHLSTFE2GhXUY:V", long_options, NULL)) != -1) {
+        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:N:Q:e:o:I:lHLSTFE2GhXUY:V", long_options, NULL)) != -1) {
             switch (c) {
                 case 'm': model_path = optarg; model_path_from_user = 1; break;
                 case 'w': weights_path = optarg; break;
@@ -7731,6 +7735,7 @@ int main(int argc, char **argv) {
                 case 'o': g_top_k = atoi(optarg); break;
                 case 'H': g_no_think = 1; break;
                 case 'l': g_low_memory = 1; break;
+                case 'I': g_dump_logits_path = optarg; break;
                 case 'N': g_max_seq_len = atoi(optarg); break;
                 case 'Q': g_gpu_kv_seq = atoi(optarg); break;
                 case 'R': serve_port = atoi(optarg); break;
@@ -8249,6 +8254,19 @@ int main(int argc, char **argv) {
         double t_lm = now_ms();
         lm_head_forward(wf, hidden, logits);
         double lm_ms = now_ms() - t_lm;
+
+        // ---- Dump logits for cross-validation ----
+        if (g_dump_logits_path) {
+            FILE *df = fopen(g_dump_logits_path, "wb");
+            if (df) {
+                fwrite(logits, sizeof(float), VOCAB_SIZE, df);
+                fclose(df);
+                fprintf(stderr, "[dump-logits] %d floats (%.1f MB) -> %s\n",
+                        VOCAB_SIZE, (double)(VOCAB_SIZE * sizeof(float)) / 1e6, g_dump_logits_path);
+            }
+            printf("Logits dumped to %s\n", g_dump_logits_path);
+            return 0;
+        }
 
         // ---- Sample first token ----
         int next_token = cpu_sample_temp(logits, VOCAB_SIZE, g_temperature, g_top_k);
