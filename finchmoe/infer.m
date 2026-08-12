@@ -8,7 +8,7 @@
  * Architecture: Qwen3.6-35B-A3B (MoE)
  *   - 40 layers: 30 linear attention (GatedDeltaNet) + 10 full attention
  *   - hidden_size=2048, head_dim=256, num_attention_heads=16, num_kv_heads=2
- *   - 256 experts/layer, 8 active (we use K=4 for speed)
+ *   - 256 experts/layer, 8 active (model trained with 8 experts/token)
  *   - Shared expert per layer (always active)
  *   - Linear attention: conv1d(kernel=4) + gated delta recurrence
  *   - Full attention: standard QKV + scaled dot product + RoPE
@@ -704,10 +704,11 @@ static WeightFile *open_weights(const char *bin_path, const char *json_path) {
     return wf;
 }
 
+static int g_missing_tensor_count = 0;
 static void *get_tensor_ptr(WeightFile *wf, const char *name) {
     TensorInfo *t = find_tensor(wf->manifest, name);
     if (!t) {
-        fprintf(stderr, "WARNING: tensor '%s' not found\n", name);
+        g_missing_tensor_count++;
         return NULL;
     }
     return (char *)wf->data + t->offset;
@@ -827,7 +828,7 @@ static Vocabulary *load_vocab(const char *path) {
 }
 
 static const char *decode_token(Vocabulary *v, int token_id) {
-    if (token_id < 0 || token_id >= v->num_tokens || !v->tokens[token_id]) {
+    if (!v || token_id < 0 || token_id >= v->num_tokens || !v->tokens[token_id]) {
         return "<unk>";
     }
     const char *raw = v->tokens[token_id];
@@ -1134,10 +1135,111 @@ static int cpu_argmax(const float *x, int dim) {
     return best;
 }
 
+// ============================================================================
+// Repetition penalty: prevents greedy sampling from getting stuck in
+// high-probability token attractors (e.g. "* * * *" loops at T=0).
+// Tracks recently generated tokens in a ring buffer and penalizes their
+// logits before sampling.  See Bug 15 (long-generation repetition loop).
+// ============================================================================
+#define REPETITION_WINDOW 64
+static int   g_rep_ring[REPETITION_WINDOW];
+static int   g_rep_pos = 0;
+static int   g_rep_count = 0;
+static float g_rep_penalty = 1.15f;   // 1.15 = mild; 1.0 = disabled
+
+static void rep_penalty_register(int token_id) {
+    g_rep_ring[g_rep_pos] = token_id;
+    g_rep_pos = (g_rep_pos + 1) % REPETITION_WINDOW;
+    if (g_rep_count < REPETITION_WINDOW) g_rep_count++;
+}
+
+static void rep_penalty_apply(float *logits, int dim) {
+    if (g_rep_penalty <= 1.0f || g_rep_count == 0) return;
+    for (int i = 0; i < g_rep_count; i++) {
+        int tid = g_rep_ring[i];
+        if (tid >= 0 && tid < dim) {
+            // Standard formula: push positive logits down, negative up
+            if (logits[tid] > 0.0f) {
+                logits[tid] /= g_rep_penalty;
+            } else {
+                logits[tid] *= g_rep_penalty;
+            }
+        }
+    }
+}
+
+// Logit diagnostics: periodically dump logit statistics during generation
+// to diagnose temporal drift (Bug 15). Enabled via --logit-diag N.
+static int g_logit_diag_interval = 0;  // 0 = disabled; N = dump every N tokens
+
+static void logit_diag_dump(const float *logits, int dim, int token_idx, int gen_step) {
+    if (g_logit_diag_interval <= 0) return;
+    if (gen_step % g_logit_diag_interval != 0 && gen_step != 0) return;
+
+    // Find top 20
+    #define DIAG_TOPK 20
+    int top_idx[DIAG_TOPK];
+    float top_val[DIAG_TOPK];
+    for (int i = 0; i < DIAG_TOPK; i++) { top_idx[i] = -1; top_val[i] = -INFINITY; }
+    for (int i = 0; i < dim; i++) {
+        float v = logits[i];
+        // Find min in current top-k
+        int min_k = 0;
+        for (int k = 1; k < DIAG_TOPK; k++) if (top_val[k] < top_val[min_k]) min_k = k;
+        if (v > top_val[min_k]) { top_val[min_k] = v; top_idx[min_k] = i; }
+    }
+    // Sort descending
+    for (int i = 0; i < DIAG_TOPK - 1; i++) {
+        for (int j = i + 1; j < DIAG_TOPK; j++) {
+            if (top_val[j] > top_val[i]) {
+                float tv = top_val[i]; top_val[i] = top_val[j]; top_val[j] = tv;
+                int ti = top_idx[i]; top_idx[i] = top_idx[j]; top_idx[j] = ti;
+            }
+        }
+    }
+
+    // Compute softmax + entropy
+    float max_val = logits[0];
+    for (int i = 1; i < dim; i++) if (logits[i] > max_val) max_val = logits[i];
+    double sum_exp = 0.0;
+    for (int i = 0; i < dim; i++) sum_exp += expf(logits[i] - max_val);
+    double entropy = 0.0;
+    for (int i = 0; i < dim; i++) {
+        double p = expf(logits[i] - max_val) / sum_exp;
+        if (p > 0) entropy -= p * log(p);
+    }
+
+    fprintf(stderr, "\n[logit-diag] step=%d token=%d (\"%s\") entropy=%.4f max_logit=%.4f\n",
+            gen_step, token_idx,
+            decode_token(NULL, token_idx) ? decode_token(NULL, token_idx) : "?",
+            entropy, max_val);
+    fprintf(stderr, "[logit-diag] top-20: ");
+    for (int i = 0; i < DIAG_TOPK; i++) {
+        const char *s = decode_token(NULL, top_idx[i]);
+        fprintf(stderr, "%s%.4f(%s%s)", i > 0 ? " " : "",
+                top_val[i], s ? s : "?", i < DIAG_TOPK - 1 ? "," : "");
+    }
+    fprintf(stderr, "\n");
+    #undef DIAG_TOPK
+}
+
 // Temperature sampling with top-k: softmax(logits/T), pick from top K.
 // Uses static buffers to avoid per-token malloc (called on every generation step).
+// Applies repetition penalty before sampling to prevent attractor loops.
 static int cpu_sample_temp(const float *x, int dim, float temp, int top_k) {
-    if (temp <= 0.0f || top_k <= 1) return cpu_argmax(x, dim);
+    // Mutable logits buffer (repetition penalty + argmax needs it)
+    static float *logits_buf = NULL;
+    if (!logits_buf) logits_buf = malloc(VOCAB_SIZE * sizeof(float));
+    memcpy(logits_buf, x, dim * sizeof(float));
+
+    // Apply repetition penalty BEFORE argmax/temperature sampling
+    rep_penalty_apply(logits_buf, dim);
+
+    if (temp <= 0.0f || top_k <= 1) {
+        int chosen = cpu_argmax(logits_buf, dim);
+        rep_penalty_register(chosen);
+        return chosen;
+    }
 
     // Static buffers — VOCAB_SIZE is fixed at compile time
     static float *probs = NULL;
@@ -1150,8 +1252,8 @@ static int cpu_sample_temp(const float *x, int dim, float temp, int top_k) {
     }
 
     // Find max for numerical stability
-    float max_val = x[0];
-    for (int i = 1; i < dim; i++) if (x[i] > max_val) max_val = x[i];
+    float max_val = logits_buf[0];
+    for (int i = 1; i < dim; i++) if (logits_buf[i] > max_val) max_val = logits_buf[i];
 
     // Compute exp(x/T - max/T) and find top-k threshold via min-heap
     float inv_t = 1.0f / temp;
@@ -1160,7 +1262,7 @@ static int cpu_sample_temp(const float *x, int dim, float temp, int top_k) {
     float threshold = 0.0f;
 
     for (int i = 0; i < dim; i++) {
-        float p = expf((x[i] - max_val) * inv_t);
+        float p = expf((logits_buf[i] - max_val) * inv_t);
         probs[i] = p;
         sum += p;
 
@@ -1209,6 +1311,7 @@ static int cpu_sample_temp(const float *x, int dim, float temp, int top_k) {
         cumsum += probs[i];
         if (r <= cumsum) { chosen = i; break; }
     }
+    rep_penalty_register(chosen);
     return chosen;
 }
 
@@ -2220,7 +2323,7 @@ static void gpu_encode_expert_forward_slot_buf(
 
 // Batched expert encoding: encode K experts using 2 encoders per expert
 // (gate+up fused, SwiGLU+down fused) + 2 for shared = K*2 + 2 encoders total.
-// With K=4: 10 encoders (vs. old 4*K + 2 = 18 with per-operation encoding).
+// With K=8: 18 encoders (vs. old 4*K + 2 = 34 with per-operation encoding).
 // Each expert gets its own encoder pair for GPU parallelism across experts.
 // Within each encoder, gate+up (or SwiGLU+down) are serialized but share
 // encoder creation overhead. Net win: fewer encoders, same parallelism.
@@ -3680,48 +3783,71 @@ static void lm_head_forward(WeightFile *wf, const float *hidden, float *logits) 
         uint32_t *W = (uint32_t *)((char *)wf->data + w_info->offset);
         uint16_t *S = (uint16_t *)((char *)wf->data + s_info->offset);
         uint16_t *B = (uint16_t *)((char *)wf->data + b_info->offset);
-        // in_dim = packed_cols * 8 (4-bit: 8 values per uint32)
         int in_dim = w_info->shape[1] * 8;
-        int group_size = in_dim / s_info->shape[1];  // use actual group size from scale shape
+        int group_size = in_dim / s_info->shape[1];
         fast_dequant_matvec(W, S, B, hidden, logits, VOCAB_SIZE, in_dim, group_size);
         return;
     }
 
-    // BF16 path — use Accelerate BLAS for speed
-    static float *lm_head_f32 = NULL;
-    static int lm_head_f32_loaded = 0;
-    if (!lm_head_f32_loaded) {
-        const uint16_t *W_bf16 = (const uint16_t *)((char *)wf->data + w_info->offset);
-        int in_dim = w_info->shape[1];
-        lm_head_f32 = malloc((size_t)VOCAB_SIZE * in_dim * sizeof(float));
-        if (!lm_head_f32) {
-            fprintf(stderr, "ERROR: cannot allocate lm_head float32 cache\n");
-            return;
-        }
-        // Convert BF16 -> float32 once
-        for (size_t i = 0; i < (size_t)VOCAB_SIZE * in_dim; i++) {
-            lm_head_f32[i] = bf16_to_f32(W_bf16[i]);
-        }
-        lm_head_f32_loaded = 1;
-        fprintf(stderr, "[lm_head] Converted BF16->F32 cache (%.1f MB)\n",
-                (double)(VOCAB_SIZE * in_dim * sizeof(float)) / 1e6);
+    int in_dim = w_info->shape[1];  // 2048
+
+    // GPU path: use gemv_bf16_x2 kernel (reads BF16 directly from Metal buffer, zero-copy)
+    if (g_metal && g_metal->wf_buf && (g_metal->gemv_bf16_x2_pipe || g_metal->gemv_bf16_pipe)) {
+        int use_x2 = (g_metal->gemv_bf16_x2_pipe != NULL);
+        NSUInteger w_off = w_info->offset;
+        memcpy([g_metal->buf_input contents], hidden, in_dim * sizeof(float));
+        id<MTLCommandBuffer> cmdbuf = [g_metal->queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
+        [enc setComputePipelineState:use_x2 ? g_metal->gemv_bf16_x2_pipe : g_metal->gemv_bf16_pipe];
+        [enc setBuffer:g_metal->wf_buf offset:w_off atIndex:0];
+        [enc setBuffer:g_metal->buf_input offset:0 atIndex:1];
+        [enc setBuffer:g_metal->buf_output offset:0 atIndex:2];
+        uint32_t od = VOCAB_SIZE, id = (uint32_t)in_dim;
+        [enc setBytes:&od length:sizeof(uint32_t) atIndex:3];
+        [enc setBytes:&id length:sizeof(uint32_t) atIndex:4];
+        uint32_t num_tgs = use_x2 ? ((VOCAB_SIZE + 1) / 2) : VOCAB_SIZE;
+        uint32_t tg_size = use_x2 ? 256 : 256;
+        [enc dispatchThreadgroups:MTLSizeMake(num_tgs, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
+        [enc endEncoding];
+        [cmdbuf commit];
+        [cmdbuf waitUntilCompleted];
+        memcpy(logits, [g_metal->buf_output contents], VOCAB_SIZE * sizeof(float));
+        return;
     }
 
-    // cblas_sgemv: y = alpha * A * x + beta * y
-    // A is VOCAB_SIZE x HIDDEN_DIM, row-major
-    int in_dim = w_info->shape[1];
-    cblas_sgemv(CblasRowMajor, CblasNoTrans,
-                VOCAB_SIZE, in_dim,
-                1.0f, lm_head_f32, in_dim,
-                hidden, 1,
-                0.0f, logits, 1);
+    // CPU fallback: chunked BF16→F32 conversion + BLAS (avoids 2 GB allocation)
+    {
+        const uint16_t *W_bf16 = (const uint16_t *)((char *)wf->data + w_info->offset);
+        #define LM_HEAD_CHUNK 4096  // process 4096 rows at a time (34 MB chunks)
+        float *chunk_f32 = malloc((size_t)LM_HEAD_CHUNK * in_dim * sizeof(float));
+        if (!chunk_f32) {
+            fprintf(stderr, "ERROR: cannot allocate lm_head chunk buffer\n");
+            return;
+        }
+        for (int chunk = 0; chunk < VOCAB_SIZE; chunk += LM_HEAD_CHUNK) {
+            int rows = (chunk + LM_HEAD_CHUNK <= VOCAB_SIZE) ? LM_HEAD_CHUNK : (VOCAB_SIZE - chunk);
+            // Convert BF16→F32 for this chunk
+            size_t base = (size_t)chunk * in_dim;
+            for (int i = 0; i < rows * in_dim; i++) {
+                chunk_f32[i] = bf16_to_f32(W_bf16[base + i]);
+            }
+            cblas_sgemv(CblasRowMajor, CblasNoTrans,
+                        rows, in_dim,
+                        1.0f, chunk_f32, in_dim,
+                        hidden, 1,
+                        0.0f, logits + chunk, 1);
+        }
+        free(chunk_f32);
+        #undef LM_HEAD_CHUNK
+    }
 }
 
 // ============================================================================
 // Parallel I/O infrastructure for expert pread (from proven main.m pattern)
 // ============================================================================
 
-#define NUM_IO_THREADS 4  // 4 threads for K=4 experts (one per expert)
+#define NUM_IO_THREADS 8  // 8 threads for K=8 experts (one per expert)
 
 typedef struct {
     int fd;
@@ -4840,7 +4966,7 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
                        256, HIDDEN_DIM, GROUP_SIZE, 8);
     cpu_softmax(gate_scores, 256);
 
-    int K = 2;  // same as main model default
+    int K = 8;  // model trained with 8 experts/token (K=2 produces garbage)
     int expert_indices[8];
     float expert_weights[8];
     cpu_topk(gate_scores, 256, K, expert_indices, expert_weights);
@@ -7874,6 +8000,7 @@ static void process_chat_request(ServeState *s, int client_fd,
     }
     lm_head_forward(s->wf, hidden, logits);
     int next_token = cpu_sample_temp(logits, VOCAB_SIZE, g_temperature, g_top_k);
+    logit_diag_dump(logits, VOCAB_SIZE, next_token, 0);
 
     // ---- Auto-regressive generation with SSE streaming ----
     if (g_pred_enabled) {
@@ -7955,6 +8082,7 @@ static void process_chat_request(ServeState *s, int client_fd,
         }
         lm_head_forward(s->wf, hidden, logits);
         next_token = cpu_sample_temp(logits, VOCAB_SIZE, g_temperature, g_top_k);
+        logit_diag_dump(logits, VOCAB_SIZE, next_token, gen + 1);
     }
 
     double gen_ms = now_ms() - t_gen;
@@ -8360,7 +8488,7 @@ static void print_usage(const char *prog) {
     printf("  --prompt-tokens PATH prompt_tokens.bin path\n");
     printf("  --prompt TEXT         Prompt text (requires encode_prompt.py)\n");
     printf("  --tokens N           Max tokens to generate (default: 20)\n");
-    printf("  --k N                Active experts per layer (default: 4)\n");
+    printf("  --k N                Active experts per layer (default: 8)\n");
     printf("  --cache-entries N    Expert LRU cache size (default: 2500, 0 = disabled)\n");
     printf("  --malloc-cache N     Malloc expert cache entries (e.g., 2581 = 17GB for 80%% hit)\n");
     printf("  --cpu-linear         Disable fused GPU delta-net and use the older CPU/hybrid linear path\n");
@@ -8379,11 +8507,13 @@ static void print_usage(const char *prog) {
     printf("  --compare-experts N  Compare GPU vs CPU expert outputs for layer N\n");
     printf("  --temperature F      Sampling temperature (default: 0.8, 0=greedy)\n");
     printf("  --top-k N            Top-k sampling (default: 40, 1=greedy)\n");
+    printf("  --rep-penalty F      Repetition penalty (default: 1.15, 1.0=disabled)\n");
     printf("  --no-think           Disable thinking mode (empty <think/> block)\n");
     printf("  --serve PORT         Run HTTP server (OpenAI-compatible API)\n");
     printf("  --max-seq-len N      Max context length for KV cache (default: 262144 = 256K, model limit)\n");
     printf("  --gpu-kv-seq N       GPU KV buffer pre-allocation in tokens (default: 8192)\n");
     printf("  --low-memory         Skip Metal weight buffer wrap (slower, safe for 16GB)\n");
+    printf("  --logit-diag N       Dump logit top-20 + entropy every N tokens (debug drift)\n");
     printf("  --help               This message\n");
 }
 
@@ -8458,7 +8588,7 @@ int main(int argc, char **argv) {
         const char *prompt_tokens_path = NULL;
         const char *prompt_text = NULL;
         int max_tokens = 20;
-        int K = 2;  // K=2: 7+ tok/s, K=4: better quality, K=8: best quality (model default)
+        int K = 8;  // model trained with 8 experts/token (K=2 produces garbage)
         int cache_entries = 0;  // default 0: trust OS page cache (38% faster than Metal LRU)
         int malloc_cache_entries = 0;  // 0 = disabled (override with --malloc-cache)
         int serve_port = 0;  // 0 = disabled, >0 = HTTP serve mode
@@ -8489,6 +8619,7 @@ int main(int argc, char **argv) {
             {"serve",         required_argument, 0, 'R'},
             {"predict",       no_argument,       0, 'D'},
             {"mtp",           no_argument,       0, 'J'},
+            {"rep-penalty",   required_argument, 0, 'r'},
             {"debug-layers",  no_argument,       0, 'X'},
             {"gpu-experts",   no_argument,       0, 'U'},
             {"cpu-experts",   no_argument,       0, 'V'},
@@ -8498,6 +8629,7 @@ int main(int argc, char **argv) {
             {"gpu-kv-seq",    required_argument, 0, 'Q'},
             {"low-memory",    no_argument,       0, 'l'},
             {"dump-logits",   required_argument, 0, 'I'},
+            {"logit-diag",    required_argument, 0, 'A'},
             {"help",          no_argument,       0, 'h'},
             {0, 0, 0, 0}
         };
@@ -8525,6 +8657,7 @@ int main(int argc, char **argv) {
                 case 'G': gpu_linear_attn_enabled = 1; break;
                 case 'D': g_pred_enabled = 1; break;
                 case 'J': g_use_mtp = 1; break;
+                case 'r': g_rep_penalty = atof(optarg); break;
                 case 'X': g_debug_layers = 1; break;
                 case 'U': g_gpu_experts = 1; break;
                 case 'V': g_cpu_experts = 1; break;
@@ -8542,6 +8675,7 @@ int main(int argc, char **argv) {
                 case 'H': g_no_think = 1; break;
                 case 'l': g_low_memory = 1; break;
                 case 'I': g_dump_logits_path = optarg; break;
+                case 'A': g_logit_diag_interval = atoi(optarg); break;
                 case 'N': g_max_seq_len = atoi(optarg); break;
                 case 'Q': g_gpu_kv_seq = atoi(optarg); break;
                 case 'R': serve_port = atoi(optarg); break;
@@ -8929,6 +9063,10 @@ int main(int argc, char **argv) {
 
         double t_init = now_ms();
         printf("[init] Setup: %.1f ms\n\n", t_init - t0);
+        if (g_missing_tensor_count > 0) {
+            printf("[init] %d missing scale/bias tensors (expected — using BF16 fallback)\n\n",
+                   g_missing_tensor_count);
+        }
 
         // ---- Allocate working buffers ----
         float *hidden = calloc(HIDDEN_DIM, sizeof(float));
@@ -9059,7 +9197,7 @@ int main(int argc, char **argv) {
             free(normed);
         }
 
-        // ---- LM head ----
+        // ---- LM head (GPU gemv_bf16_x2, zero-copy) ----
         double t_lm = now_ms();
         lm_head_forward(wf, hidden, logits);
         double lm_ms = now_ms() - t_lm;
@@ -9079,6 +9217,7 @@ int main(int argc, char **argv) {
 
         // ---- Sample first token ----
         int next_token = cpu_sample_temp(logits, VOCAB_SIZE, g_temperature, g_top_k);
+        logit_diag_dump(logits, VOCAB_SIZE, next_token, 0);
         double ttft_ms = now_ms() - t0;
 
         // Debug: show top-5 logits for first token
@@ -9161,6 +9300,7 @@ int main(int argc, char **argv) {
 
             // Temperature sample
             next_token = cpu_sample_temp(logits, VOCAB_SIZE, g_temperature, g_top_k);
+            logit_diag_dump(logits, VOCAB_SIZE, next_token, total_generated);
 
             // Think budget: force end thinking if over budget
             if (in_think && g_think_budget > 0 && think_tokens >= g_think_budget) {
