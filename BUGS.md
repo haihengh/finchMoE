@@ -548,3 +548,84 @@ The 2 GB safety margin (`METAL_SAFETY_MARGIN_BYTES`) was designed for 17 GB weig
 **Lesson**: Apple Silicon unified memory is fundamentally different from discrete GPU architectures. Zero-copy Metal buffers don't allocate physical pages — they just create GPU page-table mappings. Memory safety margins designed for discrete GPUs are unnecessarily conservative and can block correct operation. Always test on target hardware.
 
 **Remaining**: Weight file is 4.96 GB (BF16 non-expert weights). Should be ~1.5 GB with non-expert quantization (embeddings + lm_head at 8-bit saves 1 GB, full 4-bit saves ~3.5 GB). This is the real fix for fitting in 2 GB RAM.
+
+---
+
+## Bug 14: K=2 Default Produces Garbage Output (2026-08-11)
+
+**Symptom**: Engine produced word salad at default settings ("No matter what you're going to be a little as you can. You will! be a **"). Model outputs were incoherent despite correct token-1 logits.
+
+**Root Cause**: Qwen 3.6 35B A3B is trained with `num_experts_per_tok: 8`, meaning 8 of 256 experts are active per layer. The CLI default was `K=2`, which meant only 2/8 experts (25%) contributed to each layer's output. The remaining 75% of expert computation was silently skipped, corrupting the residual stream at every layer.
+
+K=2 was chosen as a performance optimization (8.3 tok/s vs 7.5 tok/s for K=4), assuming the model could tolerate fewer experts at inference time. This assumption was wrong — the model requires all 8 experts for coherent output.
+
+**Fix** (4 changes in `infer.m`):
+1. Main CLI default: `int K = 2` → `int K = 8`
+2. MTP default: `int K = 2` → `int K = 8`
+3. I/O parallelism: `NUM_IO_THREADS` 4 → 8 (one thread per expert)
+4. Help text: `(default: 4)` → `(default: 8)`
+5. Header comment: `8 active (we use K=4 for speed)` → `8 active (model trained with 8 experts/token)`
+6. Encoder comment: `With K=4: 10 encoders` → `With K=8: 18 encoders`
+
+**Verification**: With K=8 and T=0.7, engine produces 400 coherent tokens of valid Ruby code at 3.88 tok/s. No degradation, no word salad.
+
+**Lesson**: Never override a model's trained architectural hyperparameters without verifying the quality impact. The speed difference between K=2 and K=8 is significant (8.3→3.9 tok/s), but correctness matters more. A config validation that warns when K ≠ `num_experts_per_tok` would prevent this class of bug.
+
+---
+
+## Bug 15: lm_head 2 GB F32 Cache Causes OOM / Segfault (2026-08-11)
+
+**Symptom**: Engine crashed with `zsh: segmentation fault` at token 1 on a 16 GB M4 with 5.7-6.3 GB free. The crash occurred during the first token's lm_head computation, after final norm but before sampling.
+
+**Root Cause**: The `lm_head_forward()` function allocated a static 2 GB F32 cache on first use (`lm_head_f32 = malloc(VOCAB_SIZE * HIDDEN_DIM * sizeof(float))` = 248,320 × 2,048 × 4 = 2.03 GB). On a system with 5.7 GB free and a 4.6 GB mmap'd weight file, this pushed total allocation past available physical memory. macOS virtual memory overcommit allowed the malloc to succeed (returning non-NULL), but the subsequent BF16→F32 conversion loop triggered a SIGSEGV when the OS couldn't back the pages.
+
+The old code path was:
+1. Check for scales/biases (4-bit quantized path)
+2. If not found, allocate 2 GB F32 cache
+3. Convert all 508M BF16 values to F32
+4. Use Accelerate BLAS `cblas_sgemv` for the matvec
+
+This was the ONLY place in the engine that required a large additional allocation beyond the mmap'd weight file. Everything else used either GPU zero-copy (reading BF16 directly from Metal buffer) or existing GPU buffers.
+
+**Fix**: Replaced the CPU F32-cache path with a GPU path that reads BF16 weights directly from the Metal buffer (zero-copy, no allocation):
+
+```c
+// NEW: GPU path — uses gemv_bf16_x2 kernel
+if (g_metal && g_metal->wf_buf && g_metal->gemv_bf16_x2_pipe) {
+    // Copy input to GPU, dispatch kernel, copy result back
+    // Weights read directly from Metal buffer at offset 0
+    // No malloc needed — uses preallocated buf_input and buf_output
+}
+// FALLBACK: CPU chunked path (34 MB chunks, avoids 2 GB allocation)
+```
+
+The `buf_output` Metal buffer was already allocated at `VOCAB_SIZE * sizeof(float)` = 970 KB for this purpose (line 1566 had the foresight: `max_out = VOCAB_SIZE * sizeof(float); // lm_head is largest`).
+
+The GPU kernel `gemv_bf16_x2` computes 2 output rows per threadgroup using 128-bit (uint4) BF16 loads, interleaved thread access pattern. Dispatch: 124,160 threadgroups × 256 threads.
+
+**Additional fix**: `decode_token()` had no NULL guard for the `Vocabulary *v` parameter. Calling `decode_token(NULL, tid)` (used by the logit diagnostics) dereferenced `v->num_tokens` and crashed. Added `if (!v ...)` guard.
+
+**Verification**:
+- Before fix: `zsh: segmentation fault` at token 1
+- After fix: 400 tokens generated at 3.88 tok/s, no crash
+- GPU path latency: ~10 ms per lm_head forward (vs ~15 ms for old CPU BLAS path when it worked)
+
+**Lesson**: Never allocate large caches proportional to vocabulary size without checking available memory. On macOS, malloc can succeed even when physical RAM is exhausted (virtual memory overcommit), and the actual crash happens later when writing to the pages. Always prefer zero-copy GPU paths that read directly from mmap'd weight buffers on Apple Silicon unified memory.
+
+---
+
+## Bug 16: Logit Diagnostic NULL Pointer Crash (2026-08-11)
+
+**Symptom**: After fixing Bug 15, engine still crashed with segfault at token 1. Debug output showed `lm_head_forward returned` successfully, crash was in subsequent code.
+
+**Root Cause**: The new `logit_diag_dump()` function called `decode_token(NULL, token_id)` to display token text in the top-20 logit display. But `decode_token()` dereferenced `v->num_tokens` without checking if `v` is NULL, causing a segfault. The original top-5 debug print (line 9254) passed the actual vocab pointer, but the generic diagnostic function used NULL.
+
+**Fix**: Added `if (!v || ...)` guard to `decode_token()`:
+```c
+static const char *decode_token(Vocabulary *v, int token_id) {
+    if (!v || token_id < 0 || token_id >= v->num_tokens || !v->tokens[token_id]) {
+        return "<unk>";
+    }
+```
+
+**Lesson**: Always guard pointer parameters, even in "internal" functions. Diagnostic/tooling code paths are tested less frequently and are more likely to pass unexpected NULL values.
