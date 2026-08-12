@@ -58,11 +58,19 @@ Per-token breakdown from 400-token run at K=8, 4-bit experts, warm cache:
 5. Update C engine: `gpu_batch_matvec` already handles scales/biases → 4-bit path
 6. Quality validation: compare logits before/after quantization, ensure CosSim > 0.99
 
-**Risk**: The `quantize_model.py` comments say "GPU path also hangs" for large non-expert tensors. This must be root-caused and fixed. The hang is NOT a fundamental limitation (turbo-fieldfare proves it works). Likely causes:
-- Incorrect packed size calculation (in_dim must be divisible by 64 for 4-bit, 32 for 8-bit)
-- Buffer offset alignment issue
-- Threadgroup count exceeding Metal limits (though 2048/8=256 TG is well within limits)
-- Scale/bias shape mismatch
+**Debugging the GPU hang** (specific investigation plan):
+1. **Verify packed dimensions**: For a [2048, 2048] BF16 tensor, the 4-bit packed weight is [2048, 256] uint32s (2048 × 256 × 4 = 2 MB). Scales are [2048, 32] BF16 (128 KB). Biases same. The kernel reads `num_groups = in_dim / group_size = 2048 / 64 = 32` and `packed_per_group = 64 / 8 = 8`. Verify these match the manifest.
+2. **Test incremental scale-up**: Start with [128, 2048], then [256, 2048], [512, 2048], [1024, 2048], [2048, 2048]. Find the exact size where it breaks.
+3. **Check for Metal resource limits**: Our kernel dispatches `out_dim/8` threadgroups. For out_dim=2048 that's 256 TG — well within limits. But Metal has a per-command-buffer resource limit; verify total buffer bindings across all encoders in CMD1 don't exhaust the argument buffer table.
+4. **Verify buffer offsets**: The Metal buffer offset for the packed weight within `model_weights.bin` must match what the GPU reads. A 1-byte offset error would read garbage scale/bias values, causing the kernel to produce NaN → infinite loop or hang.
+5. **Isolate from CMD1 encoding**: Test a standalone dispatch (single encoder, no batch) of `dequant_matvec_4bit_v3` on a [2048, 2048] tensor. If it works standalone but hangs in the batch, the issue is batch encoding, not the kernel.
+
+**Note**: Our expert tensors ([512, 256] etc.) work fine at 4-bit. The difference is scale: non-expert tensors are larger but structurally identical. The hang is a bug, not a fundamental limitation. turbo-fieldfare runs 4-bit dequant on [2048, 2048] attention tensors successfully.
+
+**Quality gates** — validate per tensor category, not just overall:
+- Attention Q/K/V: 4-bit acceptable if CosSim ≥ 0.99
+- Attention O-proj, GDN out_proj: consider 8-bit if 4-bit CosSim < 0.98 (these project BACK to hidden_dim, errors accumulate)
+- Embeddings/lm_head: 8-bit is safe (near-lossless for vocabulary projections)
 
 **Speed impact**: GPU 4-bit dequant matvec should be similar speed to GPU BF16 matvec. The kernel does 8 values per uint32 load, same compute pattern. Slight overhead from scale/bias application.
 
@@ -89,18 +97,28 @@ Per-token breakdown from 400-token run at K=8, 4-bit experts, warm cache:
 
 **What**: Structural improvements to the Metal command buffer pipeline.
 
-#### 3a. Fuse CMD1+CMD2 → ~4.5 tok/s
+#### 3a. Overlap Expert I/O with GPU Compute → ~4.5 tok/s
+
+Currently expert pread happens sequentially AFTER CPU routing (softmax + top-K). But we can start I/O earlier by using speculative routing from the pre-attention hidden state. While CMD2 runs on GPU, dispatch async preads for the predicted experts. When the real routing completes, most experts are already in memory.
+
+- Saves: ~15-20 ms per layer (I/O overlaps with CMD2 GPU time)
+- New per-layer: 260 - 15 = 245 ms → **4.08 tok/s**
+- Risk: speculative routing accuracy (currently 41%). Even partial overlap helps.
+
+**Implementation**: The speculative routing infrastructure already exists in `fused_layer_forward()` (lines 5683-5753) but is disabled. Re-enable with a lower threshold — even if only 40% of predictions are correct, the I/O for those 3-4 experts completes during CMD2, reducing the post-routing I/O wait.
+
+#### 3b. Fuse CMD1+CMD2 → ~4.5 tok/s
 
 Currently CMD1 and CMD2 are separate command buffers with a commit+wait between them. CMD1 does attention projections (3-4 matvecs), then waits. CMD2 does o_proj+norm+routing (8 encoders), then waits.
 
 **Proposal**: Merge into a single command buffer with 11-12 encoders, one commit+wait.
 
 - Saves: ~10 ms per layer (driver commit+wait overhead)
-- New per-layer: 242 - 10 = 232 ms → **4.31 tok/s**
+- New per-layer: 245 - 10 = 235 ms → **4.26 tok/s**
 
 **Implementation**: Combine `cmd1` and `cmd_fused` into a single command buffer. The only dependency is that CMD2 reads `buf_output` which CMD1's attention projections don't write. CMD1 writes `batch_out[0-3]`. CMD2 reads `batch_out[6]` (set by CPU after attention compute) and `buf_h_mid` (set by CMD2's own residual_add). So they're independent — they can share a command buffer.
 
-#### 3b. ICB for CMD3 → ~5.5 tok/s
+#### 3c. ICB for CMD3 → ~5.5 tok/s
 
 Metal Indirect Command Buffers (ICB) eliminate per-encoder encoding overhead. Instead of encoding K×2 individual expert dispatches, we pre-record the dispatch pattern once and replay it per layer.
 
@@ -109,16 +127,16 @@ Metal Indirect Command Buffers (ICB) eliminate per-encoder encoding overhead. In
 
 Combined with page cache warming: **~5.5 tok/s**.
 
-#### 3c. Persistent GPU Workgroups (turbo-fieldfare's key insight)
+#### 3d. Persistent GPU Workgroups (turbo-fieldfare's key insight)
 
 The current expert kernels dispatch one threadgroup per expert output row (e.g., 512 TGs for gate_proj [512, 512]). turbo-fieldfare's breakthrough was using persistent workgroups that claim rows until the dispatch completes, giving the GPU more scheduling flexibility.
 
 - Saves: ~15 ms per layer (GPU occupancy improvement)
-- New per-layer: 212 - 15 = 197 ms → **5.08 tok/s**
+- New per-layer: 215 - 15 = 200 ms → **5.00 tok/s**
 
-Combined: **~6 tok/s**.
+Combined (3a+3b+3c+3d): **~5-6 tok/s**.
 
-#### 3d. MTP Speculative Decoding → ~9-12 tok/s
+#### 3e. MTP Speculative Decoding → ~9-12 tok/s
 
 Multi-Token Prediction infrastructure is already complete in the codebase. The MTP head predicts 1 future token; the main model verifies. At 50% acceptance rate (measured previously), effective throughput doubles.
 
@@ -126,10 +144,16 @@ Multi-Token Prediction infrastructure is already complete in the codebase. The M
 - Final speed: 6 × 1.5 = **~9 tok/s** (conservative)
 - With 2-bit experts: 6 × 1.5 × (additional I/O savings) = **~10-12 tok/s**
 
+**⚠️ Critical Calibration Gate**: Before relying on MTP for speed claims, measure empirical acceptance rate on a 500-token benchmark at the target quantization (2-bit experts). If acceptance drops below 40%:
+- The overhead of candidate verification + context buffer rewinding offsets the speed benefit
+- Fallback: run MTP draft on 4-bit shared experts + dense heads only (more accurate, still provides some speedup)
+- Record per-layer acceptance to identify which layers cause the most rejections
+
 **Implementation**: Fix latent MTP bugs, enable by default. The MTP code path exists but was disabled after quality issues. Need to:
 1. Verify MTP forward math against reference
-2. Tune acceptance threshold
-3. Handle MTP+sampling interaction (temperature, rep penalty)
+2. **Benchmark acceptance rate** on 500-token generation with 2-bit experts
+3. Tune acceptance threshold based on empirical data
+4. Handle MTP+sampling interaction (temperature, rep penalty)
 
 ### Phase 4: Advanced → Beyond 12 tok/s
 
@@ -159,22 +183,33 @@ turbo-fieldfare's 1.35 GB common weights + ~0.3 GB KV + ~0.2 GB scratch ≈ 1.9-
 
 ```
 Phase 1 (Non-expert quant) ──────┐
-  ├─ Fix GPU 4-bit hang          │
-  ├─ Add 8-bit GPU dequant       │
-  └─ Verify quality              │
+  ├─ Debug GPU 4-bit hang         │
+  ├─ Add 8-bit GPU dequant        │
+  ├─ Per-tensor quality gates     │
+  └─ Extract + validate           │
                                   │
 Phase 2 (2-bit experts) ─────────┤  ← Independent, can start immediately
-  └─ Make default, verify        │
+  ├─ Make default                 │
+  └─ Verify quality at K=8        │
                                   │
-Phase 3a (Fuse CMD1+CMD2) ───────┤  ← Independent
-Phase 3b (ICB for CMD3) ─────────┤  ← Independent
-Phase 3c (Persistent workgroups)─┤  ← Independent
-Phase 3d (MTP enable) ───────────┘  ← Needs quality verification
+Phase 3a (I/O overlap) ──────────┤  ← Re-enable speculative pread
+Phase 3b (Fuse CMD1+CMD2) ───────┤  ← Independent
+Phase 3c (ICB for CMD3) ─────────┤  ← Independent
+Phase 3d (Persistent workgroups)─┤  ← Independent
+Phase 3e (MTP enable) ───────────┘  ← Needs acceptance-rate benchmark
 
 Phase 4 (Advanced) ← Can run in parallel with Phase 3
 ```
 
-**Critical path**: Phase 1 is the bottleneck. Without non-expert quantization, RAM stays at ~5.5 GB and we can't reach the 2 GB target. All other phases build on this.
+## First Actions (This Week)
+
+1. **Debug GPU hang** (Phase 1): Test `dequant_matvec_4bit_v3` on incrementally larger tensors [128→256→512→1024→2048]. Isolate standalone vs batch encoding. Check buffer offsets and packed dimensions.
+2. **Benchmark 2-bit experts** (Phase 2): Run 500-token generation with `--2bit --k 8`. Measure speed, quality, and token identity vs 4-bit reference.
+3. **Re-enable I/O overlap** (Phase 3a): Uncomment speculative routing in `fused_layer_forward()`. Even 40% accuracy means 3 experts pre-loaded during CMD2.
+4. **Fuse CMD1+CMD2** (Phase 3b): Merge two command buffers into one. Verify correctness with `--compare-experts`.
+5. **Profile Metal dispatch overhead**: Use Metal profiler to measure per-encoder cost. Quantify ICB potential savings.
+
+**Note**: Our expert I/O is already zero-copy — `posix_memalign` + `newBufferWithBytesNoCopy` means `pread` writes directly into GPU-accessible buffers. No intermediate memcpy. This is confirmed correct and identical to turbo-fieldfare's approach.
 
 ## What turbo-fieldfare Does That We Don't (Yet)
 
