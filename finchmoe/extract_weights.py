@@ -100,12 +100,22 @@ def main():
         filepath = model_path / filename
         header_cache[filename] = parse_safetensors_header(str(filepath))
 
-    # Sanitize tensor names: remove "language_model." or "model.language_model." prefix
+    # Sanitize tensor names: remove "language_model." prefix
+    # Target naming convention:
+    #   language_model.model.X.Y  → model.X.Y     (most tensors)
+    #   language_model.lm_head.X  → lm_head.X      (top-level, no model. prefix)
+    #   model.language_model.X    → model.X        (alternate prefix)
+    #   X (no prefix)             → X              (already correct)
     def sanitize_name(name):
-        for prefix in ['model.language_model.', 'language_model.']:
-            if name.startswith(prefix):
-                # If stripping 'model.language_model.', keep 'model.'; if just 'language_model.', strip entirely
-                return 'model.' + name[len(prefix):] if prefix.startswith('model.') else name[len(prefix):]
+        # Handle: model.language_model.X → remove "language_model."
+        if name.startswith('model.language_model.'):
+            return 'model.' + name[len('model.language_model.'):]
+        # Handle: language_model.model.X → model.X (preserve existing model. prefix)
+        if name.startswith('language_model.model.'):
+            return name[len('language_model.'):]
+        # Handle: language_model.lm_head.X → lm_head.X (top-level, no model. prefix)
+        if name.startswith('language_model.'):
+            return name[len('language_model.'):]
         return name
 
     # Plan the output layout
