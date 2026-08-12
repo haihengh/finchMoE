@@ -1,235 +1,23 @@
 # FinchMoE
 
-A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon, targeting 12 tok/s on M4 and 3-5 tok/s on iPhone.
+A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon, targeting **12 tok/s on M4 with ~2 GB RAM** (currently at 3.9 tok/s, ~6 GB).
 
-## Current Status
+## Current Status (2026-08-11)
 
 | Metric | Value |
-|---|---|
-| Output quality | ✅ Coherent — "Hello! How can I help you today?" |
-| Speed (M4, 2-bit, K=2) | **8.3 tok/s** |
-| Speed (M4, 2-bit, K=4) | **7.5 tok/s** |
-| Speed (M4, 1-bit, K=2) | **8.1 tok/s** (degraded quality) |
-| RAM (runtime, 1K ctx) | ~400 MB |
-| RAM (runtime, 60K ctx) | ~3.3 GB |
-| Disk (2-bit-dense, active) | **21 GB** |
-| Disk (1-bit-dense) | **13.2 GB** |
+|--------|-------|
+| Output quality | ✅ Coherent — 400 tokens of valid Ruby code |
+| **Speed (M4, 4-bit, K=8)** | **3.88 tok/s** (correct, stable) |
+| Speed (M4, 2-bit, K=2) | 8.3 tok/s (WRONG — produces garbage) |
+| RAM (runtime) | ~6.0 GB (4.96 GB weight file + 0.45 GB GPU buffers) |
+| Common weight file | 4.96 GB (all BF16 — needs quantization) |
+| Expert disk (4-bit) | 17 GB (40 layers × 256 experts × 1.77 MB) |
+| Expert disk (2-bit) | 9.4 GB (40 layers × 256 experts × 0.98 MB) |
+| Bugs fixed | **16** (documented in BUGS.md) |
 
-## Model Size & Quality Tradeoff
+**Important**: Model trained with 8 experts/token. K MUST be 8. K=2 silently drops 75% of expert compute and produces word salad. This is now the default.
 
-| Model | Safetensors | Experts | Total | Speed (K=2) | Quality |
-|-------|-------------|---------|-------|-------------|---------|
-| BF16 (source) | 67 GB | — | 67 GB | — | 0% (reference) |
-| 2-bit-dense ✅ | 11 GB | 9.4 GB | **21 GB** | 8.3 tok/s | ~5% |
-| 4-bit-dense | 19 GB | 17 GB | **36 GB** | 7.2 tok/s | ~1-2% |
-| 1-bit-dense | 7.6 GB | 5.6 GB | **13.2 GB** | 8.1 tok/s | ~10-15% (degraded) |
-
-### Quantization Strategy
-
-| Component | Format | Size | Why |
-|-----------|--------|------|-----|
-| Embeddings + lm_head | 8-bit | 1.1 GB | Near-lossless, vocabulary-critical |
-| Attention/GDN projections | 4-bit | 0.7 GB | Large, 4-bit sufficient |
-| Shared expert | 4-bit | 0.07 GB | Always active, small |
-| Routed experts | 2-bit (→1-bit) | 9.4 GB | MoE-tolerant: 8/256 fire, errors cancel |
-| Norms + routing gate | BF16 | 0.0005 GB | Tiny, not worth quantizing |
-
-## Comparison Models
-
-| Model | Arch | Active | Size | TG (M4) | Notes |
-|-------|------|--------|------|----------|-------|
-| **FinchMoE 2-bit** | MoE 35B A3B | 3B | 21 GB | **8.3 tok/s** | Custom C/Metal, 256K context |
-| [turbo-fieldfare](https://github.com/drumih/turbo-fieldfare) | MoE 26B A4B | 4B | 13 GB | **10.7 tok/s** | Swift/Metal, better poetry, 8K max context |
-| [Ternary-Bonsai-27B](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-gguf) | Dense 27B | 27B | 7.1 GB | 0.008 tok/s ❌ | 27B dense = 9× more compute |
-| [Bonsai-27B-1bit](https://huggingface.co/prism-ml/Bonsai-27B-mlx-1bit) | Dense 27B | 27B | 4.8 GB | ~1-3 tok/s (est.) | Runs on iPhone via LM Studio ✅ |
-| [DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) | MoE ~200B A13B | 13B | ~160 GB BF16 | TBD | FP4 experts, hash routing, MTP, 1M ctx |
-
-**Key insight**: Active parameter count dominates speed, not model size. DeepSeek-V4 has 13B active (4× Qwen's 3B) but uses FP4 native quantization and hash-based routing for efficiency.
-
-### Benchmarks (M4 Mac mini 16GB, Samsung 990 Plus NVMe TB4)
-
-| Model | Size | RAM | TG (1K) | TG (256K) | KV (256K) | Quality |
-|-------|------|-----|---------|-----------|-----------|---------|
-| **FinchMoE 2-bit** | 21 GB | ~400 MB | **8.3 tok/s** | ~5-8 tok/s (est.) | 5.2 GB | "You are a helpful assistant." |
-| **FinchMoE 1-bit** | 13.2 GB | ~350 MB | **8.1 tok/s** | ~5-8 tok/s (est.) | 5.2 GB | "You are a helpful assistant." (degraded) |
-| **turbo-fieldfare** | 13 GB | ~3 GB | **10.7 tok/s** | N/A (63 GB KV) | 63 GB | "The salt-crust clings..." |
-
-**PP (prompt processing)**: 3.6 tok/s at 1K. Estimated ~0.5-1 tok/s at 60K (full attention O(n²) on CPU).
-**TG at 256K**: Estimated from attention scaling. 30 GDN layers unaffected by context length.
-**KV at 256K (FP16)**: FinchMoE 5.2 GB (10 attn layers × 2 KV heads). turbo-fieldfare 63 GB (30 layers × 8 heads).
-
-### KV Cache Memory at Context Lengths
-
-| Model | Attn Layers | KV Heads | 1K | 50K | 256K |
-|-------|------------|----------|-----|------|-------|
-| **FinchMoE** | 10/40 | 2 | 0.02 GB | 1.0 GB | 5.2 GB |
-| **turbo-fieldfare** | 30/30 | 8 | 0.3 GB | 12.3 GB | 62.9 GB |
-
-FinchMoE's GatedDeltaNet layers (30/40) use fixed 2.1MB recurrent state — no KV growth. Only the 10 full-attention layers need caching.
-
-## Optimization History
-
-### Speed Progression
-
-| Step | expert_io | total_layer | tok/s | What |
-|------|-----------|-------------|-------|------|
-| Baseline (8-bit, K=4) | 2.04ms | 4.93ms | 5.1 | Starting point |
-| Fused expert kernel | 1.92ms | 4.37ms | 5.7 | gate+up+swiglu → 1 dispatch |
-| 4-bit experts | 1.33ms | 3.81ms | 6.6 | Half I/O volume |
-| Dense quantization | 0.59ms | 2.83ms | 7.2 | Embeds 8-bit, attn 4-bit |
-| 2-bit experts (K=4) | 0.38ms | 2.74ms | 7.5 | Half I/O again |
-| **K=2 default** | **0.21ms** | **2.30ms** | **8.3** | Half experts/layer |
-| 1-bit experts | 0.13ms | 2.33ms | 8.1 | Diminishing returns |
-
-### What Didn't Work
-
-| Attempt | Result | Why |
-|---------|--------|-----|
-| Batched Metal encoders | Slower | Metal cost is per-dispatch, not per-encoder |
-| Multi-expert 2x kernel | Slower | Buffer binding overhead > dispatch savings |
-| Spatial expert prediction | 1.3% hit rate | Adjacent layers pick different experts |
-| Temporal expert prediction | 41% hit rate | Validation overhead > savings |
-| mmap zero-copy Metal buffers | OOM | 17GB Metal buffers exceed 16GB RAM |
-| LZ4 expert compression | 6% ratio | Quantized data near-random |
-
-### Current Per-Layer Timing (2-bit, K=2)
-
-| Phase | ms | % | Stuck Because |
-|-------|----|---|---------------|
-| cmd1_wait (GDN GPU) | 0.87 | 38% | 5 Metal dispatches per GDN layer |
-| cmd3_encode (expert dispatch) | 0.67 | 29% | Per-dispatch Metal driver cost |
-| cmd2_wait (routing GPU) | 0.49 | 21% | 6 dispatches for o_proj+routing+shared |
-| expert_io | 0.21 | 9% | ✅ Fully optimized (RAM bandwidth limited) |
-| **Total** | **2.30** | | **× 40 layers = 92ms = 10.9 tok/s theoretical** |
-
-## Future Implementation Plan
-
-### P1: TG Speed (12+ tok/s)
-
-| # | Feature | Gain | Effort |
-|---|---------|------|--------|
-| A | ICBs (Indirect Command Buffers) | cmd3: 0.67→0.05ms | High |
-| B | Double-buffered async encoding | Hide CPU wait | High |
-| C | Single-kernel multi-expert MoE | K dispatches → 1 | High |
-| D | **MTP speculative decoding** | 1.5-2× TG | High | 
-|   | → Target model: Qwen 3.5 397B-A17B (has `mtp_num_hidden_layers: 1`) | | |
-|   | → Draft head predicts 2 tokens/forward pass, main model verifies | | |
-|   | → At 70% acceptance: effective 1.7× speedup | | |
-
-### P2: Long Context
-
-| # | Feature | Gain | Effort |
-|---|---------|------|--------|
-| D | KV cache FP16 | 2× capacity | Medium |
-| E | Batched GPU prefill attention | 5-10× PP speed | High |
-| F | GDN chunked prefill | 2-3× PP speed | Medium |
-| G | `--gpu-kv-seq` bump (default 8K→match ctx) | TG at long ctx | Free |
-
-### P3: Larger Models & Compression
-
-| # | Feature | Gain | Effort |
-|---|---------|------|--------|
-| H | 3-bit experts | 21→~16 GB | Low |
-| I | Mixed-precision experts | ~1-2% quality | Low |
-| J | Completions API (`/v1/completions`) | Standard benchmarks | Low |
-| K | **Qwen 3.5 397B-A17B** ✅ | Working at 3.2 tok/s (4-bit MLX src, degraded quality) | Done |
-|   | → Separate binary `infer_397b.m`, 397b/ weights dir | | |
-|   | → 73 GB (68 experts + 5.1 weights), <1 GB RAM | | |
-|   | → Quality limited by source MLX 4-bit quantization | | |
-|   | → **Needs BF16 source** for 2-bit custom requantization (est. ~800 GB download) | | |
-| L | **DeepSeek-V4-Flash** (13B active MoE) | New model target | High |
-|   | → 43 layers, 256 experts (6 active), sliding window attn | | |
-|   | → FP4 native experts, hash routing, DSPark, 1M context | | |
-|   | → BF16 download: ~155 GB. **[Design doc](finchmoe/design_deepseek.md)** | | |
-
-## Project Structure
-
-```
-finchMoE/
-├── README.md
-├── BUGS.md                    # 8 bugs documented
-├── design.md                  # Architecture & design decisions
-├── finchmoe/
-│   ├── infer.m                # Main engine (C/Metal, ~8000 lines)
-│   ├── shaders.metal          # Metal compute kernels (~1500 lines)
-│   ├── finchTool/             # 🔧 Metal Engine Verification & Diagnostic Suite
-│   │   ├── main.m             #   Kernel isolation, pipeline audit, parity checks
-│   │   ├── engine_utils.h/m   #   Shared Metal setup + CPU reference functions
-│   │   ├── verify_core.h/m    #   Standardized ParityReport metrics
-│   │   └── README.md          #   Full documentation
-│   ├── tokenizer.h            # C BPE tokenizer (248K vocab)
-│   ├── quantize_model.py      # BF16 → 1/2/4/8-bit quantization
-│   ├── extract_weights.py     # Non-expert weight extraction
-│   ├── repack_experts.py      # Expert weight repacking (1/2/4/8-bit)
-│   ├── generate_expert_index.py
-│   ├── compress_experts.py    # LZ4 compression tool
-│   ├── debug_gdn_compare.py   # GDN vs HF reference
-│   ├── debug_full_forward.py  # Full 40-layer forward test
-│   ├── debug_layer_diff.py    # 4-probe per-layer differential
-│   └── debug_e2e_logits.py    # End-to-end logit comparison
-├── models/
-│   ├── Qwen3.6-35B-A3B-bf16/          # Source (67 GB)
-│   ├── Qwen3.6-35B-A3B-2bit-dense/    # Active (21 GB) ✅
-│   ├── Qwen3.6-35B-A3B-4bit-dense/    # Higher quality (36 GB)
-│   ├── Qwen3.6-35B-A3B-1bit-dense/    # Ultra-compact (13.2 GB)
-│   ├── Ternary-Bonsai-27B-Q2_g64.gguf # Reference (7.1 GB)
-│   └── Bonsai-27B-mlx-1bit/           # Reference (4.8 GB)
-├── flash-moe/                 # Starting codebase (unmodified)
-├── turbo-fieldfare/           # Benchmark reference
-└── llama.cpp/                 # Ground truth reference
-```
-
-## finchTool — Diagnostic Suite
-
-`finchTool` is a standalone Metal kernel verification and diagnostic tool that shares the same `shaders.metal` as the production engine. It runs kernel isolation tests, pipeline synchronization audits, and tensor parity checks — **without requiring model weights or running full generation**.
-
-### Why It Exists
-
-During development, debugging shader bugs required manually adding `fprintf` diagnostics to `infer.m`, rebuilding, running, and then removing dead code. This process was slow and a **SiLU formula regression** (`vg*vg` instead of `vg`) went undetected for hours because the inline diagnostic code had the same bug as the kernel under test.
-
-`finchTool` replaces this with structured, reproducible tests that use an **independent CPU reference implementation** — the CPU is always the oracle.
-
-### Quick Start
-
-```bash
-cd finchmoe/finchTool
-make
-./finchTool kernel --test all      # Run all kernel isolation tests
-./finchTool pipeline --test inter-cb-sync  # Audit GPU synchronization
-```
-
-### Key Capabilities
-
-| Command | What It Tests |
-|---------|---------------|
-| `kernel --test fused_mlp` | Fused gate+up+SiLU vs non-fused path — validates our most complex kernel |
-| `kernel --test matvec` | Dequant matvec at 1/2/4/8-bit vs CPU reference |
-| `kernel --test swiglu` | SiLU activation gate×σ(gate)×up |
-| `pipeline --test inter-cb-sync` | 4-step GPU cache coherency audit (single CB → separate CBs → MTLFence → MTLSharedEvent) |
-| `parity --a X.bin --b Y.bin` | Compare any two float32 tensor files |
-
-### Parity Status Levels
-
-| Status | CosSim | MaxDiff | Meaning |
-|--------|--------|---------|---------|
-| `PASS (exact)` | ≥ 0.999999 | < 1e-5 | Bit-identical (same rounding) |
-| `PASS (acceptable)` | ≥ 0.999 | < 1e-2 | FP accumulation reordering (harmless) |
-| `WARN (degraded)` | ≥ 0.98 | < 1e-1 | Quantization or precision loss |
-| `FAIL` | < 0.98 | any | Math bug, memory hazard, or corrupt data |
-
-### Design
-
-- **Separate binary, shared shaders** — links same `shaders.metal` as production but has own minimal Metal setup
-- **Synchronous by default** — all tests commit+wait, eliminating timing-dependent bugs
-- **Fresh buffers per test** — no buffer recycling, no stale-data hazards
-- **CPU is the oracle** — every GPU test computes an independent CPU reference
-- **Zero model dependency** — kernel tests use synthetic data; only layer tests need model files
-
-Full documentation: [`finchmoe/finchTool/README.md`](finchmoe/finchTool/README.md)
-
-## Running the Engine
-
-### Quick Start
+## Quick Start
 
 ```bash
 cd finchmoe
@@ -238,19 +26,17 @@ cd finchmoe
 clang -O2 -Wall -fobjc-arc -framework Metal -framework Foundation \
       -framework Accelerate -lcompression -lpthread infer.m -o infer
 
-# Prepare model (one-time)
-python3 quantize_model.py --model ../models/Qwen3.6-35B-A3B-bf16 \
-    --output ../models/Qwen3.6-35B-A3B-2bit-dense
-python3 generate_expert_index.py --model ../models/Qwen3.6-35B-A3B-2bit-dense
-python3 repack_experts.py --index ../models/Qwen3.6-35B-A3B-2bit-dense/expert_index.json --bits 2
-python3 extract_weights.py --model ../models/Qwen3.6-35B-A3B-2bit-dense --output .
-python3 export_tokenizer.py ../models/Qwen3.6-35B-A3B-2bit-dense/tokenizer.json vocab.bin
+# Run (recommended settings)
+./infer -t 400 -k 8 --temperature 0.7 --rep-penalty 1.15
 
-# Run
-./infer --model ../models/Qwen3.6-35B-A3B-2bit-dense --prompt "Hello" --tokens 50 --no-think --temp 0
+# With diagnostics
+./infer --logit-diag 50 -t 400 -k 8 --temperature 0.7 --rep-penalty 1.15
 
-# Server (OpenAI-compatible API)
-./infer --model ../models/Qwen3.6-35B-A3B-2bit-dense --serve 9000
+# 2-bit experts (faster, slightly lower quality)
+./infer --2bit -t 400 -k 8 --temperature 0.7 --rep-penalty 1.15
+
+# Server mode
+./infer --serve 9000 -k 8 --temperature 0.7 --rep-penalty 1.15
 ```
 
 ### Key Flags
@@ -259,66 +45,172 @@ python3 export_tokenizer.py ../models/Qwen3.6-35B-A3B-2bit-dense/tokenizer.json 
 |------|---------|---------|
 | `--prompt TEXT` | — | Input prompt |
 | `--tokens N` | 20 | Max tokens to generate |
-| `--temp F` | 0.80 | Temperature (0 = greedy) |
-| `--top-k N` | 40 | Top-k sampling |
-| `-k N` | 2 | Active experts per layer (2=speed, 4=quality, 8=best) |
-| `--no-think` | off | Disable thinking mode |
+| `--temperature F` | 0.8 | Sampling temperature (0 = greedy → can degrade) |
+| `--rep-penalty F` | 1.15 | Repetition penalty (1.0 = disabled) |
+| `--top-k N` | 40 | Top-k sampling cutoff |
+| `-k N` | **8** | Active experts per layer (model trained with 8) |
+| `--2bit` | off | Use 2-bit expert quantization (faster) |
+| `--logit-diag N` | off | Dump top-20 logits + entropy every N tokens |
 | `--timing` | off | Per-layer timing breakdown |
-| `--predict` | off | Temporal expert prefetch |
-| `--cpu-linear` | off | CPU GDN path (debugging) |
-| `--cpu-experts` | off | CPU expert path (debugging) |
+| `--mtp` | off | Enable MTP speculative decoding (experimental) |
+| `--low-memory` | off | Skip Metal weight wrap (safer, slower) |
 | `--serve PORT` | — | HTTP server (OpenAI-compatible API) |
-| `--max-seq-len N` | 262144 | Max context length |
 | `--gpu-kv-seq N` | 8192 | GPU KV buffer size in tokens |
-| `--model PATH` | auto | Model directory |
 
-### Server Mode
+## Model Sizes
 
-```bash
-./infer --serve 9000
+| Model | Common Weights | Experts | Total Disk | Speed (K=8) | Quality |
+|-------|---------------|---------|------------|-------------|---------|
+| BF16 (source) | 67 GB | — | 67 GB | — | Reference |
+| 4-bit-dense | **4.96 GB** BF16 | 17 GB 4-bit | **21 GB** | **3.88 tok/s** | ✅ Coherent |
+| 2-bit-dense-v2 | 4.96 GB BF16 | 9.4 GB 2-bit | 14 GB | ~5 tok/s | ✅ Coherent |
+| 1-bit-dense | 4.96 GB BF16 | 5.6 GB 1-bit | 10 GB | ~5 tok/s | ⚠️ Degraded |
 
-# Test
-curl http://localhost:9000/health
-curl -N -X POST http://localhost:9000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Hello!"}],"max_tokens":100,"stream":true}'
+**Note**: The "4-bit-dense" and "2-bit-dense" names only refer to expert quantization. Non-expert weights (4.96 GB) are currently all BF16. Quantizing non-experts is the #1 optimization priority — see [Optimization Plan](finchmoe/OPTIMIZATION_PLAN.md).
+
+## Reference Comparison
+
+| Engine | Model | Active | RAM | M4 Speed | Notes |
+|--------|-------|--------|-----|----------|-------|
+| **FinchMoE** | Qwen 3.6 35B A3B | 3B | ~6 GB | **3.9 tok/s** | Custom C/Metal, 256K ctx |
+| [turbo-fieldfare](https://github.com/drumih/turbo-fieldfare) | Gemma 4 26B A4B | 4B | **~2 GB** | **10.7 tok/s** | Swift/Metal, 4-bit everywhere, 8K ctx |
+| [flash-moe](https://github.com/nicholas-ochoa/flash-moe) | Qwen 3.5 397B A17B | 17B | ~6 GB | 4.4 tok/s (M3 Max) | C/Metal, FMA dequant |
+| llama.cpp Q4_K_M | Qwen 3.6 35B A3B | 3B | ~20 GB | — | Uniform quantization, reference quality |
+
+**Key gap**: turbo-fieldfare achieves 5-6 tok/s on M2 with Gemma 4 (4B active) at 2 GB RAM by quantizing ALL weights to 4-bit. Our non-expert weights are still BF16, making our common model 3.7× larger. Closing this gap is the critical path to 12 tok/s.
+
+## Architecture
+
+```
+40 layers: 30× GatedDeltaNet (linear attention) + 10× full attention
+Hidden dim: 2048, 256 experts/layer, 8 active + 1 shared expert
+MoE intermediate: 512, Head dim: 256, 16Q/2KV GQA
+Vocab: 248,320 tokens
 ```
 
-Endpoints: `POST /v1/chat/completions` (SSE streaming), `GET /v1/models`, `GET /health`.
+### Per-Layer Pipeline (3 Metal Command Buffers)
 
-### Context Window
-
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--max-seq-len` | 262,144 (256K) | KV cache allocation (model's RoPE limit) |
-| `--gpu-kv-seq` | 8,192 | GPU-accelerated attention cap. Past this → CPU fallback |
-
-```bash
-# 60K agentic context: GPU KV = 2.5 GB (fits in 16GB)
-./infer --serve 9000 --gpu-kv-seq 60000
-# 256K max context: KV = 10.5 GB FP32, 5.2 GB FP16
-./infer --serve 9000 --gpu-kv-seq 256000 --max-seq-len 262144
+```
+CMD1: attention projections (3-4 BF16 matvecs, 1 commit+wait)
+  └─ optional GPU linear attention (5 fused kernels: conv1d→norm→decay→recur→gate)
+CPU:  attention compute (RoPE/softmax/GDN recurrence)
+CMD2: o_proj + residual + norm + routing + shared gate/up (8 encoders, 1 commit+wait)
+CPU:  softmax + top-K + parallel pread of K experts (4 threads via GCD)
+CMD3: K expert forwards + shared expert + combine (K×2+4 encoders, ASYNC commit)
+  └─ GPU-side combine: weighted sum + residual + norm → directly into next layer
 ```
 
-30/40 layers use GatedDeltaNet with fixed 2.1MB state — no KV growth. Only 10 full-attention layers need caching.
+**Key optimizations**:
+- **Deferred CMD3**: Expert GPU compute runs async, overlaps with next layer's CMD1
+- **GPU-side combine**: Eliminates CPU readback, saves 0.83 ms/layer
+- **Zero-copy weights**: mmap'd BF16 weights wrapped as Metal buffer, read directly by GPU
+- **Tiered I/O**: F_NOCACHE for first read, OS page cache for repeated experts
+- **Parallel pread**: 8 threads (one per expert) via GCD dispatch_group
+
+## Project Structure
+
+```
+finchMoE/
+├── README.md
+├── BUGS.md                       # 16 bugs documented
+├── design.md                     # Architecture & design decisions
+├── finchmoe/
+│   ├── infer.m                   # Main engine (C/Metal, ~9300 lines)
+│   ├── shaders.metal             # Metal compute kernels (~2000 lines)
+│   ├── ENGINE_ANALYSIS.md        # Comprehensive engine analysis
+│   ├── OPTIMIZATION_PLAN.md      # Concrete roadmap to 12 tok/s @ 2 GB
+│   ├── tokenizer.h               # C BPE tokenizer (248K vocab)
+│   ├── extract_weights.py        # Non-expert weight → model_weights.bin
+│   ├── repack_experts.py         # Expert weight → packed_experts/
+│   ├── generate_expert_index.py  # Expert index generator
+│   ├── quantize_model.py         # BF16 → 1/2/4/8-bit quantization
+│   ├── export_tokenizer.py       # Tokenizer export
+│   ├── compress_experts.py       # LZ4 compression (ineffective for quantized data)
+│   ├── debug_full_forward.py     # Full 40-layer forward comparison
+│   ├── debug_e2e_logits.py       # End-to-end logit comparison
+│   ├── debug_gdn_compare.py      # GDN vs HF reference
+│   └── finchTool/                # Metal kernel verification suite
+├── models/
+│   ├── Qwen3.6-35B-A3B-bf16/             # BF16 source (67 GB)
+│   ├── Qwen3.6-35B-A3B-4bit-dense/       # 4-bit experts (21 GB active)
+│   ├── Qwen3.6-35B-A3B-2bit-dense-v2/    # 2-bit experts (14 GB active)
+│   ├── Qwen3.6-35B-A3B-1bit-dense/       # 1-bit experts (10 GB active)
+│   ├── Qwen3.6-35B-A3B-bf16.gguf         # llama.cpp BF16 (71 GB)
+│   └── Qwen3.6-35B-A3B-Q4_K_M.gguf       # llama.cpp Q4 (20 GB)
+├── turbo-fieldfare/              # Performance benchmark reference
+├── flash-moe/                    # Architecture reference
+└── llama.cpp/                    # Ground truth reference
+```
+
+## Optimization Roadmap → 12 tok/s @ 2 GB
+
+Full details: [`finchmoe/OPTIMIZATION_PLAN.md`](finchmoe/OPTIMIZATION_PLAN.md)
+
+### Phase 1: Non-Expert Quantization → ~2.5 GB RAM, ~4 tok/s
+
+**Status**: 🔴 BLOCKED — GPU path hangs for large non-expert tensors. Must solve.
+
+| Component | Current | Target | Savings |
+|-----------|---------|--------|---------|
+| Embeddings + lm_head | 1.94 GB BF16 | 0.97 GB 8-bit | 0.97 GB |
+| Attention Q/K/V/O | 1.84 GB BF16 | 0.46 GB 4-bit | 1.38 GB |
+| GDN projections | 0.78 GB BF16 | 0.20 GB 4-bit | 0.58 GB |
+| Shared experts | 0.26 GB BF16 | 0.07 GB 4-bit | 0.19 GB |
+| **Total** | **4.96 GB** | **~1.7 GB** | **3.3 GB** |
+
+turbo-fieldfare proves this works: their common model is 1.35 GB with 4-bit embeddings, 8-bit router, 4-bit attention. The GPU "hang" in our `quantize_model.py` is a bug, not a fundamental limitation.
+
+### Phase 2: 2-Bit Experts → ~6 tok/s
+
+**Status**: ✅ Working (`--2bit` flag). Quality verified at K=8.
+
+Expert I/O drops from 1.77 MB to 0.98 MB per expert. Saves ~18 ms per layer. Combined with page cache warming: ~5-6 tok/s.
+
+### Phase 3: GPU Pipeline → ~9-12 tok/s
+
+**Status**: 🔴 Not started.
+
+| Optimization | Est. Gain | Complexity |
+|-------------|-----------|------------|
+| Fuse CMD1+CMD2 | ~10 ms/layer | Medium |
+| ICB for CMD3 | ~20 ms/layer | High |
+| Persistent workgroups | ~15 ms/layer | High |
+| MTP speculative decoding | 1.5-2× | High |
+
+### Phase 4: Advanced → Beyond 12 tok/s
+
+KV cache FP16, single-kernel multi-expert, GPU batched prefill, 3-bit experts.
+
+### First Actions (This Week)
+
+1. Debug GPU hang with quantized non-expert tensors (smallest first)
+2. Benchmark 2-bit experts at K=8 → potentially make default
+3. Fuse CMD1+CMD2 into single command buffer
+4. Profile Metal dispatch overhead → quantify ICB potential
 
 ## Known Limitations
 
-- **Single-worker generation**: One request at a time (queued up to 16). Fine for personal/agentic use.
-- **GPU context cap**: Attention falls to CPU above `--gpu-kv-seq` (default 8K). Bump for long contexts.
-- **`/v1/completions` not implemented**: Only chat completions API. lm-eval needs completions for loglikelihood benchmarks.
-- **Chat template applied in CLI**: As of Bug 8 fix, CLI now uses ChatML template for instruct behavior.
+- **Non-expert weights are unquantized**: 4.96 GB vs turbo-fieldfare's 1.35 GB. This is the #1 issue.
+- **Single-request generation**: One request at a time (queued up to 16). No continuous batching.
+- **CPU-only prefill**: Prompt processing is slow (3.4s for 4 tokens). GPU batching needed.
+- **Temporal drift at T=0**: Slight numeric drift after ~270 tokens with greedy decoding. Fixed with `--temperature 0.7 --rep-penalty 1.15`.
+- **Expert prediction disabled**: 41% hit rate, overhead > savings.
+- **MTP disabled by default**: Infrastructure complete but latent quality issues.
 
-## Bugs & Debugging
+## Bugs
 
-8 bugs discovered and fixed during development, documented in **[BUGS.md](BUGS.md)**:
-1. INT4 attention weights → catastrophic incoherence
-2. FP16/BF16 format mismatch in MLX community models
-3. Norm weight +1.0 adjustment missing
-4. Compiler warnings hiding unused variable errors
-5. Expert weight extraction namespace collision
-6. Safetensors tensor naming inconsistency
-7. switch_mlp weights excluded from extraction
-8. **Shared expert Metal command buffer sync** (root cause of "Con Con Con" loop)
+**16 bugs** discovered and fixed, documented in **[BUGS.md](BUGS.md)**. Most recent:
 
-For ongoing kernel validation and regression detection, use **[finchTool](finchmoe/finchTool/README.md)** — the standalone Metal verification suite that runs kernel isolation tests, pipeline audits, and tensor parity checks without requiring model weights or full generation.
+| # | Bug | Fix |
+|---|-----|-----|
+| 14 | K=2 default produces garbage | Changed default to K=8 |
+| 15 | lm_head 2 GB F32 cache → OOM/segfault | GPU gemv_bf16_x2 (zero-copy) |
+| 16 | decode_token NULL crash in diagnostics | NULL guard |
+
+## References
+
+- [Engine Analysis](finchmoe/ENGINE_ANALYSIS.md) — Complete architecture, pipeline, kernel catalog
+- [Optimization Plan](finchmoe/OPTIMIZATION_PLAN.md) — Concrete roadmap with benchmarks
+- [Design Document](design.md) — Architecture history and design decisions
+- [BUGS.md](BUGS.md) — All 16 bugs with root cause analysis
+- [finchTool](finchmoe/finchTool/README.md) — Metal kernel verification suite
