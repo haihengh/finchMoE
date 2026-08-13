@@ -8158,9 +8158,12 @@ static void process_chat_request(ServeState *s, int client_fd,
     float *hidden = calloc(HIDDEN_DIM, sizeof(float));
     float *logits = calloc(VOCAB_SIZE, sizeof(float));
 
-    int is_continuation = (has_session &&
-                           s->active_session_id[0] != '\0' &&
-                           strcmp(session_id, s->active_session_id) == 0);
+    // FIXME: the incremental session-continuation path corrupts context after
+    // the first turn (template tokens leak into responses). Until it is
+    // debugged, treat every request as a fresh single-turn prefill from the
+    // system-prompt snapshot — stateless, but each turn is correct.
+    int is_continuation = 0;
+    (void)session_id;
 
     fprintf(stderr, "[serve] %s content=%zu chars, max_tokens=%d, session=%s%s%s\n",
             request_id, strlen(content), max_gen,
