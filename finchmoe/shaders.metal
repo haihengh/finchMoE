@@ -1720,6 +1720,156 @@ kernel void fused_gdn_core(
 
 
 // ============================================================================
+// Fused FULL GDN: conv1d_step + rms_norm_qk + fused_gdn_core in ONE kernel
+// ============================================================================
+// One threadgroup per v-head (32 TGs x 128 threads). Each TG computes the
+// 384 conv elements it needs (q[128], k[128], v[128]) directly into
+// threadgroup memory, normalizes q/k, runs the decay/beta + delta-net
+// recurrence + gated norm — eliminating all intermediate global-memory
+// round trips (buf_conv_output, buf_delta_output, buf_delta_g_decay/beta).
+// Dispatch: num_v_heads threadgroups, value_dim threads each.
+
+kernel void fused_gdn_full(
+    device float       *conv_state,      // [3 * conv_dim] persistent, shifted in place
+    device const float *qkv_in,          // [conv_dim] projection output (batch_out[0])
+    device const uint16_t *conv_w,       // [conv_dim * 4] bf16
+    device const float *z,               // [num_v_heads * value_dim]
+    device const float *alpha,           // [num_v_heads]
+    device const float *beta,            // [num_v_heads]
+    device const float *A_log,           // [num_v_heads] (float* read — matches fused_gdn_core)
+    device const uint16_t *dt_bias,      // [num_v_heads] bf16
+    device const uint16_t *norm_weight,  // [value_dim] bf16
+    device float       *state,           // [num_v_heads * value_dim * key_dim] persistent
+    device float       *output,          // [num_v_heads * value_dim] gated output
+    constant uint &conv_dim,             // 8192
+    constant uint &k_heads_per_v,        // 2
+    constant uint &key_dim,              // 128
+    constant uint &value_dim,            // 128
+    constant float &eps,                 // 1e-6
+    uint head [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]]
+) {
+    uint kh = head / k_heads_per_v;
+    uint total_key = conv_dim / 4;  // 2048 = LINEAR_TOTAL_KEY
+
+    // ---- Step 1: conv1d for the 3 elements this thread owns ----
+    threadgroup float conv_q[128];
+    threadgroup float conv_k[128];
+    threadgroup float conv_v[128];
+
+    uint q_c = kh * key_dim + tid;
+    uint k_c = total_key + kh * key_dim + tid;
+    uint v_c = 2 * total_key + head * value_dim + tid;
+
+    {
+        uint c = q_c;
+        uint wb = c * 4;
+        float acc = conv_state[0 * conv_dim + c] * bf16_to_f32(conv_w[wb + 0])
+                  + conv_state[1 * conv_dim + c] * bf16_to_f32(conv_w[wb + 1])
+                  + conv_state[2 * conv_dim + c] * bf16_to_f32(conv_w[wb + 2])
+                  + qkv_in[c] * bf16_to_f32(conv_w[wb + 3]);
+        conv_q[tid] = acc / (1.0f + exp(-acc));  // SiLU
+        conv_state[0 * conv_dim + c] = conv_state[1 * conv_dim + c];
+        conv_state[1 * conv_dim + c] = conv_state[2 * conv_dim + c];
+        conv_state[2 * conv_dim + c] = qkv_in[c];
+    }
+    {
+        uint c = k_c;
+        uint wb = c * 4;
+        float acc = conv_state[0 * conv_dim + c] * bf16_to_f32(conv_w[wb + 0])
+                  + conv_state[1 * conv_dim + c] * bf16_to_f32(conv_w[wb + 1])
+                  + conv_state[2 * conv_dim + c] * bf16_to_f32(conv_w[wb + 2])
+                  + qkv_in[c] * bf16_to_f32(conv_w[wb + 3]);
+        conv_k[tid] = acc / (1.0f + exp(-acc));
+        conv_state[0 * conv_dim + c] = conv_state[1 * conv_dim + c];
+        conv_state[1 * conv_dim + c] = conv_state[2 * conv_dim + c];
+        conv_state[2 * conv_dim + c] = qkv_in[c];
+    }
+    {
+        uint c = v_c;
+        uint wb = c * 4;
+        float acc = conv_state[0 * conv_dim + c] * bf16_to_f32(conv_w[wb + 0])
+                  + conv_state[1 * conv_dim + c] * bf16_to_f32(conv_w[wb + 1])
+                  + conv_state[2 * conv_dim + c] * bf16_to_f32(conv_w[wb + 2])
+                  + qkv_in[c] * bf16_to_f32(conv_w[wb + 3]);
+        conv_v[tid] = acc / (1.0f + exp(-acc));
+        conv_state[0 * conv_dim + c] = conv_state[1 * conv_dim + c];
+        conv_state[1 * conv_dim + c] = conv_state[2 * conv_dim + c];
+        conv_state[2 * conv_dim + c] = qkv_in[c];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // ---- Step 2: rms_norm_qk (q gets inv^2, k gets inv) ----
+    threadgroup float part_q[128];
+    threadgroup float part_k[128];
+    part_q[tid] = conv_q[tid] * conv_q[tid];
+    part_k[tid] = conv_k[tid] * conv_k[tid];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float sq = 0, sk = 0;
+        for (uint i = 0; i < key_dim; i++) { sq += part_q[i]; sk += part_k[i]; }
+        part_q[0] = sq;
+        part_k[0] = sk;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float inv_scale = rsqrt(float(key_dim));
+    float inv_q = rsqrt(part_q[0] / float(key_dim) + 1e-6f);
+    float inv_k = rsqrt(part_k[0] / float(key_dim) + 1e-6f);
+    conv_q[tid] = conv_q[tid] * inv_q * inv_scale * inv_scale;
+    conv_k[tid] = conv_k[tid] * inv_k * inv_scale;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // ---- Step 3: g_decay + beta_gate (thread 0 only) ----
+    threadgroup float g_decay, beta_gate;
+    if (tid == 0) {
+        float a_val = alpha[head];
+        float dt_b  = bf16_to_f32(dt_bias[head]);
+        float A_val = exp(A_log[head]);
+        float softplus_val = log(1.0f + exp(a_val + dt_b));
+        g_decay   = exp(-A_val * softplus_val);
+        beta_gate = 1.0f / (1.0f + exp(-beta[head]));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // ---- Step 4: GDN recurrence (each thread owns one state row) ----
+    uint state_base = head * value_dim * key_dim;
+    float kv_mem = 0.0f;
+    for (uint ki = 0; ki < key_dim; ki++) {
+        float s = state[state_base + tid * key_dim + ki] * g_decay;
+        state[state_base + tid * key_dim + ki] = s;
+        kv_mem += s * conv_k[ki];
+    }
+    float delta = (conv_v[tid] - kv_mem) * beta_gate;
+    for (uint ki = 0; ki < key_dim; ki++) {
+        state[state_base + tid * key_dim + ki] += conv_k[ki] * delta;
+    }
+    float out_val = 0.0f;
+    for (uint ki = 0; ki < key_dim; ki++) {
+        out_val += state[state_base + tid * key_dim + ki] * conv_q[ki];
+    }
+
+    // ---- Step 5: gated rms norm ----
+    uint base = head * value_dim;
+    threadgroup float partial[128];
+    partial[tid] = out_val * out_val;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float s = 0;
+        for (uint i = 0; i < value_dim; i++) s += partial[i];
+        partial[0] = s;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float inv_rms = rsqrt(partial[0] / float(value_dim) + eps);
+
+    float normed = out_val * inv_rms;
+    float zval = z[base + tid];
+    float gate = zval / (1.0f + exp(-zval));  // SiLU
+    float w = bf16_to_f32(norm_weight[tid]);
+    output[base + tid] = normed * gate * w;
+}
+
+
+// ============================================================================
 // Kernel 12: MoE combine + residual + shared expert gate (fused)
 // ============================================================================
 // Fused operation for CMD3 GPU-side combine:
