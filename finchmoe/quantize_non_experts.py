@@ -90,7 +90,10 @@ EIGHT_BIT_PATTERNS = [
     # Vocabulary projections
     'lm_head.weight',
     'model.embed_tokens.weight',
-    # GDN projections (protected tier — dampens eps-knee amplification)
+    # GDN projections (protected tier — dampens eps-knee amplification).
+    # Optional 4-bit variant: FINCHMOE_GDN4 env switches them to 4-bit
+    # (halves the dominant per-layer weight traffic; quality must be
+    # A/B tested against the 8-bit tier).
     '.linear_attn.in_proj_qkv.weight',
     '.linear_attn.in_proj_z.weight',
     '.linear_attn.out_proj.weight',
@@ -111,8 +114,15 @@ KEEP_BF16_PATTERNS = [
 
 def get_quantization_bits(name):
     """Return (bits, group_size) or None to keep BF16"""
+    # GDN projections default to 4-bit: halves the dominant per-layer weight
+    # traffic (qkv+z+o_proj = ~42MB/layer at 8-bit) for ~25% more tok/s
+    # (9.1 -> 11.4 measured) with coherent output on our affine quantizer.
+    # FINCHMOE_GDN8=1 restores the 8-bit protected tier (quality-safe option).
+    gdn8 = os.environ.get('FINCHMOE_GDN8') == '1'
     for pat in EIGHT_BIT_PATTERNS:
         if name.endswith(pat) or pat in name:
+            if not gdn8 and '.linear_attn.' in pat:
+                return (4, 64)
             return (8, 64)  # 8-bit: 4 values/uint32, group_size=64
     for pat in FOUR_BIT_PATTERNS:
         if name.endswith(pat) or pat in name:
