@@ -243,10 +243,44 @@ def _dequant_packed_weights(packed_u32, scales_u16, biases_u16, in_dim, bits, gr
     return w
 
 
-def repack_all_3bit(expert_reads, model_path, output_dir, layers):
-    """Repack experts at 3-bit: read 4-bit (or BF16) source experts from the
-    original safetensors, dequant, requantize to 3-bit affine (group 64),
-    and write packed_experts_3bit/layer_XX.bin."""
+def quantize_affine_pack(w_f32, bits, group_size=64):
+    """Generic per-group affine quantization -> (packed, scales, biases).
+
+    bits=3: 8 values per 24-bit triplet; bits=4: 8 nibbles per uint32.
+    """
+    out_dim, in_dim = w_f32.shape
+    assert in_dim % group_size == 0
+    num_groups = in_dim // group_size
+    max_val = (1 << bits) - 1
+    w = w_f32.reshape(out_dim, num_groups, group_size)
+    w_min = w.min(axis=2)
+    w_max = w.max(axis=2)
+    scales = np.maximum((w_max - w_min) / max_val, 1e-8)
+    biases = w_min
+    q = np.round((w - biases[:, :, np.newaxis]) / scales[:, :, np.newaxis])
+    q = np.clip(q, 0, max_val).astype(np.uint64)
+    if bits == 3:
+        packed = pack_3bit(q.reshape(-1)).reshape(out_dim, in_dim * 3 // 8)
+    else:
+        vpu = 32 // bits
+        packed_cols = in_dim // vpu
+        packed = np.zeros((out_dim, packed_cols), dtype=np.uint32)
+        upg = group_size // vpu
+        for g in range(num_groups):
+            for u in range(upg):
+                u32_val = np.zeros(out_dim, dtype=np.uint32)
+                for v in range(vpu):
+                    u32_val |= q[:, g, u * vpu + v].astype(np.uint32) << (v * bits)
+                packed[:, g * upg + u] = u32_val
+    return (packed,
+            bf16_encode(scales.astype(np.float32).reshape(-1)).reshape(out_dim, num_groups),
+            bf16_encode(biases.astype(np.float32).reshape(-1)).reshape(out_dim, num_groups))
+
+
+def repack_all_requant(expert_reads, model_path, output_dir, layers, bits, components, expert_size):
+    """Repack experts at `bits` (3 or 4): read packed (1/2/4-bit) or BF16
+    source experts from the original safetensors, dequant, requantize to
+    per-group affine, and write per-layer files."""
     os.makedirs(output_dir, exist_ok=True)
     fds = {}
     t0 = time.monotonic()
@@ -258,10 +292,10 @@ def repack_all_3bit(expert_reads, model_path, output_dir, layers):
         li = expert_reads[key]
         out_path = os.path.join(output_dir, f"layer_{layer_idx:02d}.bin")
         fd_out = os.open(out_path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
-        os.ftruncate(fd_out, NUM_EXPERTS * EXPERT_SIZE_3BIT)
+        os.ftruncate(fd_out, NUM_EXPERTS * expert_size)
 
         for e in range(NUM_EXPERTS):
-            for comp in COMPONENTS_3BIT:
+            for comp in components:
                 name = comp['name']
                 if name not in li:
                     print(f"  Layer {layer_idx} expert {e}: missing {name}")
@@ -271,8 +305,8 @@ def repack_all_3bit(expert_reads, model_path, output_dir, layers):
                     fds[info['file']] = os.open(os.path.join(model_path, info['file']), os.O_RDONLY)
                 src_fd = fds[info['file']]
                 if name.endswith('.weight'):
-                    # weights: dequant source (packed U32 or BF16) -> 3-bit;
-                    # write the REQUANTIZED weight + its own scales/biases.
+                    # dequant source (packed U32 or BF16) -> requantize;
+                    # write the requantized weight + its own scales/biases.
                     wraw = os.pread(src_fd, info['expert_size'], info['abs_offset'] + e * info['expert_stride'])
                     src_dtype = info.get('dtype', 'U32')
                     if src_dtype == 'U32':
@@ -294,21 +328,25 @@ def repack_all_3bit(expert_reads, model_path, output_dir, layers):
                     else:
                         wu16 = np.frombuffer(wraw, np.uint16)
                         w_f32 = (wu16.astype(np.uint32) << 16).view(np.float32).reshape(comp['shape'][0], -1)
-                    packed, scales, biases = quantize_affine_3bit(w_f32)
-                    os.pwrite(fd_out, packed.tobytes(), e * EXPERT_SIZE_3BIT + comp['offset'])
-                    # write requantized scales/biases at their 3-bit offsets
-                    soff = next(c['offset'] for c in COMPONENTS_3BIT if c['name'] == name[:-7] + '.scales')
-                    boff = next(c['offset'] for c in COMPONENTS_3BIT if c['name'] == name[:-7] + '.biases')
-                    os.pwrite(fd_out, scales.tobytes(), e * EXPERT_SIZE_3BIT + soff)
-                    os.pwrite(fd_out, biases.tobytes(), e * EXPERT_SIZE_3BIT + boff)
+                    packed, scales, biases = quantize_affine_pack(w_f32, bits)
+                    os.pwrite(fd_out, packed.tobytes(), e * expert_size + comp['offset'])
+                    soff = next(c['offset'] for c in components if c['name'] == name[:-7] + '.scales')
+                    boff = next(c['offset'] for c in components if c['name'] == name[:-7] + '.biases')
+                    os.pwrite(fd_out, scales.tobytes(), e * expert_size + soff)
+                    os.pwrite(fd_out, biases.tobytes(), e * expert_size + boff)
                     continue
-                # .scales/.biases components are written by the .weight branch above
                 continue
         os.close(fd_out)
         print(f"  Layer {layer_idx:2d}: done ({time.monotonic() - t0:.1f}s elapsed)")
     for fd in fds.values():
         os.close(fd)
-    print(f"3-bit repack complete -> {output_dir}")
+    print(f"{bits}-bit requant repack complete -> {output_dir}")
+
+
+def repack_all_3bit(expert_reads, model_path, output_dir, layers):
+    """Repack experts at 3-bit (kept for the --bits 3 entry point)."""
+    repack_all_requant(expert_reads, model_path, output_dir, layers,
+                       3, COMPONENTS_3BIT, EXPERT_SIZE_3BIT)
 
 
 def repack_layer(layer_idx, expert_reads, model_path, fds, output_dir, components, expert_size, dry_run=False, fp16_scales=False):

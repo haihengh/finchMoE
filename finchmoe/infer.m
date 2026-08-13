@@ -4909,7 +4909,7 @@ typedef struct {
 
 static MTPWeights g_mtp = { .loaded = 0 };
 
-static void mtp_init(WeightFile *wf) {
+static void mtp_init(WeightFile *wf, const char *model_path) {
     if (g_mtp.loaded) return;
 
     char name[256];
@@ -4965,9 +4965,9 @@ static void mtp_init(WeightFile *wf) {
               g_mtp.fc_w && g_mtp.final_norm_w && g_mtp.input_layernorm_w);
     if (ok) {
         g_mtp.loaded = 1;
-        // Try to open MTP expert file
+        // Try to open MTP expert file (in the model's packed_experts dir)
         char path[512];
-        snprintf(path, sizeof(path), "packed_experts/layer_40.bin");
+        snprintf(path, sizeof(path), "%s/packed_experts/layer_40.bin", model_path);
         g_mtp.expert_fd = open(path, O_RDONLY);
         if (g_mtp.expert_fd >= 0) {
             fcntl(g_mtp.expert_fd, F_RDAHEAD, 0);
@@ -5146,10 +5146,12 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
                        shared_act, shared_out, HIDDEN_DIM, 512, GROUP_SIZE, 4);
 
     // Step 9: Routed experts (persistent buffers, allocated once)
+    // The MTP layer's expert file is packed in the 4-bit layout
+    // (g_mtp.expert_bits = 4), independent of the main model's expert format.
     static float *moe_out = NULL;
     static void *expert_data = NULL;
     static size_t expert_data_sz = 0;
-    size_t esz = active_expert_size();
+    size_t esz = EXPERT_SIZE_4BIT;
     if (!moe_out) moe_out = calloc(HIDDEN_DIM, sizeof(float));
     if (!expert_data || expert_data_sz != esz) {
         free(expert_data);
@@ -9184,7 +9186,7 @@ int main(int argc, char **argv) {
         }
 
         // Initialize MTP (Multi-Token Prediction) speculative decoding head
-        mtp_init(wf);
+        mtp_init(wf, model_path);
 
         // ---- Load vocabulary ----
         fflush(stdout); fflush(stderr);
