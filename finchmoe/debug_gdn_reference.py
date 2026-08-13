@@ -12,6 +12,7 @@ Usage:
   python3 debug_gdn_reference.py /tmp/stage_quant.bin
 """
 import json
+import os
 import struct
 import sys
 import math
@@ -26,8 +27,8 @@ LINEAR_KEY_DIM = 128
 LINEAR_VALUE_DIM = 128
 EPS = 1e-6
 
-MANIFEST = 'quant_test/model_weights.json'
-WEIGHTS = 'quant_test/model_weights.bin'
+MANIFEST = os.environ.get('FINCHMOE_REF_MANIFEST', 'quant_test/model_weights.json')
+WEIGHTS = os.environ.get('FINCHMOE_REF_WEIGHTS', 'quant_test/model_weights.bin')
 
 m = json.load(open(MANIFEST))['tensors']
 wf = open(WEIGHTS, 'rb')
@@ -43,7 +44,7 @@ def load(name):
     raw = wf.read(t['size'])
     if t['dtype'] == 'U32':
         return np.frombuffer(raw, np.uint32).reshape(t['shape'])
-    if t['dtype'] == 'BF16':
+    if t['dtype'] in ('BF16', 'U16'):
         u = np.frombuffer(raw, np.uint16)
         return (u.astype(np.uint32) << 16).view(np.float32).reshape(t['shape'])
     if t['dtype'] == 'F32':
@@ -71,6 +72,15 @@ def dequant_matvec(W, S, B, x, bits=4):
     return acc.astype(np.float32)
 
 
+def proj_bits(base):
+    """Detect packing bits from the manifest (explicit field or shape rule)."""
+    wi = m[base + '.weight']
+    si = m[base + '.scales']
+    if 'bits' in wi:
+        return wi['bits']
+    return 8 if wi['shape'][1] == si['shape'][1] * 16 else 4
+
+
 def embed(tok):
     W = load('model.embed_tokens.weight')      # [248320, 256]
     S = load('model.embed_tokens.scales')      # [248320, 32]
@@ -82,16 +92,20 @@ def embed(tok):
 
 
 def embed_vec(tok):
-    W = load('model.embed_tokens.weight')[tok]  # [256]
-    S = load('model.embed_tokens.scales')[tok]  # [32]
-    B = load('model.embed_tokens.biases')[tok]  # [32]
+    W = load('model.embed_tokens.weight')[tok]  # [packed_cols]
+    S = load('model.embed_tokens.scales')[tok]  # [groups]
+    B = load('model.embed_tokens.biases')[tok]  # [groups]
+    bits = proj_bits('model.embed_tokens')
+    vpu = 32 // bits
+    groups = len(S)
+    gs = (len(W) * vpu) // groups
     vals = []
-    for g in range(32):
+    for g in range(groups):
         s = float(S[g]); b = float(B[g])
-        for p in range(8):
-            pk = int(W[g * 8 + p])
-            for n in range(8):
-                vals.append(((pk >> (4 * n)) & 0xF) * s + b)
+        for p in range(gs // vpu):
+            pk = int(W[g * (gs // vpu) + p])
+            for n in range(vpu):
+                vals.append(((pk >> (bits * n)) & ((1 << bits) - 1)) * s + b)
     return np.array(vals, dtype=np.float32)
 
 
@@ -123,9 +137,13 @@ def main():
 
     def proj(name, out_dim):
         W = load(f'{name}.weight')
+        if name + '.scales' not in m:
+            # BF16 raw matvec
+            x64 = normed.astype(np.float64)
+            return (W.astype(np.float64) @ x64).astype(np.float32)
         S = load(f'{name}.scales')
         B = load(f'{name}.biases')
-        return dequant_matvec(W, S, B, normed.astype(np.float32), 4)
+        return dequant_matvec(W, S, B, normed.astype(np.float32), proj_bits(name))
 
     qkv = proj('model.layers.0.linear_attn.in_proj_qkv', LINEAR_CONV_DIM)
     z = proj('model.layers.0.linear_attn.in_proj_z', LINEAR_TOTAL_VALUE)
@@ -196,7 +214,7 @@ def main():
     oW = load('model.layers.0.linear_attn.out_proj.weight')
     oS = load('model.layers.0.linear_attn.out_proj.scales')
     oB = load('model.layers.0.linear_attn.out_proj.biases')
-    oproj = dequant_matvec(oW, oS, oB, gated, 4)
+    oproj = dequant_matvec(oW, oS, oB, gated, proj_bits('model.layers.0.linear_attn.out_proj'))
     h_mid = emb + oproj
     paw = load('model.layers.0.post_attention_layernorm.weight')
     h_post = rms_norm(h_mid.astype(np.float32), paw).astype(np.float32)

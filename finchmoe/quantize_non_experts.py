@@ -70,18 +70,16 @@ def quantize_affine(weights_f32, bits, group_size=64):
 
 
 # Which tensors get which quantization
+# Protected tier: GDN projections are 8-bit because the gated-norm eps-knee
+# amplifies their quantization noise (24/32 value-heads sit below rms 1e-3).
+# Group size is uniformly 64 so bit width is unambiguous from shapes
+# (row_u32 == groups*16 -> 8-bit, row_u32 == groups*8 -> 4-bit).
 FOUR_BIT_PATTERNS = [
     # Full attention
     '.self_attn.q_proj.weight',
     '.self_attn.k_proj.weight',
     '.self_attn.v_proj.weight',
     '.self_attn.o_proj.weight',
-    # Linear attention (GatedDeltaNet)
-    '.linear_attn.in_proj_qkv.weight',
-    '.linear_attn.in_proj_z.weight',
-    '.linear_attn.in_proj_a.weight',
-    '.linear_attn.in_proj_b.weight',
-    '.linear_attn.out_proj.weight',
     # Shared expert (per layer)
     '.mlp.shared_expert.gate_proj.weight',
     '.mlp.shared_expert.up_proj.weight',
@@ -92,12 +90,18 @@ EIGHT_BIT_PATTERNS = [
     # Vocabulary projections
     'lm_head.weight',
     'model.embed_tokens.weight',
+    # GDN projections (protected tier — dampens eps-knee amplification)
+    '.linear_attn.in_proj_qkv.weight',
+    '.linear_attn.in_proj_z.weight',
+    '.linear_attn.out_proj.weight',
 ]
 
 # BF16 (keep as-is)
 KEEP_BF16_PATTERNS = [
     '.mlp.gate.weight',           # routing gate (256-dim, tiny)
     '.mlp.shared_expert_gate.weight',  # shared expert gate (1-dim)
+    '.linear_attn.in_proj_a.weight',   # alpha gate (32-dim scalar projection)
+    '.linear_attn.in_proj_b.weight',   # beta gate (32-dim scalar projection)
     'norm.weight',                 # all norms
     'layernorm.weight',
     'input_layernorm',
@@ -109,7 +113,7 @@ def get_quantization_bits(name):
     """Return (bits, group_size) or None to keep BF16"""
     for pat in EIGHT_BIT_PATTERNS:
         if name.endswith(pat) or pat in name:
-            return (8, 32)  # 8-bit: 4 values/uint32, group_size=32
+            return (8, 64)  # 8-bit: 4 values/uint32, group_size=64
     for pat in FOUR_BIT_PATTERNS:
         if name.endswith(pat) or pat in name:
             return (4, 64)  # 4-bit: 8 values/uint32, group_size=64
@@ -253,7 +257,8 @@ def main():
                 raw = sf.read(byte_len)
 
             # Decode to float32
-            if dtype == 'BF16':
+            if dtype in ('BF16', 'U16'):
+                # 'U16' label = genuine BF16 data (self-quantized model convention)
                 arr = (np.frombuffer(raw, np.uint16).astype(np.uint32) << 16).view(np.float32)
             elif dtype == 'F32':
                 arr = np.frombuffer(raw, np.float32)
@@ -270,13 +275,13 @@ def main():
                 tensor_count += 1
                 continue
 
-            # Handle norm weight adjustment
-            if 'norm.weight' in nn or 'layernorm.weight' in nn:
-                arr = arr + 1.0
+            # NOTE: no +1 adjustment — the source models used by this pipeline
+            # (2bit-dense-v2, 4bit) already store EFFECTIVE norm weights
+            # (1 + weight_param). Adding 1 again doubles them.
 
             bits_info = quant_plan.get(nn)
             if bits_info and bits_info[0] == 'quant':
-                bits, gs = bits_info
+                _, bits, gs = bits_info
                 w = arr.reshape(shape[0], shape[1])
                 packed, scales, biases = quantize_affine(w, bits, gs)
 
