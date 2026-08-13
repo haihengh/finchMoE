@@ -1297,6 +1297,15 @@ static int cpu_sample_temp(const float *x, int dim, float temp, int top_k) {
 
     if (temp <= 0.0f || top_k <= 1) {
         int chosen = cpu_argmax(logits_buf, dim);
+        // Hard block on 3-in-a-row repeats (breaks the repetition attractor
+        // that the soft rep penalty alone can't stop, e.g. "â>' â>' â>'" loops).
+        static int last_tok = -1, last2_tok = -1;
+        if (chosen == last_tok && chosen == last2_tok) {
+            logits_buf[chosen] = -INFINITY;
+            chosen = cpu_argmax(logits_buf, dim);
+        }
+        last2_tok = last_tok;
+        last_tok = chosen;
         rep_penalty_register(chosen);
         return chosen;
     }
@@ -8322,6 +8331,11 @@ static void process_chat_request(ServeState *s, int client_fd,
         free(normed);
     }
     lm_head_forward(s->wf, hidden, logits);
+    if (getenv("FINCHMOE_SERVE_DEBUG")) {
+        fprintf(stderr, "[serve-dbg] %s prefill hidden_rms=%.4f logits_rms=%.4f top3=%d(%.2f),%d(%.2f),%d(%.2f)\n",
+                request_id, vec_rms(hidden, HIDDEN_DIM), vec_rms(logits, VOCAB_SIZE),
+                (int)cpu_argmax(logits, VOCAB_SIZE), 0.0f, 0, 0.0f, 0, 0.0f);
+    }
     int next_token = cpu_sample_temp(logits, VOCAB_SIZE, g_temperature, g_top_k);
     logit_diag_dump(logits, VOCAB_SIZE, next_token, 0);
 
