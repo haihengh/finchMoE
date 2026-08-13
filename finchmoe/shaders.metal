@@ -534,6 +534,85 @@ kernel void dequant_matvec_8bit(
 
 
 // ============================================================================
+// Kernel 1e3: 3-bit dequant matvec (8 values per 24 bits, group_size=64)
+// ============================================================================
+// Layout: W_packed is byte-addressable, row stride = in_dim * 3 / 8 bytes.
+// Each 24-bit triplet holds 8 3-bit values (value j at bits 3j..3j+2).
+// Same tiled structure as v3: ROWS_PER_TG=8 rows, 256 threads.
+#define ROWS_PER_TG_3 8
+
+kernel void dequant_matvec_3bit(
+    device const uint8_t* W_packed   [[buffer(0)]],  // [out_dim, in_dim*3/8] bytes
+    device const uint16_t* scales    [[buffer(1)]],  // [out_dim, num_groups] bf16
+    device const uint16_t* biases    [[buffer(2)]],  // [out_dim, num_groups] bf16
+    device const float*    x         [[buffer(3)]],  // [in_dim]
+    device float*          out       [[buffer(4)]],  // [out_dim]
+    constant uint&         out_dim   [[buffer(5)]],
+    constant uint&         in_dim    [[buffer(6)]],
+    constant uint&         group_size [[buffer(7)]],
+    uint tgid   [[threadgroup_position_in_grid]],
+    uint lid    [[thread_position_in_threadgroup]],    // 0..255
+    uint simd_lane  [[thread_index_in_simdgroup]],    // 0..31
+    uint simd_group [[simdgroup_index_in_threadgroup]] // 0..7
+) {
+    uint row = tgid * ROWS_PER_TG_3 + simd_group;
+
+    uint num_groups      = in_dim / group_size;
+    uint triplets        = in_dim / 8;              // 24-bit fields per row
+    uint triplets_per_g  = group_size / 8;          // 8 per group (gs=64)
+    uint row_bytes       = in_dim * 3 / 8;
+
+    threadgroup float x_shared[4096];
+    for (uint i = lid; i < in_dim; i += 256) {
+        x_shared[i] = x[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (row >= out_dim) return;
+
+    device const uint8_t* w_row = W_packed + row * row_bytes;
+    device const uint16_t* s_row = scales + row * num_groups;
+    device const uint16_t* b_row = biases + row * num_groups;
+
+    float acc = 0.0f;
+    for (uint t = simd_lane; t < triplets; t += 32) {
+        uint g = t / triplets_per_g;
+        float scale = bf16_to_f32(s_row[g]);
+        float bias  = bf16_to_f32(b_row[g]);
+
+        uint b_off = t * 3;
+        uint32_t packed = (uint32_t)w_row[b_off] |
+                          ((uint32_t)w_row[b_off + 1] << 8) |
+                          ((uint32_t)w_row[b_off + 2] << 16);
+
+        uint xb = t * 8;
+        float sx0 = scale * x_shared[xb + 0];  float bx0 = bias * x_shared[xb + 0];
+        float sx1 = scale * x_shared[xb + 1];  float bx1 = bias * x_shared[xb + 1];
+        float sx2 = scale * x_shared[xb + 2];  float bx2 = bias * x_shared[xb + 2];
+        float sx3 = scale * x_shared[xb + 3];  float bx3 = bias * x_shared[xb + 3];
+        float sx4 = scale * x_shared[xb + 4];  float bx4 = bias * x_shared[xb + 4];
+        float sx5 = scale * x_shared[xb + 5];  float bx5 = bias * x_shared[xb + 5];
+        float sx6 = scale * x_shared[xb + 6];  float bx6 = bias * x_shared[xb + 6];
+        float sx7 = scale * x_shared[xb + 7];  float bx7 = bias * x_shared[xb + 7];
+
+        acc += fma(float((packed >>  0) & 0x7), sx0, bx0);
+        acc += fma(float((packed >>  3) & 0x7), sx1, bx1);
+        acc += fma(float((packed >>  6) & 0x7), sx2, bx2);
+        acc += fma(float((packed >>  9) & 0x7), sx3, bx3);
+        acc += fma(float((packed >> 12) & 0x7), sx4, bx4);
+        acc += fma(float((packed >> 15) & 0x7), sx5, bx5);
+        acc += fma(float((packed >> 18) & 0x7), sx6, bx6);
+        acc += fma(float((packed >> 21) & 0x7), sx7, bx7);
+    }
+
+    float sum = simd_sum(acc);
+    if (simd_lane == 0) {
+        out[row] = sum;
+    }
+}
+
+
+// ============================================================================
 // Kernel 1f: 4-bit dequant matvec with LUT (eliminates uint→float conversions)
 // ============================================================================
 // Instead of converting each nibble to float (expensive conversion instruction),
