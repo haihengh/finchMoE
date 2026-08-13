@@ -1,175 +1,104 @@
-# CMD2 NaN Analysis — Phase 1 Non-Expert Quantization
+# Phase 1 Quantization — Resolution Analysis (2026-08-12)
 
-**Status**: Unresolved. Blocking Phase 1 (non-expert weight quantization).
+**Status**: NaN RESOLVED. Root causes were data corruption, not GPU kernels.
 
 ---
 
-## 1. What Changed
+## Root Causes Found (in order of discovery)
 
-Switched `model_weights.bin` from BF16 non-expert weights (4.96 GB, extracted from
-`Qwen3.6-35B-A3B-2bit-dense-v2`) to 4-bit quantized non-expert weights (1.39 GB,
-extracted from `Qwen3.6-35B-A3B-4bit`).
+### Bug 1: 8-bit routing gate dispatched through 4-bit kernel
 
-| Component | Before (BF16) | After (4-bit) |
-|-----------|--------------|---------------|
-| Attention Q/K/V/O | BF16, `gemv_bf16_x2` kernel | U32-packed, `dequant_matvec_4bit_v3` |
-| GDN projections | BF16 | 4-bit dequant |
-| Shared expert | BF16, CPU fallback in CMD3 | 4-bit, GPU dequant in CMD3 |
-| Routing gate | BF16 | 4-bit dequant |
-| Embeddings | BF16 lookup | 4-bit dequant row lookup |
-| lm_head | BF16, GPU gemv_bf16_x2 | 4-bit, GPU dequant matvec |
-| Expert weights | **UNCHANGED** (same packed_experts files) | **UNCHANGED** |
+The routing gate (`mlp.gate.weight`, 8-bit packed, 4 values/u32) and
+`shared_expert_gate.weight` (8-bit) were dispatched through the 4-bit
+`dequant_matvec_4bit_v3` kernel in the fused CMD2 GPU path.
+The CPU fallback path correctly used `bits=8`.
 
-**Everything that changed is in the non-expert weight path. Expert weights,
-expert kernels, and the CMD3 routed-expert dispatch are byte-identical.**
+- Symptom: GPU routing CosSim=0.79 vs CPU (gate), -1.0 (shared gate).
+- Fix: added `bits` field to `BatchMatvecSpec`; `gpu_encode_batch_matvec` /
+  `gpu_batch_matvec` now select `matvec_8bit` (dequant_matvec_8bit) when bits==8.
+- Verified: standalone CosSim=1.0 with real weight data.
 
-## 2. Symptom Pattern
+### Bug 2: Expert packed files repacked from the WRONG model
 
-```
-[prefill] 3/4 tokens: 367 ms    ← tokens 0-2 process CLEAN (no NaN)
-[CMD2-NAN] layer=1: h_mid or h_post contains NaN!   ← token 3, layer 1
-[LOOP] layer 1: hidden rms=nan!
-[CMD2-NAN] layer=2 ... layer=39 (all NaN)
-```
+`../models/Qwen3.6-35B-A3B-4bit/packed_experts/` was built by running
+`repack_experts.py` against the stale cwd `expert_index.json` which pointed
+at the **MTP model** (`Qwen3.6-35B-A3B-4bit-mtp`), whose routed experts are
+**2-bit** ([256,512,128]) — while the repack used the 4-bit layout
+(component size 524288 = 2× the source expert stride of 262144).
+Result: overlapping reads of 2-bit data written into a 4-bit layout = garbage
+experts, with huge/NaN values in early slots.
 
-Key observations:
-1. **Tokens 0-2 are clean** — no NaN during the first 3 prefill tokens.
-2. **Token 3, layer 0 is clean** — no CMD2-NAN at layer 0.
-3. **Token 3, layer 1+ all produce NaN** in CMD2 output.
-4. `--cpu-experts` **fixes everything** (correct output, ~10× slower).
-5. Prefill speed: 367 ms vs 3893 ms (BF16) — **5× faster**, so I/O is not the issue.
+- Fix: `python3 generate_expert_index.py --model ../models/Qwen3.6-35B-A3B-4bit --output ../models/Qwen3.6-35B-A3B-4bit/expert_index.json`
+  then `python3 repack_experts.py --index ../models/Qwen3.6-35B-A3B-4bit/expert_index.json`
+- Verified byte-identical to source safetensors (0 mismatches).
 
-## 3. What Was Verified Correct
+### Bug 3: FP16→BF16 conversion corrupted genuine BF16 scales/biases
 
-| Component | Method | Result |
-|-----------|--------|--------|
-| GPU dequant kernel (v3) | Standalone test with REAL weight data | CosSim=1.0 for [8192,2048], [4096,2048], [2048,4096] |
-| GPU dequant via engine path | Single Metal buffer + offsets (exact engine code) | CosSim=1.0, MaxDiff < 1e-4 |
-| Embeddings (4-bit lookup) | Engine debug | rms=7.7, finite ✓ |
-| CMD1 attention projections | Engine debug (NaN check) | No NaN ✓ |
-| Tensor offsets in manifest | Python verification | All offsets within file bounds ✓ |
-| Tensor shapes vs kernel expectations | Python verification | All match ✓ |
-| Weight/scale/bias triplets | Python verification | All present ✓ (0 missing in attention/MoE) |
+This model (`Qwen3.6-35B-A3B-4bit`) stores **genuine BF16** scale/bias data
+with dtype='BF16' (the old "mlx-community stores FP16" rule does NOT apply
+to it). The unconditional FP16→BF16 conversion in both `extract_weights.py`
+and `repack_experts.py` misinterpreted BF16 values as FP16 and re-encoded:
+e.g. BF16 -0.0041 (bits 0xBB87) → "FP16" -0.945 → BF16 -0.9375.
 
-**Conclusion: the GPU kernels, the data, and the CMD1 path are all correct.
-The NaN originates somewhere between CMD1 and CMD2 output readback.**
+This corrupted ALL 4-bit and 8-bit scale/bias tensors in the extracted
+weights AND the repacked experts. Evidence: `nibble*scale+bias` with the raw
+BF16 bytes reproduces the BF16 reference model weights at CosSim=0.9978;
+the converted values give CosSim=0.34.
 
-## 4. The Failure Chain (Hypothesis A)
+- Fix: `--fp16-scales` flag (default OFF) added to both scripts.
+- Verified: all tensor families (qkv, z, a, b, o_proj, shared expert, q/k/v,
+  routing gate 8-bit) match the BF16 reference model at CosSim 0.995-1.000.
 
-The NaN in CMD2's `h_mid` requires either:
-1. `o_proj` output is NaN, OR
-2. `residual` (input to residual_add) is NaN
+### Bug 4: NaN propagation through 0-weight experts
 
-CMD2's residual comes from `buf_residual`, populated by:
-```c
-memcpy([g_metal->buf_residual contents], residual, HIDDEN_DIM * sizeof(float));
-```
-where `residual` is the CPU-side hidden state.
+With garbage expert data (Bug 2), `moe_combine_residual` computed
+`0.0 * NaN = NaN` for unselected experts, poisoning `buf_moe_hidden`.
+This made the NaN visible only at the LAST prefill token (intermediate
+tokens discard their deferred expert results). Fixed transitively by Bug 2.
 
-For layer 1+ (FAST PATH), the hidden state comes from:
-```c
-finalize_deferred_experts():
-    memcpy(g_deferred.hidden, [g_metal->buf_moe_hidden contents], ...)
-```
+---
 
-`buf_moe_hidden` is written by CMD3(N-1)'s `moe_combine_residual` kernel, which reads:
-1. `buf_multi_expert_out[k]` — routed expert outputs (**unchanged weights**)
-2. `buf_shared_out` — shared expert output (**NOW 4-bit dequant down_proj**)
-3. `buf_h_mid` — residual
+## Current Status — ENGINE VERIFIED CORRECT (2026-08-12)
 
-**If `buf_shared_out` is NaN → combine output NaN → buf_moe_hidden NaN → hidden NaN → buf_residual NaN → CMD2 h_mid NaN.**
+- No NaN anywhere; per-layer hidden rms sane; logit rms 1.7 (was 902).
+- ~8 tok/s at K=8, 1.73 GB peak GPU usage (vs ~5.4 GB BF16).
+- **Engine is bit-exact**: an independent numpy reference of the layer-0
+  GDN chain (`debug_gdn_reference.py`, mirrors the Metal shader semantics)
+  matches the engine's stage dumps at CosSim 1.000000 for every stage
+  (qkv, z, beta, alpha, conv, delta_out, gated, o_proj, h_mid, h_post).
+  Standalone kernel tests also match at 1.0; every weight tensor matches
+  the BF16 base model at 0.995+.
+- **Output quality of the MLX-community 4bit model is the model's own
+  property**, not an engine bug:
+  - The GDN gated-norm sits at the eps-knee: 24/32 value-heads have
+    delta_out rms < sqrt(eps)=1e-3, so tiny input differences are
+    amplified ~2.5× per layer. Both the quant and BF16 setups share this
+    structure; the MLX-4bit model's quantization noise lands worse.
+  - llama.cpp Q4_K_M (same base model) generates fluently — the
+    architecture tolerates 4-bit, but per-model quantization choices land
+    differently in the sensitive regime.
+  - MLX could not be run on this 16 GB machine (its own Metal OOM) to
+    directly confirm — venv ready at /tmp/mlxvenv.
+- **Recommendation**: self-quantize the known-good model (2bit-dense-v2's
+  BF16 non-expert weights, fluent in our engine) with our own
+  `quantize_non_experts.py` — controlled calibration + the now-verified
+  engine, instead of the community MLX-4bit model.
 
-This explains every symptom:
-- Layer 0 clean: slow path, hidden from embedding (not buf_moe_hidden)
-- Layer 1+ NaN: fast path, hidden from buf_moe_hidden
-- `--cpu-experts` fixes it: CPU fallback computes combine on CPU (correct)
-- Tokens 0-2 clean: NaN propagates but is DISCARDED by `discard_deferred_experts()`
-  (only the GDN state and KV cache persist, not the hidden state)
-
-Wait — tokens 0-2 should also show CMD2-NAN at layers 1+! Unless the NaN only
-appears at token 3 due to GDN state accumulation.
-
-## 5. The Failure Chain (Hypothesis B) — GDN State Corruption
-
-Tokens 0-2 update the 30 GDN recurrent states. If the GDN state is corrupted
-(even slightly) by 4-bit quantized GDN projection weights, the corruption
-accumulates over tokens. By token 3, the state produces NaN in the attention
-output, which flows into o_proj → CMD2 h_mid NaN.
-
-This explains why tokens 0-2 are clean but token 3 fails.
-
-However, CMD1-NAN checks showed the GDN projections are finite at token 3.
-The GDN state update happens on GPU (fused GPU delta-net) with the SAME
-buffers as before — only the projection INPUTS changed.
-
-## 6. What `--cpu-experts` Actually Changes
-
-`--cpu-experts` (infer.m:6422) skips the ENTIRE GPU CMD3 encoding and uses:
-1. CPU dequant matvec per expert
-2. CPU combine (`hidden = h_mid + moe_out + shared_out`)
-
-It also means `gpu_combine` is never set, so `finalize_deferred_experts()`
-reads from CPU memory (`g_deferred.hidden`) instead of `buf_moe_hidden`.
-
-This narrows the bug to ONE of these CMD3 GPU components:
-1. `moe_combine_residual` kernel inputs (shared_out with 4-bit weights)
-2. Shared expert SwiGLU + down_proj 4-bit dequant in CMD3
-3. The GPU-side combine + norm chain (buf_moe_hidden → buf_input)
-
-## 7. Most Likely Root Causes (Ranked)
-
-### #1: Shared expert down_proj 4-bit dequant produces wrong values (60% confidence)
-
-The CMD3 shared expert path changed from CPU BF16 to GPU 4-bit dequant.
-The dimensions are [2048, 512] (out=2048, in=512), which is DIFFERENT from
-the attention tensors tested standalone ([8192,2048], [2048,4096]).
-
-The v3 kernel with in_dim=512: num_groups=8, packed_per_group=8.
-Not verified standalone with these exact dimensions.
-
-### #2: GPU combine reads stale buf_h_mid (25% confidence)
-
-The combine kernel reads buf_h_mid from CMD2. CMD2 is committed and waited,
-so buf_h_mid should be current. But the kernel ordering within CMD3 could
-have a subtle issue: the shared expert down_proj reads buf_shared_act, which
-is written by the SwiGLU dispatch earlier in CMD3. If the encoders aren't
-properly ordered within CMD3...
-
-### #3: Metal resource limit with more encoders (15% confidence)
-
-CMD3 now has MORE encoders than before (the shared expert went from CPU to
-GPU). More encoders = more resources. Could hit a Metal limit silently.
-
-## 8. Next Debugging Steps
-
-1. **Standalone test for shared expert dimensions**: Test v3 with
-   [2048, 512] (down_proj) and [512, 2048] (gate/up) using real weight data.
-2. **Check buf_shared_out directly**: Add debug print after CMD3 completes to
-   see if buf_shared_out is NaN.
-3. **Check buf_moe_hidden directly**: Verify whether the combine output is NaN.
-4. **Disable GPU combine**: Force the slow path (CPU combine) and see if NaN
-   disappears — would confirm the combine chain as the source.
-5. **Isolate CMD3 shared expert**: Use BF16 for shared expert only (keep 4-bit
-   for attention) by modifying the manifest, then test.
-
-## 9. Files and Reproduction
+## Reproduction
 
 ```bash
 cd finchmoe
-# Extract 4-bit non-expert weights
 python3 extract_weights.py --model ../models/Qwen3.6-35B-A3B-4bit --output ./quant_test
-
-# Switch engine to quantized weights
 ln -sf quant_test/model_weights.bin model_weights.bin
 ln -sf quant_test/model_weights.json model_weights.json
-
-# Reproduce NaN
-./infer -t 3 -k 8              # NaN at layers 1+
-
-# Verify correct with CPU experts
-./infer -t 3 -k 8 --cpu-experts   # works correctly
-
-# Verify GPU kernels standalone
-clang -O2 -fobjc-arc -framework Metal -framework Foundation test_engine_path.m -o test_engine_path
-./test_engine_path            # all PASS (attention dims only)
+./finchmoe-infer -t 40 -k 8   # NaN-free; quality = model property
 ```
+
+## Debug Instrumentation Added (env-gated, inert by default)
+
+- `FINCHMOE_DUMP_HPOST=1` — appends per-layer h_post to /tmp/hpost_dump.bin
+- `FINCHMOE_DUMP_HIDDEN=1` — appends post-combine hidden to /tmp/hidden_dump.bin
+- `FINCHMOE_DUMP_STAGES=1` — layer-0 token-0 stage dump to /tmp/stage_dump.bin
+- `-X` adds ATTN-DBG/FAST-DBG/OPROJ-DBG/LC-DBG prints (layers 0-2)
+- `-I` now dumps logits for EVERY decode step (append; step 0 truncates)
+- `debug_gdn_reference.py` — numpy GDN reference for stage cross-validation

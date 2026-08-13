@@ -157,7 +157,7 @@ def open_source_files(expert_reads, model_path, layers):
     return fds
 
 
-def repack_layer(layer_idx, expert_reads, model_path, fds, output_dir, components, expert_size, dry_run=False):
+def repack_layer(layer_idx, expert_reads, model_path, fds, output_dir, components, expert_size, dry_run=False, fp16_scales=False):
     """Repack all experts for one layer into a contiguous binary file.
 
     Returns (bytes_written, elapsed_seconds).
@@ -198,11 +198,13 @@ def repack_layer(layer_idx, expert_reads, model_path, fds, output_dir, component
             src_fd = fds[info['file']]
             src_offset = info['abs_offset'] + expert_idx * info['expert_stride']
             dst_offset = expert_idx * expert_size + comp['offset']
-            # MLX community models store scales/biases as FP16 with dtype='BF16' (known quirk).
-            # Our self-quantized models store them as BF16 with dtype='U16'.
-            # Only convert when dtype is 'BF16' (meaning data is actually FP16).
+            # Some mlx-community models store scales/biases as FP16 with
+            # dtype='BF16'. Our self-quantized models (incl. Qwen3.6-35B-A3B-4bit)
+            # store genuine BF16 data with the same dtype label — converting
+            # those corrupts the values (BF16 -0.0041 misread as FP16 -0.945).
+            # Only convert when --fp16-scales is explicitly passed.
             is_scale_or_bias = ('scales' in comp['name'] or 'biases' in comp['name'])
-            needs_fp16_convert = is_scale_or_bias and info.get('dtype') == 'BF16'
+            needs_fp16_convert = fp16_scales and is_scale_or_bias and info.get('dtype') == 'BF16'
             read_plan.append((src_fd, src_offset, dst_offset, comp['size'], needs_fp16_convert))
 
     # Sort by (src_fd, src_offset) for sequential read locality
@@ -231,7 +233,7 @@ def repack_layer(layer_idx, expert_reads, model_path, fds, output_dir, component
     return bytes_written, elapsed
 
 
-def verify_layer(layer_idx, expert_reads, model_path, fds, output_dir, components, expert_size):
+def verify_layer(layer_idx, expert_reads, model_path, fds, output_dir, components, expert_size, fp16_scales=False):
     """Read back expert 0 from packed file and compare to originals."""
     layer_key = str(layer_idx)
     layer_info = expert_reads[layer_key]
@@ -260,12 +262,12 @@ def verify_layer(layer_idx, expert_reads, model_path, fds, output_dir, component
                 src_u16 = np.frombuffer(original, dtype=np.uint16)
                 pck_u16 = np.frombuffer(packed, dtype=np.uint16)
                 src_dtype = info.get('dtype', 'BF16')
-                if src_dtype == 'BF16':
-                    # MLX community model: source is FP16, packed is BF16
+                if fp16_scales and src_dtype == 'BF16':
+                    # mlx-community model: source is FP16, packed is converted BF16
                     src_f32 = src_u16.view(np.float16).astype(np.float32)
                     pck_f32 = (pck_u16.astype(np.uint32) << 16).view(np.float32)
                 else:
-                    # Self-quantized model: both source and packed are BF16
+                    # Self-quantized model (default): both source and packed are BF16
                     src_f32 = (src_u16.astype(np.uint32) << 16).view(np.float32)
                     pck_f32 = (pck_u16.astype(np.uint32) << 16).view(np.float32)
                 if not np.allclose(src_f32, pck_f32, rtol=1e-2, atol=1e-3, equal_nan=True):
@@ -311,6 +313,12 @@ def main():
                         help='Quantization bits: 1, 2, 4, or 8 (default: 4)')
     parser.add_argument('--dry-run', action='store_true',
                         help='Verify offsets without writing')
+    parser.add_argument('--fp16-scales', action='store_true',
+                        help='Convert scale/bias tensors from FP16 to BF16 '
+                             '(needed for some mlx-community models whose '
+                             'dtype="BF16" actually holds FP16 data). '
+                             'DEFAULT OFF: our self-quantized models store '
+                             'genuine BF16 data, and the conversion corrupts it.')
     parser.add_argument('--verify-only', type=int, default=None, metavar='LAYER',
                         help='Verify a specific layer against originals')
     args = parser.parse_args()
@@ -389,7 +397,8 @@ def main():
     fds = open_source_files(expert_reads, model_path, layers)
 
     if args.verify_only is not None:
-        verify_layer(args.verify_only, expert_reads, model_path, fds, output_dir, components, expert_size)
+        verify_layer(args.verify_only, expert_reads, model_path, fds, output_dir, components, expert_size,
+                     fp16_scales=args.fp16_scales)
         for fd in fds.values():
             os.close(fd)
         return
@@ -404,7 +413,8 @@ def main():
     for i, layer_idx in enumerate(layers):
         t_layer = time.monotonic()
         bytes_written, elapsed = repack_layer(
-            layer_idx, expert_reads, model_path, fds, output_dir, components, expert_size, dry_run=args.dry_run
+            layer_idx, expert_reads, model_path, fds, output_dir, components, expert_size,
+            dry_run=args.dry_run, fp16_scales=args.fp16_scales
         )
         total_written += bytes_written
 
@@ -420,7 +430,8 @@ def main():
                   f"ETA: {eta:.0f}s")
 
             # Verify this layer immediately
-            if not verify_layer(layer_idx, expert_reads, model_path, fds, output_dir, components, expert_size):
+            if not verify_layer(layer_idx, expert_reads, model_path, fds, output_dir, components, expert_size,
+                                fp16_scales=args.fp16_scales):
                 print(f"ABORTING: verification failed for layer {layer_idx}")
                 sys.exit(1)
 

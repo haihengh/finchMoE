@@ -1892,7 +1892,7 @@ typedef struct {
     uint32_t in_dim;
     uint32_t group_size;
     int batch_slot;          // which batch_out[slot] to use for GPU output
-    int is_bf16;             // if 1, weight is raw BF16 (no dequant), use CPU path
+    int bits;                // packing width: 4 or 8 (ignored when scales==NULL → BF16 path)
 } BatchMatvecSpec;
 
 // Run N matmuls in a single command buffer. All share the same input vector.
@@ -1938,7 +1938,12 @@ static void gpu_batch_matvec(
 
         id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
         int use_v3 = (s->in_dim <= 4096);
-        [enc setComputePipelineState: use_v3 ? ctx->matvec_v3 : ctx->matvec_fast];
+        if (s->bits == 8 && ctx->matvec_8bit) {
+            // 8-bit packed weights: same tiled layout as v3 (ROWS_PER_TG=8, 256 threads)
+            [enc setComputePipelineState:ctx->matvec_8bit];
+        } else {
+            [enc setComputePipelineState: use_v3 ? ctx->matvec_v3 : ctx->matvec_fast];
+        }
         [enc setBuffer:ctx->wf_buf  offset:w_off atIndex:0];
         [enc setBuffer:ctx->wf_buf  offset:s_off atIndex:1];
         [enc setBuffer:ctx->wf_buf  offset:b_off atIndex:2];
@@ -2042,7 +2047,12 @@ static void gpu_encode_batch_matvec(
 
         id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
         int use_v3 = (s->in_dim <= 4096);
-        [enc setComputePipelineState: use_v3 ? ctx->matvec_v3 : ctx->matvec_fast];
+        if (s->bits == 8 && ctx->matvec_8bit) {
+            // 8-bit packed weights: same tiled layout as v3 (ROWS_PER_TG=8, 256 threads)
+            [enc setComputePipelineState:ctx->matvec_8bit];
+        } else {
+            [enc setComputePipelineState: use_v3 ? ctx->matvec_v3 : ctx->matvec_fast];
+        }
         [enc setBuffer:ctx->wf_buf  offset:w_off atIndex:0];
         [enc setBuffer:ctx->wf_buf  offset:s_off atIndex:1];
         [enc setBuffer:ctx->wf_buf  offset:b_off atIndex:2];
@@ -2094,6 +2104,11 @@ static void gpu_encode_dequant_matvec_with_io_bufs(
     NSUInteger b_off = (NSUInteger)((const char *)biases  - (const char *)[ctx->wf_buf contents]);
 
     id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
+    // Barrier: the caller may have written the input buffer from a previous
+    // encoder in this command buffer (e.g. shared expert SwiGLU -> down_proj).
+    // Without this the GPU may run the two dispatches concurrently and this
+    // kernel reads a half-written input. (Bit us: timing-dependent garbage.)
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
     int use_v3 = (in_dim <= 4096);
     [enc setComputePipelineState: use_v3 ? ctx->matvec_v3 : ctx->matvec_fast];
     [enc setBuffer:ctx->wf_buf offset:w_off atIndex:0];
@@ -2730,7 +2745,7 @@ static void fast_batch_matvec(
         for (int i = 0; i < num_specs; i++) {
             BatchMatvecSpec *s = &specs[i];
             cpu_dequant_matvec(s->W, s->scales, s->biases, x, s->out_cpu,
-                               s->out_dim, s->in_dim, s->group_size, 4);
+                               s->out_dim, s->in_dim, s->group_size, s->bits ? s->bits : 4);
         }
     }
 }
@@ -3039,9 +3054,9 @@ static void full_attention_forward(
     // Batch Q/K/V into one command buffer (3 dispatches, 1 commit)
     if (qw && kw && vw /* BF16: scales may be NULL */) {
         BatchMatvecSpec qkv_specs[3] = {
-            { qw, qs, qb, q_proj_out, (uint32_t)q_proj_dim, HIDDEN_DIM, GROUP_SIZE, 0 },
-            { kw, ks, kb, k,          (uint32_t)kv_dim,     HIDDEN_DIM, GROUP_SIZE, 1 },
-            { vw, vs, vb, v,          (uint32_t)kv_dim,     HIDDEN_DIM, GROUP_SIZE, 2 },
+            { qw, qs, qb, q_proj_out, (uint32_t)q_proj_dim, HIDDEN_DIM, GROUP_SIZE, 0, 4 },
+            { kw, ks, kb, k,          (uint32_t)kv_dim,     HIDDEN_DIM, GROUP_SIZE, 1, 4 },
+            { vw, vs, vb, v,          (uint32_t)kv_dim,     HIDDEN_DIM, GROUP_SIZE, 2, 4 },
         };
         fast_batch_matvec(normed, HIDDEN_DIM, qkv_specs, 3);
     }
@@ -3296,10 +3311,10 @@ static void linear_attention_forward(
 
     if (qkv_w && z_w && b_w && a_w /* BF16: scales may be NULL */) {
         BatchMatvecSpec la_specs[4] = {
-            { qkv_w, qkv_s, qkv_b, qkv,   (uint32_t)qkv_dim,         HIDDEN_DIM, GROUP_SIZE, 0 },
-            { z_w,   z_s,   z_b,   z,      (uint32_t)z_dim,           HIDDEN_DIM, GROUP_SIZE, 1 },
-            { b_w,   b_s,   b_b,   beta,   (uint32_t)LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, 2 },
-            { a_w,   a_s,   a_b,   alpha,  (uint32_t)LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, 3 },
+            { qkv_w, qkv_s, qkv_b, qkv,   (uint32_t)qkv_dim,         HIDDEN_DIM, GROUP_SIZE, 0, 4 },
+            { z_w,   z_s,   z_b,   z,      (uint32_t)z_dim,           HIDDEN_DIM, GROUP_SIZE, 1, 4 },
+            { b_w,   b_s,   b_b,   beta,   (uint32_t)LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, 2, 4 },
+            { a_w,   a_s,   a_b,   alpha,  (uint32_t)LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, 3, 4 },
         };
         fast_batch_matvec(normed, HIDDEN_DIM, la_specs, 4);
     }
@@ -3558,8 +3573,8 @@ static void moe_forward(
 
         // 4-bit matvecs (can use GPU)
         BatchMatvecSpec moe_specs[2] = {
-            { sgw,    sgs,    sgb,    shared_gate, (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 0 },
-            { suw,    sus,    sub,    shared_up,   (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 1 },
+            { sgw,    sgs,    sgb,    shared_gate, (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 0, 4 },
+            { suw,    sus,    sub,    shared_up,   (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 1, 4 },
         };
         fast_batch_matvec(h_post, HIDDEN_DIM, moe_specs, 2);
     }
@@ -5124,6 +5139,11 @@ static void finalize_deferred_experts(void) {
         // Just read back hidden (needed for the residual connection in future layers).
         memcpy(g_deferred.hidden, [g_metal->buf_moe_hidden contents],
                HIDDEN_DIM * sizeof(float));
+        if (getenv("FINCHMOE_DUMP_HIDDEN")) {
+            static FILE *hf3 = NULL;
+            if (!hf3) hf3 = fopen("/tmp/hidden_dump.bin", "wb");
+            if (hf3) { fwrite(g_deferred.hidden, sizeof(float), HIDDEN_DIM, hf3); fflush(hf3); }
+        }
     } else {
         // CPU-side combine (original path)
         // Read back and accumulate routed expert outputs
@@ -5149,6 +5169,12 @@ static void finalize_deferred_experts(void) {
         for (int i = 0; i < HIDDEN_DIM; i++) {
             g_deferred.hidden[i] = g_deferred.h_mid[i] + moe_out[i] + shared_out[i];
         }
+    }
+
+    if (getenv("FINCHMOE_DUMP_HIDDEN")) {
+        static FILE *hf2 = NULL;
+        if (!hf2) hf2 = fopen("/tmp/hidden_dump.bin", "wb");
+        if (hf2) { fwrite(g_deferred.hidden, sizeof(float), HIDDEN_DIM, hf2); fflush(hf2); }
     }
 
     g_deferred.active = 0;
@@ -5293,6 +5319,10 @@ static void fused_layer_forward(
     int is_full = (kv != NULL);
 
     debug_print_hidden("input", layer_idx, hidden, HIDDEN_DIM);
+    if (g_debug_layers && layer_idx <= 2) {
+        fprintf(stderr, "[LC-DBG] L%d qkv_w=%p z_w=%p b_w=%p a_w=%p (is_full=%d)\n",
+                layer_idx, (void*)lc->qkv_w, (void*)lc->z_w, (void*)lc->b_w, (void*)lc->a_w, is_full);
+    }
 
     // =====================================================================
     // PHASE 1: Deferred completion + CMD1 (attention projections)
@@ -5313,9 +5343,9 @@ static void fused_layer_forward(
         v_out = s_v_proj_out;
 
         if (lc->q_w && lc->k_w && lc->v_w /* BF16: scales may be NULL */) {
-            attn_specs[0] = (BatchMatvecSpec){ lc->q_w, lc->q_s, lc->q_b, q_proj_out, (uint32_t)q_proj_dim, HIDDEN_DIM, GROUP_SIZE, 0 };
-            attn_specs[1] = (BatchMatvecSpec){ lc->k_w, lc->k_s, lc->k_b, k_out,      (uint32_t)kv_dim,     HIDDEN_DIM, GROUP_SIZE, 1 };
-            attn_specs[2] = (BatchMatvecSpec){ lc->v_w, lc->v_s, lc->v_b, v_out,      (uint32_t)kv_dim,     HIDDEN_DIM, GROUP_SIZE, 2 };
+            attn_specs[0] = (BatchMatvecSpec){ lc->q_w, lc->q_s, lc->q_b, q_proj_out, (uint32_t)q_proj_dim, HIDDEN_DIM, GROUP_SIZE, 0, 4 };
+            attn_specs[1] = (BatchMatvecSpec){ lc->k_w, lc->k_s, lc->k_b, k_out,      (uint32_t)kv_dim,     HIDDEN_DIM, GROUP_SIZE, 1, 4 };
+            attn_specs[2] = (BatchMatvecSpec){ lc->v_w, lc->v_s, lc->v_b, v_out,      (uint32_t)kv_dim,     HIDDEN_DIM, GROUP_SIZE, 2, 4 };
             num_attn_specs = 3;
         }
     } else {
@@ -5328,10 +5358,10 @@ static void fused_layer_forward(
         alpha_out = s_alpha_proj_out;
 
         if (lc->qkv_w && lc->z_w && lc->b_w && lc->a_w /* BF16: scales may be NULL */) {
-            attn_specs[0] = (BatchMatvecSpec){ lc->qkv_w, lc->qkv_s, lc->qkv_b, qkv_out,   (uint32_t)qkv_dim,            HIDDEN_DIM, GROUP_SIZE, 0 };
-            attn_specs[1] = (BatchMatvecSpec){ lc->z_w,   lc->z_s,   lc->z_b,   z_out,      (uint32_t)z_dim,              HIDDEN_DIM, GROUP_SIZE, 1 };
-            attn_specs[2] = (BatchMatvecSpec){ lc->b_w,   lc->b_s,   lc->b_b,   beta_out,   (uint32_t)LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, 2 };
-            attn_specs[3] = (BatchMatvecSpec){ lc->a_w,   lc->a_s,   lc->a_b,   alpha_out,  (uint32_t)LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, 3 };
+            attn_specs[0] = (BatchMatvecSpec){ lc->qkv_w, lc->qkv_s, lc->qkv_b, qkv_out,   (uint32_t)qkv_dim,            HIDDEN_DIM, GROUP_SIZE, 0, 4 };
+            attn_specs[1] = (BatchMatvecSpec){ lc->z_w,   lc->z_s,   lc->z_b,   z_out,      (uint32_t)z_dim,              HIDDEN_DIM, GROUP_SIZE, 1, 4 };
+            attn_specs[2] = (BatchMatvecSpec){ lc->b_w,   lc->b_s,   lc->b_b,   beta_out,   (uint32_t)LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, 2, 4 };
+            attn_specs[3] = (BatchMatvecSpec){ lc->a_w,   lc->a_s,   lc->a_b,   alpha_out,  (uint32_t)LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, 3, 4 };
             num_attn_specs = 4;
         }
     }
@@ -5497,6 +5527,15 @@ static void fused_layer_forward(
         }
         if (g_timing_enabled) { t1 = now_ms(); g_timing.cmd1_wait += t1 - t0; }
 
+        // Debug: check fast-path buffers for early layers
+        if (g_debug_layers && layer_idx <= 2) {
+            float *fq = (float *)[g_metal->batch_out[0] contents];
+            float *fg = (float *)[g_metal->batch_out[6] contents];
+            float *fi = (float *)[g_metal->buf_input contents];
+            fprintf(stderr, "[FAST-DBG] L%d batch_out[0] first4: [%.4f %.4f %.4f %.4f] batch_out[6] first4: [%.4f %.4f %.4f %.4f] buf_input first4: [%.4f %.4f %.4f %.4f]\n",
+                    layer_idx, fq[0], fq[1], fq[2], fq[3], fg[0], fg[1], fg[2], fg[3], fi[0], fi[1], fi[2], fi[3]);
+        }
+
         // Now CMD3(N-1) is done. Read back hidden state from GPU.
         if (g_timing_enabled) { t0 = now_ms(); }
         finalize_deferred_experts();  // reads buf_moe_hidden -> hidden
@@ -5657,6 +5696,47 @@ static void fused_layer_forward(
             [cmd1 waitUntilCompleted];
             if (!gpu_linear_attn) {
                 gpu_flush_batch_results(g_metal, attn_specs, num_attn_specs);
+            }
+        }
+        // Stage dump for layer-0 cross-validation (env-gated)
+        if (getenv("FINCHMOE_DUMP_STAGES") && layer_idx == 0 && pos == 0) {
+            static FILE *sf1 = NULL;
+            if (!sf1) sf1 = fopen("/tmp/stage_dump.bin", "wb");
+            if (sf1) {
+                fwrite([g_metal->batch_out[0] contents], sizeof(float), LINEAR_CONV_DIM, sf1);    // qkv 8192
+                fwrite([g_metal->batch_out[1] contents], sizeof(float), LINEAR_TOTAL_VALUE, sf1); // z 4096
+                fwrite([g_metal->batch_out[2] contents], sizeof(float), LINEAR_NUM_V_HEADS, sf1); // beta 32
+                fwrite([g_metal->batch_out[3] contents], sizeof(float), LINEAR_NUM_V_HEADS, sf1); // alpha 32
+                fwrite([g_metal->buf_conv_output contents], sizeof(float), LINEAR_CONV_DIM, sf1); // conv 8192
+                fwrite([g_metal->buf_delta_output contents], sizeof(float), LINEAR_TOTAL_VALUE, sf1); // delta out 4096
+                fwrite([g_metal->batch_out[6] contents], sizeof(float), LINEAR_TOTAL_VALUE, sf1); // gated 4096
+                fflush(sf1);
+            }
+        }
+        // Debug: check projection outputs after CMD1 completes
+        if (g_debug_layers && !is_full && num_attn_specs == 4) {
+            if (layer_idx <= 2) {
+                BatchMatvecSpec *s0 = &attn_specs[0];
+                NSUInteger w_off = (NSUInteger)((const char *)s0->W - (const char *)[g_metal->wf_buf contents]);
+                NSUInteger s_off = (NSUInteger)((const char *)s0->scales - (const char *)[g_metal->wf_buf contents]);
+                NSUInteger b_off = (NSUInteger)((const char *)s0->biases - (const char *)[g_metal->wf_buf contents]);
+                const uint32_t *wptr = (const uint32_t *)[g_metal->wf_buf contents];
+                const uint16_t *sptr = (const uint16_t *)[g_metal->wf_buf contents];
+                fprintf(stderr, "[ATTN-DBG] L%d spec0: W=%p scales=%p biases=%p w_off=%lu s_off=%lu b_off=%lu\n",
+                        layer_idx, (void*)s0->W, (void*)s0->scales, (void*)s0->biases,
+                        (unsigned long)w_off, (unsigned long)s_off, (unsigned long)b_off);
+                fprintf(stderr, "[ATTN-DBG] L%d spec0: W[0]=0x%08x S[0]=%.6f B[0]=%.6f\n",
+                        layer_idx, wptr[w_off/4],
+                        s0->scales ? bf16_to_f32(sptr[s_off/2]) : 0.0f,
+                        s0->biases ? bf16_to_f32(sptr[b_off/2]) : 0.0f);
+                float *dbg = (float *)[g_metal->batch_out[0] contents];
+                fprintf(stderr, "[ATTN-DBG] L%d batch_out[0] first8: [%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f]\n",
+                        layer_idx, dbg[0], dbg[1], dbg[2], dbg[3], dbg[4], dbg[5], dbg[6], dbg[7]);
+                fprintf(stderr, "[ATTN-DBG] L%d gpu_linear_attn=%d qkv_out first8: [%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f] qkv_out=%p\n",
+                        layer_idx, gpu_linear_attn, qkv_out[0], qkv_out[1], qkv_out[2], qkv_out[3],
+                        qkv_out[4], qkv_out[5], qkv_out[6], qkv_out[7], (void*)qkv_out);
+                fprintf(stderr, "[ATTN-DBG] L%d batch_out ptr=%p qkv_out ptr=%p\n",
+                        layer_idx, (void*)[g_metal->batch_out[0] contents], (void*)qkv_out);
             }
         }
         // Debug: check projection outputs after CMD1 completes
@@ -6296,11 +6376,12 @@ static void fused_layer_forward(
         }
 
         // ---- Enc 5-8: routing + shared expert projections (read buf_input) ----
+        // Routing gate + shared_expert_gate are 8-bit packed; shared gate/up are 4-bit.
         BatchMatvecSpec moe_specs[4] = {
-            { gate_w, gate_s, gate_b, gate_scores,        (uint32_t)NUM_EXPERTS,        HIDDEN_DIM, GROUP_SIZE, 0 },
-            { sgw,    sgs,    sgb,    shared_gate,         (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 1 },
-            { suw,    sus,    sub,    shared_up,           (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 2 },
-            { seg_w,  seg_s,  seg_b,  &shared_gate_score,  1,                            HIDDEN_DIM, GROUP_SIZE, 3 },
+            { gate_w, gate_s, gate_b, gate_scores,        (uint32_t)NUM_EXPERTS,        HIDDEN_DIM, GROUP_SIZE, 0, 8 },
+            { sgw,    sgs,    sgb,    shared_gate,         (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 1, 4 },
+            { suw,    sus,    sub,    shared_up,           (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 2, 4 },
+            { seg_w,  seg_s,  seg_b,  &shared_gate_score,  1,                            HIDDEN_DIM, GROUP_SIZE, 3, 8 },
         };
         // buf_input already contains h_post from Enc 4 output -- no memcpy needed
         gpu_encode_batch_matvec(g_metal, cmd_fused, moe_specs, 4);
@@ -6316,8 +6397,37 @@ static void fused_layer_forward(
         gpu_flush_batch_results(g_metal, moe_specs, 4);
         // Read h_mid from GPU buffer (needed for final combine)
         memcpy(h_mid, [g_metal->buf_h_mid contents], HIDDEN_DIM * sizeof(float));
+        // Stage dump part 2: CMD2 outputs for layer-0 cross-validation
+        if (getenv("FINCHMOE_DUMP_STAGES") && layer_idx == 0 && pos == 0) {
+            static FILE *sf2 = NULL;
+            if (!sf2) sf2 = fopen("/tmp/stage_dump.bin", "ab");
+            if (sf2) {
+                fwrite([g_metal->buf_output contents], sizeof(float), HIDDEN_DIM, sf2); // o_proj 2048
+                fwrite([g_metal->buf_h_mid contents], sizeof(float), HIDDEN_DIM, sf2);  // h_mid 2048
+                fwrite([g_metal->buf_input contents], sizeof(float), HIDDEN_DIM, sf2);  // h_post 2048
+                fflush(sf2);
+            }
+        }
+        if (g_debug_layers && layer_idx <= 2) {
+            float *ob = (float *)[g_metal->buf_output contents];
+            float *hb = (float *)[g_metal->buf_h_mid contents];
+            float *rb = (float *)[g_metal->buf_residual contents];
+            NSUInteger ow_off = (NSUInteger)((const char *)oproj_w - (const char *)[g_metal->wf_buf contents]);
+            NSUInteger os_off = oproj_s ? (NSUInteger)((const char *)oproj_s - (const char *)[g_metal->wf_buf contents]) : 0;
+            const uint16_t *sp = (const uint16_t *)[g_metal->wf_buf contents];
+            fprintf(stderr, "[OPROJ-DBG] L%d out[%.3f %.3f %.3f %.3f] h_mid[%.3f %.3f %.3f %.3f] resid[%.4f %.4f %.4f %.4f] w_off=%lu S[0]=%.6f\n",
+                    layer_idx, ob[0], ob[1], ob[2], ob[3], hb[0], hb[1], hb[2], hb[3],
+                    rb[0], rb[1], rb[2], rb[3],
+                    (unsigned long)ow_off,
+                    oproj_s ? bf16_to_f32(sp[os_off/2]) : 0.0f);
+        }
         // Read h_post from buf_input (needed for expert input)
         memcpy(h_post, [g_metal->buf_input contents], HIDDEN_DIM * sizeof(float));
+        if (getenv("FINCHMOE_DUMP_HPOST")) {
+            static FILE *hf = NULL;
+            if (!hf) hf = fopen("/tmp/hpost_dump.bin", "wb");
+            if (hf) { fwrite(h_post, sizeof(float), HIDDEN_DIM, hf); fflush(hf); }
+        }
         // Update hidden state to h_mid (= residual + o_proj)
         memcpy(hidden, h_mid, HIDDEN_DIM * sizeof(float));
 
@@ -6360,8 +6470,8 @@ static void fused_layer_forward(
             shared_gate_score = seg_buf;
             // 4-bit: shared gate/up
             BatchMatvecSpec moe_specs[2] = {
-                { sgw,    sgs,    sgb,    shared_gate, (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 0 },
-                { suw,    sus,    sub,    shared_up,   (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 1 },
+                { sgw,    sgs,    sgb,    shared_gate, (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 0, 4 },
+                { suw,    sus,    sub,    shared_up,   (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 1, 4 },
             };
             fast_batch_matvec(h_post, HIDDEN_DIM, moe_specs, 2);
         }
@@ -6745,6 +6855,10 @@ static void fused_layer_forward(
                 id<MTLComputeCommandEncoder> enc = [cmd_experts computeCommandEncoder];
                 // Wait for fused expert CB writes to out[k] to be visible
                 [enc waitForFence:g_metal->expert_fence];
+                // Barrier: expert out[k] + shared_out are written by earlier
+                // encoders in THIS command buffer; ensure those dispatches
+                // complete before the combine reads them.
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
                 [enc setComputePipelineState:g_metal->moe_combine_residual];
                 [enc setBuffer:g_metal->buf_h_mid         offset:0 atIndex:0];   // h_mid
                 [enc setBuffer:g_metal->buf_shared_out    offset:0 atIndex:1];   // shared_out
@@ -9203,17 +9317,15 @@ int main(int argc, char **argv) {
         lm_head_forward(wf, hidden, logits);
         double lm_ms = now_ms() - t_lm;
 
-        // ---- Dump logits for cross-validation ----
+        // ---- Dump logits for cross-validation (first token truncates, later steps append) ----
         if (g_dump_logits_path) {
             FILE *df = fopen(g_dump_logits_path, "wb");
             if (df) {
                 fwrite(logits, sizeof(float), VOCAB_SIZE, df);
                 fclose(df);
-                fprintf(stderr, "[dump-logits] %d floats (%.1f MB) -> %s\n",
+                fprintf(stderr, "[dump-logits] step 0: %d floats (%.1f MB) -> %s\n",
                         VOCAB_SIZE, (double)(VOCAB_SIZE * sizeof(float)) / 1e6, g_dump_logits_path);
             }
-            printf("Logits dumped to %s\n", g_dump_logits_path);
-            return 0;
         }
 
         // ---- Sample first token ----
@@ -9298,6 +9410,15 @@ int main(int argc, char **argv) {
 
             // LM head
             lm_head_forward(wf, hidden, logits);
+
+            // Per-step logit dump for drift cross-validation
+            if (g_dump_logits_path) {
+                FILE *df = fopen(g_dump_logits_path, "ab");
+                if (df) {
+                    fwrite(logits, sizeof(float), VOCAB_SIZE, df);
+                    fclose(df);
+                }
+            }
 
             // Temperature sample
             next_token = cpu_sample_temp(logits, VOCAB_SIZE, g_temperature, g_top_k);

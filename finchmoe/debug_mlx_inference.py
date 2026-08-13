@@ -60,8 +60,6 @@ def test_inference(model_path, prompt, max_tokens=50):
         tokenizer,
         prompt=text,
         max_tokens=max_tokens,
-        temp=0.6,
-        top_p=0.95,
         verbose=True,
     )
     print(f"\n--- Output ---")
