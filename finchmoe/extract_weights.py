@@ -46,6 +46,12 @@ def main():
                         help='Output directory for model_weights.bin and .json')
     parser.add_argument('--include-experts', action='store_true',
                         help='Also extract expert weights (huge, not recommended)')
+    parser.add_argument('--fp16-scales', action='store_true',
+                        help='Convert scale/bias tensors from FP16 to BF16 '
+                             '(needed for some mlx-community models whose '
+                             'dtype="BF16" actually holds FP16 data). '
+                             'DEFAULT OFF: our self-quantized models store '
+                             'genuine BF16 data, and the conversion corrupts it.')
     args = parser.parse_args()
 
     model_path = Path(args.model)
@@ -197,9 +203,13 @@ def main():
                 sf.seek(data_start + tensor_offsets[0])
                 data = sf.read(byte_len)
 
-            # MLX stores scales/biases as FP16 (not BF16) — convert to BF16
+            # Some mlx-community models store scales/biases as FP16 with
+            # dtype='BF16'. Our self-quantized models store genuine BF16 data
+            # (also with dtype='BF16') — converting those corrupts the values
+            # (e.g. BF16 -0.0041 misread as FP16 -0.945). Only convert when
+            # --fp16-scales is explicitly passed.
             is_scale_or_bias = san_name.endswith('.scales') or san_name.endswith('.biases')
-            if is_scale_or_bias and dtype == 'BF16':
+            if args.fp16_scales and is_scale_or_bias and dtype == 'BF16':
                 arr = np.frombuffer(data, dtype=np.uint16)
                 f16 = arr.view(np.float16).astype(np.float32)
                 bf16 = (f16.view(np.uint32) >> 16).astype(np.uint16)
