@@ -5684,7 +5684,36 @@ static void fused_layer_forward(
                     [enc endEncoding];
                 }
 
-                // Enc L3: compute_decay_beta
+                // Enc L3: FUSED GDN core (decay/beta + delta-net recurrence + gated norm)
+                if (g_metal->fused_gdn_core) {
+                    NSUInteger a_log_off   = (NSUInteger)((const char *)lc->A_log   - (const char *)[g_metal->wf_buf contents]);
+                    NSUInteger dt_bias_off = (NSUInteger)((const char *)lc->dt_bias  - (const char *)[g_metal->wf_buf contents]);
+                    NSUInteger gnorm_w_off = (NSUInteger)((const char *)lc->gated_norm_w - (const char *)[g_metal->wf_buf contents]);
+                    uint32_t khpv = LINEAR_NUM_V_HEADS / LINEAR_NUM_K_HEADS;
+                    uint32_t kdim = LINEAR_KEY_DIM, vdim = LINEAR_VALUE_DIM;
+                    float eps = RMS_NORM_EPS;
+                    id<MTLComputeCommandEncoder> enc = [cmd1 computeCommandEncoder];
+                    [enc setComputePipelineState:g_metal->fused_gdn_core];
+                    [enc setBuffer:g_metal->buf_delta_state[linear_layer_idx] offset:0 atIndex:0];  // state
+                    [enc setBuffer:g_metal->buf_conv_output offset:0 atIndex:1];  // q
+                    [enc setBuffer:g_metal->buf_conv_output offset:LINEAR_TOTAL_KEY * sizeof(float) atIndex:2];  // k
+                    [enc setBuffer:g_metal->buf_conv_output offset:2 * LINEAR_TOTAL_KEY * sizeof(float) atIndex:3];  // v
+                    [enc setBuffer:g_metal->batch_out[1]       offset:0          atIndex:4];  // z
+                    [enc setBuffer:g_metal->batch_out[3]       offset:0          atIndex:5];  // alpha
+                    [enc setBuffer:g_metal->batch_out[2]       offset:0          atIndex:6];  // beta
+                    [enc setBuffer:g_metal->wf_buf             offset:a_log_off  atIndex:7];  // A_log
+                    [enc setBuffer:g_metal->wf_buf             offset:dt_bias_off atIndex:8]; // dt_bias (bf16)
+                    [enc setBuffer:g_metal->wf_buf             offset:gnorm_w_off atIndex:9]; // norm_weight (bf16)
+                    [enc setBuffer:g_metal->batch_out[6]       offset:0          atIndex:10]; // output
+                    [enc setBytes:&khpv length:sizeof(khpv) atIndex:11];
+                    [enc setBytes:&kdim length:sizeof(kdim) atIndex:12];
+                    [enc setBytes:&vdim length:sizeof(vdim) atIndex:13];
+                    [enc setBytes:&eps  length:sizeof(eps)  atIndex:14];
+                    [enc dispatchThreadgroups:MTLSizeMake(LINEAR_NUM_V_HEADS, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(LINEAR_VALUE_DIM, 1, 1)];
+                    [enc endEncoding];
+                } else {
+                // Enc L3b: compute_decay_beta
                 {
                     NSUInteger a_log_off   = (NSUInteger)((const char *)lc->A_log   - (const char *)[g_metal->wf_buf contents]);
                     NSUInteger dt_bias_off = (NSUInteger)((const char *)lc->dt_bias  - (const char *)[g_metal->wf_buf contents]);
@@ -5719,7 +5748,7 @@ static void fused_layer_forward(
                     [enc endEncoding];
                 }
 
-                // Enc L5: gated_rms_norm -> batch_out[6]
+                // Enc L5b: gated_rms_norm -> batch_out[6] (unfused fallback)
                 {
                     NSUInteger gnorm_w_off = (NSUInteger)((const char *)lc->gated_norm_w - (const char *)[g_metal->wf_buf contents]);
                     uint32_t value_dim = LINEAR_VALUE_DIM;
@@ -5736,6 +5765,7 @@ static void fused_layer_forward(
                         threadsPerThreadgroup:MTLSizeMake(LINEAR_VALUE_DIM, 1, 1)];
                     [enc endEncoding];
                 }
+                }  // end if (fused_gdn_core) ... else ...
 
                 gpu_linear_attn = 1;
             }
@@ -6393,8 +6423,26 @@ static void fused_layer_forward(
                 uint32_t tgs8 = (o_out_dim + 7) / 8;
                 [enc dispatchThreadgroups:MTLSizeMake(tgs8, 1, 1)
                     threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            } else if (o_in_dim <= 4096 && g_metal->matvec_v3) {
+                // 4-bit path, in_dim <= 4096: tiled v3 (8 rows/TG x 256 threads)
+                // — much faster than matvec_fast's 1 row/TG x 64 threads.
+                NSUInteger s_off = (NSUInteger)((const char *)oproj_s - (const char *)[g_metal->wf_buf contents]);
+                NSUInteger b_off = (NSUInteger)((const char *)oproj_b - (const char *)[g_metal->wf_buf contents]);
+                uint32_t o_gs = GROUP_SIZE;
+                [enc setComputePipelineState:g_metal->matvec_v3];
+                [enc setBuffer:g_metal->wf_buf  offset:w_off atIndex:0];
+                [enc setBuffer:g_metal->wf_buf  offset:s_off atIndex:1];
+                [enc setBuffer:g_metal->wf_buf  offset:b_off atIndex:2];
+                [enc setBuffer:oproj_input      offset:0    atIndex:3];
+                [enc setBuffer:g_metal->buf_output offset:0 atIndex:4];
+                [enc setBytes:&o_out_dim  length:4 atIndex:5];
+                [enc setBytes:&o_in_dim   length:4 atIndex:6];
+                [enc setBytes:&o_gs       length:4 atIndex:7];
+                uint32_t tgsv = (o_out_dim + 7) / 8;
+                [enc dispatchThreadgroups:MTLSizeMake(tgsv, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             } else {
-                // 4-bit path: use matvec_fast
+                // 4-bit path, in_dim > 4096: matvec_fast (no x_shared limit)
                 NSUInteger s_off = (NSUInteger)((const char *)oproj_s - (const char *)[g_metal->wf_buf contents]);
                 NSUInteger b_off = (NSUInteger)((const char *)oproj_b - (const char *)[g_metal->wf_buf contents]);
                 uint32_t o_gs = GROUP_SIZE;
