@@ -1225,6 +1225,45 @@ kernel void residual_add(
 
 
 // ============================================================================
+// Fused residual + RMS norm: replaces residual_add + rms_norm_sum +
+// rms_norm_apply in ONE dispatch. Writes h_mid (resid + oproj) to
+// h_mid_out and the normalized h_post to h_post_out.
+// Dispatch: 1 threadgroup x 256 threads.
+// ============================================================================
+
+kernel void residual_norm_fused(
+    device const float* resid      [[buffer(0)]],  // [dim] residual (buf_residual / buf_moe_hidden)
+    device const float* oproj      [[buffer(1)]],  // [dim] o_proj output (buf_output)
+    device const uint16_t* norm_w  [[buffer(2)]],  // [dim] post-attn norm weights bf16
+    device float* h_mid_out        [[buffer(3)]],  // [dim] buf_h_mid
+    device float* h_post_out       [[buffer(4)]],  // [dim] buf_input
+    constant uint&      dim        [[buffer(5)]],  // 2048
+    constant float&     eps        [[buffer(6)]],
+    uint tid [[thread_position_in_threadgroup]]
+) {
+    threadgroup float partial[256];
+    float local_sum = 0.0f;
+    for (uint i = tid; i < dim; i += 256) {
+        float h = resid[i] + oproj[i];
+        h_mid_out[i] = h;
+        local_sum += h * h;
+    }
+    partial[tid] = local_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float s = 0.0f;
+        for (uint i = 0; i < 256; i++) s += partial[i];
+        partial[0] = s;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float inv_rms = rsqrt(partial[0] / float(dim) + eps);
+    for (uint i = tid; i < dim; i += 256) {
+        h_post_out[i] = h_mid_out[i] * inv_rms * bf16_to_f32(norm_w[i]);
+    }
+}
+
+
+// ============================================================================
 // Kernel 6: Batched GPU attention scores (Q @ K^T, scaled) — all heads at once
 // ============================================================================
 //
@@ -1633,6 +1672,100 @@ kernel void gated_rms_norm(
         output[base + tid] = normed * gate * w;
     }
 }
+
+
+// ============================================================================
+// Fused routing batch: gate (8-bit) + shared gate/up (4-bit) +
+// shared_expert_gate (8-bit) in ONE dispatch.
+// Four output sections; section s covers rows [base, base + out_count).
+// Mixed packing widths handled per section via a generic inner loop.
+// Dispatch: ceil(total_rows/8) threadgroups x 256 threads.
+// ============================================================================
+
+struct RoutingSectionDesc {
+    uint bits;        // 4 or 8
+    uint out_count;   // rows in this section
+};
+
+kernel void routing_batch_fused(
+    device const uint32_t* W0 [[buffer(0)]],  device const uint16_t* S0 [[buffer(1)]],  device const uint16_t* B0 [[buffer(2)]],  // gate 8-bit
+    device const uint32_t* W1 [[buffer(3)]],  device const uint16_t* S1 [[buffer(4)]],  device const uint16_t* B1 [[buffer(5)]],  // shared gate 4-bit
+    device const uint32_t* W2 [[buffer(6)]],  device const uint16_t* S2 [[buffer(7)]],  device const uint16_t* B2 [[buffer(8)]],  // shared up 4-bit
+    device const uint32_t* W3 [[buffer(9)]],  device const uint16_t* S3 [[buffer(10)]], device const uint16_t* B3 [[buffer(11)]], // shared_expert_gate 8-bit
+    device const float*    x  [[buffer(12)]],   // [in_dim]
+    device float*       o0 [[buffer(13)]],      // gate scores
+    device float*       o1 [[buffer(14)]],      // shared gate
+    device float*       o2 [[buffer(15)]],      // shared up
+    device float*       o3 [[buffer(16)]],      // shared_expert_gate score
+    constant RoutingSectionDesc* sections [[buffer(17)]],
+    constant uint& in_dim      [[buffer(18)]],
+    constant uint& group_size  [[buffer(19)]],
+    uint tgid   [[threadgroup_position_in_grid]],
+    uint lid    [[thread_position_in_threadgroup]],
+    uint simd_lane  [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint total_rows = sections[0].out_count + sections[1].out_count +
+                      sections[2].out_count + sections[3].out_count;
+    uint row = tgid * 8 + simd_group;
+
+    threadgroup float x_shared[4096];
+    for (uint i = lid; i < in_dim; i += 256) {
+        x_shared[i] = x[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (row >= total_rows) return;
+
+    // Locate the section this row belongs to
+    uint sec = 0;
+    uint sec_base = 0;
+    uint cum = 0;
+    for (uint s = 0; s < 4; s++) {
+        if (row >= cum + sections[s].out_count) {
+            cum += sections[s].out_count;
+            sec = s + 1;
+        }
+    }
+    uint sec_row = row - cum;
+    uint bits = sections[sec].bits;
+    uint vpu = 32 / bits;
+    uint mask = (1u << bits) - 1;
+    uint num_groups = in_dim / group_size;
+    uint packed_per_group = group_size / vpu;
+    uint packed_cols = in_dim / vpu;
+
+    device const uint32_t* W;
+    device const uint16_t* S;
+    device const uint16_t* B;
+    device float* O;
+    if (sec == 0) { W = W0; S = S0; B = B0; O = o0; }
+    else if (sec == 1) { W = W1; S = S1; B = B1; O = o1; }
+    else if (sec == 2) { W = W2; S = S2; B = B2; O = o2; }
+    else { W = W3; S = S3; B = B3; O = o3; }
+
+    device const uint32_t* w_row = W + sec_row * packed_cols;
+    device const uint16_t* s_row = S + sec_row * num_groups;
+    device const uint16_t* b_row = B + sec_row * num_groups;
+
+    float acc = 0.0f;
+    for (uint col = simd_lane; col < packed_cols; col += 32) {
+        uint g = col / packed_per_group;
+        float scale = bf16_to_f32(s_row[g]);
+        float bias  = bf16_to_f32(b_row[g]);
+        uint32_t packed = w_row[col];
+        uint xb = col * vpu;
+        for (uint n = 0; n < vpu; n++) {
+            acc += ((float)((packed >> (n * bits)) & mask) * scale + bias) * x_shared[xb + n];
+        }
+    }
+
+    float sum = simd_sum(acc);
+    if (simd_lane == 0) {
+        O[sec_row] = sum;
+    }
+}
+
 
 // ============================================================================
 // Fused GDN core: compute_decay_beta + gated_delta_net_step + gated_rms_norm

@@ -1440,6 +1440,8 @@ typedef struct {
     id<MTLComputePipelineState> rms_norm_apply;
     id<MTLComputePipelineState> rms_norm_apply_bf16;
     id<MTLComputePipelineState> residual_add;
+    id<MTLComputePipelineState> residual_norm_fused;  // residual_add + rms_norm in one dispatch
+    id<MTLComputePipelineState> routing_batch_fused;  // gate+sg+su+seg in one dispatch
     id<MTLComputePipelineState> swiglu;
     // GPU attention pipelines
     id<MTLComputePipelineState> attn_scores_pipe;
@@ -1599,6 +1601,8 @@ static MetalCtx *metal_setup(void) {
     ctx->rms_norm_apply = makePipe(@"rms_norm_apply");
     ctx->rms_norm_apply_bf16 = makePipe(@"rms_norm_apply_bf16");
     ctx->residual_add  = makePipe(@"residual_add");
+    ctx->residual_norm_fused = makePipe(@"residual_norm_fused");
+    ctx->routing_batch_fused = makePipe(@"routing_batch_fused");
     ctx->swiglu        = makePipe(@"swiglu_fused");
     ctx->attn_scores_pipe  = makePipe(@"attn_scores_batched");
     ctx->attn_softmax_pipe = makePipe(@"attn_softmax_batched");
@@ -6477,61 +6481,34 @@ static void fused_layer_forward(
             [enc endEncoding];
         }
 
-        // ---- Enc 2: residual_add (buf_output + residual -> buf_h_mid) ----
+        // ---- Enc 2: residual + rms_norm fused (one dispatch, writes
+        //      buf_h_mid + buf_input) ----
         {
             id<MTLComputeCommandEncoder> enc = [cmd_fused computeCommandEncoder];
             uint32_t dim = HIDDEN_DIM;
-            [enc setComputePipelineState:g_metal->residual_add];
+            float eps = RMS_NORM_EPS;
+            NSUInteger norm_off = (NSUInteger)((const char *)lc->post_attn_norm_w -
+                                               (const char *)[g_metal->wf_buf contents]);
+            [enc setComputePipelineState:g_metal->residual_norm_fused];
             // Fused fast path: read buf_moe_hidden (== hidden before attention)
             // directly from the GPU — the CPU memcpy of buf_residual would
             // require the (now-skipped) CMD1 wait. GPU-side ordering is
             // guaranteed by the serial queue (CMD3(N-1) precedes this buffer).
             id<MTLBuffer> resid_src = (cmd12_fused && prev_gpu_combined)
                 ? g_metal->buf_moe_hidden : g_metal->buf_residual;
-            [enc setBuffer:resid_src                    offset:0 atIndex:0];  // a = residual
-            [enc setBuffer:g_metal->buf_output   offset:0 atIndex:1];  // b = o_proj result
-            [enc setBuffer:g_metal->buf_h_mid    offset:0 atIndex:2];  // out = h_mid
-            [enc setBytes:&dim length:4 atIndex:3];
-            uint32_t tgs = (dim + 255) / 256;
-            [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-            [enc endEncoding];
-        }
-
-        // ---- Enc 3: rms_norm_sum_sq (buf_h_mid -> buf_sum_sq) ----
-        {
-            id<MTLComputeCommandEncoder> enc = [cmd_fused computeCommandEncoder];
-            uint32_t dim = HIDDEN_DIM;
-            [enc setComputePipelineState:g_metal->rms_norm_sum];
-            [enc setBuffer:g_metal->buf_h_mid  offset:0 atIndex:0];
-            [enc setBuffer:g_metal->buf_sum_sq offset:0 atIndex:1];
-            [enc setBytes:&dim length:4 atIndex:2];
+            [enc setBuffer:resid_src              offset:0       atIndex:0];
+            [enc setBuffer:g_metal->buf_output    offset:0       atIndex:1];
+            [enc setBuffer:g_metal->wf_buf        offset:norm_off atIndex:2];
+            [enc setBuffer:g_metal->buf_h_mid     offset:0       atIndex:3];
+            [enc setBuffer:g_metal->buf_input     offset:0       atIndex:4];
+            [enc setBytes:&dim length:4 atIndex:5];
+            [enc setBytes:&eps length:4 atIndex:6];
             [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             [enc endEncoding];
         }
 
-        // ---- Enc 4: rms_norm_apply_bf16 (buf_h_mid + norm_w -> buf_input) ----
-        {
-            NSUInteger norm_off = (NSUInteger)((const char *)lc->post_attn_norm_w -
-                                               (const char *)[g_metal->wf_buf contents]);
-            id<MTLComputeCommandEncoder> enc = [cmd_fused computeCommandEncoder];
-            uint32_t dim = HIDDEN_DIM;
-            float eps = RMS_NORM_EPS;
-            [enc setComputePipelineState:g_metal->rms_norm_apply_bf16];
-            [enc setBuffer:g_metal->buf_h_mid  offset:0       atIndex:0];  // x
-            [enc setBuffer:g_metal->wf_buf     offset:norm_off atIndex:1]; // weight (bf16)
-            [enc setBuffer:g_metal->buf_sum_sq offset:0       atIndex:2];  // sum_sq
-            [enc setBuffer:g_metal->buf_input  offset:0       atIndex:3];  // out = h_post
-            [enc setBytes:&dim length:4 atIndex:4];
-            [enc setBytes:&eps length:4 atIndex:5];
-            uint32_t tgs = (dim + 255) / 256;
-            [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-            [enc endEncoding];
-        }
-
-        // ---- Enc 5-8: routing + shared expert projections (read buf_input) ----
+        // ---- Enc 3: routing + shared expert projections, ONE dispatch ----
         // Routing gate + shared_expert_gate are 8-bit packed; shared gate/up are 4-bit
         // (bits detected from manifest shapes at cache-build time).
         BatchMatvecSpec moe_specs[4] = {
@@ -6540,8 +6517,44 @@ static void fused_layer_forward(
             { suw,    sus,    sub,    shared_up,           (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 2, lc->su_bits },
             { seg_w,  seg_s,  seg_b,  &shared_gate_score,  1,                            HIDDEN_DIM, GROUP_SIZE, 3, lc->seg_bits },
         };
-        // buf_input already contains h_post from Enc 4 output -- no memcpy needed
-        gpu_encode_batch_matvec(g_metal, cmd_fused, moe_specs, 4);
+        if (g_metal->routing_batch_fused && gate_s && sgs && sus && seg_s) {
+            // Single mixed-bits kernel: gate(8) + sg(4) + su(4) + seg(8)
+            struct { uint32_t bits; uint32_t out_count; } secs[4] = {
+                { (uint32_t)lc->gate_bits, NUM_EXPERTS },
+                { (uint32_t)lc->sg_bits,   SHARED_INTERMEDIATE },
+                { (uint32_t)lc->su_bits,   SHARED_INTERMEDIATE },
+                { (uint32_t)lc->seg_bits,  1 },
+            };
+            uint32_t in_dim = HIDDEN_DIM, gs = GROUP_SIZE;
+            id<MTLComputeCommandEncoder> enc = [cmd_fused computeCommandEncoder];
+            [enc setComputePipelineState:g_metal->routing_batch_fused];
+            [enc setBuffer:g_metal->wf_buf offset:(NSUInteger)((const char *)gate_w - (const char *)[g_metal->wf_buf contents]) atIndex:0];
+            [enc setBuffer:g_metal->wf_buf offset:(NSUInteger)((const char *)gate_s - (const char *)[g_metal->wf_buf contents]) atIndex:1];
+            [enc setBuffer:g_metal->wf_buf offset:(NSUInteger)((const char *)gate_b - (const char *)[g_metal->wf_buf contents]) atIndex:2];
+            [enc setBuffer:g_metal->wf_buf offset:(NSUInteger)((const char *)sgw    - (const char *)[g_metal->wf_buf contents]) atIndex:3];
+            [enc setBuffer:g_metal->wf_buf offset:(NSUInteger)((const char *)sgs    - (const char *)[g_metal->wf_buf contents]) atIndex:4];
+            [enc setBuffer:g_metal->wf_buf offset:(NSUInteger)((const char *)sgb    - (const char *)[g_metal->wf_buf contents]) atIndex:5];
+            [enc setBuffer:g_metal->wf_buf offset:(NSUInteger)((const char *)suw    - (const char *)[g_metal->wf_buf contents]) atIndex:6];
+            [enc setBuffer:g_metal->wf_buf offset:(NSUInteger)((const char *)sus    - (const char *)[g_metal->wf_buf contents]) atIndex:7];
+            [enc setBuffer:g_metal->wf_buf offset:(NSUInteger)((const char *)sub    - (const char *)[g_metal->wf_buf contents]) atIndex:8];
+            [enc setBuffer:g_metal->wf_buf offset:(NSUInteger)((const char *)seg_w  - (const char *)[g_metal->wf_buf contents]) atIndex:9];
+            [enc setBuffer:g_metal->wf_buf offset:(NSUInteger)((const char *)seg_s  - (const char *)[g_metal->wf_buf contents]) atIndex:10];
+            [enc setBuffer:g_metal->wf_buf offset:(NSUInteger)((const char *)seg_b  - (const char *)[g_metal->wf_buf contents]) atIndex:11];
+            [enc setBuffer:g_metal->buf_input offset:0 atIndex:12];
+            [enc setBuffer:g_metal->batch_out[0] offset:0 atIndex:13];
+            [enc setBuffer:g_metal->batch_out[1] offset:0 atIndex:14];
+            [enc setBuffer:g_metal->batch_out[2] offset:0 atIndex:15];
+            [enc setBuffer:g_metal->batch_out[3] offset:0 atIndex:16];
+            [enc setBytes:secs length:sizeof(secs) atIndex:17];
+            [enc setBytes:&in_dim length:4 atIndex:18];
+            [enc setBytes:&gs length:4 atIndex:19];
+            uint32_t total_rows = NUM_EXPERTS + 2 * SHARED_INTERMEDIATE + 1;
+            [enc dispatchThreadgroups:MTLSizeMake((total_rows + 7) / 8, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            [enc endEncoding];
+        } else {
+            gpu_encode_batch_matvec(g_metal, cmd_fused, moe_specs, 4);
+        }
 
         if (g_timing_enabled) { t1 = now_ms(); g_timing.cmd2_encode += t1 - t0; }
 
