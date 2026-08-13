@@ -6744,6 +6744,7 @@ static void fused_layer_forward(
         } else if (pred_started) {
             // ---- Prediction path: predicted experts already loading into buf_B ----
             // Wait for predicted preads (they've had ~1.6ms: CMD1_wait + attn + CMD2 + routing)
+            if (getenv("FINCHMOE_PRED_DEBUG")) fprintf(stderr, "[PRED] layer=%d wait start count=%d\n", layer_idx, g_pred_count[layer_idx]);
             async_pread_wait();
             g_pred_layers++;
 
@@ -6773,6 +6774,7 @@ static void fused_layer_forward(
                     miss_count++;
                 }
             }
+            if (getenv("FINCHMOE_PRED_DEBUG")) fprintf(stderr, "[PRED] layer=%d hits=%d misses=%d\n", layer_idx, hit_count, miss_count);
             g_pred_hits += hit_count;
             g_pred_misses += miss_count;
 
@@ -6787,6 +6789,9 @@ static void fused_layer_forward(
                     tasks[m].offset = (off_t)miss_ei[m] * esz;
                     tasks[m].size = esz;
                     tasks[m].result = 0;
+                    tasks[m].mmap_base = NULL;
+                    tasks[m].lz4_comp_buf = NULL;
+                    tasks[m].lz4_comp_size = 0;
                 }
                 io_pool_dispatch(tasks, miss_count);
                 for (int m = 0; m < miss_count; m++) {
