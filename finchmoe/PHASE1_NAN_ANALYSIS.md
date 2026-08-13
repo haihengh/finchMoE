@@ -58,16 +58,25 @@ tokens discard their deferred expert results). Fixed transitively by Bug 2.
 
 ---
 
-## Current Status — ENGINE VERIFIED CORRECT (2026-08-12)
+## Current Status — PHASE 1 COMPLETE (2026-08-13)
 
-- No NaN anywhere; per-layer hidden rms sane; logit rms 1.7 (was 902).
-- ~8 tok/s at K=8, 1.73 GB peak GPU usage (vs ~5.4 GB BF16).
-- **Engine is bit-exact**: an independent numpy reference of the layer-0
-  GDN chain (`debug_gdn_reference.py`, mirrors the Metal shader semantics)
-  matches the engine's stage dumps at CosSim 1.000000 for every stage
-  (qkv, z, beta, alpha, conv, delta_out, gated, o_proj, h_mid, h_post).
-  Standalone kernel tests also match at 1.0; every weight tensor matches
-  the BF16 base model at 0.995+.
+- No NaN anywhere; engine **bit-exact** vs the numpy GDN reference
+  (CosSim 1.000000 per stage); all kernels 1.0 vs CPU reference.
+- **11.4-12.4 tok/s** decode (M4, K=8, greedy) with 1.95 GB weights
+  (4-bit GDN tier + 3-bit experts, both default) and 2.25 GB peak GPU.
+- Speed arc: 3.85 → 6.90 (self-quant) → 7.32 (CMD1+CMD2 fuse) →
+  9.09 (3-bit experts) → 11.4 (4-bit GDN tier). The fused-GPU wait is
+  weight memory bandwidth, not dispatch latency (proven by neutral
+  micro-fusions).
+- **Open quality issue (2026-08-13)**: typo'd/ambiguous prompts degrade
+  into repetition loops. llama.cpp Q4_K_M on the SAME prompt reasons
+  correctly → the base model is fine; the problem is our weights being
+  quantized from the marginal `2bit-dense-v2` variant (double-quantized
+  experts). Fix: re-quantize from pristine `Qwen3.6-35B-A3B-bf16`.
+- Prefill = decode speed (~12 tok/s, 789 tokens = 66s) — batched GPU
+  prefill is the agentic-workload priority.
+- Server multi-turn continuation corrupts after turn 1 (stateless
+  fallback active); MTP draft head math wrong (α=0%).
 - **Output quality of the MLX-community 4bit model is the model's own
   property**, not an engine bug:
   - The GDN gated-norm sits at the eps-knee: 24/32 value-heads have

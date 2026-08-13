@@ -1,15 +1,51 @@
 # FinchMoE Optimization Roadmap: 12 tok/s @ ~2 GB RAM
 
-## Where We Are vs Where We Need to Be
+## Where We Are (2026-08-13) — Phase 1 TARGETS MET
 
-| Metric | Current (Aug 2026) | Target | Gap |
-|--------|-------------------|--------|-----|
-| Decode speed (M4 16GB) | 3.88 tok/s | 12 tok/s | **3.1×** |
-| RAM footprint | ~6.0 GB | ~2.0 GB | **3.0×** |
-| Common weight file | 4.96 GB (all BF16) | ~1.5 GB (quantized) | **3.3×** |
-| Expert bit-width | 4-bit (1.77 MB/expert) | 2-bit (0.98 MB/expert) | **1.8× I/O** |
+| Metric | Baseline (Aug 2026) | Current | Target |
+|--------|---------------------|---------|--------|
+| Decode speed (M4 16GB) | 3.88 tok/s | **11.4-12.4 tok/s** ✅ | 12 tok/s |
+| RAM footprint | ~6.0 GB | **~2.8 GB @ 8k ctx** (2.25 GB peak GPU) | ~2.0 GB |
+| Weight file | 4.96 GB (all BF16) | **1.95 GB** (4-bit GDN + 3-bit experts) | ~1.5 GB |
+| Expert bit-width | 4-bit (1.77 MB/expert) | **3-bit default** (1.31 MB/expert) | — |
 
-**Reference target**: turbo-fieldfare achieves 5.1-6.3 tok/s at ~2 GB on **M2 8GB** with Gemma 4 26B (30 layers, 128 experts, 4-bit everywhere). M4 is ~1.4× faster than M2, so turbo-fieldfare-level optimization on M4 would give **7-9 tok/s**. To reach 12 tok/s, we need to go beyond.
+### Progress log (commits on main)
+
+- `7b59c18` — Phase 1 NaN fixed (4 data bugs: 8-bit gate dispatch, wrong-model
+  expert repack, FP16→BF16 corruption, 0×NaN); engine verified bit-exact vs
+  numpy GDN reference (CosSim 1.000000 per stage).
+- `3e716e4` — Protected-tier self-quantization (8-bit GDN, fluent).
+- `7deadd1` — CMD1+CMD2 fused into one commit+wait per layer.
+- `1337137` — 3-bit expert pipeline (kernel + repack + engine): 9.09 tok/s.
+- `033c608` — 3-bit experts as default.
+- `c22a393` — Fully fused GDN kernel (neutral speed; proved the wall is
+  weight memory bandwidth, not dispatch count).
+- `a8b9c3d` — Micro-fusions + **4-bit GDN tier (default)**: 11.4-12.4 tok/s.
+- `a913e25` — MTP harness unblocked (layer-40 experts, path fix); α=0%.
+- `0f102bb` — MTP logit-cosine diagnostic (0.59-0.74 → forward-math bug).
+- `156cddb` — Server: disabled broken incremental session continuation.
+
+### OPEN ISSUES (priority order)
+
+1. **Model quality on edge prompts** — typo'd/ambiguous prompts degrade into
+   repetition loops ("Done! â>' â>'..."). llama.cpp Q4_K_M on the SAME typo
+   prompt plans the story correctly → the base model is fine; OUR weights
+   are the problem (quantized from the marginal `2bit-dense-v2` variant +
+   double-quantized experts). **Fix: re-quantize from the pristine
+   `Qwen3.6-35B-A3B-bf16` base** (BF16 non-experts → 4-bit GDN tier;
+   BF16 experts `mlp.experts.gate_up_proj/down_proj` → 3-bit).
+2. **Prefill speed** — measured 789 tokens in 66.2s (~12 tok/s = decode
+   speed; every prompt token runs the serial 40-layer pipeline). Agentic
+   workloads need **batched GPU prefill** (5-10× target): batch the prompt
+   through the GPU matmuls + batched full-attention.
+3. **Server multi-turn** — session continuation corrupts after turn 1
+   (template tokens leak; 2nd request can yield 0 tokens). Disabled via
+   stateless fallback; needs the snapshot-restore state-leak debugging.
+4. **MTP speculative decoding** — harness runs (finite outputs) but
+   logit-cos 0.59-0.74 → forward math must be verified against the
+   Qwen3.6 nextn reference before the acceptance-rate gate.
+
+**Reference target**: turbo-fieldfare achieves 5.1-6.3 tok/s at ~2 GB on **M2 8GB** with Gemma 4 26B. M4 is ~1.4× faster than M2 — we now exceed that reference (11.4 tok/s on M4).
 
 ## Benchmark: Where Every Millisecond Goes
 
