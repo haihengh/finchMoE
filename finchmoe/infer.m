@@ -205,17 +205,30 @@ static const char *format_mem_size(size_t bytes) {
 #define DOWN_S_OFF_2  917504
 #define DOWN_B_OFF_2  950272
 
+// 3-bit expert layout: 8 values per 24 bits (3 bytes), group_size=64.
+// gate/up: [512, 2048] -> 512*768 bytes, down: [2048, 512] -> 2048*192 bytes
+#define EXPERT_SIZE_3BIT       1376256
+#define GATE_W_OFF_3  0
+#define GATE_S_OFF_3  393216
+#define GATE_B_OFF_3  425984
+#define UP_W_OFF_3    458752
+#define UP_S_OFF_3    851968
+#define UP_B_OFF_3    884736
+#define DOWN_W_OFF_3  917504
+#define DOWN_S_OFF_3  1310720
+#define DOWN_B_OFF_3  1343488
+
 // Dynamic offset helpers: pick the right offset based on active format
-#define GATE_W_OFF  (g_use_2bit ? GATE_W_OFF_2  : (g_use_int8 ? GATE_W_OFF_8  : GATE_W_OFF_4))
-#define GATE_S_OFF  (g_use_2bit ? GATE_S_OFF_2  : (g_use_int8 ? GATE_S_OFF_8  : GATE_S_OFF_4))
-#define GATE_B_OFF  (g_use_2bit ? GATE_B_OFF_2  : (g_use_int8 ? GATE_B_OFF_8  : GATE_B_OFF_4))
-#define UP_W_OFF    (g_use_2bit ? UP_W_OFF_2    : (g_use_int8 ? UP_W_OFF_8    : UP_W_OFF_4))
-#define UP_S_OFF    (g_use_2bit ? UP_S_OFF_2    : (g_use_int8 ? UP_S_OFF_8    : UP_S_OFF_4))
-#define UP_B_OFF    (g_use_2bit ? UP_B_OFF_2    : (g_use_int8 ? UP_B_OFF_8    : UP_B_OFF_4))
-#define DOWN_W_OFF  (g_use_2bit ? DOWN_W_OFF_2  : (g_use_int8 ? DOWN_W_OFF_8  : DOWN_W_OFF_4))
-#define DOWN_S_OFF  (g_use_2bit ? DOWN_S_OFF_2  : (g_use_int8 ? DOWN_S_OFF_8  : DOWN_S_OFF_4))
-#define DOWN_B_OFF  (g_use_2bit ? DOWN_B_OFF_2  : (g_use_int8 ? DOWN_B_OFF_8  : DOWN_B_OFF_4))
-#define EXPERT_BITS (g_use_1bit ? 1 : (g_use_2bit ? 2 : (g_use_int8 ? 8 : 4)))
+#define GATE_W_OFF  (g_use_3bit ? GATE_W_OFF_3 : (g_use_2bit ? GATE_W_OFF_2  : (g_use_int8 ? GATE_W_OFF_8  : GATE_W_OFF_4)))
+#define GATE_S_OFF  (g_use_3bit ? GATE_S_OFF_3 : (g_use_2bit ? GATE_S_OFF_2  : (g_use_int8 ? GATE_S_OFF_8  : GATE_S_OFF_4)))
+#define GATE_B_OFF  (g_use_3bit ? GATE_B_OFF_3 : (g_use_2bit ? GATE_B_OFF_2  : (g_use_int8 ? GATE_B_OFF_8  : GATE_B_OFF_4)))
+#define UP_W_OFF    (g_use_3bit ? UP_W_OFF_3   : (g_use_2bit ? UP_W_OFF_2    : (g_use_int8 ? UP_W_OFF_8    : UP_W_OFF_4)))
+#define UP_S_OFF    (g_use_3bit ? UP_S_OFF_3   : (g_use_2bit ? UP_S_OFF_2    : (g_use_int8 ? UP_S_OFF_8    : UP_S_OFF_4)))
+#define UP_B_OFF    (g_use_3bit ? UP_B_OFF_3   : (g_use_2bit ? UP_B_OFF_2    : (g_use_int8 ? UP_B_OFF_8    : UP_B_OFF_4)))
+#define DOWN_W_OFF  (g_use_3bit ? DOWN_W_OFF_3 : (g_use_2bit ? DOWN_W_OFF_2  : (g_use_int8 ? DOWN_W_OFF_8  : DOWN_W_OFF_4)))
+#define DOWN_S_OFF  (g_use_3bit ? DOWN_S_OFF_3 : (g_use_2bit ? DOWN_S_OFF_2  : (g_use_int8 ? DOWN_S_OFF_8  : DOWN_S_OFF_4)))
+#define DOWN_B_OFF  (g_use_3bit ? DOWN_B_OFF_3 : (g_use_2bit ? DOWN_B_OFF_2  : (g_use_int8 ? DOWN_B_OFF_8  : DOWN_B_OFF_4)))
+#define EXPERT_BITS (g_use_1bit ? 1 : (g_use_2bit ? 2 : (g_use_3bit ? 3 : (g_use_int8 ? 8 : 4))))
 #define EXPERT_SIZE_MAX 3932160  // max of all expert sizes (8-bit is 3.3MB, rest are smaller)
 
 // KV cache maximum context length — configurable via CLI for agentic workloads
@@ -324,6 +337,7 @@ static int g_expert_freq[NUM_LAYERS][NUM_EXPERTS];  // activation count per (lay
 static int g_freq_tracking = 0;  // enabled by --freq flag
 static int g_use_1bit = 0;       // enabled by --1bit flag: use packed_experts_1bit/ + 1-bit kernel
 static int g_use_2bit = 0;       // enabled by --2bit flag: use packed_experts_2bit/ + 2-bit kernel
+static int g_use_3bit = 0;       // enabled by --3bit flag: use packed_experts_3bit/ + 3-bit kernel
 static int g_use_int8 = 0;       // enabled by --int8-experts flag: use 8-bit packed experts
 static int g_cache_telemetry_enabled = 0;  // enabled by --cache-telemetry flag
 static int g_think_budget = 2048; // max thinking tokens before force-emitting </think>
@@ -355,7 +369,7 @@ static inline int expert_pick_fd(int layer, int expert, int warm_fd) {
 
 // Active expert size based on quantization mode
 static inline size_t active_expert_size(void) {
-    return g_use_1bit ? EXPERT_SIZE_1BIT : (g_use_2bit ? EXPERT_SIZE_2BIT : (g_use_int8 ? EXPERT_SIZE_8BIT : EXPERT_SIZE_4BIT));
+    return g_use_1bit ? EXPERT_SIZE_1BIT : (g_use_2bit ? EXPERT_SIZE_2BIT : (g_use_3bit ? EXPERT_SIZE_3BIT : (g_use_int8 ? EXPERT_SIZE_8BIT : EXPERT_SIZE_4BIT)));
 }
 static int g_freq_total_tokens = 0;  // total tokens processed while tracking
 
@@ -1002,6 +1016,36 @@ static void cpu_dequant_matvec(
     }
 
     int num_groups = in_dim / group_size;
+
+    // 3-bit path: 8 values per 24 bits (3 bytes), byte-addressed rows
+    if (bits == 3) {
+        const uint8_t *W8 = (const uint8_t *)W;
+        int triplets = in_dim / 8;
+        int triplets_per_g = group_size / 8;
+        int row_bytes = in_dim * 3 / 8;
+        for (int row = 0; row < out_dim; row++) {
+            float acc = 0.0f;
+            const uint8_t *w_row = W8 + (size_t)row * row_bytes;
+            const uint16_t *s_row = scales + row * num_groups;
+            const uint16_t *b_row = biases + row * num_groups;
+            for (int t = 0; t < triplets; t++) {
+                int g = t / triplets_per_g;
+                float scale = bf16_to_f32(s_row[g]);
+                float bias = bf16_to_f32(b_row[g]);
+                uint32_t packed = (uint32_t)w_row[t * 3] |
+                                  ((uint32_t)w_row[t * 3 + 1] << 8) |
+                                  ((uint32_t)w_row[t * 3 + 2] << 16);
+                int xb = t * 8;
+                for (int j = 0; j < 8; j++) {
+                    float w_val = (float)((packed >> (3 * j)) & 0x7) * scale + bias;
+                    acc += w_val * x[xb + j];
+                }
+            }
+            out[row] = acc;
+        }
+        return;
+    }
+
     int vals_per_u32 = 32 / bits;  // 32 for 1-bit, 16 for 2-bit, 8 for 4-bit, 4 for 8-bit
     int packed_per_group = group_size / vals_per_u32;
     int packed_cols = in_dim / vals_per_u32;
@@ -1387,6 +1431,7 @@ typedef struct {
     id<MTLComputePipelineState> gemv_bf16_x2_pipe; // 2 rows/tg (NR0=2), faster for large out_dim
     id<MTLComputePipelineState> matvec_1bit;  // 1-bit expert dequant kernel
     id<MTLComputePipelineState> matvec_2bit;  // 2-bit expert dequant kernel
+    id<MTLComputePipelineState> matvec_3bit;  // 3-bit expert dequant kernel
     id<MTLComputePipelineState> matvec_8bit;  // 8-bit expert dequant kernel
     id<MTLComputePipelineState> fused_gate_up_swiglu_pipe;      // 4-bit fused gate+up+swiglu
     id<MTLComputePipelineState> fused_gate_up_swiglu_8bit_pipe; // 8-bit fused gate+up+swiglu
@@ -1542,6 +1587,7 @@ static MetalCtx *metal_setup(void) {
     ctx->matvec_fast   = makePipe(@"dequant_matvec_4bit_fast");
     ctx->matvec_1bit   = makePipe(@"dequant_matvec_1bit");
     ctx->matvec_2bit   = makePipe(@"dequant_matvec_2bit");
+    ctx->matvec_3bit   = makePipe(@"dequant_matvec_3bit");
     ctx->matvec_8bit   = makePipe(@"dequant_matvec_8bit");
     ctx->fused_gate_up_swiglu_pipe      = makePipe(@"fused_gate_up_swiglu");
     ctx->fused_gate_up_swiglu_8bit_pipe = makePipe(@"fused_gate_up_swiglu_8bit");
@@ -2176,6 +2222,10 @@ static void gpu_encode_expert_forward_slot(
         gate_w_off = GATE_W_OFF_2; gate_s_off = GATE_S_OFF_2; gate_b_off = GATE_B_OFF_2;
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
+    } else if (g_use_3bit) {
+        gate_w_off = GATE_W_OFF_3; gate_s_off = GATE_S_OFF_3; gate_b_off = GATE_B_OFF_3;
+        up_w_off   = UP_W_OFF_3;   up_s_off   = UP_S_OFF_3;   up_b_off   = UP_B_OFF_3;
+        down_w_off = DOWN_W_OFF_3; down_s_off = DOWN_S_OFF_3; down_b_off = DOWN_B_OFF_3;
     } else if (g_use_int8) {
         gate_w_off = GATE_W_OFF_8; gate_s_off = GATE_S_OFF_8; gate_b_off = GATE_B_OFF_8;
         up_w_off   = UP_W_OFF_8;   up_s_off   = UP_S_OFF_8;   up_b_off   = UP_B_OFF_8;
@@ -2185,7 +2235,7 @@ static void gpu_encode_expert_forward_slot(
         up_w_off   = UP_W_OFF_4;   up_s_off   = UP_S_OFF_4;   up_b_off   = UP_B_OFF_4;
         down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
-    id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : (g_use_1bit ? ctx->matvec_1bit : (g_use_int8 ? ctx->matvec_8bit : ctx->matvec_v3));
+    id<MTLComputePipelineState> expert_pipe = g_use_3bit ? ctx->matvec_3bit : (g_use_2bit ? ctx->matvec_2bit : (g_use_1bit ? ctx->matvec_1bit : (g_use_int8 ? ctx->matvec_8bit : ctx->matvec_v3)));
 
     uint32_t gate_up_out = MOE_INTERMEDIATE;
     uint32_t gate_up_in  = HIDDEN_DIM;
@@ -2280,6 +2330,10 @@ static void gpu_encode_expert_forward_slot_buf(
         gate_w_off = GATE_W_OFF_2; gate_s_off = GATE_S_OFF_2; gate_b_off = GATE_B_OFF_2;
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
+    } else if (g_use_3bit) {
+        gate_w_off = GATE_W_OFF_3; gate_s_off = GATE_S_OFF_3; gate_b_off = GATE_B_OFF_3;
+        up_w_off   = UP_W_OFF_3;   up_s_off   = UP_S_OFF_3;   up_b_off   = UP_B_OFF_3;
+        down_w_off = DOWN_W_OFF_3; down_s_off = DOWN_S_OFF_3; down_b_off = DOWN_B_OFF_3;
     } else if (g_use_int8) {
         gate_w_off = GATE_W_OFF_8; gate_s_off = GATE_S_OFF_8; gate_b_off = GATE_B_OFF_8;
         up_w_off   = UP_W_OFF_8;   up_s_off   = UP_S_OFF_8;   up_b_off   = UP_B_OFF_8;
@@ -2289,7 +2343,7 @@ static void gpu_encode_expert_forward_slot_buf(
         up_w_off   = UP_W_OFF_4;   up_s_off   = UP_S_OFF_4;   up_b_off   = UP_B_OFF_4;
         down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
-    id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : (g_use_1bit ? ctx->matvec_1bit : (g_use_int8 ? ctx->matvec_8bit : ctx->matvec_v3));
+    id<MTLComputePipelineState> expert_pipe = g_use_3bit ? ctx->matvec_3bit : (g_use_2bit ? ctx->matvec_2bit : (g_use_1bit ? ctx->matvec_1bit : (g_use_int8 ? ctx->matvec_8bit : ctx->matvec_v3)));
 
     uint32_t gate_up_out = MOE_INTERMEDIATE;
     uint32_t gate_up_in  = HIDDEN_DIM;
@@ -2388,6 +2442,10 @@ static void gpu_encode_experts_batched(
         gate_w_off = GATE_W_OFF_2; gate_s_off = GATE_S_OFF_2; gate_b_off = GATE_B_OFF_2;
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
+    } else if (g_use_3bit) {
+        gate_w_off = GATE_W_OFF_3; gate_s_off = GATE_S_OFF_3; gate_b_off = GATE_B_OFF_3;
+        up_w_off   = UP_W_OFF_3;   up_s_off   = UP_S_OFF_3;   up_b_off   = UP_B_OFF_3;
+        down_w_off = DOWN_W_OFF_3; down_s_off = DOWN_S_OFF_3; down_b_off = DOWN_B_OFF_3;
     } else if (g_use_int8) {
         gate_w_off = GATE_W_OFF_8; gate_s_off = GATE_S_OFF_8; gate_b_off = GATE_B_OFF_8;
         up_w_off   = UP_W_OFF_8;   up_s_off   = UP_S_OFF_8;   up_b_off   = UP_B_OFF_8;
@@ -2397,7 +2455,7 @@ static void gpu_encode_experts_batched(
         up_w_off   = UP_W_OFF_4;   up_s_off   = UP_S_OFF_4;   up_b_off   = UP_B_OFF_4;
         down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
-    id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : (g_use_1bit ? ctx->matvec_1bit : (g_use_int8 ? ctx->matvec_8bit : ctx->matvec_v3));
+    id<MTLComputePipelineState> expert_pipe = g_use_3bit ? ctx->matvec_3bit : (g_use_2bit ? ctx->matvec_2bit : (g_use_1bit ? ctx->matvec_1bit : (g_use_int8 ? ctx->matvec_8bit : ctx->matvec_v3)));
     // SiLU formula corrected in shaders: vg/(1+exp(-vg))*vu = SiLU(gate)*up.
     // Fused path verified bit-identical in isolation (finchTool).
     // For production: non-fused path for 4-bit (verified 6.2 tok/s coherent).
@@ -2804,6 +2862,10 @@ static void gpu_expert_forward(
         gate_w_off = GATE_W_OFF_2; gate_s_off = GATE_S_OFF_2; gate_b_off = GATE_B_OFF_2;
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
+    } else if (g_use_3bit) {
+        gate_w_off = GATE_W_OFF_3; gate_s_off = GATE_S_OFF_3; gate_b_off = GATE_B_OFF_3;
+        up_w_off   = UP_W_OFF_3;   up_s_off   = UP_S_OFF_3;   up_b_off   = UP_B_OFF_3;
+        down_w_off = DOWN_W_OFF_3; down_s_off = DOWN_S_OFF_3; down_b_off = DOWN_B_OFF_3;
     } else if (g_use_int8) {
         gate_w_off = GATE_W_OFF_8; gate_s_off = GATE_S_OFF_8; gate_b_off = GATE_B_OFF_8;
         up_w_off   = UP_W_OFF_8;   up_s_off   = UP_S_OFF_8;   up_b_off   = UP_B_OFF_8;
@@ -2813,7 +2875,7 @@ static void gpu_expert_forward(
         up_w_off   = UP_W_OFF_4;   up_s_off   = UP_S_OFF_4;   up_b_off   = UP_B_OFF_4;
         down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
-    id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : (g_use_1bit ? ctx->matvec_1bit : (g_use_int8 ? ctx->matvec_8bit : ctx->matvec_v3));
+    id<MTLComputePipelineState> expert_pipe = g_use_3bit ? ctx->matvec_3bit : (g_use_2bit ? ctx->matvec_2bit : (g_use_1bit ? ctx->matvec_1bit : (g_use_int8 ? ctx->matvec_8bit : ctx->matvec_v3)));
 
     // Copy expert weights into Metal buffer only if not already there
     if (!expert_data_already_in_buffer) {
@@ -7150,15 +7212,15 @@ static void fused_layer_forward(
                 void *expert_data = malloc(esz);
                 memcpy(expert_data, [expert_bufs[k] contents], esz);
 
-                uint32_t *gw = (uint32_t *)((char *)expert_data + (g_use_int8 ? GATE_W_OFF_8 : GATE_W_OFF_4));
-                uint16_t *gs_p = (uint16_t *)((char *)expert_data + (g_use_int8 ? GATE_S_OFF_8 : GATE_S_OFF_4));
-                uint16_t *gb_p = (uint16_t *)((char *)expert_data + (g_use_int8 ? GATE_B_OFF_8 : GATE_B_OFF_4));
-                uint32_t *uw = (uint32_t *)((char *)expert_data + (g_use_int8 ? UP_W_OFF_8 : UP_W_OFF_4));
-                uint16_t *us_p = (uint16_t *)((char *)expert_data + (g_use_int8 ? UP_S_OFF_8 : UP_S_OFF_4));
-                uint16_t *ub_p = (uint16_t *)((char *)expert_data + (g_use_int8 ? UP_B_OFF_8 : UP_B_OFF_4));
-                uint32_t *dw = (uint32_t *)((char *)expert_data + (g_use_int8 ? DOWN_W_OFF_8 : DOWN_W_OFF_4));
-                uint16_t *ds_p = (uint16_t *)((char *)expert_data + (g_use_int8 ? DOWN_S_OFF_8 : DOWN_S_OFF_4));
-                uint16_t *db_p = (uint16_t *)((char *)expert_data + (g_use_int8 ? DOWN_B_OFF_8 : DOWN_B_OFF_4));
+                uint32_t *gw = (uint32_t *)((char *)expert_data + GATE_W_OFF);
+                uint16_t *gs_p = (uint16_t *)((char *)expert_data + GATE_S_OFF);
+                uint16_t *gb_p = (uint16_t *)((char *)expert_data + GATE_B_OFF);
+                uint32_t *uw = (uint32_t *)((char *)expert_data + UP_W_OFF);
+                uint16_t *us_p = (uint16_t *)((char *)expert_data + UP_S_OFF);
+                uint16_t *ub_p = (uint16_t *)((char *)expert_data + UP_B_OFF);
+                uint32_t *dw = (uint32_t *)((char *)expert_data + DOWN_W_OFF);
+                uint16_t *ds_p = (uint16_t *)((char *)expert_data + DOWN_S_OFF);
+                uint16_t *db_p = (uint16_t *)((char *)expert_data + DOWN_B_OFF);
 
                 // --- CPU compute ---
                 float *cpu_gate = malloc(MOE_INTERMEDIATE * sizeof(float));
@@ -7166,7 +7228,7 @@ static void fused_layer_forward(
                 float *cpu_act  = malloc(MOE_INTERMEDIATE * sizeof(float));
                 float *cpu_out  = malloc(HIDDEN_DIM * sizeof(float));
 
-                int cmp_bits = g_use_int8 ? 8 : 4;
+                int cmp_bits = g_use_int8 ? 8 : (g_use_3bit ? 3 : 4);
                 cpu_dequant_matvec(gw, gs_p, gb_p, h_post, cpu_gate, MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, cmp_bits);
                 cpu_dequant_matvec(uw, us_p, ub_p, h_post, cpu_up,   MOE_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, cmp_bits);
                 cpu_swiglu(cpu_gate, cpu_up, cpu_act, MOE_INTERMEDIATE);
@@ -7410,6 +7472,11 @@ static void fused_layer_forward(
                 c_up_w   = UP_W_OFF_2;   c_up_s   = UP_S_OFF_2;   c_up_b   = UP_B_OFF_2;
                 c_down_w = DOWN_W_OFF_2; c_down_s = DOWN_S_OFF_2; c_down_b = DOWN_B_OFF_2;
                 c_bits = 2;
+            } else if (g_use_3bit) {
+                c_gate_w = GATE_W_OFF_3; c_gate_s = GATE_S_OFF_3; c_gate_b = GATE_B_OFF_3;
+                c_up_w   = UP_W_OFF_3;   c_up_s   = UP_S_OFF_3;   c_up_b   = UP_B_OFF_3;
+                c_down_w = DOWN_W_OFF_3; c_down_s = DOWN_S_OFF_3; c_down_b = DOWN_B_OFF_3;
+                c_bits = 3;
             } else if (g_use_int8) {
                 c_gate_w = GATE_W_OFF_8; c_gate_s = GATE_S_OFF_8; c_gate_b = GATE_B_OFF_8;
                 c_up_w   = UP_W_OFF_8;   c_up_s   = UP_S_OFF_8;   c_up_b   = UP_B_OFF_8;
@@ -8806,6 +8873,7 @@ static void print_usage(const char *prog) {
     printf("  --freq               Enable expert frequency tracking + analysis\n");
     printf("  --cache-telemetry    Report cold vs eviction misses and reuse distance\n");
     printf("  --2bit               Use 2-bit quantized experts (packed_experts_2bit/)\n");
+    printf("  --3bit               Use 3-bit quantized experts (packed_experts_3bit/)\n");
     printf("  --int8-experts       Use 8-bit quantized experts (packed_experts_8bit/)\n");
     printf("  --gpu-linear         Alias for the fused GPU delta-net path (default)\n");
     printf("  --predict            Enable temporal expert prediction (prefetch during CMD1_wait)\n");
@@ -8920,6 +8988,7 @@ int main(int argc, char **argv) {
             {"freq",          no_argument,       0, 'F'},
             {"cache-telemetry", no_argument,     0, 'E'},
             {"2bit",          no_argument,       0, '2'},
+            {"3bit",          no_argument,       0, '3'},
             {"int8-experts",  no_argument,       0, '8'},
             {"gpu-linear",    no_argument,       0, 'G'},
             {"think-budget",  required_argument, 0, 'B'},
@@ -8945,7 +9014,7 @@ int main(int argc, char **argv) {
         };
 
         int c;
-        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:N:Q:e:o:I:lHLSTFE2GhXUY:VJ", long_options, NULL)) != -1) {
+        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:N:Q:e:o:I:lHLSTFE23GhXUY:VJ", long_options, NULL)) != -1) {
             switch (c) {
                 case 'm': model_path = optarg; model_path_from_user = 1; break;
                 case 'w': weights_path = optarg; break;
@@ -8963,6 +9032,7 @@ int main(int argc, char **argv) {
                 case 'F': g_freq_tracking = 1; break;
                 case 'E': g_cache_telemetry_enabled = 1; break;
                 case '2': g_use_2bit = 1; break;
+                case '3': g_use_3bit = 1; break;
                 case '8': g_use_int8 = 1; break;
                 case 'G': gpu_linear_attn_enabled = 1; break;
                 case 'D': g_pred_enabled = 1; break;
@@ -9250,7 +9320,7 @@ int main(int argc, char **argv) {
 
         // Print quant and linear info now that auto-detect has settled
         printf("Quant:    %s experts (%zu bytes each)\n",
-               g_use_1bit ? "1-bit" : (g_use_2bit ? "2-bit" : (g_use_int8 ? "8-bit" : "4-bit")),
+               g_use_1bit ? "1-bit" : (g_use_2bit ? "2-bit" : (g_use_3bit ? "3-bit" : (g_use_int8 ? "8-bit" : "4-bit"))),
                active_expert_size());
         printf("Linear:   %s\n", gpu_linear_attn_enabled ? "fused GPU delta-net" : "CPU/hybrid fallback");
 
@@ -9275,6 +9345,7 @@ int main(int argc, char **argv) {
             snprintf(path, sizeof(path), "%s/%s/layer_%02d.bin", model_path,
                      g_use_1bit ? "packed_experts_1bit" :
                      g_use_2bit ? "packed_experts_2bit" :
+                     g_use_3bit ? "packed_experts_3bit" :
                      g_use_int8 ? "packed_experts_8bit" : "packed_experts", i);
             layer_fds[i] = open(path, O_RDONLY);
             layer_fds_cold[i] = -1;  // no longer used (trust OS page cache)

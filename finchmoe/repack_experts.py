@@ -86,6 +86,22 @@ COMPONENTS_1BIT = [
 ]
 
 # 2-bit expert format: 16 values per uint32
+# 3-bit expert format: 8 values packed per 24 bits (3 bytes), group_size=64.
+# gate/up: [512, 2048] -> 2048*3/8 = 768 bytes/row -> 512*768 = 393216 bytes
+# down:    [2048, 512] -> 512*3/8   = 192 bytes/row -> 2048*192 = 393216 bytes
+EXPERT_SIZE_3BIT = 1376256
+COMPONENTS_3BIT = [
+    {"name": "gate_proj.weight",  "offset": 0,        "size": 393216,  "dtype": "U8",   "shape": [512, 768]},
+    {"name": "gate_proj.scales",  "offset": 393216,   "size": 32768,   "dtype": "BF16", "shape": [512, 32]},
+    {"name": "gate_proj.biases",  "offset": 425984,   "size": 32768,   "dtype": "BF16", "shape": [512, 32]},
+    {"name": "up_proj.weight",    "offset": 458752,   "size": 393216,  "dtype": "U8",   "shape": [512, 768]},
+    {"name": "up_proj.scales",    "offset": 851968,   "size": 32768,   "dtype": "BF16", "shape": [512, 32]},
+    {"name": "up_proj.biases",    "offset": 884736,   "size": 32768,   "dtype": "BF16", "shape": [512, 32]},
+    {"name": "down_proj.weight",  "offset": 917504,   "size": 393216,  "dtype": "U8",   "shape": [2048, 192]},
+    {"name": "down_proj.scales",  "offset": 1310720,  "size": 32768,   "dtype": "BF16", "shape": [2048, 8]},
+    {"name": "down_proj.biases",  "offset": 1343488,  "size": 32768,   "dtype": "BF16", "shape": [2048, 8]},
+]
+
 COMPONENTS_2BIT = [
     {"name": "gate_proj.weight",  "offset": 0,        "size": 262144,  "dtype": "U32",  "shape": [512, 128]},
     {"name": "gate_proj.scales",  "offset": 262144,   "size": 32768,   "dtype": "BF16", "shape": [512, 32]},
@@ -155,6 +171,144 @@ def open_source_files(expert_reads, model_path, layers):
         fds[fname] = os.open(path, os.O_RDONLY)
     print(f"Opened {len(fds)} source safetensors files")
     return fds
+
+
+def bf16_encode(arr_f32):
+    """Convert float32 -> bfloat16 (stored as uint16)."""
+    return (arr_f32.view(np.uint32) >> 16).astype(np.uint16)
+
+
+def bf16_decode(arr_u16):
+    """Convert bfloat16 (uint16) -> float32."""
+    return (arr_u16.astype(np.uint32) << 16).view(np.float32)
+
+
+def pack_3bit(q_vals, group_size=64):
+    """Pack quantized values (0..7) into 24-bit triplets (8 values per 3 bytes).
+
+    q_vals: uint8 array of length divisible by 8.
+    Returns uint8 array of length len(q_vals)*3/8.
+    """
+    n = len(q_vals)
+    assert n % 8 == 0, f"3-bit packing requires multiple of 8 values, got {n}"
+    q = q_vals.astype(np.uint64).reshape(-1, 8)
+    acc = np.zeros(n // 8, dtype=np.uint64)
+    for j in range(8):
+        acc |= q[:, j] << (3 * j)
+    b0 = (acc & 0xFF).astype(np.uint8)
+    b1 = ((acc >> 8) & 0xFF).astype(np.uint8)
+    b2 = ((acc >> 16) & 0xFF).astype(np.uint8)
+    return np.stack([b0, b1, b2], axis=1).reshape(-1)
+
+
+def quantize_affine_3bit(w_f32, group_size=64):
+    """Per-group affine 3-bit quantization -> (packed_bytes, scales, biases)."""
+    out_dim, in_dim = w_f32.shape
+    assert in_dim % group_size == 0
+    num_groups = in_dim // group_size
+    w = w_f32.reshape(out_dim, num_groups, group_size)
+    w_min = w.min(axis=2)
+    w_max = w.max(axis=2)
+    scales = np.maximum((w_max - w_min) / 7.0, 1e-8)
+    biases = w_min
+    q = np.round((w - biases[:, :, np.newaxis]) / scales[:, :, np.newaxis])
+    q = np.clip(q, 0, 7).astype(np.uint8)
+    packed = pack_3bit(q.reshape(-1))  # [out_dim * in_dim * 3/8]
+    packed = packed.reshape(out_dim, in_dim * 3 // 8)
+    return (packed,
+            bf16_encode(scales.astype(np.float32).reshape(-1)).reshape(out_dim, num_groups),
+            bf16_encode(biases.astype(np.float32).reshape(-1)).reshape(out_dim, num_groups))
+
+
+def _dequant_packed_weights(packed_u32, scales_u16, biases_u16, in_dim, bits, group_size=64):
+    """Dequant packed rows to float32 (raw BF16 scale/bias convention).
+
+    Supports bits = 1, 2, 4 (values per uint32 = 32/bits).
+    Vectorized: unpacks all value planes at once, then applies the
+    per-group affine transform.
+    """
+    out_dim, packed_cols = packed_u32.shape
+    num_groups = in_dim // group_size
+    vpu = 32 // bits
+    mask = (1 << bits) - 1
+    w = np.zeros((out_dim, in_dim), dtype=np.float32)
+    pk = packed_u32.astype(np.uint32)
+    for n in range(vpu):
+        w[:, n::vpu] = ((pk >> (bits * n)) & mask).astype(np.float32)
+    for g in range(num_groups):
+        s = bf16_decode(scales_u16[:, g]).astype(np.float32)[:, None]
+        b = bf16_decode(biases_u16[:, g]).astype(np.float32)[:, None]
+        w[:, g * group_size:(g + 1) * group_size] *= s
+        w[:, g * group_size:(g + 1) * group_size] += b
+    return w
+
+
+def repack_all_3bit(expert_reads, model_path, output_dir, layers):
+    """Repack experts at 3-bit: read 4-bit (or BF16) source experts from the
+    original safetensors, dequant, requantize to 3-bit affine (group 64),
+    and write packed_experts_3bit/layer_XX.bin."""
+    os.makedirs(output_dir, exist_ok=True)
+    fds = {}
+    t0 = time.monotonic()
+    for layer_idx in layers:
+        key = str(layer_idx)
+        if key not in expert_reads:
+            print(f"  Layer {layer_idx}: NOT FOUND in index, skipping")
+            continue
+        li = expert_reads[key]
+        out_path = os.path.join(output_dir, f"layer_{layer_idx:02d}.bin")
+        fd_out = os.open(out_path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+        os.ftruncate(fd_out, NUM_EXPERTS * EXPERT_SIZE_3BIT)
+
+        for e in range(NUM_EXPERTS):
+            for comp in COMPONENTS_3BIT:
+                name = comp['name']
+                if name not in li:
+                    print(f"  Layer {layer_idx} expert {e}: missing {name}")
+                    continue
+                info = li[name]
+                if info['file'] not in fds:
+                    fds[info['file']] = os.open(os.path.join(model_path, info['file']), os.O_RDONLY)
+                src_fd = fds[info['file']]
+                if name.endswith('.weight'):
+                    # weights: dequant source (packed U32 or BF16) -> 3-bit;
+                    # write the REQUANTIZED weight + its own scales/biases.
+                    wraw = os.pread(src_fd, info['expert_size'], info['abs_offset'] + e * info['expert_stride'])
+                    src_dtype = info.get('dtype', 'U32')
+                    if src_dtype == 'U32':
+                        wu32 = np.frombuffer(wraw, np.uint32).reshape(comp['shape'][0], -1)
+                        sname = name[:-7] + '.scales'
+                        sinfo = li[sname]
+                        sraw = os.pread(src_fd, sinfo['expert_size'], sinfo['abs_offset'] + e * sinfo['expert_stride'])
+                        su16 = np.frombuffer(sraw, np.uint16).reshape(comp['shape'][0], -1)
+                        bname = name[:-7] + '.biases'
+                        binfo = li[bname]
+                        braw = os.pread(src_fd, binfo['expert_size'], binfo['abs_offset'] + e * binfo['expert_stride'])
+                        bu16 = np.frombuffer(braw, np.uint16).reshape(comp['shape'][0], -1)
+                        # Detect source packing: bits = 32 * row_u32 / (groups * group_size)
+                        row_u32 = wu32.shape[1]
+                        num_groups = su16.shape[1]
+                        src_bits = (row_u32 * 32) // (num_groups * 64)
+                        in_dim = num_groups * 64
+                        w_f32 = _dequant_packed_weights(wu32, su16, bu16, in_dim, src_bits)
+                    else:
+                        wu16 = np.frombuffer(wraw, np.uint16)
+                        w_f32 = (wu16.astype(np.uint32) << 16).view(np.float32).reshape(comp['shape'][0], -1)
+                    packed, scales, biases = quantize_affine_3bit(w_f32)
+                    os.pwrite(fd_out, packed.tobytes(), e * EXPERT_SIZE_3BIT + comp['offset'])
+                    # write requantized scales/biases at their 3-bit offsets
+                    soff = next(c['offset'] for c in COMPONENTS_3BIT if c['name'] == name[:-7] + '.scales')
+                    boff = next(c['offset'] for c in COMPONENTS_3BIT if c['name'] == name[:-7] + '.biases')
+                    os.pwrite(fd_out, scales.tobytes(), e * EXPERT_SIZE_3BIT + soff)
+                    os.pwrite(fd_out, biases.tobytes(), e * EXPERT_SIZE_3BIT + boff)
+                    continue
+                # .scales/.biases components are written by the .weight branch above
+                continue
+        os.close(fd_out)
+        print(f"  Layer {layer_idx:2d}: done ({time.monotonic() - t0:.1f}s elapsed)")
+    for fd in fds.values():
+        os.close(fd)
+    print(f"3-bit repack complete -> {output_dir}")
 
 
 def repack_layer(layer_idx, expert_reads, model_path, fds, output_dir, components, expert_size, dry_run=False, fp16_scales=False):
@@ -309,7 +463,7 @@ def main():
                         help='Path to expert_index.json')
     parser.add_argument('--layers', default=None,
                         help='Layer spec: "all", "0-4", "0,5,10" (default: all)')
-    parser.add_argument('--bits', type=int, default=4, choices=[1, 2, 4, 8],
+    parser.add_argument('--bits', type=int, default=4, choices=[1, 2, 3, 4, 8],
                         help='Quantization bits: 1, 2, 4, or 8 (default: 4)')
     parser.add_argument('--dry-run', action='store_true',
                         help='Verify offsets without writing')
@@ -328,6 +482,10 @@ def main():
         components = COMPONENTS_8BIT
         expert_size = EXPERT_SIZE_8BIT
         dirname = "packed_experts_8bit"
+    elif args.bits == 3:
+        components = COMPONENTS_3BIT
+        expert_size = EXPERT_SIZE_3BIT
+        dirname = "packed_experts_3bit"
     elif args.bits == 2:
         components = COMPONENTS_2BIT
         expert_size = EXPERT_SIZE_2BIT
@@ -350,7 +508,9 @@ def main():
     output_dir = os.path.join(model_path, dirname)
 
     # Verify component sizes — auto-detect large model (397B) vs standard (35B)
-    if not verify_component_sizes(expert_reads, components):
+    # (skipped for 3-bit: the source experts are 4-bit/BF16 and get
+    # dequant->requantized, so sizes differ by design)
+    if args.bits != 3 and not verify_component_sizes(expert_reads, components):
         # Try large-model variants
         if args.bits == 4:
             components = COMPONENTS_4BIT_LARGE; expert_size = EXPERT_SIZE_4BIT_LARGE
@@ -376,6 +536,12 @@ def main():
         layers = parse_layers(args.layers)
 
     print(f"Layers to process: {layers[0]}-{layers[-1]} ({len(layers)} layers)")
+
+    if args.bits == 3:
+        # 3-bit requires dequant->requant (source experts are 4-bit or BF16).
+        # Bypasses the raw-copy repack below and the component-size check.
+        repack_all_3bit(expert_reads, model_path, output_dir, layers)
+        return
 
     layer_total_size = NUM_EXPERTS * expert_size
 

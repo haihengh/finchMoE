@@ -78,6 +78,80 @@ static void compare_and_report(const char *label, const char *tname,
     }
 }
 
+// ---- 3-bit expert kernel test (reads packed_experts_3bit/layer_00.bin directly) ----
+static void test_3bit_kernel(id<MTLDevice> device, id<MTLCommandQueue> queue) {
+    const char *path3 = "../models/Qwen3.6-35B-A3B-4bit/packed_experts_3bit/layer_00.bin";
+    int fd3 = open(path3, O_RDONLY);
+    if (fd3 < 0) { printf("SKIP 3-bit test (no packed_experts_3bit yet)\n"); return; }
+    struct stat st3; fstat(fd3, &st3);
+    void *m3 = mmap(NULL, st3.st_size, PROT_READ, MAP_PRIVATE, fd3, 0);
+    id<MTLBuffer> b3 = [device newBufferWithBytesNoCopy:m3 length:st3.st_size options:MTLResourceStorageModeShared deallocator:nil];
+    NSString *src3 = [NSString stringWithContentsOfFile:@"shaders.metal" encoding:NSUTF8StringEncoding error:nil];
+    id<MTLLibrary> lib3 = [device newLibraryWithSource:src3 options:nil error:nil];
+    id<MTLFunction> fn3 = [lib3 newFunctionWithName:@"dequant_matvec_3bit"];
+    id<MTLComputePipelineState> p3 = [device newComputePipelineStateWithFunction:fn3 error:nil];
+
+    // gate_proj [512, 2048]: W off 0 (393216 B), S off 393216, B off 425984, group 64
+    int out_dim = 512, in_dim = 2048, gs = 64;
+    float *inp = malloc(in_dim * sizeof(float));
+    srand(7);
+    for (int i = 0; i < in_dim; i++) inp[i] = ((float)rand() / RAND_MAX - 0.5f);
+    id<MTLBuffer> bx = [device newBufferWithBytes:inp length:in_dim*sizeof(float) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> bo = [device newBufferWithLength:out_dim*sizeof(float) options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:p3];
+    [enc setBuffer:b3 offset:0       atIndex:0];
+    [enc setBuffer:b3 offset:393216  atIndex:1];
+    [enc setBuffer:b3 offset:425984  atIndex:2];
+    [enc setBuffer:bx offset:0       atIndex:3];
+    [enc setBuffer:bo offset:0       atIndex:4];
+    uint32_t o = out_dim, i = in_dim, g = gs;
+    [enc setBytes:&o length:4 atIndex:5];
+    [enc setBytes:&i length:4 atIndex:6];
+    [enc setBytes:&g length:4 atIndex:7];
+    [enc dispatchThreadgroups:MTLSizeMake((out_dim + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    float *gpu_out = malloc(out_dim * sizeof(float));
+    memcpy(gpu_out, [bo contents], out_dim * sizeof(float));
+
+    // CPU reference: 3-bit unpack
+    const uint8_t *W8 = (const uint8_t *)m3;
+    const uint16_t *S3 = (const uint16_t *)((char *)m3 + 393216);
+    const uint16_t *B3 = (const uint16_t *)((char *)m3 + 425984);
+    float *cpu_out = malloc(out_dim * sizeof(float));
+    for (int row = 0; row < out_dim; row++) {
+        double acc = 0;
+        const uint8_t *w_row = W8 + (size_t)row * 768;
+        for (int t = 0; t < 256; t++) {
+            int gg = t / 8;
+            float sc = bf16_to_f32_cpu(S3[row * 32 + gg]);
+            float bi = bf16_to_f32_cpu(B3[row * 32 + gg]);
+            uint32_t pk = (uint32_t)w_row[t*3] | ((uint32_t)w_row[t*3+1] << 8) | ((uint32_t)w_row[t*3+2] << 16);
+            for (int j = 0; j < 8; j++) {
+                acc += (double)((float)((pk >> (3*j)) & 7) * sc + bi) * (double)inp[t*8 + j];
+            }
+        }
+        cpu_out[row] = (float)acc;
+    }
+    double maxd = 0, dot = 0, n1 = 0, n2 = 0;
+    for (int j = 0; j < out_dim; j++) {
+        double d = fabs((double)cpu_out[j] - gpu_out[j]);
+        if (d > maxd) maxd = d;
+        dot += (double)cpu_out[j] * gpu_out[j];
+        n1 += (double)cpu_out[j] * cpu_out[j];
+        n2 += (double)gpu_out[j] * gpu_out[j];
+    }
+    printf("\n--- 3-bit expert kernel (gate [512,2048], real data) ---\n");
+    printf("  CosSim=%.8f MaxDiff=%.2e  %s\n", dot / sqrt(n1 * n2), maxd,
+           (dot / sqrt(n1 * n2) > 0.999 && maxd < 1e-3) ? "PASS" : "FAIL");
+    munmap(m3, st3.st_size);
+    close(fd3);
+    free(inp); free(gpu_out); free(cpu_out);
+}
+
 int main() {
     const char *json_path = "quant_test/model_weights.json";
     const char *bin_path = "quant_test/model_weights.bin";
@@ -215,5 +289,8 @@ int main() {
 
     munmap(mmap_data, st.st_size);
     close(fd);
+
+    // 3-bit expert kernel check (skips gracefully if the repack hasn't run)
+    test_3bit_kernel(device, queue);
     return 0;
 }
