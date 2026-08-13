@@ -5378,6 +5378,11 @@ static void fused_layer_forward(
     double t_layer_start = 0, t0 = 0, t1 = 0;
     if (g_timing_enabled) { t_layer_start = now_ms(); }
     int pred_started = 0;  // set to 1 if we started prediction preads during CMD1_wait
+    // CMD1+CMD2 fusion: for gpu_linear layers, CMD2's encoders (o_proj +
+    // residual_add + norm + routing) are appended to the CMD1 command buffer,
+    // giving ONE commit+wait round trip per layer instead of two.
+    id<MTLCommandBuffer> cmd12 = nil;   // the fused buffer (== cmd1 when fused)
+    int cmd12_fused = 0;
 
     init_layer_scratch();
     if (!layer_cache_built) build_layer_cache(wf);
@@ -5581,20 +5586,28 @@ static void fused_layer_forward(
             gpu_linear_attn = 1;
         }
 
-        [cmd1 commit];
+        if (gpu_linear_attn && cmd1) {
+            // CMD1+CMD2 fusion: defer commit — CMD2's encoders append below.
+            cmd12 = cmd1;
+            cmd12_fused = 1;
+        } else {
+            [cmd1 commit];
+        }
 
         if (g_timing_enabled) { t1 = now_ms(); g_timing.cmd1_submit += t1 - t0; }
 
         // Wait for CMD1 (implies CMD3(N-1) also done, since queue is serial)
         if (g_timing_enabled) { t0 = now_ms(); }
-        [cmd1 waitUntilCompleted];
-        if (!gpu_linear_attn) {
-            gpu_flush_batch_results(g_metal, attn_specs, num_attn_specs);
+        if (!cmd12_fused) {
+            [cmd1 waitUntilCompleted];
+            if (!gpu_linear_attn) {
+                gpu_flush_batch_results(g_metal, attn_specs, num_attn_specs);
+            }
         }
         if (g_timing_enabled) { t1 = now_ms(); g_timing.cmd1_wait += t1 - t0; }
 
         // Debug: check fast-path buffers for early layers
-        if (g_debug_layers && layer_idx <= 2) {
+        if (!cmd12_fused && g_debug_layers && layer_idx <= 2) {
             float *fq = (float *)[g_metal->batch_out[0] contents];
             float *fg = (float *)[g_metal->batch_out[6] contents];
             float *fi = (float *)[g_metal->buf_input contents];
@@ -5604,21 +5617,27 @@ static void fused_layer_forward(
 
         // Now CMD3(N-1) is done. Read back hidden state from GPU.
         if (g_timing_enabled) { t0 = now_ms(); }
-        finalize_deferred_experts();  // reads buf_moe_hidden -> hidden
+        if (!cmd12_fused) {
+            finalize_deferred_experts();  // reads buf_moe_hidden -> hidden
 
-        // Start predicted expert preads AFTER CMD1_wait.
-        // CMD3(N-1) is guaranteed done (serial queue), so buf_B is safe to overwrite.
-        // Predictions overlap with CPU attn + CMD2 + routing (~0.6ms head start).
-        // Predicted experts that hit page cache (same as previous token) complete in ~0.1ms.
-        if (g_pred_enabled && g_pred_generating && g_pred_valid && packed_fd >= 0 &&
-            g_metal->buf_multi_expert_data_B[0] && g_pred_count[layer_idx] > 0) {
-            async_pread_start(packed_fd, g_pred_experts[layer_idx],
-                              g_pred_count[layer_idx],
-                              g_metal->buf_multi_expert_data_B, mmap_base);
-            pred_started = 1;
+            // Start predicted expert preads AFTER CMD1_wait.
+            // CMD3(N-1) is guaranteed done (serial queue), so buf_B is safe to overwrite.
+            // Predictions overlap with CPU attn + CMD2 + routing (~0.6ms head start).
+            // Predicted experts that hit page cache (same as previous token) complete in ~0.1ms.
+            if (g_pred_enabled && g_pred_generating && g_pred_valid && packed_fd >= 0 &&
+                g_metal->buf_multi_expert_data_B[0] && g_pred_count[layer_idx] > 0) {
+                async_pread_start(packed_fd, g_pred_experts[layer_idx],
+                                  g_pred_count[layer_idx],
+                                  g_metal->buf_multi_expert_data_B, mmap_base);
+                pred_started = 1;
+            }
+            // Set up residual for CMD2 (residual = hidden before this layer's attention)
+            cpu_vec_copy(residual, hidden, HIDDEN_DIM);
         }
-        // Set up residual for CMD2 (residual = hidden before this layer's attention)
-        cpu_vec_copy(residual, hidden, HIDDEN_DIM);
+        // When fused (cmd12_fused): finalize + residual happen AFTER the single
+        // commit+wait (in the CMD2 block); the GPU residual_add reads
+        // buf_moe_hidden directly (== hidden before attention) instead of
+        // buf_residual, avoiding the CPU round trip.
         if (g_timing_enabled) { t1 = now_ms(); g_timing.deferred_cpu += t1 - t0; }
 
         // No input_norm needed — CMD3 already computed it into buf_input.
@@ -5770,7 +5789,13 @@ static void fused_layer_forward(
                 gpu_linear_attn = 1;
             }
 
-            [cmd1 commit];
+            if (gpu_linear_attn && cmd1) {
+                // CMD1+CMD2 fusion: defer commit — CMD2's encoders append below.
+                cmd12 = cmd1;
+                cmd12_fused = 1;
+            } else {
+                [cmd1 commit];
+            }
         } else {
             for (int i = 0; i < num_attn_specs; i++) {
                 BatchMatvecSpec *s = &attn_specs[i];
@@ -5786,16 +5811,17 @@ static void fused_layer_forward(
         }
         if (g_timing_enabled) { t1 = now_ms(); g_timing.cmd1_submit += t1 - t0; }
 
-        // Wait for CMD1
+        // Wait for CMD1 (skipped when fused — the single wait is in the CMD2 block)
         if (g_timing_enabled) { t0 = now_ms(); }
-        if (cmd1) {
+        if (cmd1 && !cmd12_fused) {
             [cmd1 waitUntilCompleted];
             if (!gpu_linear_attn) {
                 gpu_flush_batch_results(g_metal, attn_specs, num_attn_specs);
             }
         }
         // Stage dump for layer-0 cross-validation (env-gated)
-        if (getenv("FINCHMOE_DUMP_STAGES") && layer_idx == 0 && pos == 0) {
+        // NOTE: when fused, the dump happens after the CMD2-block wait instead.
+        if (!cmd12_fused && getenv("FINCHMOE_DUMP_STAGES") && layer_idx == 0 && pos == 0) {
             static FILE *sf1 = NULL;
             if (!sf1) sf1 = fopen("/tmp/stage_dump.bin", "wb");
             if (sf1) {
@@ -6309,7 +6335,7 @@ static void fused_layer_forward(
 
         attn_out_for_oproj = NULL;
 
-        id<MTLCommandBuffer> cmd_fused = [g_metal->queue commandBuffer];
+        id<MTLCommandBuffer> cmd_fused = cmd12 ? cmd12 : [g_metal->queue commandBuffer];
 
         // ---- GPU attention dispatches (only for full-attn layers with GPU path) ----
         if (gpu_attn_fuse) {
@@ -6461,12 +6487,18 @@ static void fused_layer_forward(
             [enc endEncoding];
         }
 
-        // ---- Enc 2: residual_add (buf_output + buf_residual -> buf_h_mid) ----
+        // ---- Enc 2: residual_add (buf_output + residual -> buf_h_mid) ----
         {
             id<MTLComputeCommandEncoder> enc = [cmd_fused computeCommandEncoder];
             uint32_t dim = HIDDEN_DIM;
             [enc setComputePipelineState:g_metal->residual_add];
-            [enc setBuffer:g_metal->buf_residual offset:0 atIndex:0];  // a = residual
+            // Fused fast path: read buf_moe_hidden (== hidden before attention)
+            // directly from the GPU — the CPU memcpy of buf_residual would
+            // require the (now-skipped) CMD1 wait. GPU-side ordering is
+            // guaranteed by the serial queue (CMD3(N-1) precedes this buffer).
+            id<MTLBuffer> resid_src = (cmd12_fused && prev_gpu_combined)
+                ? g_metal->buf_moe_hidden : g_metal->buf_residual;
+            [enc setBuffer:resid_src                    offset:0 atIndex:0];  // a = residual
             [enc setBuffer:g_metal->buf_output   offset:0 atIndex:1];  // b = o_proj result
             [enc setBuffer:g_metal->buf_h_mid    offset:0 atIndex:2];  // out = h_mid
             [enc setBytes:&dim length:4 atIndex:3];
@@ -6523,10 +6555,33 @@ static void fused_layer_forward(
 
         if (g_timing_enabled) { t1 = now_ms(); g_timing.cmd2_encode += t1 - t0; }
 
-        // ---- Single commit+wait for all 8 encoders ----
+        // ---- Single commit+wait for all encoders ----
         if (g_timing_enabled) { t0 = now_ms(); }
         [cmd_fused commit];
         [cmd_fused waitUntilCompleted];
+
+        // Fused fast path: the deferred finalize now runs after the single
+        // wait (CMD3(N-1) is done — serial queue). residual stays CPU-side
+        // for the next layer's non-fused paths / CPU combine.
+        if (cmd12_fused && prev_gpu_combined) {
+            finalize_deferred_experts();  // reads buf_moe_hidden -> hidden
+            cpu_vec_copy(residual, hidden, HIDDEN_DIM);
+        }
+        // Fused layer-0 stage dump part 1 (CMD1 side was skipped)
+        if (cmd12_fused && getenv("FINCHMOE_DUMP_STAGES") && layer_idx == 0 && pos == 0) {
+            static FILE *sf1f = NULL;
+            if (!sf1f) sf1f = fopen("/tmp/stage_dump.bin", "wb");
+            if (sf1f) {
+                fwrite([g_metal->batch_out[0] contents], sizeof(float), LINEAR_CONV_DIM, sf1f);    // qkv 8192
+                fwrite([g_metal->batch_out[1] contents], sizeof(float), LINEAR_TOTAL_VALUE, sf1f); // z 4096
+                fwrite([g_metal->batch_out[2] contents], sizeof(float), LINEAR_NUM_V_HEADS, sf1f); // beta 32
+                fwrite([g_metal->batch_out[3] contents], sizeof(float), LINEAR_NUM_V_HEADS, sf1f); // alpha 32
+                fwrite([g_metal->buf_conv_output contents], sizeof(float), LINEAR_CONV_DIM, sf1f); // conv 8192
+                fwrite([g_metal->buf_delta_output contents], sizeof(float), LINEAR_TOTAL_VALUE, sf1f); // delta out 4096
+                fwrite([g_metal->batch_out[6] contents], sizeof(float), LINEAR_TOTAL_VALUE, sf1f); // gated 4096
+                fflush(sf1f);
+            }
+        }
 
         // Read back results
         gpu_flush_batch_results(g_metal, moe_specs, 4);
