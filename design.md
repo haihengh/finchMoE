@@ -1,202 +1,176 @@
 # FinchMoE Design Document
 
+*Last updated 2026-08-13 — reflects commits through 753dde3.*
+
 ## 1. Overview
 
-FinchMoE is a C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon. It streams quantized expert weights from SSD through Metal compute kernels.
-
-**Current (2026-08-11): 3.88 tok/s on M4 16GB, ~6 GB RAM, 4-bit experts + BF16 non-experts.**
-**Target: 12 tok/s on M4, ~2 GB RAM, matching turbo-fieldfare's efficiency.**
+FinchMoE is a C/Metal inference engine for Qwen 3.6 35B A3B on Apple
+Silicon. The engine is **bit-exact** against an independent numpy
+reference of the GDN chain (CosSim 1.000000 per stage) and runs at
+**11.4-12.4 tok/s** on M4 with **1.95 GB weights** and ~2.8 GB total RAM
+at 8k context. See [finchmoe/OPTIMIZATION_PLAN.md](finchmoe/OPTIMIZATION_PLAN.md)
+for the commit-by-commit progress log and open issues.
 
 ## 2. Model Architecture
 
-```
-Qwen 3.6 35B A3B: 35B total parameters, 3B active per token
-40 layers: 30× GatedDeltaNet (linear attention) + 10× full attention
-Full attention at layers 3,7,11,15,19,23,27,31,35,39
-256 experts/layer, 8 active per token + 1 shared expert (always active)
-Hidden dim: 2048, MoE intermediate: 512, Shared intermediate: 512
-Vocab: 248,320, Head dim: 256, 16 Q-heads, 2 KV-heads (8:1 GQA)
-RoPE: theta=10M, partial rotary 0.25 (64 of 256 dims)
-GDN: 32 V-heads, 16 K-heads, key_dim=128, value_dim=128, conv kernel=4
-```
+| Parameter | Value |
+|-----------|-------|
+| Layers | 40 (30 linear-attention GatedDeltaNet + 10 full attention, every 4th) |
+| Hidden dim | 2048 |
+| Attention | 16 Q heads, 2 KV heads, head_dim 256 (GQA) |
+| GDN | 16 K heads / 32 V heads, key/value dim 128, conv kernel 4 |
+| MoE | 256 routed experts, K=8 active + 1 shared expert, intermediate 512 |
+| Vocab | 248,320 tokens |
 
-## 3. Weight Inventory (Current Production)
+## 3. Weight Inventory (Current Production — quant_self/)
 
-### Non-Expert Weights: model_weights.bin (mmap'd, 4.96 GB)
+| Component | Format | Size |
+|-----------|--------|------|
+| GDN qkv/z/out_proj | 4-bit affine, group 64 (the default tier; `FINCHMOE_GDN8=1` → 8-bit) | |
+| Attention Q/K/V/O | 4-bit affine, group 64 | |
+| beta/alpha gates, norms, conv, routing gate | BF16 (kept) | |
+| Embeddings + lm_head | 8-bit, group 64 | |
+| **Total non-expert** | | **1.95 GB** |
+| Routed experts | **3-bit** affine, group 64 (8 values/24 bits, 1.31 MB/expert) | 13 GB disk, streamed |
 
-| Component | Tensors | Size | Format |
-|-----------|---------|------|--------|
-| Embeddings | 1 | 0.97 GB | BF16 (uint16) |
-| lm_head | 1 | 0.97 GB | BF16 (uint16) |
-| Attention Q/K/V/O (full attn layers) | 40 | 0.52 GB | BF16 |
-| GDN projections (linear attn layers) | 300 | 2.10 GB | BF16 |
-| Shared experts (gate/up/down × 40) | 120 | 0.26 GB | BF16 |
-| Routing gates (per-layer) | 40 | 0.04 GB | BF16 |
-| Norms (input + post-attn × 80) | 80 | 0.01 GB | BF16 |
-| MTP head (optional) | 19 | 0.05 GB | BF16 |
-| **Total** | **632** | **4.96 GB** | All BF16 |
+Bit-width is unambiguous from manifest shapes (row_u32 == groups×16 → 8-bit,
+== groups×8 → 4-bit); the engine detects it at cache-build time
+(`tensor_bits()`).
 
-**Critical fact**: Non-expert weights are unquantized. turbo-fieldfare's equivalent is 1.35 GB (4-bit embeddings, 8-bit router, 4-bit attention). Our common model is **3.7× larger**. Quantizing to 4-bit/8-bit would save ~3.3 GB.
-
-### Expert Weights: packed_experts/layer_NN.bin (per-layer files, 17 GB total)
-
-256 experts × 40 layers. Each expert:
-- gate_proj: [512, 256] U32 packed (4-bit, 8 vals/uint32)
-- gate scales/biases: [512, 32] BF16 each
-- up_proj: [512, 256] U32 packed
-- up scales/biases: [512, 32] BF16 each
-- down_proj: [2048, 64] U32 packed
-- down scales/biases: [2048, 8] BF16 each
-- **Total per expert**: 1,769,472 bytes (4-bit), 983,040 bytes (2-bit)
-
-Streamed on demand via `pread` with F_NOCACHE for cold reads, OS page cache for warm.
-
-## 4. Inference Pipeline (Per Token)
+## 4. Inference Pipeline (Per Token, per Layer)
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ CMD1: Attention Projections (GPU, 1 cmd buffer, 3-9 encoders)   │
-│   Full attn: Q[16384], K[512], V[512]  (3 BF16 matvecs)        │
-│   Linear:    QKV[12288], Z[4096], β[32], α[32] (4 matvecs)     │
-│   + GPU linear attn fusion: conv1d→norm→decay→recur→gate (5)   │
-│   Commit + Wait                                                  │
-├─────────────────────────────────────────────────────────────────┤
-│ CPU: Attention Compute                                           │
-│   Full: RMSNorm(Q,K) + RoPE + KV cache update + GPU scores      │
-│   Linear: Conv1d + RMSNorm(q,k) + GDN recurrence + gated_norm   │
-│   (~10 ms)                                                       │
-├─────────────────────────────────────────────────────────────────┤
-│ CMD2: O-Projection + Residual + Norm + Routing (GPU, 8-12 enc)  │
-│   o_proj → residual_add → rms_norm → gate/routing/shared projs  │
-│   + optional GPU attention (scores+softmax+values+sigmoid)      │
-│   Commit + Wait                                                  │
-├─────────────────────────────────────────────────────────────────┤
-│ CPU: Routing + Parallel I/O                                      │
-│   softmax(gate_scores[256]) → topK → normalize_weights          │
-│   Parallel pread: K experts from SSD (GCD dispatch_group)        │
-│   (~45 ms, dominated by SSD random read IOPS)                   │
-├─────────────────────────────────────────────────────────────────┤
-│ CMD3: Expert Forwards + Combine (GPU, K×2+4 enc, ASYNC commit)  │
-│   Per expert: fused_gate_up_swiglu + down_proj                  │
-│   Shared expert: swiglu + down_proj + gate weighting             │
-│   GPU-side combine: weighted_sum + residual + norm → next layer │
-│   NO wait — runs concurrently with next layer's CMD1            │
-└─────────────────────────────────────────────────────────────────┘
+CMD1+CMD2 — ONE command buffer, ONE commit+wait:
+  [1] attention projections: qkv/z/alpha/beta (4 matvecs, v3/8-bit/BF16 per tensor)
+  [2] fused_gdn_full: conv1d + qk-norm + decay/beta + delta recurrence +
+      gated norm — ONE kernel, zero intermediate global round trips
+  [3] o_proj (v3 tiled / 8-bit / BF16 by tensor bits)
+  [4] residual_norm_fused: h_mid = residual + o_proj AND h_post = rms_norm(h_mid)
+      — ONE kernel; fast path reads buf_moe_hidden directly as the residual
+      (GPU-ordered via the serial queue, no CPU memcpy)
+  [5] routing_batch_fused: gate(8-bit) + sg/su(4-bit) + seg(8-bit) — ONE
+      mixed-bits kernel
+CPU: softmax + top-K + parallel pread of K experts (3-bit, 1.31 MB each)
+CMD3 — ASYNC (deferred, overlaps the next layer):
+  K expert forwards + shared SwiGLU/down + moe_combine_residual
+  → buf_moe_hidden (next layer's input norm + residual source)
 ```
 
-**Deferred CMD3**: Expert compute is launched async. At the start of the next layer, finalize_deferred() waits for GPU completion and reads back the combined hidden state. The GPU queue serializes CMD3(layer N-1) → CMD1(layer N), so no explicit synchronization is needed.
+**Key mechanisms**
+- **One round trip per layer** (CMD1+CMD2 fused; CMD3 deferred) — the
+  structural win worth ~0.4 ms/layer.
+- **Fused GDN kernel** (`fused_gdn_full`): one threadgroup per v-head
+  computes its 384 conv elements into threadgroup memory, normalizes q/k
+  in place, and runs the recurrence + gated norm without touching global
+  memory for intermediates.
+- **Weight memory bandwidth is the fused-wait wall**: ~42 MB/layer at
+  8-bit GDN vs ~21 MB at 4-bit GDN — the 4-bit tier is the +25% speed win
+  (measured). Dispatch count is NOT the wall (proven by neutral
+  micro-fusions).
+- **3-bit experts**: 8 values per 24-bit triplet; byte-addressed tiled
+  kernel. 9.09 tok/s with 4-bit-quality output; beats 2-bit on speed too
+  (page-cache friendliness).
 
-**GPU-side combine**: For non-last layers, CMD3 computes weighted sum of expert outputs + shared expert + residual → rms_norm → buf_input. This eliminates the CPU round-trip (0.83 ms/layer saved).
+## 5. Memory Layout (8k context)
 
-## 5. Memory Layout
+| Component | Size |
+|-----------|------|
+| Weights (mmap + zero-copy Metal wrap) | 1.95 GB |
+| CPU KV (10 full-attn layers, K+V fp32, `-N`) | 0.34 GB @ 8k / 10.7 GB @ 256k ⚠️ |
+| GPU KV (`-Q`, default 8192) | 0.34 GB |
+| Delta-net state (30 × 32×128×128 fp32) | 63 MB |
+| Expert buffers (16 × 2 MB-aligned) | 64 MB |
+| **Peak GPU (budget report)** | **2.25 GB** |
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ model_weights.bin (mmap'd, 4.96 GB)                             │
-│   → Wrapped as Metal buffer (zero-copy, same physical pages)    │
-│   → Read directly by GPU kernels (gemv_bf16 for BF16 weights)   │
-├─────────────────────────────────────────────────────────────────┤
-│ packed_experts/layer_NN.bin (mmap'd, 17 GB virtual)             │
-│   → Tiered I/O: F_NOCACHE for cold, page cache for warm         │
-│   → 8 parallel pread threads via GCD                             │
-├─────────────────────────────────────────────────────────────────┤
-│ GPU Buffers (Metal, ~449 MB allocated)                          │
-│   → 10 KV caches: 16.8 MB each (2 KV heads × 256 dim × 8192)   │
-│   → 30 GDN states: 2.1 MB each (32×128×128 floats)              │
-│   → 16 expert data slots: 2 MB each (2MB-aligned DMA)           │
-│   → Batch output slots: 16 KB each (16 slots)                   │
-│   → lm_head output: 970 KB (VOCAB_SIZE floats)                  │
-├─────────────────────────────────────────────────────────────────┤
-│ CPU Scratch (~2 MB)                                             │
-│   → Per-layer: normed, residual, attn_proj, h_post, h_mid, etc │
-└─────────────────────────────────────────────────────────────────┘
+256k context does NOT fit 16 GB (10.7 GB CPU KV alone) — disk-backed KV
+is a future item. The startup budget report only counts the GPU side;
+CPU KV is not budgeted (known gap).
 
-Physical RAM: ~6 GB (GPU buffers always resident, mmap pages faulted in on demand)
-After non-expert quantization: ~2.5 GB (1.7 GB weight file + 0.45 GB GPU + scratch)
-```
+## 6. GPU Kernels (shaders.metal)
 
-## 6. GPU Kernels
+| Kernel | Purpose | Notes |
+|--------|---------|-------|
+| `dequant_matvec_4bit_v3` | 4-bit dequant matvec | 8 rows/TG × 256 threads, x_shared cache |
+| `dequant_matvec_8bit` | 8-bit dequant matvec | same tiled structure |
+| `dequant_matvec_3bit` | 3-bit dequant matvec | byte-addressed 24-bit triplets |
+| `dequant_matvec_2bit` / `1bit` | low-bit experts | |
+| `dequant_matvec_4bit_fast` | 1 row/TG × 64 threads | in_dim > 4096 only |
+| `fused_gdn_full` | conv1d+qk-norm+decay+delta+gated | ONE kernel, threadgroup-local |
+| `fused_gdn_core` | decay+delta+gated (fallback chain) | |
+| `residual_norm_fused` | residual_add + rms_norm | writes buf_h_mid + buf_input |
+| `routing_batch_fused` | gate+sg+su+seg in one mixed-bits dispatch | section descriptors |
+| `moe_combine_residual` | expert combine + residual + norm | reads buf_moe_hidden residual |
+| `attn_scores/softmax/values_batched` | GPU full attention (kv ≥ 32) | |
+| `gated_delta_net_step`, `conv1d_step`, `rms_norm_qk` | fallback chain pieces | |
 
-| Kernel | Purpose | Grid | Threads | Notes |
-|--------|---------|------|---------|-------|
-| `gemv_bf16_x2` | BF16 matvec, 2 rows/tg | out_dim/2 TG | 256 | 128-bit uint4 loads, interleaved |
-| `dequant_matvec_4bit_v3` | 4-bit affine dequant matvec | out_dim/8 TG | 256 | 8 rows/tg, shared-mem x-cache |
-| `dequant_matvec_2bit` | 2-bit affine dequant | out_dim/8 TG | 256 | 16 vals/uint32 |
-| `dequant_matvec_1bit` | 1-bit affine dequant | out_dim/32 TG | 256 | 32 vals/uint32 |
-| `dequant_matvec_8bit` | 8-bit affine dequant | out_dim/4 TG | 256 | 4 vals/uint32 |
-| `fused_gate_up_swiglu` | Gate+up+SiLU fused | out_dim/256 TG | 256 | 1 dispatch instead of 3 |
-| `swiglu_fused` | SiLU(gate)×up | out_dim/256 TG | 256 | Downstream of gate+up |
-| `moe_combine_residual` | Expert combine+residual+norm | dim/256 TG | 256 | GPU-side combine |
-| `gated_delta_net_step` | GDN recurrence | 32 TG | 128 | One per V-head |
-| `conv1d_step` | Depthwise conv + SiLU | dim/256 TG | 256 | Kernel=4 |
-| `rms_norm_sum_sq` | Sum of squares reduce | 1 TG | 256 | Pre-reduction |
-| `rms_norm_apply_bf16` | Apply norm with BF16 weights | dim/256 TG | 256 | Uses pre-computed sum_sq |
-| `rms_norm_qk` | Per-head Q/K norm | 16 TG | 128 | Linear attention |
-| `compute_decay_beta` | g_decay + beta_gate | 1 TG | 32 | GDN parameters |
-| `gated_rms_norm` | norm(out) ⊙ silu(z) × w | 32 TG | 128 | GDN output norm |
-| `attn_scores_batched` | Q @ K^T | seq×16 TG | 256 | Batched GQA |
-| `attn_softmax_batched` | Softmax over seq | 16 TG | 256 | Per-head |
-| `attn_values_batched` | Softmax @ V | 16×256 TG | 256 | Weighted sum |
+All kernels verified against CPU references (CosSim 1.0); the layer-0
+chain verified end-to-end by `debug_gdn_reference.py`.
 
-All kernels compiled at runtime from `shaders.metal`. Verified with finchTool: CosSim=1.0, MaxDiff<1e-4 against CPU reference.
+## 7. Per-Layer Timing (3-bit experts + 4-bit GDN, K=8, M4)
 
-## 7. Per-Layer Timing (4-bit, K=8, warm cache, M4 16GB)
+| Phase | ms/layer | Bound by |
+|-------|----------|----------|
+| Fused GPU wait (CMD1+CMD2) | 1.33 | weight memory bandwidth (~21 MB/layer) |
+| Expert I/O | 0.94 | SSD pread (3-bit, page-cached) |
+| CPU routing + readbacks | ~0.15 | trivial |
+| **Total** | **~2.5** | → ~11.4 tok/s |
 
-| Phase | ms | Bound By |
-|-------|-----|----------|
-| CMD1 (attn projections) | 90 | GPU dispatch overhead (5-9 encoders) |
-| CPU attention compute | 10 | Memory bandwidth |
-| CMD2 (o_proj+norm+routing) | 60 | GPU dispatch (8-12 encoders) |
-| CPU routing + I/O | 45 | SSD random read IOPS |
-| CMD3 (expert forwards, async) | 30 | GPU compute |
-| CMD3 deferred wait/readback | 15 | GPU sync + CPU copy |
-| Overhead | 10 | State management |
-| **Total** | **260** | → 3.85 tok/s |
+Prefill = decode speed (~12 tok/s; every prompt token runs the serial
+40-layer pipeline) — batched GPU prefill is the agentic-workload priority.
 
 ## 8. Key Design Decisions
 
-1. **BF16 non-experts**: Currently kept as BF16 because CPU BLAS is 400× faster than CPU 4-bit dequant, and GPU path had a hang bug for large tensors. turbo-fieldfare proves GPU 4-bit dequant works at scale — this is the #1 optimization priority.
+1. **Quantized everything** (4-bit GDN tier + 3-bit experts default):
+   the community-model failures were calibration issues, not bit-width;
+   our affine quantizer is coherent at these widths. 8-bit GDN tier
+   available via `FINCHMOE_GDN8=1` (quality-safe fallback).
 
-2. **GPU-side combine (CMD3)**: Eliminates CPU expert-output readback per layer. Saved ~0.83 ms/layer. turbo-fieldfare does the same.
+2. **3-bit experts beat 2-bit on speed AND quality**: 1.31 MB/expert
+   page-caches better than 0.98 MB suggests, with near-4-bit quality.
 
-3. **Deferred CMD3**: Expert compute launched async, overlaps with next layer's attention projections. GPU queue serialization ensures correctness without explicit fences.
+3. **GPU-side residual from buf_moe_hidden**: the fast path's
+   residual_add reads the previous layer's combine output directly on
+   GPU — eliminates the CPU round trip and enables the single
+   commit+wait per layer.
 
-4. **K=8 default**: Model trained with 8 experts/token. K=2 was a performance shortcut that produced garbage. Quality > speed.
+4. **K=8 always**: the model is trained for 8 experts/token; K=2
+   produces garbage (historical trap documented in the optimization log).
 
-5. **GPU lm_head**: gemv_bf16_x2 kernel reads BF16 weights directly from Metal buffer. Avoids 2 GB F32 cache allocation that caused OOM crashes.
+5. **No custom expert cache**: OS page cache wins; temporal prediction
+   (--predict) measured net-negative (~50% hits, overhead > savings).
 
-6. **Fused GDN pipeline**: Optional GPU path fuses conv1d → norm → decay → recurrence → gated_norm into CMD1 (5 extra encoders). Falls back to CPU for correctness when needed.
+6. **Think budget (-B)**: forces `</think>` after N reasoning tokens;
+   needed because story/edge prompts can loop in the thinking phase.
 
-7. **No custom expert cache**: OS page cache outperforms custom LRU/LFU schemes for our workload. turbo-fieldfare disagrees (uses LFU with 16 slots/layer) — worth revisiting.
+7. **Weights must come from the pristine BF16 base**: the current build
+   quantized the marginal `2bit-dense-v2` variant, whose edge-prompt
+   behavior degrades (repetition loops) while llama.cpp Q4_K_M of the
+   clean base handles the same prompts correctly. Re-quantizing from
+   `Qwen3.6-35B-A3B-bf16` is Priority 0.
 
 ## 9. Optimization History
 
-| Step | ms/layer | tok/s | What |
-|------|----------|-------|------|
-| Baseline (8-bit, K=4) | 4.93 | 5.1 | Starting point |
-| Fused expert kernel | 4.37 | 5.7 | gate+up+swiglu in 1 dispatch |
-| 4-bit experts | 3.81 | 6.6 | Halved I/O volume |
-| 2-bit experts (K=4) | 2.74 | 7.5 | Halved again |
-| **K=2 default** | **2.30** | **8.3** | Wrong — produces garbage |
-| **K=8 fix** | **6.50** | **3.9** | Correct, 2.1× slower |
+| Step | tok/s | What |
+|------|-------|------|
+| Roadmap baseline (4-bit exp, K=8) | 3.85 | reference point |
+| Self-quantized weights (8-bit GDN tier) | 6.90 | Phase 1 quality fix |
+| CMD1+CMD2 single round trip | 7.32 | structural sync win |
+| 3-bit experts | 9.09 | +32%; quality held |
+| **4-bit GDN tier (default)** | **11.4-12.4** | bandwidth halved on the dominant traffic |
+| micro-fusions (residual+norm, routing batch) | neutral | proved dispatch count ≠ the wall |
+| full GDN fusion | neutral | proved intermediates ≠ the wall |
 
-The optimization history reveals a painful truth: the 8.3 tok/s headline number was achieved by silently breaking the model. Real speed at K=8 is 3.9 tok/s. The path to 12 tok/s requires genuine optimization, not parameter shortcuts.
+## 10. Future
 
-## 10. Future: Road to 12 tok/s @ 2 GB
-
-See [`finchmoe/OPTIMIZATION_PLAN.md`](finchmoe/OPTIMIZATION_PLAN.md) for the complete phased plan.
-
-**Phase 1**: Non-expert quantization (4.96 GB → 1.7 GB, ~4 tok/s) — CRITICAL PATH  
-**Phase 2**: 2-bit experts default (I/O halved, ~6 tok/s) — WORKING, needs validation  
-**Phase 3**: GPU pipeline (fuse CMD1+CMD2, ICB, MTP → ~9-12 tok/s)  
-**Phase 4**: Advanced (single-kernel multi-expert, KV FP16 → beyond 12 tok/s)
+See [finchmoe/OPTIMIZATION_PLAN.md](finchmoe/OPTIMIZATION_PLAN.md). In order:
+1. Requant from pristine `Qwen3.6-35B-A3B-bf16` (edge-prompt quality).
+2. Batched GPU prefill (agentic workloads; 5-10× PP target).
+3. Server multi-turn session fix.
+4. MTP speculative decoding (α-gated; forward-math verification first).
 
 ## 11. Hardware Targets
 
-| Device | RAM | Current Speed | Target Speed |
-|--------|-----|---------------|-------------|
-| M4 Mac mini 16GB | 16 GB | 3.9 tok/s (4-bit, K=8) | **12 tok/s** |
-| M1 Mac mini 8GB | 8 GB | TBD | 6-8 tok/s (estimated) |
-| iPhone A18 Pro | 6-8 GB | Not yet ported | 3-5 tok/s (target) |
-
-All measurements with Samsung 990 Plus NVMe in Thunderbolt 4 enclosure (~2.8 GB/s sequential, ~800 MB/s random).
+| Device | RAM | Current | Target |
+|--------|-----|---------|--------|
+| M4 Mac mini 16 GB | 16 GB | **11.4-12.4 tok/s** | 12-15 tok/s (MTP) |
+| iPhone | 8 GB | — | 3-5 tok/s (all-4-bit, SSD streaming) |
