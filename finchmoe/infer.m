@@ -337,7 +337,7 @@ static int g_expert_freq[NUM_LAYERS][NUM_EXPERTS];  // activation count per (lay
 static int g_freq_tracking = 0;  // enabled by --freq flag
 static int g_use_1bit = 0;       // enabled by --1bit flag: use packed_experts_1bit/ + 1-bit kernel
 static int g_use_2bit = 0;       // enabled by --2bit flag: use packed_experts_2bit/ + 2-bit kernel
-static int g_use_3bit = 0;       // enabled by --3bit flag: use packed_experts_3bit/ + 3-bit kernel
+static int g_use_3bit = 1;       // DEFAULT: 3-bit experts (9.1 tok/s, near-4bit quality); --2bit/--4bit/--8bit override
 static int g_use_int8 = 0;       // enabled by --int8-experts flag: use 8-bit packed experts
 static int g_cache_telemetry_enabled = 0;  // enabled by --cache-telemetry flag
 static int g_think_budget = 2048; // max thinking tokens before force-emitting </think>
@@ -8873,7 +8873,8 @@ static void print_usage(const char *prog) {
     printf("  --freq               Enable expert frequency tracking + analysis\n");
     printf("  --cache-telemetry    Report cold vs eviction misses and reuse distance\n");
     printf("  --2bit               Use 2-bit quantized experts (packed_experts_2bit/)\n");
-    printf("  --3bit               Use 3-bit quantized experts (packed_experts_3bit/)\n");
+    printf("  --3bit               Use 3-bit quantized experts (packed_experts_3bit/) [DEFAULT]\n");
+    printf("  --4bit               Use 4-bit quantized experts (packed_experts/)\n");
     printf("  --int8-experts       Use 8-bit quantized experts (packed_experts_8bit/)\n");
     printf("  --gpu-linear         Alias for the fused GPU delta-net path (default)\n");
     printf("  --predict            Enable temporal expert prediction (prefetch during CMD1_wait)\n");
@@ -8989,6 +8990,7 @@ int main(int argc, char **argv) {
             {"cache-telemetry", no_argument,     0, 'E'},
             {"2bit",          no_argument,       0, '2'},
             {"3bit",          no_argument,       0, '3'},
+            {"4bit",          no_argument,       0, '4'},
             {"int8-experts",  no_argument,       0, '8'},
             {"gpu-linear",    no_argument,       0, 'G'},
             {"think-budget",  required_argument, 0, 'B'},
@@ -9014,7 +9016,7 @@ int main(int argc, char **argv) {
         };
 
         int c;
-        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:N:Q:e:o:I:lHLSTFE23GhXUY:VJ", long_options, NULL)) != -1) {
+        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:N:Q:e:o:I:lHLSTFE234GhXUY:VJ", long_options, NULL)) != -1) {
             switch (c) {
                 case 'm': model_path = optarg; model_path_from_user = 1; break;
                 case 'w': weights_path = optarg; break;
@@ -9031,9 +9033,10 @@ int main(int argc, char **argv) {
                 case 'T': g_timing_enabled = 1; break;
                 case 'F': g_freq_tracking = 1; break;
                 case 'E': g_cache_telemetry_enabled = 1; break;
-                case '2': g_use_2bit = 1; break;
-                case '3': g_use_3bit = 1; break;
-                case '8': g_use_int8 = 1; break;
+                case '2': g_use_2bit = 1; g_use_3bit = 0; g_use_int8 = 0; g_use_1bit = 0; break;
+                case '3': g_use_3bit = 1; g_use_2bit = 0; g_use_int8 = 0; g_use_1bit = 0; break;
+                case '4': g_use_3bit = 0; g_use_2bit = 0; g_use_int8 = 0; g_use_1bit = 0; break;
+                case '8': g_use_int8 = 1; g_use_3bit = 0; g_use_2bit = 0; g_use_1bit = 0; break;
                 case 'G': gpu_linear_attn_enabled = 1; break;
                 case 'D': g_pred_enabled = 1; break;
                 case 'J': g_use_mtp = 1; break;
@@ -9283,15 +9286,15 @@ int main(int argc, char **argv) {
             printf("\n");
         }
 
-        // ---- Auto-detect expert format ----
-        if (!g_use_1bit && !g_use_2bit && !g_use_int8) {
+        // ---- Auto-detect expert format (only when no explicit flag; 3-bit is the default) ----
+        if (!g_use_1bit && !g_use_2bit && !g_use_3bit && !g_use_int8) {
             char probe[1024];
             // Check 1-bit first (smallest, fastest)
             snprintf(probe, sizeof(probe), "%s/packed_experts_1bit/layer_00.bin", model_path);
             int pfd1 = open(probe, O_RDONLY);
             if (pfd1 >= 0) { close(pfd1); g_use_1bit = 1; printf("[auto] Using 1-bit experts\n"); }
         }
-        if (!g_use_1bit && !g_use_2bit && !g_use_int8) {
+        if (!g_use_1bit && !g_use_2bit && !g_use_3bit && !g_use_int8) {
             char probe[1024];
             // Check 8-bit
             snprintf(probe, sizeof(probe), "%s/packed_experts_8bit/layer_00.bin", model_path);
@@ -9317,6 +9320,19 @@ int main(int argc, char **argv) {
         }
         if (g_use_int8) printf("[auto] Using 8-bit experts\n");
         if (g_use_2bit) printf("[auto] Using 2-bit experts\n");
+
+        // 3-bit is the default; if its files are missing, fall back to 4-bit.
+        if (g_use_3bit) {
+            char probe[1024];
+            snprintf(probe, sizeof(probe), "%s/packed_experts_3bit/layer_00.bin", model_path);
+            int pfd3 = open(probe, O_RDONLY);
+            if (pfd3 < 0) {
+                g_use_3bit = 0;
+                printf("[auto] packed_experts_3bit missing — falling back to 4-bit experts\n");
+            } else {
+                close(pfd3);
+            }
+        }
 
         // Print quant and linear info now that auto-detect has settled
         printf("Quant:    %s experts (%zu bytes each)\n",
