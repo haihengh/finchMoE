@@ -9683,6 +9683,17 @@ int main(int argc, char **argv) {
                     mtp_attempts++;
                     int draft_match = (mtp_token == next_token);
                     if (draft_match) mtp_accepted++;
+                    if (mtp_attempts % 10 == 0 || mtp_attempts < 3) {
+                        double md = 0, mn1 = 0, mn2 = 0;
+                        for (int i = 0; i < VOCAB_SIZE; i++) {
+                            md += (double)logits[i] * mtp_logits[i];
+                            mn1 += (double)logits[i] * logits[i];
+                            mn2 += (double)mtp_logits[i] * mtp_logits[i];
+                        }
+                        fprintf(stderr, "  [mtp-cos] main_vs_draft_logit_cos=%.4f (main_rms=%.2f draft_rms=%.2f)\n",
+                                md / sqrt(mn1 * mn2),
+                                vec_rms(logits, VOCAB_SIZE), vec_rms(mtp_logits, VOCAB_SIZE));
+                    }
                     if (mtp_attempts % 10 == 0 || draft_match || mtp_attempts < 5) {
                         fprintf(stderr, "  mtp=%d draft=%d %s (rate=%d/%d=%.0f%%)\n",
                                 next_token, mtp_token,
