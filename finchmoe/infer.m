@@ -5651,6 +5651,17 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
     float expert_weights[8];
     cpu_topk(gate_scores, 256, K, expert_indices, expert_weights);
     cpu_normalize_weights(expert_weights, K);
+    {
+        static int rt_dbg = 0;
+        if (rt_dbg < 3) {
+            float ent = 0;
+            for (int i = 0; i < 256; i++) if (gate_scores[i] > 0) ent -= gate_scores[i] * logf(gate_scores[i]);
+            fprintf(stderr, "[mtp-route] top8: ");
+            for (int k = 0; k < K; k++) fprintf(stderr, "%d(%.2f) ", expert_indices[k], expert_weights[k]);
+            fprintf(stderr, "entropy=%.2f\n", ent);
+            rt_dbg++;
+        }
+    }
 
     // Step 7: Shared expert gate
     float shared_gate_score;
@@ -5734,6 +5745,10 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
     // Step 11: Final norm
     float final_hidden[HIDDEN_DIM];
     cpu_rms_norm(h, g_mtp.final_norm_w, final_hidden, HIDDEN_DIM, RMS_NORM_EPS);
+
+    // (FC hidden-half norm variants were swept 2026-08-14: pre_fc_norm_hidden
+    // → cos -0.59/-0.70, raw h → 0.58/0.78, input_layernorm → 0.58/0.79 —
+    // mtp.norm is confirmed.)
 
     // Step 12: FC projection — maps [hidden; embedding] -> hidden
     // fc.weight shape: [2048, 4096] 4-bit packed = [2048, 512] uint32
