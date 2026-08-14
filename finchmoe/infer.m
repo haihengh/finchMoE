@@ -5476,13 +5476,13 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
     float normed[HIDDEN_DIM];
     cpu_rms_norm(h, g_mtp.input_layernorm_w, normed, HIDDEN_DIM, RMS_NORM_EPS);
 
-    // Step 5: MTP attention with KV cache (32 Q heads, 2 KV heads, 256 dim)
-    // Q: [8192, 2048] BF16, K/V: [512, 2048] BF16, O: [2048, 4096] BF16
-    // O takes 16 heads × 256 = 4096 input (first 16 of 32 Q heads)
-    #define MTP_N_Q_HEADS 32
+    // Step 5: MTP attention with KV cache (16 Q heads + gates, 2 KV heads,
+    // 256 dim). q_proj: [8192, 2048] = 16 heads × 512 (Q+gate interleaved),
+    // K/V: [512, 2048], O: [2048, 4096] = all 16 heads.
+    #define MTP_N_Q_HEADS 16
     #define MTP_N_KV_HEADS 2
     #define MTP_HEAD_DIM 256
-    #define MTP_Q_DIM (MTP_N_Q_HEADS * MTP_HEAD_DIM)    // 8192
+    #define MTP_Q_DIM (MTP_N_Q_HEADS * MTP_HEAD_DIM)    // 4096 (q only)
     #define MTP_KV_DIM (MTP_N_KV_HEADS * MTP_HEAD_DIM)  // 512
     #define MTP_O_IN_DIM (16 * MTP_HEAD_DIM)             // 4096
     #define MTP_KV_CACHE_MAX 64
@@ -5496,24 +5496,45 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
     }
 
     // Q, K, V projections (4-bit if scales present, BF16 if NULL)
+    // q_proj [8192, 2048] = 16 heads × 512: Q and the attention output GATE
+    // interleaved per head (q at [h*512+d], gate at [h*512+256+d]) — the
+    // MTP block has 16 Q heads, 2 KV heads, O takes all 16 (4096 input).
     int q_bits = (g_mtp.q_s && g_mtp.q_b) ? 4 : 0;
     int kv_bits = (g_mtp.k_s && g_mtp.k_b) ? 4 : 0;
-    float q_buf[MTP_Q_DIM], k_buf[MTP_KV_DIM], v_buf[MTP_KV_DIM];
-    cpu_dequant_matvec(g_mtp.q_w, g_mtp.q_s, g_mtp.q_b, normed, q_buf, MTP_Q_DIM, HIDDEN_DIM, GROUP_SIZE, q_bits);
+    float q_raw[MTP_Q_DIM * 2], k_buf[MTP_KV_DIM], v_buf[MTP_KV_DIM];
+    cpu_dequant_matvec(g_mtp.q_w, g_mtp.q_s, g_mtp.q_b, normed, q_raw, MTP_Q_DIM * 2, HIDDEN_DIM, GROUP_SIZE, q_bits);
     cpu_dequant_matvec(g_mtp.k_w, g_mtp.k_s, g_mtp.k_b, normed, k_buf, MTP_KV_DIM, HIDDEN_DIM, GROUP_SIZE, kv_bits);
     cpu_dequant_matvec(g_mtp.v_w, g_mtp.v_s, g_mtp.v_b, normed, v_buf, MTP_KV_DIM, HIDDEN_DIM, GROUP_SIZE, kv_bits);
 
-    // Per-head Q/K norms
+    // De-interleave Q and gate — ELEMENT-interleaved per head (q,g,q,g...:
+    // q at [h*512 + 2d], gate at [h*512 + 2d+1] — per the reference's
+    // strided views of the [head × 2×dim] Q projection). Per-head QKNorm
+    // (RMS, like the main model).
+    float q_buf[MTP_Q_DIM], gate_buf[MTP_Q_DIM];
     for (int h = 0; h < MTP_N_Q_HEADS; h++) {
-        float *qh = q_buf + h * MTP_HEAD_DIM;
+        float sum_sq = 0.0f;
+        for (int d = 0; d < MTP_HEAD_DIM; d++) {
+            float qv = q_raw[h * 512 + 2 * d];
+            q_buf[h * MTP_HEAD_DIM + d] = qv;
+            gate_buf[h * MTP_HEAD_DIM + d] = q_raw[h * 512 + 2 * d + 1];
+            sum_sq += qv * qv;
+        }
+        float inv_rms = 1.0f / sqrtf(sum_sq / MTP_HEAD_DIM + RMS_NORM_EPS);
         for (int d = 0; d < MTP_HEAD_DIM; d++)
-            qh[d] *= bf16_to_f32(g_mtp.q_norm_w[d]);
+            q_buf[h * MTP_HEAD_DIM + d] *= inv_rms * bf16_to_f32(g_mtp.q_norm_w[d]);
     }
     for (int h = 0; h < MTP_N_KV_HEADS; h++) {
-        float *kh = k_buf + h * MTP_HEAD_DIM;
+        float sum_sq = 0.0f;
+        for (int d = 0; d < MTP_HEAD_DIM; d++) sum_sq += k_buf[h * MTP_HEAD_DIM + d] * k_buf[h * MTP_HEAD_DIM + d];
+        float inv_rms = 1.0f / sqrtf(sum_sq / MTP_HEAD_DIM + RMS_NORM_EPS);
         for (int d = 0; d < MTP_HEAD_DIM; d++)
-            kh[d] *= bf16_to_f32(g_mtp.k_norm_w[d]);
+            k_buf[h * MTP_HEAD_DIM + d] *= inv_rms * bf16_to_f32(g_mtp.k_norm_w[d]);
     }
+
+    // RoPE (partial rotary, same as the main attention) at the frontier
+    // position; the K/V cache stores the rope'd K so scores use positions.
+    apply_rotary_emb(q_buf, k_buf, mtp_cache_len, MTP_N_Q_HEADS, MTP_N_KV_HEADS,
+                     MTP_HEAD_DIM, ROTARY_DIM);
 
     // Append K, V to cache
     if (mtp_cache_len < MTP_KV_CACHE_MAX) {
@@ -5524,13 +5545,13 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
 
     // Multi-head attention with softmax over cached tokens
     int n_ctx = mtp_cache_len;
-    float attn_out[MTP_O_IN_DIM];  // 4096: first 16 Q heads output
+    float attn_out[MTP_O_IN_DIM];  // 4096: all 16 Q heads output
     memset(attn_out, 0, sizeof(attn_out));
     float inv_sqrt_dh = 1.0f / sqrtf((float)MTP_HEAD_DIM);
 
-    // For each of the first 16 Q heads (O projection input)
+    // For each of the 16 Q heads (O projection input); GQA: 8 Q heads/KV head
     for (int qh = 0; qh < 16; qh++) {
-        int kvh = qh * MTP_N_KV_HEADS / MTP_N_Q_HEADS;  // GQA: 16 Q heads per KV head
+        int kvh = qh / 8;
         float *q_head = q_buf + qh * MTP_HEAD_DIM;
 
         // Attention scores against all cached keys
@@ -5552,13 +5573,15 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
             sum_exp += scores[t];
         }
 
-        // Weighted sum of V
+        // Weighted sum of V, then the attention output gate (sigmoid)
         float *o_head = attn_out + qh * MTP_HEAD_DIM;
         for (int t = 0; t < n_ctx; t++) {
             float *v_head = mtp_v_cache + t * MTP_KV_DIM + kvh * MTP_HEAD_DIM;
             float w = scores[t] / sum_exp;
             for (int d = 0; d < MTP_HEAD_DIM; d++) o_head[d] += w * v_head[d];
         }
+        for (int d = 0; d < MTP_HEAD_DIM; d++)
+            o_head[d] *= 1.0f / (1.0f + expf(-gate_buf[qh * MTP_HEAD_DIM + d]));
     }
 
     // O projection: 4-bit if scales present, BF16 if NULL
@@ -11844,7 +11867,11 @@ int main(int argc, char **argv) {
             complete_deferred_experts();
             pos++;
 
-            // Final norm
+            // Final norm — save the pre-norm hidden for the MTP head
+            // (the reference MTP consumes the post-MoE residual, not the
+            // final-normed hidden).
+            static float mtp_hidden_in[HIDDEN_DIM];
+            memcpy(mtp_hidden_in, hidden, HIDDEN_DIM * sizeof(float));
             if (final_norm_w) {
                 float *normed = malloc(HIDDEN_DIM * sizeof(float));
                 cpu_rms_norm(hidden, final_norm_w, normed, HIDDEN_DIM, RMS_NORM_EPS);
@@ -11898,7 +11925,7 @@ int main(int argc, char **argv) {
                 float saved_hidden[HIDDEN_DIM];
                 memcpy(saved_hidden, hidden, HIDDEN_DIM * sizeof(float));
 
-                if (mtp_forward(wf, hidden, next_token, &mtp_token, mtp_logits)) {
+                if (mtp_forward(wf, mtp_hidden_in, next_token, &mtp_token, mtp_logits)) {
                     mtp_attempts++;
                     int draft_match = (mtp_token == next_token);
                     if (draft_match) mtp_accepted++;
