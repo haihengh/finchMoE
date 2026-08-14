@@ -106,6 +106,21 @@ static size_t get_available_memory(void) {
     return free_bytes + inactive_bytes + purgeable_bytes + speculative_bytes;
 }
 
+// Strictly-free bytes (excludes reclaimable cache). The page cache holds the
+// expert files that hot-set prefetch re-reads; when free memory collapses the
+// kernel evicts that cache and the prefetch turns into net-extra SSD I/O.
+static size_t get_free_memory(void) {
+    mach_port_t host = mach_host_self();
+    vm_size_t page_size = 16384;
+    host_page_size(host, &page_size);
+    vm_statistics64_data_t vm_stat;
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    if (host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vm_stat, &count) != KERN_SUCCESS) {
+        return 0;
+    }
+    return (size_t)vm_stat.free_count * page_size;
+}
+
 // Returns a human-readable memory size string (e.g. "5.52 GB")
 // Uses a rotating buffer to allow up to 3 calls in a single printf.
 static const char *format_mem_size(size_t bytes) {
@@ -375,6 +390,11 @@ static float g_temperature = 0.3f;  // sampling temperature (0 = greedy argmax)
 #define PF_ATTN_MAX 64     // batched GPU attention cap (positions per dispatch)
 static int g_prefill_chunk = 8;  // --prefill-chunk N (0 = per-token path; 8 = pooled+batched-attn sweet spot)
 static int g_pf_pool_slots = 0;  // pool-mode expert slots (64 → 32 → 16 → 0 under memory pressure)
+static int g_pf_hot_slots = 0;   // prefetch-pool slots per layer (32 → 16 → 0 under memory pressure)
+#define PF_HOT_MAX 64
+static int g_hot_slot[NUM_LAYERS][NUM_EXPERTS];  // layer → expert → prefetch slot (-1 = not hot)
+static int g_hot_expert[NUM_LAYERS][PF_HOT_MAX]; // layer → slot → expert (for prefetch preads)
+static int g_hot_loaded = 0;   // hot_sets.bin loaded (prefetch active)
 static int g_top_k = 40;            // top-k sampling (1 = greedy)
 static int g_no_think = 0;          // 0 = thinking mode on, 1 = skip think block
 static int g_low_memory = 0;       // enabled by --low-memory: skip Metal weight wrap, use CPU fallback
@@ -1670,6 +1690,9 @@ typedef struct {
     // Pool-mode expert pread buffers (sized by g_pf_pool_slots; 0 = pool mode
     // disabled). Position m's expert k data lives at pool slot 8m+k.
     id<MTLBuffer> buf_pool_expert_data;   // [P × expert_alloc_size] one buffer
+    // Prefill hot-set prefetch pools (2 × g_pf_hot_slots, alternating per
+    // layer: hot(L) lives in pool[L%2], prefetched one layer ahead).
+    id<MTLBuffer> buf_prefetch_pool[2];
     id<MTLBuffer> buf_pf_expert_input;    // [P, 2048]
     id<MTLBuffer> buf_pf_expert_gate[MAX_K];  // [P, 512]
     id<MTLBuffer> buf_pf_expert_up[MAX_K];    // [P, 512]
@@ -1913,6 +1936,39 @@ static MetalCtx *metal_setup(void) {
                     p, (double)pool_bytes / 1e6, p / MAX_K);
         } else {
             fprintf(stderr, "[pf-pool] disabled (insufficient memory) — per-position expert path\n");
+        }
+        // Prefill hot-set prefetch pools: 2 × hot_slots, alternating per
+        // layer (hot(L) in pool[L%2], prefetched during layer L-1's compute).
+        // Same memory-budget ladder; hot sets loaded from hot_sets.bin.
+        // The prefetch re-reads the hot set once per chunk (redundant reads
+        // served from the page cache) — it only pays when the OS has real
+        // page-cache headroom, so require ~1 GB strictly-free memory beyond
+        // the pools (reclaimable cache doesn't count: that IS the cache).
+        // FINCHMOE_PF_PREFETCH=1 forces it on (benchmarking on healthy boxes).
+        if (p >= 64) {
+            int hp = 32;
+            size_t free2 = get_free_memory();
+            int force_pf = getenv("FINCHMOE_PF_PREFETCH") != NULL;
+            while (!force_pf && hp >= 16 && free2 < (size_t)2 * hp * expert_alloc_size + (size_t)1024 * 1024 * 1024) hp /= 2;
+            if (!force_pf && free2 < (size_t)2 * 16 * expert_alloc_size + (size_t)1024 * 1024 * 1024) hp = 0;
+            g_pf_hot_slots = hp;
+            for (int pi = 0; pi < 2; pi++) {
+                if (hp == 0) break;
+                void *hot_aligned = NULL;
+                size_t hot_bytes = (size_t)hp * expert_alloc_size;
+                posix_memalign(&hot_aligned, 2*1024*1024, hot_bytes);
+                memset(hot_aligned, 0, hot_bytes);
+                ctx->buf_prefetch_pool[pi] = [ctx->device newBufferWithBytesNoCopy:hot_aligned
+                                                                             length:hot_bytes
+                                                                            options:MTLResourceStorageModeShared
+                                                                        deallocator:nil];
+            }
+            if (hp > 0) {
+                fprintf(stderr, "[pf-prefetch] 2 x %d hot slots (%.0f MB), 1-layer-ahead hot-set prefetch\n",
+                        hp, (double)2 * hp * expert_alloc_size / 1e6);
+            } else {
+                fprintf(stderr, "[pf-prefetch] disabled (insufficient page-cache headroom) — miss-only preads\n");
+            }
         }
     }
 
@@ -2734,8 +2790,8 @@ static void gpu_encode_experts_batched(
     const int *valid,            // which experts are valid [MAX_K]
     id<MTLBuffer> __strong *expert_bufs,  // per-expert weight data buffers [MAX_K]
     NSUInteger out_offset,       // byte offset for expert output buffers (prefill slot m)
-    id<MTLBuffer> data_buf,      // pool mode: one buffer, position m at slots [8m..8m+7]
-    NSUInteger data_base_off,    // pool mode: byte offset of position m's first expert slot
+    id<MTLBuffer> __unsafe_unretained *data_bufs,  // pool mode: per-expert weight buffers [MAX_K]
+    const NSUInteger *data_offs, // pool mode: per-expert byte offsets (base of expert slot)
     uint32_t slot_m              // pool mode: position slot for input/gate/up/act bindings
 ) {
     // Select offsets and pipeline based on quantization mode
@@ -2880,18 +2936,18 @@ static void gpu_encode_experts_batched(
 
         for (int k = 0; k < K; k++) {
         if (!valid[k]) continue;
-        // Pool mode (data_buf != nil): rebind weight data, input, and
+        // Pool mode (data_bufs != NULL): rebind weight data, input, and
         // gate/up/act scratch to position slot_m's regions. Pool mode only
         // runs on the non-fused path (g_use_int8 excluded by the caller).
         NSUInteger exp_alloc = (EXPERT_SIZE_MAX + 2*1024*1024 - 1) & ~(2*1024*1024 - 1);
-        id<MTLBuffer> data_src_buf = data_buf ? data_buf : expert_bufs[k];
-        NSUInteger data_src_off   = data_buf ? (data_base_off + (NSUInteger)k * exp_alloc) : 0;
-        id<MTLBuffer> in_buf  = data_buf ? ctx->buf_pf_expert_input : ctx->buf_multi_expert_input;
-        NSUInteger in_off     = data_buf ? (NSUInteger)slot_m * HIDDEN_DIM * sizeof(float) : 0;
-        id<MTLBuffer> gate_buf = data_buf ? ctx->buf_pf_expert_gate[k] : ctx->buf_multi_expert_gate[k];
-        id<MTLBuffer> up_buf   = data_buf ? ctx->buf_pf_expert_up[k]   : ctx->buf_multi_expert_up[k];
-        id<MTLBuffer> act_buf  = data_buf ? ctx->buf_pf_expert_act[k]  : ctx->buf_multi_expert_act[k];
-        NSUInteger mid_off    = data_buf ? (NSUInteger)slot_m * MOE_INTERMEDIATE * sizeof(float) : 0;
+        id<MTLBuffer> data_src_buf = data_bufs ? data_bufs[k] : expert_bufs[k];
+        NSUInteger data_src_off   = data_bufs ? data_offs[k] : 0;
+        id<MTLBuffer> in_buf  = data_bufs ? ctx->buf_pf_expert_input : ctx->buf_multi_expert_input;
+        NSUInteger in_off     = data_bufs ? (NSUInteger)slot_m * HIDDEN_DIM * sizeof(float) : 0;
+        id<MTLBuffer> gate_buf = data_bufs ? ctx->buf_pf_expert_gate[k] : ctx->buf_multi_expert_gate[k];
+        id<MTLBuffer> up_buf   = data_bufs ? ctx->buf_pf_expert_up[k]   : ctx->buf_multi_expert_up[k];
+        id<MTLBuffer> act_buf  = data_bufs ? ctx->buf_pf_expert_act[k]  : ctx->buf_multi_expert_act[k];
+        NSUInteger mid_off    = data_bufs ? (NSUInteger)slot_m * MOE_INTERMEDIATE * sizeof(float) : 0;
         id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
         if (fused_pipe) {
             static int fused_call_count = 0;
@@ -4467,6 +4523,43 @@ static void async_pread_wait(void) {
         g_async_pread.valid[k] = (g_async_pread.tasks[k].result == (ssize_t)active_expert_size());
     }
     g_async_pread.active = 0;
+}
+
+// Second async-pread state for the prefill hot-set prefetcher (runs
+// concurrently with the main expert preads, targeting the prefetch pools).
+static AsyncPreadState g_prefetch_pread = {0};
+
+static void async_pread_prefetch_start(const int *fds, const off_t *offsets,
+                                       void *const *dsts, const size_t *sizes, int n) {
+    g_prefetch_pread.num_tasks = n;
+    g_prefetch_pread.active = 1;
+    if (!g_prefetch_pread.group) g_prefetch_pread.group = dispatch_group_create();
+
+    for (int i = 0; i < n; i++) {
+        g_prefetch_pread.tasks[i].fd = fds[i];
+        g_prefetch_pread.tasks[i].dst = dsts[i];
+        g_prefetch_pread.tasks[i].offset = offsets[i];
+        g_prefetch_pread.tasks[i].size = sizes[i];
+        g_prefetch_pread.tasks[i].result = 0;
+    }
+
+    static dispatch_queue_t io_q = NULL;
+    if (!io_q) io_q = dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0);
+    for (int i = 0; i < n; i++) {
+        InferPreadTask *t = &g_prefetch_pread.tasks[i];
+        dispatch_group_async(g_prefetch_pread.group, io_q, ^{
+            t->result = pread(t->fd, t->dst, t->size, t->offset);
+        });
+    }
+}
+
+static void async_pread_prefetch_wait(void) {
+    if (!g_prefetch_pread.active) return;
+    dispatch_group_wait(g_prefetch_pread.group, DISPATCH_TIME_FOREVER);
+    for (int k = 0; k < g_prefetch_pread.num_tasks; k++) {
+        g_prefetch_pread.valid[k] = (g_prefetch_pread.tasks[k].result == (ssize_t)active_expert_size());
+    }
+    g_prefetch_pread.active = 0;
 }
 
 static void io_pool_shutdown(void) {
@@ -7192,6 +7285,12 @@ static void fused_layer_forward(
         fwrite(&ki, sizeof(int32_t), 1, g_routing_log);
         fwrite(hidden, sizeof(float), HIDDEN_DIM, g_routing_log);
         fwrite(expert_indices, sizeof(int32_t), ki, g_routing_log);
+        // Extended top-24 indices (gate scores pre-softmax — same ranking)
+        // for predictor coverage analysis.
+        int ext_indices[24];
+        float ext_weights[24];
+        cpu_topk(gate_scores, NUM_EXPERTS, 24, ext_indices, ext_weights);
+        fwrite(ext_indices, sizeof(int32_t), 24, g_routing_log);
         g_routing_log_samples++;
     }
 
@@ -7463,7 +7562,7 @@ static void fused_layer_forward(
         [cmd_experts encodeWaitForEvent:g_metal->expert_sync_event
                                   value:g_metal->expert_sync_value];
 
-        gpu_encode_experts_batched(g_metal, cmd_experts, actual_K, valid, expert_bufs, 0, nil, 0, 0);
+        gpu_encode_experts_batched(g_metal, cmd_experts, actual_K, valid, expert_bufs, 0, NULL, NULL, 0);
 
         // Shared expert SwiGLU + down_proj (2 more encoders)
         // Note: shared_gate/up already copied to GPU buffers above (before async pread wait)
@@ -8043,27 +8142,26 @@ static void fused_layer_forward(
 static id<MTLCommandBuffer> prefill_chunk_cmd3(int layer_idx, uint32_t m,
                                                 int actual_K, const int *valid,
                                                 float shared_gate_score,
-                                                int pool_mode)
+                                                int pool_mode,
+                                                id<MTLBuffer> __unsafe_unretained *data_bufs,  // pool mode: per-expert weight buffers
+                                                const NSUInteger *data_offs)  // pool mode: per-expert base offsets
 {
     MetalCtx *ctx = g_metal;
     LayerWeightCache *lc = &layer_cache[layer_idx];
     double t_cmd3 = 0;
     if (g_chunk_timing_enabled) t_cmd3 = now_ms();
 
-    NSUInteger exp_alloc = (EXPERT_SIZE_MAX + 2*1024*1024 - 1) & ~(2*1024*1024 - 1);
     NSUInteger out_off = (NSUInteger)m * HIDDEN_DIM * sizeof(float);
     NSUInteger mid_off = pool_mode ? (NSUInteger)m * MOE_INTERMEDIATE * sizeof(float) : 0;
     id<MTLBuffer> sh_gate = pool_mode ? ctx->buf_pf_shared_gate : ctx->buf_shared_gate;
     id<MTLBuffer> sh_up   = pool_mode ? ctx->buf_pf_shared_up   : ctx->buf_shared_up;
     id<MTLBuffer> sh_act  = pool_mode ? ctx->buf_pf_shared_act  : ctx->buf_shared_act;
-    id<MTLBuffer> data_buf = pool_mode ? ctx->buf_pool_expert_data : nil;
-    NSUInteger data_base_off = pool_mode ? (NSUInteger)(8 * m) * exp_alloc : 0;
 
     id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
     [cmd encodeWaitForEvent:ctx->expert_sync_event value:ctx->expert_sync_value];
 
     gpu_encode_experts_batched(ctx, cmd, actual_K, valid, ctx->buf_multi_expert_data,
-                               out_off, data_buf, data_base_off, pool_mode ? m : 0);
+                               out_off, data_bufs, data_offs, pool_mode ? m : 0);
 
     // Shared expert SwiGLU
     {
@@ -8275,7 +8373,7 @@ static id<MTLCommandBuffer> prefill_chunk_experts(
         expert_weights_out[k] = expert_weights[k];
         valid_out[k] = valid[k];
     }
-    return prefill_chunk_cmd3(layer_idx, m, actual_K, valid, shared_gate_score, 0);
+    return prefill_chunk_cmd3(layer_idx, m, actual_K, valid, shared_gate_score, 0, NULL, NULL);
 }
 
 // Deferred CMD3 slots for the chunked path (file-scope: strong refs keep the
@@ -8290,6 +8388,7 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
                                 uint32_t M, int pos_base,
                                 KVCache *kv, LinearAttnState *la_state,
                                 const void *mmap_base, int K, int packed_fd,
+                                int *layer_fds,   // all layers' packed expert fds (hot-set prefetch)
                                 id<MTLCommandBuffer> __strong *last_cmd3_out)
 {
     MetalCtx *ctx = g_metal;
@@ -8901,11 +9000,50 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
 
     // Pool mode: routing pass for all M + ONE batched pread + M back-to-back
     // CMD3s (no backpressure — every buffer is per-position-disjoint).
+    // With hot sets: layer L+1's hot experts are prefetched NOW (during this
+    // layer's routing/preads/CMD3s) into pool[(L+1)%2]; this layer's hot
+    // experts were prefetched during layer L-1 into pool[L%2].
     int pool_ok = (g_pf_pool_slots >= (int)(8 * M)) && !g_use_int8 && ctx->buf_pool_expert_data;
     if (pool_ok) {
         static int pf_idx[PREFILL_CHUNK_MAX][MAX_K];
         static float pf_w[PREFILL_CHUNK_MAX][MAX_K];
+        static id<MTLBuffer> __unsafe_unretained pf_data_bufs[PREFILL_CHUNK_MAX * MAX_K];
+        static NSUInteger pf_data_offs[PREFILL_CHUNK_MAX * MAX_K];
+        static int pf_valid_all[PREFILL_CHUNK_MAX * MAX_K];
+        static int pf_miss_map[PREFILL_CHUNK_MAX * MAX_K];
         int actual_K = (K > MAX_K) ? MAX_K : K;
+        NSUInteger exp_alloc = (EXPERT_SIZE_MAX + 2*1024*1024 - 1) & ~(2*1024*1024 - 1);
+        size_t esz = active_expert_size();
+
+        // Wait for this layer's hot-set prefetch FIRST (fired during layer
+        // L-1's Phase B — or at the chunk start for layer 0; ~0 residual:
+        // it had a full layer of GPU work to complete in). Waiting before
+        // firing the next prefetch keeps the two on separate group cycles.
+        // Snapshot validity before the next fire overwrites the task array.
+        static int pf_prefetch_valid[PF_HOT_MAX];
+        async_pread_prefetch_wait();
+        for (int s = 0; s < g_pf_hot_slots; s++) pf_prefetch_valid[s] = g_prefetch_pread.valid[s];
+
+        // ---- Prefetch layer L+1's hot set (async; overlaps this layer's
+        // routing + miss preads + CMD3s + next layer's cmdA/cmdB) ----
+        if (g_hot_loaded && layer_idx < NUM_LAYERS - 1 && layer_fds) {
+            int pi = (layer_idx + 1) % 2;
+            if (ctx->buf_prefetch_pool[pi]) {
+                static int pf_fds[PF_HOT_MAX];
+                static off_t pf_offs[PF_HOT_MAX];
+                static void *pf_dsts[PF_HOT_MAX];
+                static size_t pf_sizes[PF_HOT_MAX];
+                char *pp = (char *)[ctx->buf_prefetch_pool[pi] contents];
+                for (int s = 0; s < g_pf_hot_slots; s++) {
+                    int e = g_hot_expert[layer_idx + 1][s];
+                    pf_fds[s] = layer_fds[layer_idx + 1];   // layer L+1's own expert file
+                    pf_offs[s] = (off_t)e * (off_t)esz;
+                    pf_dsts[s] = pp + (size_t)s * exp_alloc;
+                    pf_sizes[s] = esz;
+                }
+                async_pread_prefetch_start(pf_fds, pf_offs, pf_dsts, pf_sizes, g_pf_hot_slots);
+            }
+        }
 
         // Pass 1: routing + staging for all M positions
         for (uint32_t m = 0; m < M; m++) {
@@ -8941,39 +9079,61 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
                    SHARED_INTERMEDIATE * sizeof(float));
         }
 
-        // One batched pread for all positions' experts (slots [8m..8m+7])
+        // Hit/miss split: hot experts bind directly from pool[L%2]; misses
+        // are pread into the main pool slots [8m..8m+7] (one batched read).
         {
             static int fds[PREFILL_CHUNK_MAX * MAX_K];
             static off_t offs[PREFILL_CHUNK_MAX * MAX_K];
             static void *dsts[PREFILL_CHUNK_MAX * MAX_K];
             static size_t sizes[PREFILL_CHUNK_MAX * MAX_K];
-            size_t esz = active_expert_size();
-            NSUInteger exp_alloc = (EXPERT_SIZE_MAX + 2*1024*1024 - 1) & ~(2*1024*1024 - 1);
             char *pool_base = (char *)[ctx->buf_pool_expert_data contents];
-            int n = 0;
+            int n_miss = 0;
             for (uint32_t m = 0; m < M; m++) {
-                for (int k = 0; k < actual_K; k++) {
-                    fds[n] = packed_fd;
-                    offs[n] = (off_t)pf_idx[m][k] * (off_t)esz;
-                    dsts[n] = pool_base + ((size_t)(8 * m) + (size_t)k) * exp_alloc;
-                    sizes[n] = esz;
-                    n++;
+                for (int k = 0; k < MAX_K; k++) {
+                    int e = pf_idx[m][k];
+                    int s = (k < actual_K) ? g_hot_slot[layer_idx][e] : -1;
+                    // A hot slot only counts if its prefetch pread completed
+                    // with a full read (short reads under IO pressure would
+                    // otherwise silently corrupt the expert computation).
+                    if (s >= 0 && !pf_prefetch_valid[s]) s = -1;
+                    if (s >= 0) {
+                        // Hot hit — bind the prefetch pool slot directly.
+                        pf_data_bufs[(size_t)m * MAX_K + k] = ctx->buf_prefetch_pool[layer_idx % 2];
+                        pf_data_offs[(size_t)m * MAX_K + k] = (NSUInteger)s * exp_alloc;
+                        pf_valid_all[(size_t)m * MAX_K + k] = 1;
+                    } else {
+                        // Cold miss — pread into the main pool slot.
+                        int n = n_miss++;
+                        fds[n] = packed_fd;
+                        offs[n] = (off_t)e * (off_t)esz;
+                        dsts[n] = pool_base + ((size_t)(8 * m) + (size_t)k) * exp_alloc;
+                        sizes[n] = esz;
+                        pf_miss_map[n] = (int)((size_t)m * MAX_K + k);
+                        pf_data_bufs[(size_t)m * MAX_K + k] = ctx->buf_pool_expert_data;
+                        pf_data_offs[(size_t)m * MAX_K + k] = ((size_t)(8 * m) + (size_t)k) * exp_alloc;
+                        pf_valid_all[(size_t)m * MAX_K + k] = 0;
+                    }
                 }
             }
             double t_pread = 0;
             if (g_chunk_timing_enabled) t_pread = now_ms();
-            async_pread_multi_start(fds, offs, dsts, sizes, n);
-            async_pread_wait();
+            if (n_miss > 0) {
+                async_pread_multi_start(fds, offs, dsts, sizes, n_miss);
+                async_pread_wait();
+            }
+            for (int n = 0; n < n_miss; n++) {
+                pf_valid_all[pf_miss_map[n]] = g_async_pread.valid[n];
+            }
             if (g_chunk_timing_enabled) g_chunk_timing.pread_wait += now_ms() - t_pread;
         }
 
-        // Combine params + validity (after the wait)
+        // Combine params + validity
         {
             float *params = (float *)[ctx->buf_pf_combine_params contents];
             for (uint32_t m = 0; m < M; m++) {
                 memset(params + (size_t)m * 10, 0, 10 * sizeof(float));
                 for (int k = 0; k < actual_K; k++) {
-                    int v = g_async_pread.valid[(size_t)m * MAX_K + k];
+                    int v = pf_valid_all[(size_t)m * MAX_K + k];
                     params[(size_t)m * 10 + k] = v ? pf_w[m][k] : 0.0f;
                 }
                 params[(size_t)m * 10 + 8] = seg_batch[m];
@@ -8984,10 +9144,12 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
         for (uint32_t m = 0; m < M; m++) {
             int valid[MAX_K];
             for (int k = 0; k < actual_K; k++) {
-                valid[k] = g_async_pread.valid[(size_t)m * MAX_K + k];
+                valid[k] = pf_valid_all[(size_t)m * MAX_K + k];
             }
             pf_cmd3_slots[m] = prefill_chunk_cmd3(layer_idx, m, actual_K, valid,
-                                                  seg_batch[m], 1);
+                                                  seg_batch[m], 1,
+                                                  &pf_data_bufs[(size_t)m * MAX_K],
+                                                  &pf_data_offs[(size_t)m * MAX_K]);
         }
     } else {
         for (uint32_t m = 0; m < M; m++) {
@@ -9044,13 +9206,35 @@ static void prefill_chunked_run(WeightFile *wf, float *hidden,
 
     for (int cbase = 0; cbase < count; cbase += chunk_size) {
         int M = (cbase + chunk_size <= count) ? chunk_size : (count - cbase);
+        // Kick off layer 0's hot-set prefetch for THIS chunk before the
+        // chunk's layer-0 cmdA so it overlaps the first layer's GPU work
+        // (layers >= 1 prefetch during the previous layer's Phase B).
+        // pool[0] is free here: the previous chunk's last pool[0] reader was
+        // CMD3(38), completed before that chunk's cmdA(39).
+        if (g_hot_loaded && g_pf_hot_slots > 0 && g_metal->buf_prefetch_pool[0] && layer_fds) {
+            static int pf_fds[PF_HOT_MAX];
+            static off_t pf_offs[PF_HOT_MAX];
+            static void *pf_dsts[PF_HOT_MAX];
+            static size_t pf_sizes[PF_HOT_MAX];
+            size_t esz = active_expert_size();
+            NSUInteger exp_alloc = (EXPERT_SIZE_MAX + 2*1024*1024 - 1) & ~(2*1024*1024 - 1);
+            char *pp = (char *)[g_metal->buf_prefetch_pool[0] contents];
+            for (int s = 0; s < g_pf_hot_slots; s++) {
+                int e = g_hot_expert[0][s];
+                pf_fds[s] = layer_fds[0];
+                pf_offs[s] = (off_t)e * (off_t)esz;
+                pf_dsts[s] = pp + (size_t)s * exp_alloc;
+                pf_sizes[s] = esz;
+            }
+            async_pread_prefetch_start(pf_fds, pf_offs, pf_dsts, pf_sizes, g_pf_hot_slots);
+        }
         for (int layer = 0; layer < NUM_LAYERS; layer++) {
             int is_full = ((layer + 1) % FULL_ATTN_INTERVAL == 0);
             id<MTLCommandBuffer> layer_last = nil;
             prefill_chunk_layer(wf, layer, embed_batch, cbase, (uint32_t)M, *pos,
                                 is_full ? kv_caches[layer] : NULL,
                                 is_full ? NULL : (LinearAttnState *)layer_states[layer],
-                                layer_mmaps[layer], K, layer_fds[layer],
+                                layer_mmaps[layer], K, layer_fds[layer], layer_fds,
                                 &layer_last);
             if (cbase + M >= count && layer == NUM_LAYERS - 1) {
                 last_cmd3 = layer_last;
@@ -10888,6 +11072,35 @@ int main(int argc, char **argv) {
                g_use_1bit ? "1-bit" : (g_use_2bit ? "2-bit" : (g_use_3bit ? "3-bit" : (g_use_int8 ? "8-bit" : "4-bit"))),
                active_expert_size());
         printf("Linear:   %s\n", gpu_linear_attn_enabled ? "fused GPU delta-net" : "CPU/hybrid fallback");
+
+        // ---- Load static per-layer hot sets (prefill expert prefetch) ----
+        // hot_sets.bin: [NUM_LAYERS][PF_HOT_MAX] int32 expert ids, most
+        // frequently selected first (built by build_hot_sets.py from
+        // --collect-routing logs). The first g_pf_hot_slots entries per
+        // layer are prefetched one layer ahead during chunked prefill.
+        memset(g_hot_slot, -1, sizeof(g_hot_slot));
+        memset(g_hot_expert, 0, sizeof(g_hot_expert));
+        if (g_prefill_chunk > 0 && g_pf_hot_slots > 0) {
+            FILE *hf = fopen("hot_sets.bin", "rb");
+            if (hf) {
+                int32_t hot[PF_HOT_MAX];
+                for (int L = 0; L < NUM_LAYERS; L++) {
+                    if (fread(hot, sizeof(int32_t), PF_HOT_MAX, hf) != PF_HOT_MAX) break;
+                    for (int s = 0; s < g_pf_hot_slots; s++) {
+                        if (hot[s] >= 0 && hot[s] < NUM_EXPERTS) {
+                            g_hot_slot[L][hot[s]] = s;
+                            g_hot_expert[L][s] = hot[s];
+                        }
+                    }
+                }
+                fclose(hf);
+                g_hot_loaded = 1;
+                printf("[pf-prefetch] hot_sets.bin loaded (%d hot slots/layer)\n", g_pf_hot_slots);
+            } else {
+                fprintf(stderr, "[pf-prefetch] hot_sets.bin not found — prefetch disabled "
+                                "(build with build_hot_sets.py)\n");
+            }
+        }
 
         // ---- Open + mmap packed expert files ----
         // Tiered I/O: two fds per layer file.

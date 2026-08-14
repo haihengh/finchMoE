@@ -11,6 +11,7 @@ finchmoe/chat
 # Model binaries and quantization artifacts (multi-GB, regenerated from
 # the pristine BF16 base — see OPTIMIZATION_PLAN.md)
 finchmoe/*.bin
+!finchmoe/hot_sets.bin
 finchmoe/*.bak
 finchmoe/model_weights_*.json
 finchmoe/packed_experts
