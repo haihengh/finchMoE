@@ -23,3 +23,10 @@ finchmoe/test_quant_weights
 /vllm/
 /text-generation-inference/
 /Lvllmds4-x/
+
+# Misc
+.DS_Store
+**/__pycache__/
+archive/
+finchmoe/397b/
+finchmoe/chat
