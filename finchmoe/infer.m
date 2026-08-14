@@ -5516,10 +5516,26 @@ static void mtp_kv_append(WeightFile *wf, const float *embed, const float *hidde
 
 // Fill the MTP K/V cache for a batch of prefill positions (per-token or
 // per-chunk hiddens with their embeddings).
-static void mtp_cache_fill(WeightFile *wf, const float *embed_batch,
+static void mtp_cache_fill(WeightFile *wf, const int *tokens,
+                           const float *embed_batch,
                            const float *hidden_batch, int count, int pos_base) {
     if (!g_use_mtp) return;
     for (int i = 0; i < count; i++) {
+        // MTP reference dump (FINCHMOE_MTP_DUMP): prefill record
+        if (getenv("FINCHMOE_MTP_DUMP")) {
+            static FILE *md = NULL;
+            if (!md) md = fopen("/tmp/mtp_ref_input.bin", "wb");
+            if (md) {
+                int32_t pos_i = pos_base + i, tok_i = tokens ? tokens[i] : -1;
+                float zeros[VOCAB_SIZE];
+                memset(zeros, 0, sizeof(zeros));
+                fwrite(&pos_i, sizeof(int32_t), 1, md);
+                fwrite(&tok_i, sizeof(int32_t), 1, md);
+                fwrite(hidden_batch + (size_t)i * HIDDEN_DIM, sizeof(float), HIDDEN_DIM, md);
+                fwrite(zeros, sizeof(float), VOCAB_SIZE, md);
+                fflush(md);
+            }
+        }
         mtp_kv_append(wf, embed_batch + (size_t)i * HIDDEN_DIM,
                       hidden_batch + (size_t)i * HIDDEN_DIM, pos_base + i);
     }
@@ -9514,6 +9530,7 @@ static int prefill_chunk_available(void) {
 // Chunked prefill driver: replaces the per-token prefill loops.
 static void prefill_chunked_run(WeightFile *wf, float *hidden,
                                 const float *embed_batch, int count, int *pos,
+                                const int *mtp_tokens,
                                 KVCache **kv_caches, void **layer_states,
                                 void **layer_mmaps, int K, int *layer_fds,
                                 int chunk_size)
@@ -9594,7 +9611,8 @@ static void prefill_chunked_run(WeightFile *wf, float *hidden,
                 const float *so = (const float *)[g_metal->buf_shared_out contents] + (size_t)m * HIDDEN_DIM;
                 for (int i = 0; i < HIDDEN_DIM; i++) h_out[i] += shared_gate * so[i];
             }
-            mtp_cache_fill(wf, embed_batch + (size_t)cbase * HIDDEN_DIM,
+            mtp_cache_fill(wf, mtp_tokens ? mtp_tokens + cbase : NULL,
+                           embed_batch + (size_t)cbase * HIDDEN_DIM,
                            mtp_hidden_batch, M, cbase);
         }
         *pos += M;
@@ -10466,6 +10484,7 @@ static void process_chat_request(ServeState *s, int client_fd,
         // Chunked batched prefill — completes the final hidden and advances
         // pos (same contract as the interactive path).
         prefill_chunked_run(s->wf, hidden, serve_embed_batch, pt->count, &pos,
+                            pt->ids,
                             s->kv_caches, s->layer_states, s->layer_mmaps,
                             s->K, s->layer_fds, g_prefill_chunk);
     } else {
@@ -10489,7 +10508,7 @@ static void process_chat_request(ServeState *s, int client_fd,
             discard_deferred_experts();
             pos++;
             if (g_use_mtp && serve_embed_batch)
-                mtp_cache_fill(s->wf, serve_embed_batch + (size_t)i * HIDDEN_DIM,
+                mtp_cache_fill(s->wf, pt->ids + i, serve_embed_batch + (size_t)i * HIDDEN_DIM,
                                hidden, 1, pos - 1);
         }
         // Last prefill token
@@ -10513,7 +10532,8 @@ static void process_chat_request(ServeState *s, int client_fd,
             complete_deferred_experts();
             pos++;
             if (g_use_mtp && serve_embed_batch)
-                mtp_cache_fill(s->wf, serve_embed_batch + (size_t)(pt->count - 1) * HIDDEN_DIM,
+                mtp_cache_fill(s->wf, pt->ids + (pt->count - 1),
+                               serve_embed_batch + (size_t)(pt->count - 1) * HIDDEN_DIM,
                                hidden, 1, pos - 1);
         }
     }
@@ -10776,6 +10796,7 @@ static void serve_loop(
         if (prefill_chunk_available() && sys_pt->count > 1 && sys_embed_batch) {
             // Chunked batched prefill for the system prompt.
             prefill_chunked_run(wf, hidden, sys_embed_batch, sys_pt->count, &sys_pos,
+                                sys_pt->ids,
                                 kv_caches, layer_states, layer_mmaps, K, layer_fds,
                                 g_prefill_chunk);
         } else {
@@ -11782,6 +11803,7 @@ int main(int argc, char **argv) {
                 // ---- Chunked batched prefill (all prompt tokens, then the
                 // driver CPU-combines the last token for lm_head) ----
                 prefill_chunked_run(wf, hidden, embed_batch, pt->count, &pos,
+                                    pt->ids,
                                     kv_caches, (void **)layer_states,
                                     layer_mmaps, K, layer_fds, g_prefill_chunk);
                 first_tok_ms = 0;  // not measured per token in chunk mode
@@ -11811,7 +11833,8 @@ int main(int argc, char **argv) {
                     pos++;
 
                     if (g_use_mtp && embed_batch)
-                        mtp_cache_fill(wf, embed_batch + (size_t)token_idx * HIDDEN_DIM,
+                        mtp_cache_fill(wf, pt->ids + token_idx,
+                                       embed_batch + (size_t)token_idx * HIDDEN_DIM,
                                        hidden, 1, pos - 1);
 
                     if (token_idx == 0) {
@@ -11860,7 +11883,8 @@ int main(int argc, char **argv) {
             complete_deferred_experts();
             pos++;
             if (g_use_mtp && embed_batch)
-                mtp_cache_fill(wf, embed_batch + (size_t)(pt->count - 1) * HIDDEN_DIM,
+                mtp_cache_fill(wf, pt->ids + (pt->count - 1),
+                               embed_batch + (size_t)(pt->count - 1) * HIDDEN_DIM,
                                hidden, 1, pos - 1);
         }
 
@@ -12016,6 +12040,21 @@ int main(int argc, char **argv) {
             if (!mtp_logits) {
                 mtp_logits = malloc(VOCAB_SIZE * sizeof(float));
                 fprintf(stderr, "[MTP] logits buffer alloc: %p\n", (void*)mtp_logits);
+            }
+            // MTP reference dump (FINCHMOE_MTP_DUMP): record (token, pre-norm
+            // hidden, main logits) per generation step for the Python
+            // reference comparison.
+            if (g_use_mtp && getenv("FINCHMOE_MTP_DUMP")) {
+                static FILE *md = NULL;
+                if (!md) md = fopen("/tmp/mtp_ref_input.bin", "ab");
+                if (md) {
+                    int32_t pos_i = pos, tok = next_token;
+                    fwrite(&pos_i, sizeof(int32_t), 1, md);
+                    fwrite(&tok, sizeof(int32_t), 1, md);
+                    fwrite(mtp_hidden_in, sizeof(float), HIDDEN_DIM, md);
+                    fwrite(logits, sizeof(float), VOCAB_SIZE, md);
+                    fflush(md);
+                }
             }
             if (g_use_mtp && g_mtp.loaded && mtp_logits && total_generated < max_tokens - 1) {
                 int mtp_token;
