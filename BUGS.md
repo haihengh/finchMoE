@@ -629,3 +629,113 @@ static const char *decode_token(Vocabulary *v, int token_id) {
 ```
 
 **Lesson**: Always guard pointer parameters, even in "internal" functions. Diagnostic/tooling code paths are tested less frequently and are more likely to pass unexpected NULL values.
+
+---
+
+## Bug 17: Chunked Prefill — Final Hidden Clobbered by Raw Embedding (2026-08-13)
+
+**Symptom**: After the chunked batched prefill (`--prefill-chunk N`) completed, the
+first generated token was garbage (top logits = structural tokens like `<|im_end|>`)
+even though every layer's hidden output matched the per-token path bitwise.
+
+**Root Cause**: In `main()`, the "last prefill token" block ran an unconditional
+`memcpy(hidden, embed_batch + last_token)` — overwriting the driver's carefully
+computed layer-39 output with the RAW last-token embedding (rms 0.0115 vs the real
+0.3984) — then skipped the layer loop in chunked mode and double-incremented `pos`
+(corrupting RoPE/KV positions for generation). The comment said "skipped in chunked
+mode", but only the layer loop was skipped, not the clobbering memcpy.
+
+**Fix** (`infer.m`): wrapped the entire last-token block in
+`if (!(prefill_chunk_available() && pt->count > 1))`.
+
+**Discovery Method**: final-combine component dumps (h_mid/seg/weights/expert outs/
+shared out) were all bitwise-identical between paths, yet `[PRE-NORM]` rms differed
+(0.3984 vs 0.0115) — the combine inputs were right, so the output must be
+overwritten afterward.
+
+**Lesson**: "Skipped in chunked mode" comments lie — verify the whole block, not
+just the loop. Raw-embedding rms (~0.01) vs post-model rms (~0.4) is a fast
+fingerprint for this bug class.
+
+---
+
+## Bug 18: FMA Contraction Broke Bitwise Parity in the Final CPU Combine (2026-08-13)
+
+**Symptom**: Chunked-prefill logits matched the per-token path to ~1.9e-6 but not
+bitwise, even though every combine component was bitwise-identical.
+
+**Root Cause**: The driver's final CPU combine wrote
+`hidden[i] = h_mid[i] + moe + shared_gate * so[i]` — clang contracts the multiply-add
+into a single FMA (one rounding). `finalize_deferred_experts` premultiplies
+`shared_out[i] *= gate` in a separate loop and adds with plain adds (two roundings).
+Same math, different rounding → ULP-level logit noise.
+
+**Fix**: mirror `finalize_deferred_experts` exactly — separate `cpu_vec_madd`
+accumulation, premultiply the shared gate in its own loop, then plain adds.
+
+**Lesson**: "Bitwise parity" is unforgiving at the compiler level: FMA contraction
+is legal C and invisible in the source. When a parity gate demands max|Δ| = 0,
+arithmetic ORDER must be replicated statement-for-statement.
+
+---
+
+## Bug 19: GPU KV Mirror Out-of-Bounds Write (2026-08-13)
+
+**Symptom**: latent — never crashed in testing, found by code audit.
+
+**Root Cause**: both the per-token path and the chunked prefill copied freshly
+computed K/V rows into the GPU mirror (`buf_kv_k[fa_idx]`, 8192 positions) at
+`cache_pos * kv_dim` without checking `cache_pos < g_gpu_kv_seq`. Prefilling more
+than 8192 tokens writes past the 16 MiB mirror buffers.
+
+**Fix**: added the `cache_pos < g_gpu_kv_seq` guard at both mirror sites
+(prefill > 8192 tokens falls back to CPU attention, which reads the CPU cache).
+
+---
+
+## Bug 20: Hot-Set Prefetch — Wrong fd, Missing Per-Chunk Prefetch, Fire/Wait
+Ordering, Unvalidated Preads (2026-08-14)
+
+**Symptom**: First parity gate after adding the hot-set expert prefetch failed —
+logits off by 1.4e-4 to 12.9, varying per run (a 12.9 "reference" turned out to be a
+chunk-8 run mislabeled as flag-0, which masked the real signature).
+
+**Root Cause**: four compounding bugs in the initial prefetch implementation:
+1. The prefetch for layer L+1 used `packed_fd` (layer L's expert file) — reading
+   layer L+1's experts from the WRONG layer file.
+2. Layer 0's hot set was prefetched only once at driver entry, but every chunk
+   needs its own pass (the pool is overwritten every 2 layers).
+3. `dispatch_group_wait` was called after firing the NEXT layer's prefetch on the
+   same group, so the wait blocked on the new fire (perf) and made valid-flag
+   snapshots fragile (correctness).
+4. The prefetch-wait never validated pread results — short reads under IO pressure
+   left hot slots half-written while the hit path trusted them unconditionally
+   (valid=1), silently corrupting expert computations.
+
+**Fixes**: per-layer fd (`layer_fds[layer+1]`); per-chunk layer-0 prefetch at the
+chunk loop top; wait-before-fire ordering with an explicit validity snapshot;
+`result == active_expert_size()` validation with automatic fallback to a miss pread.
+
+**Lesson**: async prefetch has three independent hazards — wrong source, wrong
+lifetime, wrong synchronization — and each produces a different failure signature
+(deterministic garbage, deterministic garbage, race). Parity gates at every step +
+validating EVERY read result (not just the main path) is what caught them.
+
+---
+
+## Open Issue: Page-Cache-Starvation Logit Wobble (2026-08-14, UNRESOLVED)
+
+**Symptom**: intermittent ~1e-4…1e-2 run-to-run logit differences (bitwise parity
+passes 2/3–3/3 runs), appearing only when the machine's free memory collapses
+(~100-200 MB free; Chrome et al. evict the page cache).
+
+**Status**: predates the perf refactor (first seen during the Step 2 parity gates).
+The chunked path is deterministic when the cache is healthy (multiple 3/3 bitwise
+sessions). Suspects: kernel-level short reads not caught by the main-path valid
+check, or a GPU-side race that only manifests under IO stalls. The hot-set prefetch
+is auto-disabled under these conditions by the strictly-free-memory gate, so it is
+not the trigger.
+
+**Next step**: reproduce on a healthy machine (or after freeing RAM); if the wobble
+persists there, bisect with the FINCHMOE_PF_DUMP hidden-state dumps to find the
+first divergent layer.
