@@ -154,8 +154,15 @@ def main():
     # Group by shard file
     by_file = defaultdict(list)
     for name, filename in weight_map.items():
-        # Skip vision and expert tensors
-        if 'vision' in name or 'switch_mlp' in name:
+        # Skip vision/visual and routed-expert tensors. Routed experts appear
+        # as switch_mlp (quantized variants) or mlp.experts (pristine BF16
+        # base). NOTE: mlp.shared_expert (always-on expert) IS kept.
+        # The C engine is text-only and never reads model.visual.* (333
+        # tensors, 893 MB in BF16) — pruning them keeps the bin ~1.95 GB,
+        # which matters for 8 GB unified-memory devices (smaller zero-copy
+        # Metal wrap + faster cold mmap).
+        if ('vision' in name or 'visual' in name
+                or 'switch_mlp' in name or '.mlp.experts.' in name):
             continue
         # Strip language_model prefix
         nn = name
@@ -285,9 +292,15 @@ def main():
                 tensor_count += 1
                 continue
 
-            # NOTE: no +1 adjustment — the source models used by this pipeline
-            # (2bit-dense-v2, 4bit) already store EFFECTIVE norm weights
-            # (1 + weight_param). Adding 1 again doubles them.
+            # Qwen norm storage convention varies by MODEL, not by tensor:
+            # the pristine BF16 base stores raw weight_param for ALL norms
+            # (means range 0.04..1.63 — a threshold can't detect it), while
+            # the 2bit-dense-v2 variant stores effective weights (1 + param).
+            # FINCHMOE_NORM_PLUS1=1 enables the +1 for param-storing models.
+            if (os.environ.get('FINCHMOE_NORM_PLUS1') == '1'
+                    and ('norm.weight' in nn or 'layernorm.weight' in nn)
+                    and len(arr.shape) == 1):
+                arr = arr + 1.0
 
             bits_info = quant_plan.get(nn)
             if bits_info and bits_info[0] == 'quant':

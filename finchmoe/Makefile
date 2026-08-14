@@ -12,7 +12,7 @@
 # Based on flash-moe's metal_infer/Makefile, adapted for Qwen3.6-35B-A3B.
 
 CC = clang
-CFLAGS = -O2 -Wall -Wextra -fobjc-arc -DACCELERATE_NEW_LAPACK
+CFLAGS = -O2 -g -Wall -Wextra -fobjc-arc -DACCELERATE_NEW_LAPACK
 FRAMEWORKS = -framework Metal -framework Foundation -framework Accelerate
 LDFLAGS = -lpthread -lcompression
 
