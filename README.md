@@ -4,23 +4,26 @@ A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon.
 
 **Phase 1 targets MET (2026-08-13)**: 11.4-12.4 tok/s decode on M4, 1.95 GB weights, 2.25 GB peak GPU — see [finchmoe/OPTIMIZATION_PLAN.md](finchmoe/OPTIMIZATION_PLAN.md) for the full progress log.
 
-## Current Status (2026-08-13)
+## Current Status (2026-08-14)
 
 | Metric | Value |
 |--------|-------|
 | Decode speed (M4, K=8) | **~9-10 tok/s** (3-bit experts, page-cache dependent) |
-| Prefill speed | **Chunked batched GPU prefill** (default `--prefill-chunk 8`): 90-token prompt 6.2s, 883-token 51s (**2.1×** vs per-token, 3-bit experts); logits bitwise-identical to the per-token path |
+| Prefill speed | **Chunked batched GPU prefill** (default `--prefill-chunk 8`): 90-token prompt 6.2s, 883-token 51s (**2.1×** vs per-token, 3-bit experts); logits bitwise-identical to the per-token path. Hot-set expert prefetch (build_hot_sets.py) is memory-adaptive — auto-disabled when the OS lacks page-cache headroom |
 | Weight file | **1.95 GB** (4-bit GDN tier + 3-bit experts, both default) |
 | RAM (8k context) | ~2.8 GB total (2.25 GB peak GPU + 0.34 GB CPU KV) |
 | Expert disk (3-bit) | 13 GB (40 layers × 256 × 1.31 MB) |
 | Correctness | Bit-exact vs numpy GDN reference (CosSim 1.000000 per stage) |
-| Bugs fixed | 16 + Phase 1 root causes (see finchmoe/PHASE1_NAN_ANALYSIS.md) |
+| Bugs fixed | 20 + Phase 1 root causes (see [BUGS.md](BUGS.md) and [finchmoe/PHASE1_NAN_ANALYSIS.md](finchmoe/PHASE1_NAN_ANALYSIS.md)) |
 
-Known issues (ranked): (1) prefill is expert-IO bound (~5.4 ms/layer
-pread against an ~14 GB expert working set; next lever = speculative
-expert prediction for prefill). (2) Server multi-turn session corruption
-after turn 1 (stateless fallback active). (3) MTP speculative decoding:
-harness runs, draft math wrong (α=0%).
+Known issues (ranked): (1) intermittent ~1e-4…1e-2 run-to-run logit wobble
+under page-cache starvation — predates the perf refactor, needs a
+healthy-machine session to isolate. (2) prefill is expert-IO bound
+(~5.4 ms/layer pread against an ~14 GB expert working set; the hot-set
+prefetch needs RAM headroom to pay, the 5-10× tier needs a learned router
+predictor — layer→layer expert carry-over is only 3.3%). (3) Server
+multi-turn session corruption after turn 1 (stateless fallback active).
+(4) MTP speculative decoding: harness runs, draft math wrong (α=0%).
 
 ## Quick Start
 
@@ -38,7 +41,7 @@ make chat                              # builds the chat TUI client
 
 # Cross-validation (expect CosSim 1.000000 for gated/o_proj/h_mid/h_post)
 FINCHMOE_DUMP_STAGES=1 ./finchmoe-infer -t 1 -k 8 -e 0 -P "Explain what a MoE transformer is in one sentence."
-FINCHMOE_REF_MANIFEST=quant_self/model_weights_quant.json FINCHMOE_REF_WEIGHTS=quant_self/model_weights_quant.bin python3 debug_gdn_reference.py /tmp/stage_dump.bin
+FINCHMOE_REF_MANIFEST=quant_clean/model_weights_quant.json FINCHMOE_REF_WEIGHTS=quant_clean/model_weights_quant.bin python3 debug_gdn_reference.py /tmp/stage_dump.bin
 ```
 
 ### Key Flags
@@ -63,7 +66,7 @@ FINCHMOE_REF_MANIFEST=quant_self/model_weights_quant.json FINCHMOE_REF_WEIGHTS=q
 
 | Configuration | Weights | Expert disk | Speed (K=8) | Notes |
 |---------------|---------|-------------|-------------|-------|
-| **Default (quant_self)** | **1.95 GB** (4-bit GDN, 8-bit embed/lm_head) | 13 GB 3-bit | **11.4-12.4 tok/s** | current production config |
+| **Default (quant_clean)** | **1.95 GB** (4-bit GDN, 8-bit embed/lm_head) | 13 GB 3-bit | **11.4-12.4 tok/s** | current production config |
 | Protected tier | 2.45 GB (8-bit GDN, `FINCHMOE_GDN8=1`) | 13 GB 3-bit | ~9.1 tok/s | quality-safe fallback |
 | BF16 (source) | 67 GB | — | — | reference; the intended requant base |
 | 2bit-dense-v2 (legacy) | 4.96 GB BF16 | 9.4 GB 2-bit | ~5 tok/s | marginal quality — being replaced |
@@ -101,26 +104,74 @@ page-cache friendly).
 | turbo-fieldfare | Gemma 4 26B A4B | ~2 GB | 10.7 tok/s (est.) | Swift/Metal reference |
 | llama.cpp Q4_K_M | Qwen 3.6 35B A3B | ~20 GB | — | reference quality; handles edge prompts well |
 
-## Project Structure
+## Documentation
+
+| Document | What it covers |
+|----------|----------------|
+| [design.md](design.md) | Engine design: pipeline, key decisions, timing budget, future work |
+| [BUGS.md](BUGS.md) | Chronological bug log (17+ fixed; 2026-08-07 → chunked-prefill era) |
+| [finchmoe/OPTIMIZATION_PLAN.md](finchmoe/OPTIMIZATION_PLAN.md) | Roadmap + progress log (Phase 1 targets, prefill levers) |
+| [finchmoe/ENGINE_ANALYSIS.md](finchmoe/ENGINE_ANALYSIS.md) | Comprehensive engine analysis (current-status header) |
+| [finchmoe/PHASE1_NAN_ANALYSIS.md](finchmoe/PHASE1_NAN_ANALYSIS.md) | Phase 1 NaN root causes + resolution |
+| [finchmoe/BUG_REPORT.md](finchmoe/BUG_REPORT.md) | Original degenerate-output bug report (historical) |
+| [finchmoe/BUGS_DEEPSEEK.md](finchmoe/BUGS_DEEPSEEK.md) | DeepSeek-V4-Flash engine bug log (sibling project) |
+| [finchmoe/design_deepseek.md](finchmoe/design_deepseek.md) | DeepSeek-V4-Flash engine design (sibling project) |
+
+## Tools
+
+### Build & quantization (finchmoe/)
+
+| Tool | Purpose |
+|------|---------|
+| `Makefile` | Builds `finchmoe-infer` (+ `chat`, `extract`, `index`, `repack` targets) |
+| `extract_weights.py` | Non-expert weights → model_weights.bin (safetensors → flat binary) |
+| `quantize_non_experts.py` | BF16 → 4/8-bit non-experts (4-bit GDN default; `FINCHMOE_GDN8=1`) |
+| `quantize_model.py` | Full-model MLX quantizer (incl. Qwen3_5RMSNorm +1.0 fix) |
+| `repack_experts.py` | Expert repack `--bits 1/2/3/4/8` (3-bit requant path from BF16 source) |
+| `generate_expert_index.py` | Expert tensor index (offset math, MTP-aware) |
+| `compress_experts.py` | Expert compression variants |
+| `export_tokenizer.py` | vocab.bin from the HF tokenizer (BPE merges) |
+| `extract_mtp_experts.py` | MTP auxiliary-head expert extraction |
+| `build_hot_sets.py` | Per-layer hot expert sets from `--collect-routing` logs → hot_sets.bin (prefill prefetch) |
+
+### Debugging & verification (finchmoe/)
+
+| Tool | Purpose |
+|------|---------|
+| `debug_compare.py` | Weight/manifest consistency checks + logits comparison helper |
+| `debug_gdn_reference.py` | Numpy GDN reference (stage cross-validation, CosSim 1.000000) |
+| `debug_e2e_logits.py` | End-to-end logits cross-check |
+| `debug_full_forward.py` / `debug_layer_compare.py` / `debug_layer_diff.py` | Full-forward and per-layer reference diffs |
+| `debug_full_attn_moe.py` / `debug_2token_gdn.py` | Attention/MoE and GDN targeted references |
+| `debug_bf16_vs_4bit.py` / `debug_mlx_inference.py` | Format and MLX-loader verification |
+| `verify_clean_rebuild.py` | CosSim verification of the clean-rebuild weights (3-bit experts, non-experts) |
+| `bench_prefill.sh` | Prefill benchmark + bitwise parity matrix (chunk sizes × timings) |
+| `finchTool/` | Standalone Metal kernel verification suite (matvec/attention kernels) |
+| `test_engine_path.m` | Engine-path standalone test |
+
+### Runtime diagnostics (engine flags & env vars)
+
+| Flag / Env | Purpose |
+|------------|---------|
+| `--timing` / `FINCHMOE_PF_TIMING=1` | Per-phase timing (per-token path / chunked prefill path) |
+| `--debug-layers` | Per-layer hidden-state statistics |
+| `--compare-experts N` | GPU vs CPU expert outputs for layer N |
+| `--dump-logits FILE` | First-token logits for cross-validation |
+| `--collect-routing FILE` | Routing logs (layer, hidden, top-K, top-24) for predictor training |
+| `FINCHMOE_DUMP_HIDDEN` / `FINCHMOE_PF_DUMP` / `FINCHMOE_DUMP_STAGES` | Per-layer hidden / chunked-stage dumps for parity forensics |
+| `FINCHMOE_PF_PREFETCH=1` | Force-enable hot-set prefetch (bypasses the memory gate) |
+
+## Project Layout
 
 ```
 finchMoE/
-├── README.md
-├── BUGS.md
-├── design.md
-├── finchmoe/
-│   ├── infer.m                   # Main engine (C/Metal)
-│   ├── shaders.metal             # Metal kernels (4/3/2/1/8-bit dequant, fused GDN, routing batch)
-│   ├── chat.m                    # Chat TUI client
-│   ├── ENGINE_ANALYSIS.md        # Comprehensive engine analysis (current-status header)
-│   ├── OPTIMIZATION_PLAN.md      # Roadmap + progress log
-│   ├── PHASE1_NAN_ANALYSIS.md    # Phase 1 NaN root causes + resolution
-│   ├── extract_weights.py        # Non-expert weights → model_weights.bin (+ --fp16-scales)
-│   ├── quantize_non_experts.py   # BF16 → 4/8-bit (4-bit GDN default; FINCHMOE_GDN8=1)
-│   ├── repack_experts.py         # Expert repack (--bits 1/2/3/4/8; 3-bit requant path)
-│   ├── generate_expert_index.py  # Expert index generator
-│   ├── debug_gdn_reference.py    # Numpy GDN reference (stage cross-validation)
-│   └── test_engine_path.m        # Standalone kernel verification suite
+├── README.md, design.md, BUGS.md
+├── finchmoe/                     # engine + tools (see tables above)
+│   ├── infer.m                   # main engine (C/Metal, ~15k lines)
+│   ├── shaders.metal             # Metal kernels (4/3/2/1/8-bit dequant, fused GDN, routing, attention)
+│   └── chat.m                    # chat TUI client
 ├── models/                       # Qwen3.6-35B-A3B variants + GGUF references
-└── quant_self/                   # Current production weights (model_weights_quant.bin/.json)
+│   └── Qwen3.6-35B-A3B-bf16/     # pristine BF16 base (requant source, expert packs)
+├── quant_clean/                  # current production weights (model_weights_quant.bin/.json)
+└── quant_*/                      # quant experiments (self, 4gdn, 8gdn, visual, …)
 ```
