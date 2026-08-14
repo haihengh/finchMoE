@@ -50,9 +50,16 @@
    (GPU) + pread_wait 6.2 ms/layer (SSD). Static hot-set prefetch tested
    and rejected (26% unique-expert coverage) — the 5-10× tier needs
    prefill speculative expert prediction.
-3. **Server multi-turn** — session continuation corrupts after turn 1
-   (template tokens leak; 2nd request can yield 0 tokens). Disabled via
-   stateless fallback; needs the snapshot-restore state-leak debugging.
+3. ~~**Server multi-turn**~~ — **FIXED 2026-08-14 (commit 1260465)**: the
+   "empty turn-2" bug was NOT a state leak — the continuation state was
+   verified clean. The model imitates the previous turn's ending shape: a
+   truncated turn (no EOS, unclosed `<think>`) makes the next turn end
+   immediately. Fix: pre-turn state snapshot + rollback of truncated turns
+   (FINCHMOE_SERVE_CONTINUE=1; stateless remains default) + think-token
+   re-entry ban. Verified: truncated turn 1 + turn 2 → 100 coherent tokens.
+   OPEN follow-up: at T=0.3 the model rarely emits EOS within reasonable
+   bounds (bug-15 drift), so turns usually truncate and roll back — session
+   history accumulation depends on the long-generation quality fix.
 4. **MTP speculative decoding** — harness runs (finite outputs) but
    logit-cos 0.59-0.74 → forward math must be verified against the
    Qwen3.6 nextn reference before the acceptance-rate gate.
