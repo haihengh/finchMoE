@@ -9,6 +9,7 @@ A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon.
 | Metric | Value |
 |--------|-------|
 | Decode speed (M4, K=8) | **~9-10.3 tok/s** (3-bit experts, page-cache dependent; post-restart retest 2026-08-14: 8.8 cold / **10.3 warm**) |
+| Decode speed (M1 mini, 8 GB) | **~4.1 tok/s**; chunk-8 prefill ~25 s is *slower* than per-token ~22.6 s on 8 GB (IO-bound) — full table in [M1 mini benchmark](#m1-mini-benchmark-2026-08-14) |
 | Prefill speed | **Chunked batched GPU prefill** (default `--prefill-chunk 8`): 90-token prompt 6.2-7.0s, 883-token 51s (**2.1×** vs per-token, 3-bit experts); logits bitwise-identical to the per-token path. Hot-set expert prefetch (build_hot_sets.py) is memory-adaptive — measured 2026-08-14, **does not pay** (26% unique-expert coverage, pread_wait 6.2→6.3 ms), auto-gate stays |
 | Weight file | **1.95 GB** (4-bit GDN tier + 3-bit experts, both default) |
 | RAM (8k context) | ~3.3 GB total (2.9 GB GPU peak + 0.34 GB CPU KV; +0.27 GB when the hot-set prefetch is active) |
@@ -27,6 +28,41 @@ the 5-10× tier needs a learned router predictor, layer→layer expert
 carry-over is only 3.3%). (3) Server
 multi-turn session corruption after turn 1 (stateless fallback active).
 (4) MTP speculative decoding: harness runs, draft math wrong (α=0%).
+
+### M1 mini benchmark (2026-08-14)
+
+Measured on an M1 mini (8 GB unified memory, 256 GB internal Apple SSD), running
+the `finchmoe-m1/` deploy copy (prebuilt binary + quant_clean weights +
+`bench.sh`). Same suite as the M4 reference:
+
+| Metric | M1 mini (8 GB) | M4 reference | Ratio |
+|--------|----------------|--------------|-------|
+| Decode (K=8, 50 tokens) | **~4.1 tok/s** (3.79-4.29, n=3) | 10.3 tok/s | 0.40× |
+| Prefill 90 tok, per-token (chunk 0) | **~22.6 s** (22.4/22.7, n=2) | 10.6 s | 2.1× slower |
+| Prefill 90 tok, chunked (chunk 8) | **~25 s** (24.9/25.2, n=2) | 6.8-7.0 s | 3.7× slower |
+| Expert `pread_wait` (chunked) | 33.0 ms/layer | 6.2 ms/layer | 5.3× slower |
+
+Findings:
+
+- **Chunked batched prefill does not pay on the M1** — it is ~11% *slower*
+  than the per-token path (25.1 vs 22.6 s), whereas on the M4 the same flag is the
+  2.1× win. Both paths are expert-IO-bound here: the 14 GB expert working set
+  never fits the 8 GB machine's page cache (`pread_wait` 33 ms/layer vs 6.2 on
+  the M4), so batching commit+waits buys nothing while the pf-pool adds overhead.
+- **Hot-set prefetch does not pay on the M1 either**: forced run 24.9 s vs 25.2 s
+  with the auto-gate on (unchanged `pread_wait`). The prefetched 32 experts/layer
+  cover only part of the reads, and SSD-bound preads dominate regardless. The
+  auto-gate enables prefetch only above 1 GB strictly-free RAM (it was active in
+  the 3.6+ GB runs).
+- **The bootstrap memory gate is live on 8 GB machines**: it refuses below
+  3.0 GB available (free+inactive+purgeable+speculative) and warns below 7 GB.
+  During the benchmark session available memory fluctuated 2.5-3.8 GB and 2 of 7
+  suite invocations were refused and had to be rerun. The check runs before
+  argument parsing, so `--low-memory` does not lower the hard floor — close
+  memory-heavy apps first (the engine itself wants ~3.3 GB total, see the RAM
+  row above, and Claude Code alone is ~2 GB).
+- Quality on the copied deploy is intact: coherent output on the typo prompt
+  (default sampling, temp 0.30/top-k 40); no obvious quality issues.
 
 ## Quick Start
 
@@ -68,7 +104,7 @@ FINCHMOE_REF_MANIFEST=quant_clean/model_weights_quant.json FINCHMOE_REF_WEIGHTS=
 
 ## Model Sizes
 
-| Configuration | Weights | Expert disk | Speed (K=8) | Notes |
+| Configuration | Weights | Expert disk | Speed (K=8, M4) | Notes |
 |---------------|---------|-------------|-------------|-------|
 | **Default (quant_clean)** | **1.95 GB** (4-bit GDN, 8-bit embed/lm_head) | 14 GB 3-bit | **~10.3 tok/s** (post-restart retest 2026-08-14) | current production config; 11.4+ was the quant_self-era peak |
 | Protected tier | 2.45 GB (8-bit GDN, `FINCHMOE_GDN8=1`) | 13 GB 3-bit | ~9.1 tok/s | quality-safe fallback |
@@ -133,7 +169,7 @@ the OS has ≥1 GB strictly-free RAM (`FINCHMOE_PF_PREFETCH=1` forces it).
 
 | Engine | Model | RAM | M4 Speed | Notes |
 |--------|-------|-----|----------|-------|
-| **FinchMoE** | Qwen 3.6 35B A3B | **~3.3 GB** | **~9-10 tok/s** (11.4+ warm cache) | custom C/Metal, bit-exact |
+| **FinchMoE** | Qwen 3.6 35B A3B | **~3.3 GB** | **~9-10.3 tok/s** (post-restart retest 2026-08-14) | custom C/Metal, bit-exact |
 | turbo-fieldfare | Gemma 4 26B A4B | ~2 GB | 10.7 tok/s (est.) | Swift/Metal reference |
 | llama.cpp Q4_K_M | Qwen 3.6 35B A3B | ~20 GB | — | reference quality; handles edge prompts well |
 
@@ -206,5 +242,6 @@ finchMoE/
 ├── models/                       # Qwen3.6-35B-A3B variants + GGUF references
 │   └── Qwen3.6-35B-A3B-bf16/     # pristine BF16 base (requant source, expert packs)
 ├── quant_clean/                  # current production weights (model_weights_quant.bin/.json)
-└── quant_*/                      # quant experiments (self, 4gdn, 8gdn, visual, …)
+├── quant_*/                      # quant experiments (self, 4gdn, 8gdn, visual, …)
+└── finchmoe-m1/                  # M1 mini (8GB) deploy copy: binary + weight symlinks + bench.sh (untracked)
 ```

@@ -118,9 +118,11 @@ chain verified end-to-end by `debug_gdn_reference.py`.
 Prefill was decode speed (~12 tok/s). Now chunked batched GPU prefill
 (`--prefill-chunk 8`, default): batched matvecs, one CB per linear layer,
 64-slot pooled expert preads with back-to-back CMD3s (zero backpressure),
-and M-position batched GPU attention — 1.66-1.7× TTFT (90-token 7.8s,
-883-token 65s) with logits bitwise-identical to the per-token path.
-Remaining wall: expert pread I/O (~8 ms/layer) + GPU matvec time.
+and M-position batched GPU attention — 2.1× TTFT (90-token 6.2-7.0s,
+883-token 51s; post-restart retest 2026-08-14) with logits bitwise-identical
+to the per-token path. On 8 GB machines the expert set never page-caches,
+so chunking does not pay there — see README "M1 mini benchmark".
+Remaining wall: expert pread I/O (~6.2 ms/layer) + GPU matvec time.
 
 ## 8. Key Design Decisions
 
@@ -177,5 +179,6 @@ See [finchmoe/OPTIMIZATION_PLAN.md](finchmoe/OPTIMIZATION_PLAN.md). In order:
 
 | Device | RAM | Current | Target |
 |--------|-----|---------|--------|
-| M4 Mac mini 16 GB | 16 GB | **11.4-12.4 tok/s** | 12-15 tok/s (MTP) |
+| M4 Mac mini 16 GB | 16 GB | **~9-10.3 tok/s** (post-restart retest 2026-08-14) | 12-15 tok/s (MTP) |
+| M1 mini 8 GB | 8 GB | **~4.1 tok/s** (measured 2026-08-14, 3-bit — see README "M1 mini benchmark") | — |
 | iPhone | 8 GB | — | 3-5 tok/s (all-4-bit, SSD streaming) |

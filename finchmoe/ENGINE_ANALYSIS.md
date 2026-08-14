@@ -1,18 +1,18 @@
 # FinchMoE Inference Engine — Comprehensive Analysis
 
-> **CURRENT STATUS (2026-08-13)** — this document's architecture analysis
+> **CURRENT STATUS (2026-08-14)** — this document's architecture analysis
 > remains accurate; the state below reflects the latest commits.
 >
 > | Item | State |
 > |---|---|
 > | Weights | 1.95 GB: 4-bit GDN tier (qkv/z/out_proj), Q/K/V/O 4-bit, embed/lm_head 8-bit, beta/alpha BF16, **3-bit experts (default)** |
-> | Speed | 11.4-12.4 tok/s decode (M4, K=8, greedy); **prefill ~12 tok/s** (789-token prompt = 66.2s) |
-> | RAM | 2.25 GB peak GPU + 0.34 GB CPU KV @ 8k; 256k context = 10.7 GB CPU KV (does not fit 16 GB) |
+> | Speed | ~9-10.3 tok/s decode (M4, K=8; 8.8 cold / 10.3 warm, post-restart 2026-08-14 — 11.4+ was the quant_self-era peak); chunked batched prefill: 90-token 6.2-7.0s, 883-token 51s (2.1× vs per-token). M1 mini 8 GB: ~4.1 tok/s, per-token prefill ~22.6s — see README "M1 mini benchmark" |
+> | RAM | 2.9 GB peak GPU + 0.34 GB CPU KV @ 8k; 256k context = 10.7 GB CPU KV (does not fit 16 GB) |
 > | Correctness | Engine bit-exact vs numpy GDN reference (CosSim 1.000000/stage); kernels 1.0 vs CPU |
 > | Command pipeline | CMD1+CMD2 fused (one round trip/layer); GDN fully fused (conv+qk-norm+decay+delta+gated in one kernel); residual+norm fused; routing batch fused |
 > | Expert formats | `-3` default / `-4` / `-2` / `-8`; packed_experts dirs per format |
 > | Server | OpenAI-compatible SSE on `-R PORT`; `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`; chat TUI client (`make chat`) |
-> | Known issues | (1) model quality on typo'd prompts — weights quantized from the marginal 2bit-dense-v2 variant (fix: requant from pristine BF16 base); (2) prefill not batched; (3) server multi-turn session corruption after turn 1 (stateless fallback active); (4) MTP draft head math wrong (α=0%, logit-cos 0.59-0.74) |
+> | Known issues | (1) intermittent ~1e-4…1e-2 run-to-run logit wobble under page-cache starvation; (2) prefill GPU+IO co-bound (pread_wait 6.2 ms/layer; static hot-set prefetch measured and does not pay — 26% coverage); (3) server multi-turn session corruption after turn 1 (stateless fallback active); (4) MTP draft math wrong (α=0%) |
 
 ## 1. Model Architecture
 
