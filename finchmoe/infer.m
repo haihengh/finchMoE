@@ -1707,7 +1707,6 @@ typedef struct {
     id<MTLBuffer> buf_pf_shared_up;       // [P, 512]
     id<MTLBuffer> buf_pf_shared_act;      // [P, 512]
     id<MTLBuffer> buf_pf_sum_sq;
-    id<MTLBuffer> buf_gdn_dbg;      // fused_gdn_batched per-iteration debug [M*24]         // [256]        rms norm reductions
     // Inter-command-buffer synchronization for fused expert path
     id<MTLFence>      expert_fence;        // MTLFence: encoder-level GPU sync
     id<MTLSharedEvent> expert_sync_event;   // MTLSharedEvent: CB-level GPU sync
@@ -2019,7 +2018,6 @@ static MetalCtx *metal_setup(void) {
         ctx->buf_pf_moe_hidden   = [ctx->device newBufferWithLength:PF_2048 options:MTLResourceStorageModeShared];
         ctx->buf_pf_combine_params = [ctx->device newBufferWithLength:(size_t)PREFILL_CHUNK_MAX * 10 * sizeof(float) options:MTLResourceStorageModeShared];
         ctx->buf_pf_sum_sq   = [ctx->device newBufferWithLength:(size_t)PREFILL_CHUNK_MAX * sizeof(float) options:MTLResourceStorageModeShared];
-        ctx->buf_gdn_dbg     = [ctx->device newBufferWithLength:(size_t)PREFILL_CHUNK_MAX * 24 * sizeof(float) options:MTLResourceStorageModeShared];
     }
 
     // GPU attention buffers
@@ -5961,13 +5959,12 @@ static void gpu_encode_gdn_batched(MetalCtx *ctx, id<MTLCommandBuffer> cmdbuf,
     [enc setBuffer:ctx->buf_delta_state[linear_layer_idx] offset:0 atIndex:8];
     [enc setBuffer:ctx->buf_pf_oproj_in offset:0          atIndex:9];
     [enc setBuffer:ctx->buf_conv_qk[linear_layer_idx] offset:0 atIndex:10]; // per-head q/k histories
-    [enc setBuffer:ctx->buf_gdn_dbg offset:0 atIndex:11];
-    [enc setBytes:&conv_dim length:4 atIndex:12];
-    [enc setBytes:&khpv     length:4 atIndex:13];
-    [enc setBytes:&kdim     length:4 atIndex:14];
-    [enc setBytes:&vdim     length:4 atIndex:15];
-    [enc setBytes:&M        length:4 atIndex:16];
-    [enc setBytes:&eps      length:4 atIndex:17];
+    [enc setBytes:&conv_dim length:4 atIndex:11];
+    [enc setBytes:&khpv     length:4 atIndex:12];
+    [enc setBytes:&kdim     length:4 atIndex:13];
+    [enc setBytes:&vdim     length:4 atIndex:14];
+    [enc setBytes:&M        length:4 atIndex:15];
+    [enc setBytes:&eps      length:4 atIndex:16];
     [enc dispatchThreadgroups:MTLSizeMake(LINEAR_NUM_V_HEADS, 1, 1)
         threadsPerThreadgroup:MTLSizeMake(LINEAR_VALUE_DIM, 1, 1)];
     // Writer-side barrier: state + oproj_in writes visible to subsequent
@@ -8617,14 +8614,6 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
         [cmdA commit];
         [cmdA waitUntilCompleted];
         if (g_chunk_timing_enabled) g_chunk_timing.cmdA_wait += now_ms() - t_ph;
-        if (getenv("FINCHMOE_DUMP_PHASEB")) {
-            static FILE *gd = NULL;
-            if (!gd) gd = fopen("/tmp/gdn_dbg.bin", "wb");
-            if (gd) {
-                fwrite([ctx->buf_gdn_dbg contents], sizeof(float), (size_t)M * 24, gd);
-                fflush(gd);
-            }
-        }
         memcpy([ctx->buf_pf_oproj_in2 contents], [ctx->buf_pf_oproj_in contents],
                (size_t)M * LINEAR_TOTAL_VALUE * sizeof(float));
     } else {
