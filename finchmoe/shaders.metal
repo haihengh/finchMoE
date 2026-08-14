@@ -2821,7 +2821,6 @@ kernel void fused_gdn_batched(
     device float       *state,           // [num_v_heads * value_dim * key_dim] persistent
     device float       *output,          // [M * num_v_heads * value_dim] gated output
     device float       *qk_hist,         // [3 * (2*total_key)] per-thread q/k conv history
-    device float       *dbg,             // debug: [M*24] per-iteration state for head0/tid0
     constant uint &conv_dim,             // 8192
     constant uint &k_heads_per_v,        // 2
     constant uint &key_dim,              // 128
@@ -2961,20 +2960,5 @@ kernel void fused_gdn_batched(
         float w = bf16_to_f32(norm_weight[tid]);
         out_m[base + tid] = normed * gate * w;
 
-        if (head == 0 && tid == 0) {
-            device float *qh = qk_hist + head * 3 * key_dim + tid;
-            device float *kh_hist = qk_hist + 32 * 3 * key_dim + head * 3 * key_dim + tid;
-            for (uint i = 0; i < 8; i++) dbg[m * 24 + i] = state[i];
-            dbg[m * 24 + 8] = conv_q[0];
-            dbg[m * 24 + 9] = conv_k[0];
-            dbg[m * 24 + 10] = out_val;
-            dbg[m * 24 + 11] = g_decay;
-            dbg[m * 24 + 12] = beta_gate;
-            dbg[m * 24 + 13] = zval;
-            for (uint i = 0; i < 3; i++) dbg[m * 24 + 14 + i] = qh[i * key_dim];
-            for (uint i = 0; i < 3; i++) dbg[m * 24 + 17 + i] = kh_hist[i * key_dim];
-            for (uint i = 0; i < 3; i++) dbg[m * 24 + 20 + i] = conv_state[i];
-            dbg[m * 24 + 23] = conv_state[2 * conv_dim];
-        }
     }
 }

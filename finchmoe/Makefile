@@ -12,7 +12,9 @@
 # Based on flash-moe's metal_infer/Makefile, adapted for Qwen3.6-35B-A3B.
 
 CC = clang
-CFLAGS = -O2 -g -Wall -Wextra -fobjc-arc -DACCELERATE_NEW_LAPACK
+# -mmacosx-version-min=13.0 keeps the binary runnable on older Apple
+# Silicon Macs (M1 mini etc.) — the default SDK targets the host OS only.
+CFLAGS = -O2 -g -Wall -Wextra -fobjc-arc -DACCELERATE_NEW_LAPACK -mmacosx-version-min=13.0
 FRAMEWORKS = -framework Metal -framework Foundation -framework Accelerate
 LDFLAGS = -lpthread -lcompression
 
