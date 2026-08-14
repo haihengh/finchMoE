@@ -60,9 +60,13 @@
    OPEN follow-up: at T=0.3 the model rarely emits EOS within reasonable
    bounds (bug-15 drift), so turns usually truncate and roll back — session
    history accumulation depends on the long-generation quality fix.
-4. **MTP speculative decoding** — harness runs (finite outputs) but
-   logit-cos 0.59-0.74 → forward math must be verified against the
-   Qwen3.6 nextn reference before the acceptance-rate gate.
+4. ~~**MTP speculative decoding**~~ — **DIAGNOSED 2026-08-14, NOT SHIPPABLE**:
+   the forward math was verified against a pristine-BF16 numpy reference
+   (mtp_reference.py — the reference reproduces the engine's drafts and cos
+   exactly: 0.6051/0.7769/0.7021 vs 0.6115/0.7875 engine). The Qwen3.6-35B
+   MTP head is inherently weak (cos 0.3-0.8, ~0% T=0 acceptance) — per the
+   calibration gate, speculative decoding stays disabled. The harness +
+   reference tooling remain for any future MTP variant.
 
 **Reference target**: turbo-fieldfare achieves 5.1-6.3 tok/s at ~2 GB on **M2 8GB** with Gemma 4 26B. M4 is ~1.4× faster than M2 — we now exceed that reference (11.4 tok/s on M4).
 

@@ -27,7 +27,9 @@ prefetch was measured and does not pay — 26% unique-expert coverage —
 the 5-10× tier needs a learned router predictor, layer→layer expert
 carry-over is only 3.3%). (3) Server
 multi-turn session corruption after turn 1 (stateless fallback active).
-(4) MTP speculative decoding: harness runs, draft math wrong (α=0%).
+(4) MTP speculative decoding: forward math verified correct against a
+pristine-BF16 numpy reference, but the model's MTP head is inherently weak
+(cos 0.3-0.8, ~0% acceptance) — not shippable (see finchmoe/mtp_reference.py).
 
 ### M1 mini benchmark (2026-08-14)
 
