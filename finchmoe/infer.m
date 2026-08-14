@@ -5455,6 +5455,76 @@ static void mtp_init(WeightFile *wf, const char *model_path) {
 // MTP forward pass: predicts next token from hidden state + current token embedding.
 // Returns 1 if a token was generated, 0 if MTP is not available.
 // The predicted token is written to *next_token and hidden is updated in-place.
+// MTP K/V cache: the MTP attention attends the FULL context — the cache is
+// filled with the MTP's own K/V per token, both at prefill time (via
+// mtp_cache_fill) and during generation (inside mtp_forward).
+#define MTP_N_Q_HEADS 16
+#define MTP_N_KV_HEADS 2
+#define MTP_HEAD_DIM 256
+#define MTP_Q_DIM (MTP_N_Q_HEADS * MTP_HEAD_DIM)    // 4096 (q only)
+#define MTP_KV_DIM (MTP_N_KV_HEADS * MTP_HEAD_DIM)  // 512
+#define MTP_O_IN_DIM (16 * MTP_HEAD_DIM)             // 4096
+#define MTP_KV_CACHE_MAX 8192                        // 32 MB K + 32 MB V
+
+static float *mtp_k_cache = NULL, *mtp_v_cache = NULL;
+static int mtp_cache_len = 0;
+
+// Compute the MTP K/V for one token (norm chain + projections + RoPE) and
+// append to the cache. embed = token embedding, hidden = pre-final-norm
+// hidden (post-MoE residual), pos = sequence position.
+static void mtp_kv_append(WeightFile *wf, const float *embed, const float *hidden, int pos) {
+    if (!g_mtp.loaded) return;
+    if (!mtp_k_cache) {
+        mtp_k_cache = calloc(MTP_KV_CACHE_MAX * MTP_KV_DIM, sizeof(float));
+        mtp_v_cache = calloc(MTP_KV_CACHE_MAX * MTP_KV_DIM, sizeof(float));
+        mtp_cache_len = 0;
+    }
+    if (mtp_cache_len >= MTP_KV_CACHE_MAX) {
+        // Slide the window: drop the oldest half (the attention is local
+        // enough that the full context beyond 8K rarely matters).
+        memmove(mtp_k_cache, mtp_k_cache + (MTP_KV_CACHE_MAX / 2) * MTP_KV_DIM,
+                (MTP_KV_CACHE_MAX / 2) * MTP_KV_DIM * sizeof(float));
+        memmove(mtp_v_cache, mtp_v_cache + (MTP_KV_CACHE_MAX / 2) * MTP_KV_DIM,
+                (MTP_KV_CACHE_MAX / 2) * MTP_KV_DIM * sizeof(float));
+        mtp_cache_len = MTP_KV_CACHE_MAX / 2;
+    }
+
+    float emb_normed[HIDDEN_DIM], hidden_normed[HIDDEN_DIM], h[HIDDEN_DIM], normed[HIDDEN_DIM];
+    cpu_rms_norm((float *)embed, g_mtp.pre_fc_norm_embedding_w, emb_normed, HIDDEN_DIM, RMS_NORM_EPS);
+    cpu_rms_norm((float *)hidden, g_mtp.pre_fc_norm_hidden_w, hidden_normed, HIDDEN_DIM, RMS_NORM_EPS);
+    for (int i = 0; i < HIDDEN_DIM; i++) h[i] = emb_normed[i] + hidden_normed[i];
+    cpu_rms_norm(h, g_mtp.input_layernorm_w, normed, HIDDEN_DIM, RMS_NORM_EPS);
+
+    int kv_bits = (g_mtp.k_s && g_mtp.k_b) ? 4 : 0;
+    float k_buf[MTP_KV_DIM], v_buf[MTP_KV_DIM];
+    cpu_dequant_matvec(g_mtp.k_w, g_mtp.k_s, g_mtp.k_b, normed, k_buf, MTP_KV_DIM, HIDDEN_DIM, GROUP_SIZE, kv_bits);
+    cpu_dequant_matvec(g_mtp.v_w, g_mtp.v_s, g_mtp.v_b, normed, v_buf, MTP_KV_DIM, HIDDEN_DIM, GROUP_SIZE, kv_bits);
+    for (int hh = 0; hh < MTP_N_KV_HEADS; hh++) {
+        float sum_sq = 0.0f;
+        for (int d = 0; d < MTP_HEAD_DIM; d++) sum_sq += k_buf[hh * MTP_HEAD_DIM + d] * k_buf[hh * MTP_HEAD_DIM + d];
+        float inv_rms = 1.0f / sqrtf(sum_sq / MTP_HEAD_DIM + RMS_NORM_EPS);
+        for (int d = 0; d < MTP_HEAD_DIM; d++)
+            k_buf[hh * MTP_HEAD_DIM + d] *= inv_rms * bf16_to_f32(g_mtp.k_norm_w[d]);
+    }
+    // RoPE on K at its position (Q gets RoPE at the frontier in mtp_forward)
+    apply_rotary_emb(k_buf, k_buf, pos, MTP_N_KV_HEADS, MTP_N_KV_HEADS, MTP_HEAD_DIM, ROTARY_DIM);
+
+    memcpy(mtp_k_cache + mtp_cache_len * MTP_KV_DIM, k_buf, MTP_KV_DIM * sizeof(float));
+    memcpy(mtp_v_cache + mtp_cache_len * MTP_KV_DIM, v_buf, MTP_KV_DIM * sizeof(float));
+    mtp_cache_len++;
+}
+
+// Fill the MTP K/V cache for a batch of prefill positions (per-token or
+// per-chunk hiddens with their embeddings).
+static void mtp_cache_fill(WeightFile *wf, const float *embed_batch,
+                           const float *hidden_batch, int count, int pos_base) {
+    if (!g_use_mtp) return;
+    for (int i = 0; i < count; i++) {
+        mtp_kv_append(wf, embed_batch + (size_t)i * HIDDEN_DIM,
+                      hidden_batch + (size_t)i * HIDDEN_DIM, pos_base + i);
+    }
+}
+
 static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
                        int *next_token, float *logits_buf) {
     if (!g_mtp.loaded || g_mtp.expert_fd < 0) return 0;
@@ -5476,35 +5546,15 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
     float normed[HIDDEN_DIM];
     cpu_rms_norm(h, g_mtp.input_layernorm_w, normed, HIDDEN_DIM, RMS_NORM_EPS);
 
-    // Step 5: MTP attention with KV cache (16 Q heads + gates, 2 KV heads,
-    // 256 dim). q_proj: [8192, 2048] = 16 heads × 512 (Q+gate interleaved),
-    // K/V: [512, 2048], O: [2048, 4096] = all 16 heads.
-    #define MTP_N_Q_HEADS 16
-    #define MTP_N_KV_HEADS 2
-    #define MTP_HEAD_DIM 256
-    #define MTP_Q_DIM (MTP_N_Q_HEADS * MTP_HEAD_DIM)    // 4096 (q only)
-    #define MTP_KV_DIM (MTP_N_KV_HEADS * MTP_HEAD_DIM)  // 512
-    #define MTP_O_IN_DIM (16 * MTP_HEAD_DIM)             // 4096
-    #define MTP_KV_CACHE_MAX 64
+    // Step 5: MTP attention (16 Q heads + gates, 2 KV heads, 256 dim).
+    // The current token's K/V is appended to the full-context cache by
+    // mtp_kv_append (which also computes the norm chain + projections).
+    mtp_kv_append(wf, embed_buf, hidden, mtp_cache_len);
 
-    static float *mtp_k_cache = NULL, *mtp_v_cache = NULL;
-    static int mtp_cache_len = 0;
-    if (!mtp_k_cache) {
-        mtp_k_cache = calloc(MTP_KV_CACHE_MAX * MTP_KV_DIM, sizeof(float));
-        mtp_v_cache = calloc(MTP_KV_CACHE_MAX * MTP_KV_DIM, sizeof(float));
-        mtp_cache_len = 0;
-    }
-
-    // Q, K, V projections (4-bit if scales present, BF16 if NULL)
-    // q_proj [8192, 2048] = 16 heads × 512: Q and the attention output GATE
-    // interleaved per head (q at [h*512+d], gate at [h*512+256+d]) — the
-    // MTP block has 16 Q heads, 2 KV heads, O takes all 16 (4096 input).
+    // Q projection + gate (element-interleaved), 4-bit if scales present
     int q_bits = (g_mtp.q_s && g_mtp.q_b) ? 4 : 0;
-    int kv_bits = (g_mtp.k_s && g_mtp.k_b) ? 4 : 0;
-    float q_raw[MTP_Q_DIM * 2], k_buf[MTP_KV_DIM], v_buf[MTP_KV_DIM];
+    float q_raw[MTP_Q_DIM * 2];
     cpu_dequant_matvec(g_mtp.q_w, g_mtp.q_s, g_mtp.q_b, normed, q_raw, MTP_Q_DIM * 2, HIDDEN_DIM, GROUP_SIZE, q_bits);
-    cpu_dequant_matvec(g_mtp.k_w, g_mtp.k_s, g_mtp.k_b, normed, k_buf, MTP_KV_DIM, HIDDEN_DIM, GROUP_SIZE, kv_bits);
-    cpu_dequant_matvec(g_mtp.v_w, g_mtp.v_s, g_mtp.v_b, normed, v_buf, MTP_KV_DIM, HIDDEN_DIM, GROUP_SIZE, kv_bits);
 
     // De-interleave Q and gate — ELEMENT-interleaved per head (q,g,q,g...:
     // q at [h*512 + 2d], gate at [h*512 + 2d+1] — per the reference's
@@ -5523,25 +5573,10 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
         for (int d = 0; d < MTP_HEAD_DIM; d++)
             q_buf[h * MTP_HEAD_DIM + d] *= inv_rms * bf16_to_f32(g_mtp.q_norm_w[d]);
     }
-    for (int h = 0; h < MTP_N_KV_HEADS; h++) {
-        float sum_sq = 0.0f;
-        for (int d = 0; d < MTP_HEAD_DIM; d++) sum_sq += k_buf[h * MTP_HEAD_DIM + d] * k_buf[h * MTP_HEAD_DIM + d];
-        float inv_rms = 1.0f / sqrtf(sum_sq / MTP_HEAD_DIM + RMS_NORM_EPS);
-        for (int d = 0; d < MTP_HEAD_DIM; d++)
-            k_buf[h * MTP_HEAD_DIM + d] *= inv_rms * bf16_to_f32(g_mtp.k_norm_w[d]);
-    }
-
-    // RoPE (partial rotary, same as the main attention) at the frontier
-    // position; the K/V cache stores the rope'd K so scores use positions.
-    apply_rotary_emb(q_buf, k_buf, mtp_cache_len, MTP_N_Q_HEADS, MTP_N_KV_HEADS,
+    // RoPE on Q at the frontier position (K was rope'd by mtp_kv_append).
+    static float mtp_k_scratch[MTP_KV_DIM];
+    apply_rotary_emb(q_buf, mtp_k_scratch, mtp_cache_len - 1, MTP_N_Q_HEADS, MTP_N_KV_HEADS,
                      MTP_HEAD_DIM, ROTARY_DIM);
-
-    // Append K, V to cache
-    if (mtp_cache_len < MTP_KV_CACHE_MAX) {
-        memcpy(mtp_k_cache + mtp_cache_len * MTP_KV_DIM, k_buf, MTP_KV_DIM * sizeof(float));
-        memcpy(mtp_v_cache + mtp_cache_len * MTP_KV_DIM, v_buf, MTP_KV_DIM * sizeof(float));
-        mtp_cache_len++;
-    }
 
     // Multi-head attention with softmax over cached tokens
     int n_ctx = mtp_cache_len;
@@ -5606,8 +5641,9 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
 
     // Step 6: MoE routing
     float gate_scores[256];
+    int gate_bits = (g_mtp.gate_s && g_mtp.gate_b) ? 8 : 0;  // BF16 in the MTP manifest
     cpu_dequant_matvec(g_mtp.gate_w, g_mtp.gate_s, g_mtp.gate_b, h_post, gate_scores,
-                       256, HIDDEN_DIM, GROUP_SIZE, 8);
+                       256, HIDDEN_DIM, GROUP_SIZE, gate_bits);
     cpu_softmax(gate_scores, 256);
 
     int K = 8;  // model trained with 8 experts/token (K=2 produces garbage)
@@ -5618,17 +5654,20 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
 
     // Step 7: Shared expert gate
     float shared_gate_score;
+    int sgg_bits = (g_mtp.shared_gate_gate_s && g_mtp.shared_gate_gate_b) ? 4 : 0;
     cpu_dequant_matvec(g_mtp.shared_gate_gate_w, g_mtp.shared_gate_gate_s,
                        g_mtp.shared_gate_gate_b, h_post, &shared_gate_score,
-                       1, HIDDEN_DIM, GROUP_SIZE, 8);
+                       1, HIDDEN_DIM, GROUP_SIZE, sgg_bits);
     float shared_weight = 1.0f / (1.0f + expf(-shared_gate_score));  // sigmoid
 
     // Step 8: Shared expert gate/up
     float shared_gate[SHARED_INTERMEDIATE], shared_up[SHARED_INTERMEDIATE];
+    int sg_bits = (g_mtp.shared_gate_s && g_mtp.shared_gate_b) ? 4 : 0;
+    int su_bits = (g_mtp.shared_up_s && g_mtp.shared_up_b) ? 4 : 0;
     cpu_dequant_matvec(g_mtp.shared_gate_w, g_mtp.shared_gate_s, g_mtp.shared_gate_b,
-                       h_post, shared_gate, 512, HIDDEN_DIM, GROUP_SIZE, 4);
+                       h_post, shared_gate, 512, HIDDEN_DIM, GROUP_SIZE, sg_bits);
     cpu_dequant_matvec(g_mtp.shared_up_w, g_mtp.shared_up_s, g_mtp.shared_up_b,
-                       h_post, shared_up, 512, HIDDEN_DIM, GROUP_SIZE, 4);
+                       h_post, shared_up, 512, HIDDEN_DIM, GROUP_SIZE, su_bits);
 
     // Shared expert SwiGLU
     float shared_act[SHARED_INTERMEDIATE];
@@ -5636,8 +5675,9 @@ static int mtp_forward(WeightFile *wf, float *hidden, int current_token,
 
     // Shared expert down
     float shared_out[HIDDEN_DIM];
+    int sd_bits = (g_mtp.shared_down_s && g_mtp.shared_down_b) ? 4 : 0;
     cpu_dequant_matvec(g_mtp.shared_down_w, g_mtp.shared_down_s, g_mtp.shared_down_b,
-                       shared_act, shared_out, HIDDEN_DIM, 512, GROUP_SIZE, 4);
+                       shared_act, shared_out, HIDDEN_DIM, 512, GROUP_SIZE, sd_bits);
 
     // Step 9: Routed experts (persistent buffers, allocated once)
     // The MTP layer's expert file is packed in the 4-bit layout
@@ -9500,6 +9540,7 @@ static void prefill_chunked_run(WeightFile *wf, float *hidden,
             }
             async_pread_prefetch_start(pf_fds, pf_offs, pf_dsts, pf_sizes, g_pf_hot_slots);
         }
+        id<MTLCommandBuffer> chunk_last = nil;
         for (int layer = 0; layer < NUM_LAYERS; layer++) {
             int is_full = ((layer + 1) % FULL_ATTN_INTERVAL == 0);
             id<MTLCommandBuffer> layer_last = nil;
@@ -9508,10 +9549,38 @@ static void prefill_chunked_run(WeightFile *wf, float *hidden,
                                 is_full ? NULL : (LinearAttnState *)layer_states[layer],
                                 layer_mmaps[layer], K, layer_fds[layer], layer_fds,
                                 &layer_last);
+            if (layer == NUM_LAYERS - 1) chunk_last = layer_last;
             if (cbase + M >= count && layer == NUM_LAYERS - 1) {
                 last_cmd3 = layer_last;
                 last_M = M;
             }
+        }
+        // Fill the MTP K/V cache for this chunk's prompt tokens. The MTP's
+        // hidden input = the post-MoE hidden per position — layer 39's
+        // CMD3s don't combine into a buffer (only the driver's finalize
+        // does, for the last position), so wait for the chunk's last CB and
+        // CPU-combine per position, mirroring the finalize arithmetic.
+        if (g_use_mtp && g_metal && chunk_last) {
+            [chunk_last waitUntilCompleted];
+            const float *h_mid = (const float *)[g_metal->buf_pf_h_mid contents];
+            const float *params = (const float *)[g_metal->buf_pf_combine_params contents];
+            static float mtp_hidden_batch[PREFILL_CHUNK_MAX * HIDDEN_DIM];
+            for (uint32_t m = 0; m < (uint32_t)M; m++) {
+                float *h_out = mtp_hidden_batch + (size_t)m * HIDDEN_DIM;
+                float shared_gate = 1.0f / (1.0f + expf(-params[m * 10 + 8]));
+                memcpy(h_out, h_mid + (size_t)m * HIDDEN_DIM, HIDDEN_DIM * sizeof(float));
+                for (int k = 0; k < MAX_K; k++) {
+                    float w = params[m * 10 + k];
+                    if (w == 0.0f) continue;
+                    const float *eo = (const float *)[g_metal->buf_multi_expert_out[k] contents]
+                                      + (size_t)m * HIDDEN_DIM;
+                    cpu_vec_madd(h_out, eo, w, HIDDEN_DIM);
+                }
+                const float *so = (const float *)[g_metal->buf_shared_out contents] + (size_t)m * HIDDEN_DIM;
+                for (int i = 0; i < HIDDEN_DIM; i++) h_out[i] += shared_gate * so[i];
+            }
+            mtp_cache_fill(wf, embed_batch + (size_t)cbase * HIDDEN_DIM,
+                           mtp_hidden_batch, M, cbase);
         }
         *pos += M;
     }
@@ -10404,6 +10473,9 @@ static void process_chat_request(ServeState *s, int client_fd,
             }
             discard_deferred_experts();
             pos++;
+            if (g_use_mtp && serve_embed_batch)
+                mtp_cache_fill(s->wf, serve_embed_batch + (size_t)i * HIDDEN_DIM,
+                               hidden, 1, pos - 1);
         }
         // Last prefill token
         {
@@ -10425,6 +10497,9 @@ static void process_chat_request(ServeState *s, int client_fd,
             }
             complete_deferred_experts();
             pos++;
+            if (g_use_mtp && serve_embed_batch)
+                mtp_cache_fill(s->wf, serve_embed_batch + (size_t)(pt->count - 1) * HIDDEN_DIM,
+                               hidden, 1, pos - 1);
         }
     }
     if (serve_embed_batch) { free(serve_embed_batch); serve_embed_batch = NULL; }
@@ -11720,6 +11795,10 @@ int main(int argc, char **argv) {
                     discard_deferred_experts();
                     pos++;
 
+                    if (g_use_mtp && embed_batch)
+                        mtp_cache_fill(wf, embed_batch + (size_t)token_idx * HIDDEN_DIM,
+                                       hidden, 1, pos - 1);
+
                     if (token_idx == 0) {
                         first_tok_ms = now_ms() - t_tok;
                     }
@@ -11765,6 +11844,9 @@ int main(int argc, char **argv) {
             // Full completion — need hidden state for final norm + lm_head
             complete_deferred_experts();
             pos++;
+            if (g_use_mtp && embed_batch)
+                mtp_cache_fill(wf, embed_batch + (size_t)(pt->count - 1) * HIDDEN_DIM,
+                               hidden, 1, pos - 1);
         }
 
         if (embed_batch) { free(embed_batch); embed_batch = NULL; }
