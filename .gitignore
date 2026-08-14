@@ -43,3 +43,9 @@ finchmoe/test_quant_weights
 **/__pycache__/
 archive/
 finchmoe/397b/
+
+# M1 deploy folder (prebuilt binary + model symlinks, 15 GB — see M4_REBUILD.md)
+/finchmoe-m1/
+
+# HumanEval run artifacts (generated results, resumable)
+humaneval_m1/he_results.jsonl
