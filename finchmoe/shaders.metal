@@ -2045,6 +2045,7 @@ kernel void fused_gdn_full(
     device const uint16_t *norm_weight,  // [value_dim] bf16
     device float       *state,           // [num_v_heads * value_dim * key_dim] persistent
     device float       *output,          // [num_v_heads * value_dim] gated output
+    device float       *qk_hist,         // [3 * (2*total_key)] per-thread q/k conv history
     constant uint &conv_dim,             // 8192
     constant uint &k_heads_per_v,        // 2
     constant uint &key_dim,              // 128
@@ -2068,26 +2069,33 @@ kernel void fused_gdn_full(
     {
         uint c = q_c;
         uint wb = c * 4;
-        float acc = conv_state[0 * conv_dim + c] * bf16_to_f32(conv_w[wb + 0])
-                  + conv_state[1 * conv_dim + c] * bf16_to_f32(conv_w[wb + 1])
-                  + conv_state[2 * conv_dim + c] * bf16_to_f32(conv_w[wb + 2])
+        // Per-thread device history (qk_hist): the q/k conv channels are
+        // SHARED between head pairs (kh = head / k_heads_per_v) — concurrent
+        // threadgroups shifting the shared conv_state channels tore each
+        // other's reads (the run-to-run wobble root cause). Each thread now
+        // owns its channel's 3-slot history exclusively.
+        device float *qh = qk_hist + head * 3 * key_dim + tid;
+        float acc = qh[0 * key_dim] * bf16_to_f32(conv_w[wb + 0])
+                  + qh[1 * key_dim] * bf16_to_f32(conv_w[wb + 1])
+                  + qh[2 * key_dim] * bf16_to_f32(conv_w[wb + 2])
                   + qkv_in[c] * bf16_to_f32(conv_w[wb + 3]);
         conv_q[tid] = acc / (1.0f + exp(-acc));  // SiLU
-        conv_state[0 * conv_dim + c] = conv_state[1 * conv_dim + c];
-        conv_state[1 * conv_dim + c] = conv_state[2 * conv_dim + c];
-        conv_state[2 * conv_dim + c] = qkv_in[c];
+        qh[0 * key_dim] = qh[1 * key_dim];
+        qh[1 * key_dim] = qh[2 * key_dim];
+        qh[2 * key_dim] = qkv_in[c];
     }
     {
         uint c = k_c;
         uint wb = c * 4;
-        float acc = conv_state[0 * conv_dim + c] * bf16_to_f32(conv_w[wb + 0])
-                  + conv_state[1 * conv_dim + c] * bf16_to_f32(conv_w[wb + 1])
-                  + conv_state[2 * conv_dim + c] * bf16_to_f32(conv_w[wb + 2])
+        device float *kh_hist = qk_hist + 32 * 3 * key_dim + head * 3 * key_dim + tid;
+        float acc = kh_hist[0 * key_dim] * bf16_to_f32(conv_w[wb + 0])
+                  + kh_hist[1 * key_dim] * bf16_to_f32(conv_w[wb + 1])
+                  + kh_hist[2 * key_dim] * bf16_to_f32(conv_w[wb + 2])
                   + qkv_in[c] * bf16_to_f32(conv_w[wb + 3]);
         conv_k[tid] = acc / (1.0f + exp(-acc));
-        conv_state[0 * conv_dim + c] = conv_state[1 * conv_dim + c];
-        conv_state[1 * conv_dim + c] = conv_state[2 * conv_dim + c];
-        conv_state[2 * conv_dim + c] = qkv_in[c];
+        kh_hist[0 * key_dim] = kh_hist[1 * key_dim];
+        kh_hist[1 * key_dim] = kh_hist[2 * key_dim];
+        kh_hist[2 * key_dim] = qkv_in[c];
     }
     {
         uint c = v_c;
@@ -2791,4 +2799,182 @@ kernel void moe_combine_residual_prefill(
     if (K > 7) moe += p[7] * expert_out7[base + i];
 
     hidden_out[base + i] = h_mid[base + i] + moe + shared_gate * shared_out[base + i];
+}
+
+// ============================================================================
+// fused_gdn_batched — fused_gdn_full with an in-kernel M-position loop.
+// Processes all M positions of a chunk SEQUENTIALLY inside one dispatch so
+// the recurrent state (conv_state / state) updates are thread-sequential —
+// no cross-dispatch L2 hazard (the M separate dispatches raced on this GPU:
+// barriers and synchronizeResource both fail to flush L2 for device reads).
+// Math is verbatim fused_gdn_full per position (bitwise parity).
+// ============================================================================
+kernel void fused_gdn_batched(
+    device float       *conv_state,      // [3 * conv_dim] persistent, shifted in place
+    device const float *qkv_in,          // [M * conv_dim]
+    device const uint16_t *conv_w,       // [conv_dim * 4] bf16
+    device const float *z,               // [M * num_v_heads * value_dim]
+    device const float *ba,              // beta [M*32] then alpha [M*32]
+    device const float *A_log,           // [num_v_heads]
+    device const uint16_t *dt_bias,      // [num_v_heads] bf16
+    device const uint16_t *norm_weight,  // [value_dim] bf16
+    device float       *state,           // [num_v_heads * value_dim * key_dim] persistent
+    device float       *output,          // [M * num_v_heads * value_dim] gated output
+    device float       *qk_hist,         // [3 * (2*total_key)] per-thread q/k conv history
+    device float       *dbg,             // debug: [M*24] per-iteration state for head0/tid0
+    constant uint &conv_dim,             // 8192
+    constant uint &k_heads_per_v,        // 2
+    constant uint &key_dim,              // 128
+    constant uint &value_dim,            // 128
+    constant uint &M,                    // positions per chunk
+    constant float &eps,                 // 1e-6
+    uint head [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]]
+) {
+    uint kh = head / k_heads_per_v;
+    uint total_key = conv_dim / 4;  // 2048 = LINEAR_TOTAL_KEY
+    uint num_v_heads = k_heads_per_v * (total_key / key_dim);  // matches caller
+
+    threadgroup float conv_q[128];
+    threadgroup float conv_k[128];
+    threadgroup float conv_v[128];
+    threadgroup float g_decay, beta_gate;
+    threadgroup float part_q[128];
+    threadgroup float part_k[128];
+    threadgroup float partial[128];
+
+    for (uint m = 0; m < M; m++) {
+        device const float *qkv_m = qkv_in + (size_t)m * conv_dim;
+        device const float *z_m   = z + (size_t)m * num_v_heads * value_dim;
+        device const float *alpha_m = ba + ((size_t)M + m) * 32;
+        device const float *beta_m  = ba + (size_t)m * 32;
+        device float *out_m = output + (size_t)m * num_v_heads * value_dim;
+
+        uint q_c = kh * key_dim + tid;
+        uint k_c = total_key + kh * key_dim + tid;
+        uint v_c = 2 * total_key + head * value_dim + tid;
+
+        {
+            uint c = q_c;
+            uint wb = c * 4;
+            // Per-thread device history (see fused_gdn_full): the q/k conv
+            // channels are shared between head pairs — concurrent TGs
+            // shifting shared conv_state channels tore each other's reads.
+            device float *qh = qk_hist + head * 3 * key_dim + tid;
+            float acc = qh[0 * key_dim] * bf16_to_f32(conv_w[wb + 0])
+                      + qh[1 * key_dim] * bf16_to_f32(conv_w[wb + 1])
+                      + qh[2 * key_dim] * bf16_to_f32(conv_w[wb + 2])
+                      + qkv_m[c] * bf16_to_f32(conv_w[wb + 3]);
+            conv_q[tid] = acc / (1.0f + exp(-acc));  // SiLU
+            qh[0 * key_dim] = qh[1 * key_dim];
+            qh[1 * key_dim] = qh[2 * key_dim];
+            qh[2 * key_dim] = qkv_m[c];
+        }
+        {
+            uint c = k_c;
+            uint wb = c * 4;
+            device float *kh_hist = qk_hist + 32 * 3 * key_dim + head * 3 * key_dim + tid;
+            float acc = kh_hist[0 * key_dim] * bf16_to_f32(conv_w[wb + 0])
+                      + kh_hist[1 * key_dim] * bf16_to_f32(conv_w[wb + 1])
+                      + kh_hist[2 * key_dim] * bf16_to_f32(conv_w[wb + 2])
+                      + qkv_m[c] * bf16_to_f32(conv_w[wb + 3]);
+            conv_k[tid] = acc / (1.0f + exp(-acc));
+            kh_hist[0 * key_dim] = kh_hist[1 * key_dim];
+            kh_hist[1 * key_dim] = kh_hist[2 * key_dim];
+            kh_hist[2 * key_dim] = qkv_m[c];
+        }
+        {
+            uint c = v_c;
+            uint wb = c * 4;
+            float acc = conv_state[0 * conv_dim + c] * bf16_to_f32(conv_w[wb + 0])
+                      + conv_state[1 * conv_dim + c] * bf16_to_f32(conv_w[wb + 1])
+                      + conv_state[2 * conv_dim + c] * bf16_to_f32(conv_w[wb + 2])
+                      + qkv_m[c] * bf16_to_f32(conv_w[wb + 3]);
+            conv_v[tid] = acc / (1.0f + exp(-acc));
+            conv_state[0 * conv_dim + c] = conv_state[1 * conv_dim + c];
+            conv_state[1 * conv_dim + c] = conv_state[2 * conv_dim + c];
+            conv_state[2 * conv_dim + c] = qkv_m[c];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // ---- Step 2: rms_norm_qk (q gets inv^2, k gets inv) ----
+        part_q[tid] = conv_q[tid] * conv_q[tid];
+        part_k[tid] = conv_k[tid] * conv_k[tid];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0) {
+            float sq = 0, sk = 0;
+            for (uint i = 0; i < key_dim; i++) { sq += part_q[i]; sk += part_k[i]; }
+            part_q[0] = sq;
+            part_k[0] = sk;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float inv_scale = rsqrt(float(key_dim));
+        float inv_q = rsqrt(part_q[0] / float(key_dim) + 1e-6f);
+        float inv_k = rsqrt(part_k[0] / float(key_dim) + 1e-6f);
+        conv_q[tid] = conv_q[tid] * inv_q * inv_scale * inv_scale;
+        conv_k[tid] = conv_k[tid] * inv_k * inv_scale;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // ---- Step 3: g_decay + beta_gate (thread 0 only) ----
+        if (tid == 0) {
+            float a_val = alpha_m[head];
+            float dt_b  = bf16_to_f32(dt_bias[head]);
+            float A_val = exp(A_log[head]);
+            float softplus_val = log(1.0f + exp(a_val + dt_b));
+            g_decay   = exp(-A_val * softplus_val);
+            beta_gate = 1.0f / (1.0f + exp(-beta_m[head]));
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // ---- Step 4: GDN recurrence (each thread owns one state row) ----
+        uint state_base = head * value_dim * key_dim;
+        float kv_mem = 0.0f;
+        for (uint ki = 0; ki < key_dim; ki++) {
+            float s = state[state_base + tid * key_dim + ki] * g_decay;
+            state[state_base + tid * key_dim + ki] = s;
+            kv_mem += s * conv_k[ki];
+        }
+        float delta = (conv_v[tid] - kv_mem) * beta_gate;
+        for (uint ki = 0; ki < key_dim; ki++) {
+            state[state_base + tid * key_dim + ki] += conv_k[ki] * delta;
+        }
+        float out_val = 0.0f;
+        for (uint ki = 0; ki < key_dim; ki++) {
+            out_val += state[state_base + tid * key_dim + ki] * conv_q[ki];
+        }
+
+        // ---- Step 5: gated rms norm ----
+        uint base = head * value_dim;
+        partial[tid] = out_val * out_val;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0) {
+            float s = 0;
+            for (uint i = 0; i < value_dim; i++) s += partial[i];
+            partial[0] = s;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float inv_rms = rsqrt(partial[0] / float(value_dim) + eps);
+
+        float normed = out_val * inv_rms;
+        float zval = z_m[base + tid];
+        float gate = zval / (1.0f + exp(-zval));  // SiLU
+        float w = bf16_to_f32(norm_weight[tid]);
+        out_m[base + tid] = normed * gate * w;
+
+        if (head == 0 && tid == 0) {
+            device float *qh = qk_hist + head * 3 * key_dim + tid;
+            device float *kh_hist = qk_hist + 32 * 3 * key_dim + head * 3 * key_dim + tid;
+            for (uint i = 0; i < 8; i++) dbg[m * 24 + i] = state[i];
+            dbg[m * 24 + 8] = conv_q[0];
+            dbg[m * 24 + 9] = conv_k[0];
+            dbg[m * 24 + 10] = out_val;
+            dbg[m * 24 + 11] = g_decay;
+            dbg[m * 24 + 12] = beta_gate;
+            dbg[m * 24 + 13] = zval;
+            for (uint i = 0; i < 3; i++) dbg[m * 24 + 14 + i] = qh[i * key_dim];
+            for (uint i = 0; i < 3; i++) dbg[m * 24 + 17 + i] = kh_hist[i * key_dim];
+            for (uint i = 0; i < 3; i++) dbg[m * 24 + 20 + i] = conv_state[i];
+            dbg[m * 24 + 23] = conv_state[2 * conv_dim];
+        }
+    }
 }

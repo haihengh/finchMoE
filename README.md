@@ -8,8 +8,8 @@ A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon.
 
 | Metric | Value |
 |--------|-------|
-| Decode speed (M4, K=8) | **~9-10 tok/s** (3-bit experts, page-cache dependent) |
-| Prefill speed | **Chunked batched GPU prefill** (default `--prefill-chunk 8`): 90-token prompt 6.2s, 883-token 51s (**2.1×** vs per-token, 3-bit experts); logits bitwise-identical to the per-token path. Hot-set expert prefetch (build_hot_sets.py) is memory-adaptive — auto-disabled when the OS lacks page-cache headroom |
+| Decode speed (M4, K=8) | **~9-10.3 tok/s** (3-bit experts, page-cache dependent; post-restart retest 2026-08-14: 8.8 cold / **10.3 warm**) |
+| Prefill speed | **Chunked batched GPU prefill** (default `--prefill-chunk 8`): 90-token prompt 6.2-7.0s, 883-token 51s (**2.1×** vs per-token, 3-bit experts); logits bitwise-identical to the per-token path. Hot-set expert prefetch (build_hot_sets.py) is memory-adaptive — measured 2026-08-14, **does not pay** (26% unique-expert coverage, pread_wait 6.2→6.3 ms), auto-gate stays |
 | Weight file | **1.95 GB** (4-bit GDN tier + 3-bit experts, both default) |
 | RAM (8k context) | ~3.3 GB total (2.9 GB GPU peak + 0.34 GB CPU KV; +0.27 GB when the hot-set prefetch is active) |
 | Expert disk (3-bit) | 14 GB (40 layers × 256 × 1.31 MiB) |
@@ -18,10 +18,13 @@ A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon.
 
 Known issues (ranked): (1) intermittent ~1e-4…1e-2 run-to-run logit wobble
 under page-cache starvation — predates the perf refactor, needs a
-healthy-machine session to isolate. (2) prefill is expert-IO bound
-(~5.4 ms/layer pread against an ~14 GB expert working set; the hot-set
-prefetch needs RAM headroom to pay, the 5-10× tier needs a learned router
-predictor — layer→layer expert carry-over is only 3.3%). (3) Server
+healthy-machine session to isolate (post-restart parity battery still
+pending as of 2026-08-14). (2) prefill is GPU+IO co-bound
+(post-restart retest 2026-08-14: cmdA_wait 7.4 ms/layer + pread_wait
+6.2 ms/layer against an ~14 GB expert working set; the static hot-set
+prefetch was measured and does not pay — 26% unique-expert coverage —
+the 5-10× tier needs a learned router predictor, layer→layer expert
+carry-over is only 3.3%). (3) Server
 multi-turn session corruption after turn 1 (stateless fallback active).
 (4) MTP speculative decoding: harness runs, draft math wrong (α=0%).
 
@@ -67,7 +70,7 @@ FINCHMOE_REF_MANIFEST=quant_clean/model_weights_quant.json FINCHMOE_REF_WEIGHTS=
 
 | Configuration | Weights | Expert disk | Speed (K=8) | Notes |
 |---------------|---------|-------------|-------------|-------|
-| **Default (quant_clean)** | **1.95 GB** (4-bit GDN, 8-bit embed/lm_head) | 14 GB 3-bit | **~9-10 tok/s** | current production config; 11.4+ on a healthy page cache |
+| **Default (quant_clean)** | **1.95 GB** (4-bit GDN, 8-bit embed/lm_head) | 14 GB 3-bit | **~10.3 tok/s** (post-restart retest 2026-08-14) | current production config; 11.4+ was the quant_self-era peak |
 | Protected tier | 2.45 GB (8-bit GDN, `FINCHMOE_GDN8=1`) | 13 GB 3-bit | ~9.1 tok/s | quality-safe fallback |
 | BF16 (source) | 67 GB | — | — | reference; the intended requant base |
 | 2bit-dense-v2 (legacy) | 4.96 GB BF16 | 9.4 GB 2-bit | ~5 tok/s | marginal quality — being replaced |

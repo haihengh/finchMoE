@@ -4,7 +4,7 @@
 
 | Metric | Baseline (Aug 2026) | Current | Target |
 |--------|---------------------|---------|--------|
-| Decode speed (M4 16GB) | 3.88 tok/s | **11.4-12.4 tok/s** ✅ | 12 tok/s |
+| Decode speed (M4 16GB) | 3.88 tok/s | **10.3 tok/s** ✅ (3-bit, warm cache; 11.4-12.4 was the quant_self-era peak) | 12 tok/s |
 | RAM footprint | ~6.0 GB | **~2.8 GB @ 8k ctx** (2.25 GB peak GPU) | ~2.0 GB |
 | Weight file | 4.96 GB (all BF16) | **1.95 GB** (4-bit GDN + 3-bit experts) | ~1.5 GB |
 | Expert bit-width | 4-bit (1.77 MB/expert) | **3-bit default** (1.31 MB/expert) | — |
@@ -24,16 +24,21 @@
 - `a913e25` — MTP harness unblocked (layer-40 experts, path fix); α=0%.
 - `0f102bb` — MTP logit-cosine diagnostic (0.59-0.74 → forward-math bug).
 - `156cddb` — Server: disabled broken incremental session continuation.
+- `8c9b496` — Static per-layer hot-set expert prefetch (memory-adaptive).
+- `1e476ab` — Post-restart retest (2026-08-14): decode **10.3 tok/s** warm
+  cache (8.8 cold); chunk-8 prefill **6.8-7.0s** for 90 tokens (1.5× vs
+  flag-0's 10.6s). Layer budget 14.3 ms = cmdA_wait 7.4 (GPU) +
+  pread_wait 6.2 (SSD) + ~0.7. **Hot-set prefetch measured: does not pay**
+  (top-32 hot set covers only 26% of unique experts / 39.5% of per-token
+  requests; pread_wait 6.2 → 6.3 ms) — auto-gate stays.
 
 ### OPEN ISSUES (priority order)
 
-1. **Model quality on edge prompts** — typo'd/ambiguous prompts degrade into
-   repetition loops ("Done! â>' â>'..."). llama.cpp Q4_K_M on the SAME typo
-   prompt plans the story correctly → the base model is fine; OUR weights
-   are the problem (quantized from the marginal `2bit-dense-v2` variant +
-   double-quantized experts). **Fix: re-quantize from the pristine
-   `Qwen3.6-35B-A3B-bf16` base** (BF16 non-experts → 4-bit GDN tier;
-   BF16 experts `mlp.experts.gate_up_proj/down_proj` → 3-bit).
+1. ~~**Model quality on edge prompts**~~ — **RESOLVED 2026-08-13**: single-stage
+   rebuild from the pristine `Qwen3.6-35B-A3B-bf16` base (BF16 non-experts →
+   4-bit GDN tier; BF16 experts → 3-bit). 3-bit experts CosSim 0.966-0.979,
+   4-bit non-experts ≥0.995, typo-prompt test PASS. T=0.3 default + n-gram
+   blocker in the temp path guard the long-generation loop.
 2. **Prefill speed** — measured 789 tokens in 66.2s (~12 tok/s = decode
    speed). **FIXED 2026-08-14 (Phase 4a)**: chunked batched GPU prefill
    (`--prefill-chunk 8` default) — batched matvecs + one CB per linear
@@ -41,8 +46,10 @@
    backpressure) + M-position batched GPU attention. **1.66-1.7× TTFT**
    (90-token 13.2→7.75s, 883-token 108→65s), logits bitwise-identical to
    the per-token path at every chunk size (1/2/4/8/23/64) and in serve
-   mode. Remaining wall: expert pread I/O ~8 ms/layer + GPU matvecs —
-   the 5-10× tier needs prefill speculative expert prediction.
+   mode. Remaining wall (measured 2026-08-14): cmdA_wait 7.4 ms/layer
+   (GPU) + pread_wait 6.2 ms/layer (SSD). Static hot-set prefetch tested
+   and rejected (26% unique-expert coverage) — the 5-10× tier needs
+   prefill speculative expert prediction.
 3. **Server multi-turn** — session continuation corrupts after turn 1
    (template tokens leak; 2nd request can yield 0 tokens). Disabled via
    stateless fallback; needs the snapshot-restore state-leak debugging.
@@ -203,7 +210,7 @@ These are higher-risk, longer-term items that could push past 12 tok/s:
 | Optimization | Est. Gain | Complexity | Notes |
 |-------------|-----------|------------|-------|
 | Single-kernel multi-expert | +20% | Very High | All K experts in one GPU dispatch. Occupancy goes up, encoding overhead eliminated. |
-| Batched GPU prefill | 1.66-1.7× PP (DONE) | High | Chunked path shipped (bitwise parity); 5-10× needs prefill expert prediction. |
+| Batched GPU prefill | 1.66-1.7× PP (DONE) | High | Chunked path shipped (bitwise parity); static hot-set prefetch tried, does not pay (26% coverage); 5-10× needs learned expert prediction. |
 | KV cache FP16 | -448 MB | Medium | Already in turbo-fieldfare. Our KV is FP32. |
 | 3-bit experts | +15% speed, better quality | Medium | Sweet spot between 2-bit (fast, some quality loss) and 4-bit (slow, reference quality). Need 3-bit dequant kernel + repacker support. |
 | Expert prediction v2 | 10-20% I/O reduction | Medium | Current predictor 41% accurate. Better predictor (attention-based, learned) could reach 60-70%. |
