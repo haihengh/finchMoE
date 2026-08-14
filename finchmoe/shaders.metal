@@ -1439,6 +1439,177 @@ kernel void sigmoid_gate(
 
 
 // ============================================================================
+// Kernel 9b-9e: Batched-attention prefill variants — M queries in one
+// dispatch. Per-position bodies are VERBATIM clones of the single-query
+// kernels (bitwise parity). causal_len[m] = 0 marks a CPU-handled position
+// (sl < 32 or sl >= g_gpu_kv_seq); such positions are skipped entirely.
+// ============================================================================
+
+// One threadgroup per (m, pos, h). Grid: M * num_seq_tgs * num_heads.
+kernel void attn_scores_batched_prefill(
+    device const float* Q          [[buffer(0)]],  // [M, num_heads, head_dim]
+    device const float* K_cache    [[buffer(1)]],  // [max_seq, kv_dim]
+    device float*       scores     [[buffer(2)]],  // [M, num_heads, seq_stride]
+    constant uint&      head_dim   [[buffer(3)]],  // 256
+    constant uint&      kv_dim     [[buffer(4)]],  // 512
+    constant uint&      seq_stride [[buffer(5)]],  // MAX_SEQ_LEN
+    constant float&     scale      [[buffer(6)]],  // 1/sqrt(head_dim)
+    constant uint&      heads_per_kv [[buffer(7)]],
+    constant uint&      num_heads    [[buffer(8)]],
+    constant uint&      num_seq_tgs  [[buffer(9)]],  // = max causal_len over batch
+    constant uint*      causal_len   [[buffer(10)]], // [M]
+    uint tgid  [[threadgroup_position_in_grid]],     // linearized: pos + h * num_seq_tgs + m * num_seq_tgs * num_heads
+    uint lid   [[thread_position_in_threadgroup]],
+    uint tg_size [[threads_per_threadgroup]]
+) {
+    uint pos = tgid % num_seq_tgs;
+    uint tmp = tgid / num_seq_tgs;
+    uint h = tmp % num_heads;
+    uint m = tmp / num_heads;
+    uint sl_m = causal_len[m];
+    if (pos >= sl_m) return;
+
+    uint kv_h = h / heads_per_kv;
+    device const float* qh = Q + (size_t)m * num_heads * head_dim + h * head_dim;
+    device const float* kp = K_cache + pos * kv_dim + kv_h * head_dim;
+
+    float acc = 0.0f;
+    for (uint d = lid; d < head_dim; d += tg_size) {
+        acc += qh[d] * kp[d];
+    }
+
+    // SIMD reduction
+    float simd_val = simd_sum(acc);
+    threadgroup float shared[32];
+    uint simd_lane = lid % 32;
+    uint simd_group = lid / 32;
+    uint num_simd_groups = (tg_size + 31) / 32;
+    if (simd_lane == 0) shared[simd_group] = simd_val;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group == 0 && simd_lane < num_simd_groups) {
+        float val = simd_sum(shared[simd_lane]);
+        if (simd_lane == 0) {
+            scores[((size_t)m * num_heads + h) * seq_stride + pos] = val * scale;
+        }
+    }
+}
+
+// One threadgroup per (m, head). Grid: M * num_heads.
+kernel void attn_softmax_batched_prefill(
+    device float*    scores     [[buffer(0)]],  // [M, num_heads, seq_stride]
+    constant uint&   seq_stride [[buffer(1)]],
+    constant uint&   num_heads  [[buffer(2)]],
+    constant uint*   causal_len [[buffer(3)]],  // [M]
+    uint tgid [[threadgroup_position_in_grid]],     // linearized: h + m * num_heads
+    uint lid  [[thread_position_in_threadgroup]],
+    uint tg_size [[threads_per_threadgroup]]
+) {
+    uint h = tgid % num_heads;
+    uint m = tgid / num_heads;
+    uint seq_len = causal_len[m];
+    device float* s = scores + ((size_t)m * num_heads + h) * seq_stride;
+
+    // Pass 1: find max
+    threadgroup float shared_max[32];
+    float local_max = -1e30f;
+    for (uint i = lid; i < seq_len; i += tg_size) {
+        local_max = max(local_max, s[i]);
+    }
+    float sm = simd_max(local_max);
+    uint simd_lane = lid % 32;
+    uint simd_group = lid / 32;
+    uint num_simd_groups = (tg_size + 31) / 32;
+    if (simd_lane == 0) shared_max[simd_group] = sm;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float global_max = -1e30f;
+    if (simd_group == 0 && simd_lane < num_simd_groups) {
+        global_max = simd_max(shared_max[simd_lane]);
+    }
+    threadgroup float broadcast_max = 0.0f;
+    if (lid == 0) broadcast_max = global_max;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_max = broadcast_max;
+
+    // Pass 2: exp and sum
+    threadgroup float shared_sum[32];
+    float local_sum = 0.0f;
+    for (uint i = lid; i < seq_len; i += tg_size) {
+        float val = exp(s[i] - global_max);
+        s[i] = val;
+        local_sum += val;
+    }
+    float simd_s = simd_sum(local_sum);
+    if (simd_lane == 0) shared_sum[simd_group] = simd_s;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float global_sum = 0.0f;
+    if (simd_group == 0 && simd_lane < num_simd_groups) {
+        global_sum = simd_sum(shared_sum[simd_lane]);
+    }
+    threadgroup float broadcast_sum = 0.0f;
+    if (lid == 0) broadcast_sum = global_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_sum = broadcast_sum;
+
+    // Pass 3: normalize
+    float inv_sum = 1.0f / global_sum;
+    for (uint i = lid; i < seq_len; i += tg_size) {
+        s[i] *= inv_sum;
+    }
+}
+
+// One thread per (m, h, d). Grid: M * num_heads * head_dim.
+// Writes into the caller's oproj_in buffer at slot m (in-place sigmoid later).
+kernel void attn_values_batched_prefill(
+    device const float* scores   [[buffer(0)]],  // [M, num_heads, seq_stride]
+    device const float* V_cache  [[buffer(1)]],  // [max_seq, kv_dim]
+    device float*       out      [[buffer(2)]],  // [M, num_heads, head_dim]
+    constant uint&      head_dim  [[buffer(3)]],  // 256
+    constant uint&      kv_dim    [[buffer(4)]],  // 512
+    constant uint&      seq_stride [[buffer(5)]],
+    constant uint&      heads_per_kv [[buffer(6)]],
+    constant uint&      num_heads  [[buffer(7)]],
+    constant uint*      causal_len [[buffer(8)]],  // [M]
+    uint tid [[thread_position_in_grid]]          // linearized: d + h * head_dim + m * num_heads * head_dim
+) {
+    uint d = tid % head_dim;
+    uint tmp = tid / head_dim;
+    uint h = tmp % num_heads;
+    uint m = tmp / num_heads;
+    uint seq_len = causal_len[m];
+    if (seq_len == 0) return;  // CPU-handled position
+
+    uint kv_h = h / heads_per_kv;
+    device const float* s = scores + ((size_t)m * num_heads + h) * seq_stride;
+
+    float acc = 0.0f;
+    for (uint p = 0; p < seq_len; p++) {
+        acc += s[p] * V_cache[p * kv_dim + kv_h * head_dim + d];
+    }
+    out[(size_t)m * num_heads * head_dim + h * head_dim + d] = acc;
+}
+
+// Element-wise sigmoid gate over M positions (clone of sigmoid_gate).
+// causal_len[m] == 0 marks a CPU-handled position — its gate was applied on
+// the CPU, so the batched kernel must not touch that slot.
+kernel void sigmoid_gate_prefill(
+    device float*       x_out  [[buffer(0)]],  // [M, dim] in/out
+    device const float* gate   [[buffer(1)]],  // [M, dim] gate values
+    constant uint&      dim    [[buffer(2)]],
+    constant uint*      causal_len [[buffer(3)]],  // [M]
+    uint tid [[thread_position_in_grid]]
+) {
+    uint m = tid / dim;
+    if (causal_len[m] == 0) return;
+    size_t i = (size_t)m * dim + (tid % dim);
+    float g = 1.0f / (1.0f + exp(-gate[i]));
+    x_out[i] = x_out[i] * g;
+}
+
+
+// ============================================================================
 // Kernel 10: GatedDeltaNet linear attention step (single token, all heads)
 // ============================================================================
 //
@@ -2267,4 +2438,357 @@ kernel void gemv_bf16_x2(
             if (has_row1) out[r0 + 1] = tot1;
         }
     }
+}
+
+// ============================================================================
+// Prefill-batched kernels: identical math to the single-token kernels above,
+// with a position (M) dimension. Grid Y = position m, X = row tiles.
+// Inner loops are VERBATIM copies so each output row is bitwise identical
+// to the per-token path (same FMA form, same reduction order).
+// ============================================================================
+
+// ---- 4-bit dequant matvec, M positions (clone of dequant_matvec_4bit_v3) ----
+// Grid: ((out_dim+7)/8, M), 256 threads. x_inputs [M, in_dim], out [M, out_dim].
+kernel void dequant_matvec_4bit_prefill(
+    device const uint32_t* W_packed   [[buffer(0)]],
+    device const uint16_t* scales     [[buffer(1)]],
+    device const uint16_t* biases     [[buffer(2)]],
+    device const float*    x_inputs   [[buffer(3)]],  // [M, in_dim]
+    device float*          out        [[buffer(4)]],  // [M, out_dim]
+    constant uint&         out_dim    [[buffer(5)]],
+    constant uint&         in_dim     [[buffer(6)]],
+    constant uint&         group_size [[buffer(7)]],
+    uint tgid [[threadgroup_position_in_grid]],     // linearized: m * num_row_tiles + row_tile
+    uint lid    [[thread_position_in_threadgroup]],    // 0..255
+    uint simd_lane  [[thread_index_in_simdgroup]],    // 0..31
+    uint simd_group [[simdgroup_index_in_threadgroup]] // 0..7
+) {
+    uint num_row_tiles = (out_dim + ROWS_PER_TG - 1) / ROWS_PER_TG;
+    uint m       = tgid / num_row_tiles;   // which position
+    uint row_tile = tgid % num_row_tiles;  // which tile of rows
+    uint row = row_tile * ROWS_PER_TG + simd_group;
+
+    uint packed_cols = in_dim / 8;
+    uint num_groups  = in_dim / group_size;
+
+    threadgroup float x_shared[4096];
+    const device float* x = x_inputs + (size_t)m * in_dim;
+
+    for (uint i = lid; i < in_dim; i += 256) {
+        x_shared[i] = x[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (row >= out_dim) return;
+
+    device const uint32_t* w_row = W_packed + row * packed_cols;
+    device const uint16_t* s_row = scales + row * num_groups;
+    device const uint16_t* b_row = biases + row * num_groups;
+
+    float acc = 0.0f;
+
+    for (uint col = simd_lane; col < packed_cols; col += 32) {
+        uint g = col / (group_size / 8);
+        float scale = bf16_to_f32(s_row[g]);
+        float bias  = bf16_to_f32(b_row[g]);
+
+        uint32_t packed = w_row[col];
+        uint x_base = col * 8;
+
+        float sx0 = scale * x_shared[x_base + 0];  float bx0 = bias * x_shared[x_base + 0];
+        float sx1 = scale * x_shared[x_base + 1];  float bx1 = bias * x_shared[x_base + 1];
+        float sx2 = scale * x_shared[x_base + 2];  float bx2 = bias * x_shared[x_base + 2];
+        float sx3 = scale * x_shared[x_base + 3];  float bx3 = bias * x_shared[x_base + 3];
+        float sx4 = scale * x_shared[x_base + 4];  float bx4 = bias * x_shared[x_base + 4];
+        float sx5 = scale * x_shared[x_base + 5];  float bx5 = bias * x_shared[x_base + 5];
+        float sx6 = scale * x_shared[x_base + 6];  float bx6 = bias * x_shared[x_base + 6];
+        float sx7 = scale * x_shared[x_base + 7];  float bx7 = bias * x_shared[x_base + 7];
+
+        acc += fma(float((packed >>  0) & 0xF), sx0, bx0);
+        acc += fma(float((packed >>  4) & 0xF), sx1, bx1);
+        acc += fma(float((packed >>  8) & 0xF), sx2, bx2);
+        acc += fma(float((packed >> 12) & 0xF), sx3, bx3);
+        acc += fma(float((packed >> 16) & 0xF), sx4, bx4);
+        acc += fma(float((packed >> 20) & 0xF), sx5, bx5);
+        acc += fma(float((packed >> 24) & 0xF), sx6, bx6);
+        acc += fma(float((packed >> 28) & 0xF), sx7, bx7);
+    }
+
+    float sum = simd_sum(acc);
+    if (simd_lane == 0) {
+        out[(size_t)m * out_dim + row] = sum;
+    }
+}
+
+// ---- 8-bit dequant matvec, M positions (clone of dequant_matvec_8bit) ----
+kernel void dequant_matvec_8bit_prefill(
+    device const uint32_t* W_packed   [[buffer(0)]],
+    device const uint16_t* scales     [[buffer(1)]],
+    device const uint16_t* biases     [[buffer(2)]],
+    device const float*    x_inputs   [[buffer(3)]],  // [M, in_dim]
+    device float*          out        [[buffer(4)]],  // [M, out_dim]
+    constant uint&         out_dim    [[buffer(5)]],
+    constant uint&         in_dim     [[buffer(6)]],
+    constant uint&         group_size [[buffer(7)]],
+    uint tgid [[threadgroup_position_in_grid]],     // linearized: m * num_row_tiles + row_tile
+    uint lid    [[thread_position_in_threadgroup]],
+    uint simd_lane  [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint num_row_tiles = (out_dim + ROWS_PER_TG - 1) / ROWS_PER_TG;
+    uint m        = tgid / num_row_tiles;
+    uint row_tile = tgid % num_row_tiles;
+    uint row = row_tile * ROWS_PER_TG + simd_group;
+
+    uint packed_cols = in_dim / 4;
+    uint num_groups  = in_dim / group_size;
+    uint packed_per_group = group_size / 4;
+
+    threadgroup float x_shared[4096];
+    const device float* x = x_inputs + (size_t)m * in_dim;
+    for (uint i = lid; i < in_dim; i += 256) {
+        x_shared[i] = x[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (row >= out_dim) return;
+
+    device const uint32_t* w_row = W_packed + row * packed_cols;
+    device const uint16_t* s_row = scales + row * num_groups;
+    device const uint16_t* b_row = biases + row * num_groups;
+
+    float acc = 0.0f;
+
+    for (uint col = simd_lane; col < packed_cols; col += 32) {
+        uint g = col / packed_per_group;
+        float scale = bf16_to_f32(s_row[g]);
+        float bias  = bf16_to_f32(b_row[g]);
+
+        uint32_t packed = w_row[col];
+        uint x_base = col * 4;
+
+        float sx0 = scale * x_shared[x_base + 0];  float bx0 = bias * x_shared[x_base + 0];
+        float sx1 = scale * x_shared[x_base + 1];  float bx1 = bias * x_shared[x_base + 1];
+        float sx2 = scale * x_shared[x_base + 2];  float bx2 = bias * x_shared[x_base + 2];
+        float sx3 = scale * x_shared[x_base + 3];  float bx3 = bias * x_shared[x_base + 3];
+
+        acc += fma(float((packed >>  0) & 0xFF), sx0, bx0);
+        acc += fma(float((packed >>  8) & 0xFF), sx1, bx1);
+        acc += fma(float((packed >> 16) & 0xFF), sx2, bx2);
+        acc += fma(float((packed >> 24) & 0xFF), sx3, bx3);
+    }
+
+    float sum = simd_sum(acc);
+    if (simd_lane == 0) {
+        out[(size_t)m * out_dim + row] = sum;
+    }
+}
+
+// ---- BF16 GEMV, M positions (clone of gemv_bf16) ----
+// Grid: (out_dim, M), 256 threads.
+kernel void gemv_bf16_prefill(
+    const device uint16_t *W    [[buffer(0)]],  // [out_dim, in_dim] BF16
+    const device float    *x_inputs [[buffer(1)]],  // [M, in_dim]
+    device float          *out  [[buffer(2)]],  // [M, out_dim]
+    constant uint32_t     &out_dim [[buffer(3)]],
+    constant uint32_t     &in_dim  [[buffer(4)]],
+    uint  tid   [[thread_position_in_threadgroup]],
+    uint  tgid  [[threadgroup_position_in_grid]],     // linearized: m * out_dim + row
+    ushort tiisg [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]]
+) {
+    uint  row  = tgid % out_dim;
+    uint  m    = tgid / out_dim;
+    if (row >= out_dim) return;
+
+    constexpr short N_SIMDGROUPS = 8;
+    constexpr short CHUNK = 8;
+
+    const device uint16_t *w_row = W + row * in_dim;
+    const device float *x = x_inputs + (size_t)m * in_dim;
+
+    float acc = 0.0f;
+
+    int n_sweeps = (int)in_dim / (256 * CHUNK);
+
+    for (int sw = 0; sw < n_sweeps; sw++) {
+        int base = sw * 256 * CHUNK + (int)tid * CHUNK;
+
+        float4 xv0 = ((const device float4*)x)[base / 4];
+        float4 xv1 = ((const device float4*)x)[base / 4 + 1];
+
+        const device uint4 *wp = (const device uint4*)(w_row + base);
+        uint4 wu = *wp;
+
+        float4 wv0 = float4(
+            as_type<float>(wu.x << 16),
+            as_type<float>(wu.x & 0xFFFF0000u),
+            as_type<float>(wu.y << 16),
+            as_type<float>(wu.y & 0xFFFF0000u)
+        );
+        float4 wv1 = float4(
+            as_type<float>(wu.z << 16),
+            as_type<float>(wu.z & 0xFFFF0000u),
+            as_type<float>(wu.w << 16),
+            as_type<float>(wu.w & 0xFFFF0000u)
+        );
+
+        acc += dot(wv0, xv0) + dot(wv1, xv1);
+    }
+
+    int rem_start = n_sweeps * 256 * CHUNK;
+    for (int i = rem_start + (int)tid; i < (int)in_dim; i += 256) {
+        acc += as_type<float>(((uint32_t)w_row[i]) << 16) * x[i];
+    }
+
+    acc = simd_sum(acc);
+
+    threadgroup float sh_partial[N_SIMDGROUPS];
+    if (tiisg == 0) {
+        sh_partial[sgitg] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg == 0 && tiisg == 0) {
+        float tot = 0.0f;
+        for (short sg = 0; sg < N_SIMDGROUPS; sg++) {
+            tot += sh_partial[sg];
+        }
+        out[(size_t)m * out_dim + row] = tot;
+    }
+}
+
+// ---- Fused residual + RMS norm, M positions (clone of residual_norm_fused) ----
+// Grid: (M, 1), 256 threads. One threadgroup per position.
+kernel void residual_norm_fused_prefill(
+    device const float* resid      [[buffer(0)]],  // [M, dim]
+    device const float* oproj      [[buffer(1)]],  // [M, dim]
+    device const uint16_t* norm_w  [[buffer(2)]],  // [dim] bf16
+    device float* h_mid_out        [[buffer(3)]],  // [M, dim]
+    device float* h_post_out       [[buffer(4)]],  // [M, dim]
+    constant uint&      dim        [[buffer(5)]],
+    constant float&     eps        [[buffer(6)]],
+    uint m   [[threadgroup_position_in_grid]],
+    uint tid [[thread_position_in_threadgroup]]
+) {
+    size_t base = (size_t)m * dim;
+    threadgroup float partial[256];
+    float local_sum = 0.0f;
+    for (uint i = tid; i < dim; i += 256) {
+        float h = resid[base + i] + oproj[base + i];
+        h_mid_out[base + i] = h;
+        local_sum += h * h;
+    }
+    partial[tid] = local_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float s = 0.0f;
+        for (uint i = 0; i < 256; i++) s += partial[i];
+        partial[0] = s;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float inv_rms = rsqrt(partial[0] / float(dim) + eps);
+    for (uint i = tid; i < dim; i += 256) {
+        h_post_out[base + i] = h_mid_out[base + i] * inv_rms * bf16_to_f32(norm_w[i]);
+    }
+}
+
+// ---- RMS norm sum-of-squares, M positions (clone of rms_norm_sum_sq) ----
+// Grid: (M, 1), 256 threads. sum_sq [M].
+kernel void rms_norm_sum_sq_prefill(
+    device const float* x       [[buffer(0)]],  // [M, dim]
+    device float*       sum_sq  [[buffer(1)]],  // [M]
+    constant uint&      dim     [[buffer(2)]],
+    constant uint&      m       [[buffer(3)]],  // position slot
+    uint lid [[thread_position_in_threadgroup]],
+    uint tg_size [[threads_per_threadgroup]]
+) {
+    threadgroup float shared[32];
+
+    size_t base = (size_t)m * dim;
+    float acc = 0.0f;
+    for (uint i = lid; i < dim; i += tg_size) {
+        float val = x[base + i];
+        acc += val * val;
+    }
+
+    float simd_val = simd_sum(acc);
+    uint simd_lane = lid % 32;
+    uint simd_group = lid / 32;
+
+    if (simd_lane == 0) {
+        shared[simd_group] = simd_val;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group == 0) {
+        float val = (simd_lane < (tg_size + 31) / 32) ? shared[simd_lane] : 0.0f;
+        val = simd_sum(val);
+        if (simd_lane == 0) {
+            sum_sq[m] = val;
+        }
+    }
+}
+
+// ---- RMS norm apply (bf16 weights), M positions (clone of rms_norm_apply_bf16) ----
+// Grid: (ceil(dim/256), M), 256 threads.
+kernel void rms_norm_apply_bf16_prefill(
+    device const float*    x       [[buffer(0)]],  // [M, dim]
+    device const uint16_t* weight  [[buffer(1)]],  // [dim] bf16
+    device const float*    sum_sq  [[buffer(2)]],  // [M]
+    device float*          out     [[buffer(3)]],  // [M, dim]
+    constant uint&         dim     [[buffer(4)]],
+    constant float&        eps     [[buffer(5)]],
+    constant uint&         m       [[buffer(6)]],  // position slot
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]]
+) {
+    uint i = tgid * 256 + tid;
+    if (i >= dim) return;
+
+    float rms = rsqrt(sum_sq[m] / float(dim) + eps);
+    float w = bf16_to_f32(weight[i]);
+    out[(size_t)m * dim + i] = x[(size_t)m * dim + i] * rms * w;
+}
+
+// ---- MoE combine + residual, M positions (clone of moe_combine_residual) ----
+// Grid: (ceil(dim/256), M), 256 threads. params [M, 10].
+kernel void moe_combine_residual_prefill(
+    device const float* h_mid       [[buffer(0)]],   // [M, dim]
+    device const float* shared_out  [[buffer(1)]],   // [M, dim]
+    device float*       hidden_out  [[buffer(2)]],   // [M, dim]
+    device const float* expert_out0 [[buffer(3)]],   // [M, dim]
+    device const float* expert_out1 [[buffer(4)]],
+    device const float* expert_out2 [[buffer(5)]],
+    device const float* expert_out3 [[buffer(6)]],
+    device const float* expert_out4 [[buffer(7)]],
+    device const float* expert_out5 [[buffer(8)]],
+    device const float* expert_out6 [[buffer(9)]],
+    device const float* expert_out7 [[buffer(10)]],
+    device const float* params      [[buffer(11)]],  // [M, 10]: weights[0..7], shared_gate_score, (unused)
+    constant uint&      dim         [[buffer(12)]],
+    constant uint&      K           [[buffer(13)]],
+    constant uint&      m           [[buffer(14)]],  // position slot
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]]
+) {
+    uint i = tgid * 256 + tid;
+    if (i >= dim) return;
+
+    size_t base = (size_t)m * dim;
+    const device float* p = params + (size_t)m * 10;
+
+    float shared_gate = 1.0f / (1.0f + exp(-p[8]));
+
+    float moe = 0.0f;
+    if (K > 0) moe += p[0] * expert_out0[base + i];
+    if (K > 1) moe += p[1] * expert_out1[base + i];
+    if (K > 2) moe += p[2] * expert_out2[base + i];
+    if (K > 3) moe += p[3] * expert_out3[base + i];
+    if (K > 4) moe += p[4] * expert_out4[base + i];
+    if (K > 5) moe += p[5] * expert_out5[base + i];
+    if (K > 6) moe += p[6] * expert_out6[base + i];
+    if (K > 7) moe += p[7] * expert_out7[base + i];
+
+    hidden_out[base + i] = h_mid[base + i] + moe + shared_gate * shared_out[base + i];
 }

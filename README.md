@@ -9,19 +9,20 @@ A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon.
 | Metric | Value |
 |--------|-------|
 | Decode speed (M4, K=8, greedy) | **11.4-12.4 tok/s** |
-| Prefill speed | ~12 tok/s (789-token prompt = 66 s — batched GPU prefill pending) |
+| Prefill speed | **Chunked batched GPU prefill** (default `--prefill-chunk 8`): 90-token prompt 7.8s, 883-token 65s (**1.66-1.7×** vs per-token); logits bitwise-identical to the per-token path |
 | Weight file | **1.95 GB** (4-bit GDN tier + 3-bit experts, both default) |
 | RAM (8k context) | ~2.8 GB total (2.25 GB peak GPU + 0.34 GB CPU KV) |
 | Expert disk (3-bit) | 13 GB (40 layers × 256 × 1.31 MB) |
 | Correctness | Bit-exact vs numpy GDN reference (CosSim 1.000000 per stage) |
 | Bugs fixed | 16 + Phase 1 root causes (see finchmoe/PHASE1_NAN_ANALYSIS.md) |
 
-Known issues (ranked): (1) typo'd/ambiguous prompts degrade into repetition
-loops — traced to weights quantized from the marginal `2bit-dense-v2`
-variant; fix = requant from pristine `Qwen3.6-35B-A3B-bf16`. (2) Prefill
-not batched. (3) Server multi-turn session corruption after turn 1
-(stateless fallback active). (4) MTP speculative decoding: harness runs,
-draft math wrong (α=0%).
+Known issues (ranked): (1) prefill is expert-IO bound (~8 ms/layer
+pread against an ~18 GB expert working set; next lever = speculative
+expert prediction for prefill). (2) Server multi-turn session corruption
+after turn 1 (stateless fallback active). (3) MTP speculative decoding:
+harness runs, draft math wrong (α=0%). (4) `packed_experts_3bit` missing
+since the clean rebuild → decode falls back to 4-bit experts (~7 tok/s
+instead of 11.4); rebuild the 3-bit pack.
 
 ## Quick Start
 
