@@ -2,7 +2,7 @@
 
 A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon.
 
-**Phase 1 targets MET (2026-08-13)**: 11.4-12.4 tok/s decode on M4, 1.95 GB weights, 2.25 GB peak GPU — see [finchmoe/OPTIMIZATION_PLAN.md](finchmoe/OPTIMIZATION_PLAN.md) for the full progress log.
+**Phase 1 targets MET (2026-08-13)**: ~9-10 tok/s decode on M4 (3-bit experts, page-cache dependent), 1.95 GB weights — see [finchmoe/OPTIMIZATION_PLAN.md](finchmoe/OPTIMIZATION_PLAN.md) for the full progress log.
 
 ## Current Status (2026-08-14)
 
@@ -11,8 +11,8 @@ A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon.
 | Decode speed (M4, K=8) | **~9-10 tok/s** (3-bit experts, page-cache dependent) |
 | Prefill speed | **Chunked batched GPU prefill** (default `--prefill-chunk 8`): 90-token prompt 6.2s, 883-token 51s (**2.1×** vs per-token, 3-bit experts); logits bitwise-identical to the per-token path. Hot-set expert prefetch (build_hot_sets.py) is memory-adaptive — auto-disabled when the OS lacks page-cache headroom |
 | Weight file | **1.95 GB** (4-bit GDN tier + 3-bit experts, both default) |
-| RAM (8k context) | ~2.8 GB total (2.25 GB peak GPU + 0.34 GB CPU KV) |
-| Expert disk (3-bit) | 13 GB (40 layers × 256 × 1.31 MB) |
+| RAM (8k context) | ~3.3 GB total (2.9 GB GPU peak + 0.34 GB CPU KV; +0.27 GB when the hot-set prefetch is active) |
+| Expert disk (3-bit) | 14 GB (40 layers × 256 × 1.31 MiB) |
 | Correctness | Bit-exact vs numpy GDN reference (CosSim 1.000000 per stage) |
 | Bugs fixed | 20 + Phase 1 root causes (see [BUGS.md](BUGS.md) and [finchmoe/PHASE1_NAN_ANALYSIS.md](finchmoe/PHASE1_NAN_ANALYSIS.md)) |
 
@@ -51,7 +51,7 @@ FINCHMOE_REF_MANIFEST=quant_clean/model_weights_quant.json FINCHMOE_REF_WEIGHTS=
 | `-P TEXT` | — | Input prompt (chat template applied) |
 | `-p FILE` | — | Prompt from token-id file |
 | `-t N` | 20 | Max tokens to generate |
-| `-e F` | 0.8 | Temperature (0 = greedy) |
+| `-e F` | 0.3 | Temperature (0 = greedy) |
 | `--rep-penalty F` | 1.15 | Repetition penalty |
 | `-k N` | 8 | Active experts per layer (model trained with 8) |
 | `-3 / -4 / -2 / -8` | **-3** | Expert bit-width (3-bit is the default) |
@@ -60,13 +60,14 @@ FINCHMOE_REF_MANIFEST=quant_clean/model_weights_quant.json FINCHMOE_REF_WEIGHTS=
 | `-J` | off | MTP speculative decoding (experimental — currently slower, see issues) |
 | `-N N` | 262144 | CPU KV context (256k does NOT fit 16 GB — use 16384-32768) |
 | `-Q N` | 8192 | GPU KV pre-allocation |
+| `--prefill-chunk N` | **8** | Chunked batched prefill (0 = per-token path; 8 = pooled+batched-attn sweet spot) |
 | `--low-memory` | off | Skip Metal weight wrap |
 
 ## Model Sizes
 
 | Configuration | Weights | Expert disk | Speed (K=8) | Notes |
 |---------------|---------|-------------|-------------|-------|
-| **Default (quant_clean)** | **1.95 GB** (4-bit GDN, 8-bit embed/lm_head) | 13 GB 3-bit | **11.4-12.4 tok/s** | current production config |
+| **Default (quant_clean)** | **1.95 GB** (4-bit GDN, 8-bit embed/lm_head) | 14 GB 3-bit | **~9-10 tok/s** | current production config; 11.4+ on a healthy page cache |
 | Protected tier | 2.45 GB (8-bit GDN, `FINCHMOE_GDN8=1`) | 13 GB 3-bit | ~9.1 tok/s | quality-safe fallback |
 | BF16 (source) | 67 GB | — | — | reference; the intended requant base |
 | 2bit-dense-v2 (legacy) | 4.96 GB BF16 | 9.4 GB 2-bit | ~5 tok/s | marginal quality — being replaced |
@@ -96,11 +97,40 @@ fully fused GDN (no intermediate global round trips); zero-copy mmap'd
 weights; parallel expert preads; 3-bit experts default (1.31 MB,
 page-cache friendly).
 
+### Chunked Batched Prefill (default `--prefill-chunk 8`)
+
+The prefill of a prompt runs as chunks of up to 8 positions through a
+dedicated pipeline (bitwise-identical logits vs the per-token path):
+
+```
+Per layer, per chunk:
+  cmdA (ONE CB, linear layers):  batched input-norm → batched qkv/z/a/b
+    matvecs → M sequential fused GDN chains → batched out_proj →
+    batched residual+norm → batched routing matmuls → commit+wait
+  cmdA (full-attn layers):       batched q/k/v matvecs → wait → per-position
+    CPU Q/K-norm+RoPE+KV-append (sl<32 or sl≥8192 CPU attention; the rest
+    staged) → cmdB: 4 batched M-position GPU attention dispatches
+    (scores/softmax/values/sigmoid) → batched o_proj → residual+norm →
+    routing → commit+wait
+  Phase B:                       CPU softmax+topK per position → hot-set
+    prefetch hit/miss split (see below) → ONE batched pread of the cold
+    misses into a 64-slot pool → M CMD3s committed back-to-back with ZERO
+    backpressure (every buffer is per-position-disjoint)
+```
+
+Key properties: one commit+wait per linear layer (two for full-attn);
+expert preads for the whole chunk issue as a single GCD batch; deferred
+CMD3s pipeline across layers via queue order alone (no fences/events).
+Hot-set expert prefetch: layer L+1's top-32 most-frequent experts
+(`hot_sets.bin`, built by `build_hot_sets.py`) are prefetched into an
+alternating 2×32-slot pool during layer L's compute — enabled only when
+the OS has ≥1 GB strictly-free RAM (`FINCHMOE_PF_PREFETCH=1` forces it).
+
 ## Reference Comparison
 
 | Engine | Model | RAM | M4 Speed | Notes |
 |--------|-------|-----|----------|-------|
-| **FinchMoE** | Qwen 3.6 35B A3B | **~2.8 GB** | **11.4-12.4 tok/s** | custom C/Metal, bit-exact |
+| **FinchMoE** | Qwen 3.6 35B A3B | **~3.3 GB** | **~9-10 tok/s** (11.4+ warm cache) | custom C/Metal, bit-exact |
 | turbo-fieldfare | Gemma 4 26B A4B | ~2 GB | 10.7 tok/s (est.) | Swift/Metal reference |
 | llama.cpp Q4_K_M | Qwen 3.6 35B A3B | ~20 GB | — | reference quality; handles edge prompts well |
 
