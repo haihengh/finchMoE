@@ -10126,6 +10126,16 @@ typedef struct {
     void  *gpu_delta_snapshots[NUM_LINEAR_LAYERS];
     void  *gpu_conv_snapshots[NUM_LINEAR_LAYERS];
     void  *gpu_conv_qk_snapshots[NUM_LINEAR_LAYERS];
+    // Pre-turn snapshot (rollback target for truncated turns)
+    int   pre_turn_pos;
+    float *pre_kv_k[NUM_LAYERS];
+    float *pre_kv_v[NUM_LAYERS];
+    int   pre_kv_len[NUM_LAYERS];
+    float *pre_la_conv[NUM_LAYERS];
+    float *pre_la_ssm[NUM_LAYERS];
+    void  *pre_gpu_delta[NUM_LINEAR_LAYERS];
+    void  *pre_gpu_conv[NUM_LINEAR_LAYERS];
+    void  *pre_gpu_qk[NUM_LINEAR_LAYERS];
     // Session tracking (protected by session_mutex)
     char active_session_id[64];
     int  session_pos;
@@ -10289,6 +10299,53 @@ static void process_chat_request(ServeState *s, int client_fd,
     // Send SSE headers (same for both chat and completions)
     http_write_str(client_fd, SSE_HEADERS);
 
+    // ---- Pre-turn snapshot (session requests only) ----
+    // A truncated assistant turn poisons the next continuation (the model
+    // imitates the abrupt end and stops immediately) — snapshot the state
+    // so a truncated turn can be rolled back, keeping the session clean.
+    if (has_session) {
+        size_t kv_dim = NUM_KV_HEADS * HEAD_DIM;
+        size_t conv_state_size = (CONV_KERNEL_SIZE - 1) * LINEAR_CONV_DIM * sizeof(float);
+        size_t ssm_state_size = LINEAR_NUM_V_HEADS * LINEAR_VALUE_DIM * LINEAR_KEY_DIM * sizeof(float);
+        for (int i = 0; i < NUM_LAYERS; i++) {
+            if (s->kv_caches[i]) {
+                size_t sz = (size_t)s->kv_caches[i]->len * kv_dim * sizeof(float);
+                s->pre_kv_k[i] = realloc(s->pre_kv_k[i], sz);
+                s->pre_kv_v[i] = realloc(s->pre_kv_v[i], sz);
+                memcpy(s->pre_kv_k[i], s->kv_caches[i]->k_cache, sz);
+                memcpy(s->pre_kv_v[i], s->kv_caches[i]->v_cache, sz);
+                s->pre_kv_len[i] = s->kv_caches[i]->len;
+            }
+            if (s->layer_states[i]) {
+                LinearAttnState *ls = (LinearAttnState *)s->layer_states[i];
+                s->pre_la_conv[i] = realloc(s->pre_la_conv[i], conv_state_size);
+                s->pre_la_ssm[i] = realloc(s->pre_la_ssm[i], ssm_state_size);
+                memcpy(s->pre_la_conv[i], ls->conv_state, conv_state_size);
+                memcpy(s->pre_la_ssm[i], ls->ssm_state, ssm_state_size);
+            }
+        }
+        if (g_metal && g_metal->delta_net_step) {
+            for (int i = 0; i < NUM_LINEAR_LAYERS; i++) {
+                if (g_metal->buf_delta_state[i]) {
+                    size_t sz = 32*128*128*sizeof(float);
+                    s->pre_gpu_delta[i] = realloc(s->pre_gpu_delta[i], sz);
+                    memcpy(s->pre_gpu_delta[i], [g_metal->buf_delta_state[i] contents], sz);
+                }
+                if (g_metal->buf_conv_state[i]) {
+                    size_t sz = 3*LINEAR_CONV_DIM*sizeof(float);
+                    s->pre_gpu_conv[i] = realloc(s->pre_gpu_conv[i], sz);
+                    memcpy(s->pre_gpu_conv[i], [g_metal->buf_conv_state[i] contents], sz);
+                }
+                if (g_metal->buf_conv_qk[i]) {
+                    size_t sz = 2*LINEAR_NUM_V_HEADS*3*LINEAR_KEY_DIM*sizeof(float);
+                    s->pre_gpu_qk[i] = realloc(s->pre_gpu_qk[i], sz);
+                    memcpy(s->pre_gpu_qk[i], [g_metal->buf_conv_qk[i] contents], sz);
+                }
+            }
+        }
+        s->pre_turn_pos = pos;
+    }
+
     // ---- Batch prefill ----
     double t_prefill = now_ms();
     float *serve_embed_batch = NULL;
@@ -10376,6 +10433,7 @@ static void process_chat_request(ServeState *s, int client_fd,
     double t_gen = now_ms();
     int gen_count = 0;
     int in_think = 0;
+    int think_ended = 0;   // once the think block closes, think tokens are banned
     int think_tokens = 0;
     char *gen_response = calloc(1, 256 * 1024);
     int gen_resp_len = 0;
@@ -10399,12 +10457,13 @@ static void process_chat_request(ServeState *s, int client_fd,
         }
 
         if (next_token == THINK_START_TOKEN) in_think = 1;
-        if (next_token == THINK_END_TOKEN) in_think = 0;
+        if (next_token == THINK_END_TOKEN) { in_think = 0; think_ended = 1; }
         if (in_think) {
             think_tokens++;
             if (g_think_budget > 0 && think_tokens >= g_think_budget) {
                 next_token = THINK_END_TOKEN;
                 in_think = 0;
+                think_ended = 1;
             }
         }
 
@@ -10447,8 +10506,64 @@ static void process_chat_request(ServeState *s, int client_fd,
             free(normed);
         }
         lm_head_forward(s->wf, hidden, logits);
+        // Once the think block has closed, ban re-entering it — the model
+        // otherwise loops "<think>…</think>" fragments mid-answer (the
+        // serve long-generation repetition driver).
+        if (think_ended) {
+            logits[THINK_START_TOKEN] = -INFINITY;
+            logits[THINK_END_TOKEN] = -INFINITY;
+        }
         next_token = cpu_sample_temp(logits, VOCAB_SIZE, g_temperature, g_top_k);
         logit_diag_dump(logits, VOCAB_SIZE, next_token, gen + 1);
+    }
+
+    // Roll back a truncated turn (no EOS — max_tokens exhausted or client
+    // disconnected). An abruptly-ended assistant turn poisons the next
+    // continuation: the model imitates the turn's ending shape — an
+    // unclosed think or a cut-off answer makes the next turn end
+    // immediately (the multi-turn "empty turn-2" bug). Restoring the
+    // pre-turn snapshot keeps the session context well-formed; the
+    // truncated response was already delivered to the client, it just
+    // doesn't enter the history. (Natural-EOS turns accumulate normally.)
+    if (next_token != EOS_TOKEN_1 && next_token != EOS_TOKEN_2 && has_session) {
+        size_t kv_dim = NUM_KV_HEADS * HEAD_DIM;
+        size_t conv_state_size = (CONV_KERNEL_SIZE - 1) * LINEAR_CONV_DIM * sizeof(float);
+        size_t ssm_state_size = LINEAR_NUM_V_HEADS * LINEAR_VALUE_DIM * LINEAR_KEY_DIM * sizeof(float);
+        for (int i = 0; i < NUM_LAYERS; i++) {
+            if (s->kv_caches[i] && s->pre_kv_k[i]) {
+                size_t sz = (size_t)s->pre_kv_len[i] * kv_dim * sizeof(float);
+                memcpy(s->kv_caches[i]->k_cache, s->pre_kv_k[i], sz);
+                memcpy(s->kv_caches[i]->v_cache, s->pre_kv_v[i], sz);
+                s->kv_caches[i]->len = s->pre_kv_len[i];
+                if (g_metal) {
+                    int fa_idx = (i + 1) / FULL_ATTN_INTERVAL - 1;
+                    if (fa_idx >= 0 && fa_idx < NUM_FULL_ATTN_LAYERS) {
+                        memcpy([g_metal->buf_kv_k[fa_idx] contents], s->pre_kv_k[i], sz);
+                        memcpy([g_metal->buf_kv_v[fa_idx] contents], s->pre_kv_v[i], sz);
+                    }
+                }
+            }
+            if (s->layer_states[i] && s->pre_la_conv[i]) {
+                LinearAttnState *ls = (LinearAttnState *)s->layer_states[i];
+                memcpy(ls->conv_state, s->pre_la_conv[i], conv_state_size);
+                memcpy(ls->ssm_state, s->pre_la_ssm[i], ssm_state_size);
+            }
+        }
+        if (g_metal && g_metal->delta_net_step) {
+            for (int i = 0; i < NUM_LINEAR_LAYERS; i++) {
+                if (s->pre_gpu_delta[i] && g_metal->buf_delta_state[i])
+                    memcpy([g_metal->buf_delta_state[i] contents],
+                           s->pre_gpu_delta[i], 32*128*128*sizeof(float));
+                if (s->pre_gpu_conv[i] && g_metal->buf_conv_state[i])
+                    memcpy([g_metal->buf_conv_state[i] contents],
+                           s->pre_gpu_conv[i], 3*LINEAR_CONV_DIM*sizeof(float));
+                if (s->pre_gpu_qk[i] && g_metal->buf_conv_qk[i])
+                    memcpy([g_metal->buf_conv_qk[i] contents],
+                           s->pre_gpu_qk[i], 2*LINEAR_NUM_V_HEADS*3*LINEAR_KEY_DIM*sizeof(float));
+            }
+        }
+        pos = s->pre_turn_pos;
+        fprintf(stderr, "[serve] %s truncated turn rolled back (session kept clean)\n", request_id);
     }
 
     double gen_ms = now_ms() - t_gen;
