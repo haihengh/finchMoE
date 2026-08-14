@@ -40,8 +40,11 @@ def main():
     expert_tensors = defaultdict(lambda: defaultdict(dict))
 
     for tensor_name, filename in weight_map.items():
-        # Only process switch_mlp (routed experts), not shared_expert
-        if '.switch_mlp.' not in tensor_name:
+        # Routed experts appear as either switch_mlp (quantized variants) or
+        # mlp.experts (pristine BF16 base, fused gate_up_proj). Skip shared_expert.
+        is_switch = '.switch_mlp.' in tensor_name
+        is_experts = '.mlp.experts.' in tensor_name
+        if not is_switch and not is_experts:
             continue
 
         # Handle MTP tensors: map to layer 40 (special MTP layer index)
@@ -53,28 +56,37 @@ def main():
             # MTP tensors: mtp.layers.0.mlp.switch_mlp.* → layer 40
             layer_idx = 40
         else:
-            # Main model: model.layers.N.mlp.switch_mlp.*
+            # Main model: model.layers.N.mlp.* or model.language_model.layers.N.mlp.*
             for i, p in enumerate(parts):
-                if p == 'layers' and i + 1 < len(parts) and i > 0 and parts[i-1] == 'model':
-                    try:
-                        layer_idx = int(parts[i + 1])
-                    except ValueError:
-                        pass
-                    break
+                if p == 'layers' and i + 1 < len(parts) and i > 0:
+                    prev = parts[i - 1]
+                    if prev == 'model' or (prev == 'language_model' and i >= 2 and parts[i - 2] == 'model'):
+                        try:
+                            layer_idx = int(parts[i + 1])
+                        except ValueError:
+                            pass
+                        break
 
         if layer_idx is None:
             continue
 
-        # Extract component name: e.g. "gate_proj.weight"
-        if 'gate_proj' in tensor_name:
+        # Extract component name: e.g. "gate_proj.weight".
+        # The pristine BF16 base uses bare tensor names (no .weight/.scales/
+        # .biases suffixes) — those are weights.
+        if 'gate_up_proj' in tensor_name:
+            comp = 'fused_gate_up.weight'
+        elif 'gate_proj' in tensor_name:
             comp = 'gate_proj.' + ('weight' if '.weight' in tensor_name else
-                                    'scales' if '.scales' in tensor_name else 'biases')
+                                    'scales' if '.scales' in tensor_name else
+                                    'biases' if '.biases' in tensor_name else 'weight')
         elif 'up_proj' in tensor_name:
             comp = 'up_proj.' + ('weight' if '.weight' in tensor_name else
-                                  'scales' if '.scales' in tensor_name else 'biases')
+                                  'scales' if '.scales' in tensor_name else
+                                  'biases' if '.biases' in tensor_name else 'weight')
         elif 'down_proj' in tensor_name:
             comp = 'down_proj.' + ('weight' if '.weight' in tensor_name else
-                                    'scales' if '.scales' in tensor_name else 'biases')
+                                    'scales' if '.scales' in tensor_name else
+                                    'biases' if '.biases' in tensor_name else 'weight')
         else:
             continue
 
@@ -107,9 +119,12 @@ def main():
 
         for comp_name in ['gate_proj.weight', 'gate_proj.scales', 'gate_proj.biases',
                            'up_proj.weight', 'up_proj.scales', 'up_proj.biases',
-                           'down_proj.weight', 'down_proj.scales', 'down_proj.biases']:
+                           'down_proj.weight', 'down_proj.scales', 'down_proj.biases',
+                           'fused_gate_up.weight']:
             if comp_name not in expert_tensors[layer_idx]:
-                print(f"WARNING: layer {layer_idx} missing component {comp_name}")
+                # fused_gate_up is optional (quantized models have separate tensors)
+                if comp_name != 'fused_gate_up.weight':
+                    print(f"WARNING: layer {layer_idx} missing component {comp_name}")
                 continue
 
             info = expert_tensors[layer_idx][comp_name]
@@ -135,17 +150,32 @@ def main():
             byte_start = ds + data_offsets[0]
             byte_end = ds + data_offsets[1]
 
-            # For expert tensors, shape is [num_experts, out_dim, in_dim_packed]
-            # expert_stride = size of one expert's worth of this component
             num_experts = shape[0]
-            expert_size = (byte_end - byte_start) // num_experts
             total_size = byte_end - byte_start
+
+            if comp_name == 'fused_gate_up.weight':
+                # [num_experts, 1024, 2048] BF16 fused — split rows 0-511 (gate)
+                # and 512-1023 (up). Per-expert full stride = 1024*2048*2 bytes;
+                # per-half size = 512*2048*2 bytes.
+                full_stride = total_size // num_experts
+                half_size = full_stride // 2
+                for half, name in [(0, 'gate_proj.weight'), (half_size, 'up_proj.weight')]:
+                    expert_reads[layer_key][name] = {
+                        'file': filename,
+                        'abs_offset': byte_start + half,
+                        'expert_stride': full_stride,
+                        'expert_size': half_size,
+                        'total_size': total_size // 2,
+                        'shape': [num_experts, 512, 2048],
+                        'dtype': dtype,
+                    }
+                continue
 
             expert_reads[layer_key][comp_name] = {
                 'file': filename,
                 'abs_offset': byte_start,
-                'expert_stride': expert_size,
-                'expert_size': expert_size,
+                'expert_stride': total_size // num_experts,
+                'expert_size': total_size // num_experts,
                 'total_size': total_size,
                 'shape': shape,
                 'dtype': dtype,
