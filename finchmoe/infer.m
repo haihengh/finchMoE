@@ -379,7 +379,7 @@ static int g_use_3bit = 1;       // DEFAULT: 3-bit experts (9.1 tok/s, near-4bit
 static int g_use_int8 = 0;       // enabled by --int8-experts flag: use 8-bit packed experts
 static int g_cache_telemetry_enabled = 0;  // enabled by --cache-telemetry flag
 static int g_think_budget = 2048; // max thinking tokens before force-emitting </think>
-static float g_temperature = 0.3f;  // sampling temperature (0 = greedy argmax)
+static float g_temperature = 0.7f;  // sampling temperature (0 = greedy argmax); 0.7 ends long gens naturally (bug 15)
 // 0.3 default: T=0.8 amplifies the mild temporal logit drift (Bug 15) into
 // merged-word artifacts ("abouta", "roboticton") and mid-block repetition
 // loops. 0.1-0.3 is the empirically clean range for this engine; llama.cpp
@@ -10573,6 +10573,25 @@ static void process_chat_request(ServeState *s, int client_fd,
 
     for (int gen = 0; gen < max_gen; gen++) {
         if (next_token == EOS_TOKEN_1 || next_token == EOS_TOKEN_2) {
+            // EOS mid-think leaves an unclosed <think> in the context, which
+            // the next continuation imitates (ends immediately). Close the
+            // think in the context before embedding the EOS.
+            if (in_think) {
+                cache_telemetry_note_token();
+                embed_lookup(s->wf, THINK_END_TOKEN, hidden);
+                for (int layer = 0; layer < NUM_LAYERS; layer++) {
+                    int is_full = ((layer + 1) % FULL_ATTN_INTERVAL == 0);
+                    fused_layer_forward(s->wf, layer, hidden,
+                                        is_full ? s->kv_caches[layer] : NULL,
+                                        is_full ? NULL : s->layer_states[layer],
+                                        pos,
+                                        s->layer_mmaps[layer] != MAP_FAILED ? s->layer_mmaps[layer] : NULL,
+                                        s->K, s->layer_fds[layer]);
+                }
+                discard_deferred_experts();
+                pos++;
+                in_think = 0;
+            }
             cache_telemetry_note_token();
             embed_lookup(s->wf, next_token, hidden);
             for (int layer = 0; layer < NUM_LAYERS; layer++) {
@@ -11948,6 +11967,7 @@ int main(int argc, char **argv) {
 
         int total_generated = 1;
         int in_think = (next_token == THINK_START_TOKEN) ? 1 : 0;
+        int think_ended = 0;   // once the think block closes, think tokens are banned
         int think_tokens = 0;
 
         // ---- Auto-regressive generation ----
@@ -11965,9 +11985,9 @@ int main(int argc, char **argv) {
                 break;
             }
 
-            // Think budget enforcement
+            // Think budget enforcement + one-shot re-entry ban
             if (next_token == THINK_START_TOKEN) in_think = 1;
-            if (next_token == THINK_END_TOKEN) in_think = 0;
+            if (next_token == THINK_END_TOKEN) { in_think = 0; think_ended = 1; }
             if (in_think) think_tokens++;
 
             // Embed the just-generated token (next iteration)
@@ -12002,6 +12022,13 @@ int main(int argc, char **argv) {
 
             // LM head
             lm_head_forward(wf, hidden, logits);
+
+            // Once the think block has closed, ban re-entering it (the model
+            // otherwise loops "<think>…</think>" fragments mid-answer).
+            if (think_ended) {
+                logits[THINK_START_TOKEN] = -INFINITY;
+                logits[THINK_END_TOKEN] = -INFINITY;
+            }
 
             // Per-step logit dump for drift cross-validation
             if (g_dump_logits_path) {
