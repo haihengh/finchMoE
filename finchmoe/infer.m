@@ -7219,12 +7219,7 @@ static void fused_layer_forward(
     int force_cpu_experts = g_cpu_experts ? 1 : 0;
     if (force_cpu_experts) goto cpu_expert_fallback;
 
-    static int gpu_entry_count = 0;
     if (packed_fd >= 0 && g_metal && g_metal->buf_multi_expert_data[0]) {
-        if (gpu_entry_count < 3) {
-            fprintf(stderr, "[GPU-ENTRY] layer=%d actual_K=%d\n", layer_idx, actual_K);
-            gpu_entry_count++;
-        }
         // GPU multi-expert path with LRU cache + parallel I/O:
         // For each expert:
         //   - Cache HIT:  dispatch directly from cached Metal buffer (skip pread)
