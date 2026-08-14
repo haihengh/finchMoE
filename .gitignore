@@ -1,55 +1,25 @@
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-
-# Build outputs
-build/
-*.o
-*.a
-*.metallib
-*.air
+# Build artifacts
 finchmoe/finchmoe-infer
-finchmoe/finchTool/finchTool
-finchmoe/chat
+finchmoe/infer_*
+finchmoe/*.dSYM/
+finchmoe/finchTool/test_large_matvec
 
-# Downloaded models
-models/
-
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Archive (old finchMoE code)
-archive/
-
-# Reference projects (separate repos)
-flash-moe/
-omlx/
-turbo-fieldfare/
-llama.cpp/
-
-# Build artifacts (finchmoe)
-finchmoe/model_weights.bin
-finchmoe/vocab.bin
-finchmoe/tokenizer.bin
-finchmoe/finchmoe-infer
-finchmoe/finchmoe-chat
-finchmoe/expert_index.json
+# Model binaries and quantization artifacts (multi-GB, regenerated from
+# the pristine BF16 base — see OPTIMIZATION_PLAN.md)
+finchmoe/*.bin
+finchmoe/*.bak
+finchmoe/model_weights_*.json
 finchmoe/packed_experts/
+finchmoe/packed_experts_*/
+finchmoe/quant_*/
+finchmoe/hybrid_old_*
+finchmoe/test_engine_path
+finchmoe/test_quant_weights
 
-# Build artifacts (root level)
-model_weights.bin
-model_weights.json
-vocab.bin
-finchmoe/infer
-finchmoe/infer_397b.m
-finchmoe/finchmoe-deepseek
-*.gguf
+# Reference project clones (comparison/analysis only)
+/lmdeploy/
+/miles/
+/sglang/
+/vllm/
+/text-generation-inference/
+/Lvllmds4-x/

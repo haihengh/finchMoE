@@ -35,9 +35,14 @@
    `Qwen3.6-35B-A3B-bf16` base** (BF16 non-experts → 4-bit GDN tier;
    BF16 experts `mlp.experts.gate_up_proj/down_proj` → 3-bit).
 2. **Prefill speed** — measured 789 tokens in 66.2s (~12 tok/s = decode
-   speed; every prompt token runs the serial 40-layer pipeline). Agentic
-   workloads need **batched GPU prefill** (5-10× target): batch the prompt
-   through the GPU matmuls + batched full-attention.
+   speed). **FIXED 2026-08-14 (Phase 4a)**: chunked batched GPU prefill
+   (`--prefill-chunk 8` default) — batched matvecs + one CB per linear
+   layer + 64-slot pooled expert preads (back-to-back CMD3s, zero
+   backpressure) + M-position batched GPU attention. **1.66-1.7× TTFT**
+   (90-token 13.2→7.75s, 883-token 108→65s), logits bitwise-identical to
+   the per-token path at every chunk size (1/2/4/8/23/64) and in serve
+   mode. Remaining wall: expert pread I/O ~8 ms/layer + GPU matvecs —
+   the 5-10× tier needs prefill speculative expert prediction.
 3. **Server multi-turn** — session continuation corrupts after turn 1
    (template tokens leak; 2nd request can yield 0 tokens). Disabled via
    stateless fallback; needs the snapshot-restore state-leak debugging.
@@ -198,7 +203,7 @@ These are higher-risk, longer-term items that could push past 12 tok/s:
 | Optimization | Est. Gain | Complexity | Notes |
 |-------------|-----------|------------|-------|
 | Single-kernel multi-expert | +20% | Very High | All K experts in one GPU dispatch. Occupancy goes up, encoding overhead eliminated. |
-| Batched GPU prefill | 5-10× PP | High | Current prefill is CPU-only. GPU batching needed for production. |
+| Batched GPU prefill | 1.66-1.7× PP (DONE) | High | Chunked path shipped (bitwise parity); 5-10× needs prefill expert prediction. |
 | KV cache FP16 | -448 MB | Medium | Already in turbo-fieldfare. Our KV is FP32. |
 | 3-bit experts | +15% speed, better quality | Medium | Sweet spot between 2-bit (fast, some quality loss) and 4-bit (slow, reference quality). Need 3-bit dequant kernel + repacker support. |
 | Expert prediction v2 | 10-20% I/O reduction | Medium | Current predictor 41% accurate. Better predictor (attention-based, learned) could reach 60-70%. |
@@ -253,7 +258,7 @@ Phase 4 (Advanced) ← Can run in parallel with Phase 3
 |---------|----------------|----------|-----|
 | Non-expert quantization | 4-bit everywhere | BF16 everywhere | **Must fix** |
 | Expert streaming | LFU cache, 16 slots/layer | LRU (optional), 8 slots/layer | Small gap |
-| Prefill | Chunked GPU (MPP) | CPU-only (slow) | Large gap |
+| Prefill | Chunked GPU (MPP) | Chunked GPU prefill (1.7×, bitwise) | Closing |
 | KV cache | FP16, ring buffers | FP32, linear | Medium gap |
 | Output head | Fused 4-bit | GPU gemv_bf16 (good) | Equivalent |
 | MoE kernel | Persistent workgroups | Independent dispatches | Medium gap |

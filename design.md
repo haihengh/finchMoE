@@ -115,8 +115,12 @@ chain verified end-to-end by `debug_gdn_reference.py`.
 | CPU routing + readbacks | ~0.15 | trivial |
 | **Total** | **~2.5** | → ~11.4 tok/s |
 
-Prefill = decode speed (~12 tok/s; every prompt token runs the serial
-40-layer pipeline) — batched GPU prefill is the agentic-workload priority.
+Prefill was decode speed (~12 tok/s). Now chunked batched GPU prefill
+(`--prefill-chunk 8`, default): batched matvecs, one CB per linear layer,
+64-slot pooled expert preads with back-to-back CMD3s (zero backpressure),
+and M-position batched GPU attention — 1.66-1.7× TTFT (90-token 7.8s,
+883-token 65s) with logits bitwise-identical to the per-token path.
+Remaining wall: expert pread I/O (~8 ms/layer) + GPU matvec time.
 
 ## 8. Key Design Decisions
 
@@ -163,8 +167,9 @@ Prefill = decode speed (~12 tok/s; every prompt token runs the serial
 ## 10. Future
 
 See [finchmoe/OPTIMIZATION_PLAN.md](finchmoe/OPTIMIZATION_PLAN.md). In order:
-1. Requant from pristine `Qwen3.6-35B-A3B-bf16` (edge-prompt quality).
-2. Batched GPU prefill (agentic workloads; 5-10× PP target).
+1. Requant from pristine `Qwen3.6-35B-A3B-bf16` (edge-prompt quality) — DONE 2026-08-13.
+2. Batched GPU prefill — DONE 2026-08-13 (1.66-1.7×, bitwise parity); 5-10×
+   tier needs prefill speculative expert prediction.
 3. Server multi-turn session fix.
 4. MTP speculative decoding (α-gated; forward-math verification first).
 
