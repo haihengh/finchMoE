@@ -1,20 +1,29 @@
 # Build artifacts
 finchmoe/finchmoe-infer
+finchmoe/infer
 finchmoe/infer_*
+finchmoe/finchmoe-deepseek
 finchmoe/*.dSYM/
+finchmoe/finchTool/finchTool
 finchmoe/finchTool/test_large_matvec
+finchmoe/chat
 
 # Model binaries and quantization artifacts (multi-GB, regenerated from
 # the pristine BF16 base — see OPTIMIZATION_PLAN.md)
 finchmoe/*.bin
 finchmoe/*.bak
 finchmoe/model_weights_*.json
-finchmoe/packed_experts/
-finchmoe/packed_experts_*/
+finchmoe/packed_experts
+finchmoe/packed_experts_*
 finchmoe/quant_*/
 finchmoe/hybrid_old_*
+finchmoe/expert_index.json
 finchmoe/test_engine_path
 finchmoe/test_quant_weights
+/model_weights.bin
+/model_weights.json
+/vocab.bin
+/models/
 
 # Reference project clones (comparison/analysis only)
 /lmdeploy/
@@ -23,10 +32,13 @@ finchmoe/test_quant_weights
 /vllm/
 /text-generation-inference/
 /Lvllmds4-x/
+/flash-moe/
+/llama.cpp/
+/omlx/
+/turbo-fieldfare/
 
 # Misc
 .DS_Store
 **/__pycache__/
 archive/
 finchmoe/397b/
-finchmoe/chat
