@@ -2,6 +2,17 @@
 
 A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon.
 
+## Goal
+
+Run a capable model at reasonable speed on low-spec machines (Mac mini,
+MacBook Neo) for agentic work and general chat, fully local and offline. The
+binding constraint on such machines is RAM/VRAM, so model weights are stored
+on SSD and streamed through the OS page cache instead of being held in
+memory — letting low-spec machines run MoE models far larger than their RAM.
+The trade-off is that the SSD becomes the bottleneck, so the model must stay
+small enough to stream; Qwen 3.6 35B A3B is the sweet spot — a 35B-class
+model with proven capability, at a size the SSD can feed.
+
 **Phase 1 targets MET (2026-08-13)**: ~9-10 tok/s decode on M4 (3-bit experts, page-cache dependent), 1.95 GB weights — see [finchmoe/OPTIMIZATION_PLAN.md](finchmoe/OPTIMIZATION_PLAN.md) for the full progress log.
 
 ## Current Status (2026-08-14)
@@ -16,6 +27,7 @@ A C/Metal inference engine for **Qwen 3.6 35B A3B** on Apple Silicon.
 | Expert disk (3-bit) | 14 GB (40 layers × 256 × 1.31 MiB) |
 | Correctness | Bit-exact vs numpy GDN reference (CosSim 1.000000 per stage) |
 | Bugs fixed | 20 + Phase 1 root causes (see [BUGS.md](BUGS.md) and [finchmoe/PHASE1_NAN_ANALYSIS.md](finchmoe/PHASE1_NAN_ANALYSIS.md)) |
+| Agent harnesses | Targets: **Kon** (coding) + **Hermes** (general agentic); ~1-2 min/turn overhead at ~58 ms/token prefill; native `tools` param pending — see [Agent Harness Targets](#agent-harness-targets) |
 
 Known issues (ranked): (1) intermittent ~1e-4…1e-2 run-to-run logit wobble
 under page-cache starvation — predates the perf refactor, needs a
@@ -106,12 +118,16 @@ FINCHMOE_REF_MANIFEST=quant_clean/model_weights_quant.json FINCHMOE_REF_WEIGHTS=
 
 ## Model Sizes
 
-| Configuration | Weights | Expert disk | Speed (K=8, M4) | Notes |
-|---------------|---------|-------------|-------------|-------|
-| **Default (quant_clean)** | **1.95 GB** (4-bit GDN, 8-bit embed/lm_head) | 14 GB 3-bit | **~10.3 tok/s** (post-restart retest 2026-08-14) | current production config; 11.4+ was the quant_self-era peak |
-| Protected tier | 2.45 GB (8-bit GDN, `FINCHMOE_GDN8=1`) | 13 GB 3-bit | ~9.1 tok/s | quality-safe fallback |
-| BF16 (source) | 67 GB | — | — | reference; the intended requant base |
-| 2bit-dense-v2 (legacy) | 4.96 GB BF16 | 9.4 GB 2-bit | ~5 tok/s | marginal quality — being replaced |
+| Configuration | Weights | Expert disk | Speed (K=8, M4) | Quality loss vs BF16 | Notes |
+|---------------|---------|-------------|-------------|----------------------|-------|
+| **Default (quant_clean)** | **1.95 GB** (4-bit GDN, 8-bit embed/lm_head) | 14 GB 3-bit | **~10.3 tok/s** (post-restart retest 2026-08-14) | **Small**: 3-bit experts weight CosSim 0.966-0.979, 4-bit non-experts ≥0.995 (requant 2026-08-13), typo-prompt PASS | current production config; 11.4+ was the quant_self-era peak |
+| Protected tier | 2.45 GB (8-bit GDN, `FINCHMOE_GDN8=1`) | 13 GB 3-bit | ~9.1 tok/s | **Minimal**: 8-bit non-experts near-lossless; experts as default tier | quality-safe fallback |
+| BF16 (source) | 67 GB | — | — | None (reference) | reference; the intended requant base |
+| 2bit-dense-v2 (legacy) | 4.96 GB BF16 | 9.4 GB 2-bit | ~5 tok/s | **Large**: edge prompts degrade into repetition loops (llama.cpp Q4_K_M of the clean base handles the same prompts) | marginal quality — being replaced |
+
+Quality figures are weight-level CosSim from the requant validation plus spot
+checks. End-to-end loss (e.g. HumanEval pass@1 per tier) is not yet published —
+the `humaneval_m1/` harness exists to measure it.
 
 ## Architecture
 
@@ -174,6 +190,64 @@ the OS has ≥1 GB strictly-free RAM (`FINCHMOE_PF_PREFETCH=1` forces it).
 | **FinchMoE** | Qwen 3.6 35B A3B | **~3.3 GB** | **~9-10.3 tok/s** (post-restart retest 2026-08-14) | custom C/Metal, bit-exact |
 | turbo-fieldfare | Gemma 4 26B A4B | ~2 GB | 10.7 tok/s (est.) | Swift/Metal reference |
 | llama.cpp Q4_K_M | Qwen 3.6 35B A3B | ~20 GB | — | reference quality; handles edge prompts well |
+
+## Agent Harness Targets
+
+The engine is a stateless OpenAI-compatible server with **no prefix cache**,
+so a harness's fixed per-turn prompt is re-prefilled every turn at ~58 ms/token
+(883-token prompt = 51 s). Harness selection is decided by absolute token
+overhead, not feature lists:
+
+| Harness | Fixed overhead/turn | Cost on FinchMoE | Fit |
+|---------|--------------------|------------------|-----|
+| **Kon** ([0xku/kon](https://github.com/0xku/kon)) | ~1,000 tokens (system prompt <270) | **~1 min** | ✅ Primary — coding: read/edit/write/bash/grep/find, exact-text edits, headless `-p` mode |
+| **Hermes** (Nous `hermes-agent`) | ~1,300-2,000 tokens (memory ~1.3k + system ~800) | ~1.3-2 min | ✅ General agentic — XML-tag tool steering (matches the engine's `<tool_call>` text protocol), dynamic tool loading |
+| OpenClaw | ~18,400 tokens (measured bare turn) | ~18 min; exceeds 8k context | ❌ Rejected — does not fit |
+
+Both targets speak plain `/v1/chat/completions` and resend full history each
+turn, matching the server's stateless default. Neither needs a bigger context
+window: the 8k practical limit fits the one-file-at-a-time edit loop both
+encourage. Known fit notes: keep the engine at temp 0.3 + `-B` think budget
+(the model loops in the thinking phase otherwise), and cap harness-side
+`AGENTS.md`/memory injections at ~500 tokens (~30 s of prefill each turn).
+
+### Implementation Plan
+
+**Phase A — API contract (server)** — verify and close the gaps a real
+OpenAI-compatible client trips over:
+
+- [ ] `/v1/models` advertises a stable model id + context window (harnesses
+      probe this to size their token budgets)
+- [ ] `usage` (prompt/completion tokens) present in streamed and non-streamed
+      responses (Kon/Hermes count tokens for compaction decisions)
+- [ ] Honor `stop` sequences from the request
+- [ ] System/assistant/tool role messages routed through the Qwen chat
+      template; over-context requests rejected with HTTP 400 instead of
+      silent truncation
+- [ ] Fix `-N` default (262144 → 16384): 256k KV is 10.7 GB fp32 and does not
+      fit 16 GB — validate against free RAM at startup
+
+**Phase B — tool calling** — the decisive feature:
+
+- [ ] Native `tools` parameter on `/v1/chat/completions`: inject Qwen tool-call
+      format, parse `<tool_call>` from the stream (parser already exists in
+      `chat.m`), execute via a registered tool table, append `<tool_result>`,
+      loop until the model answers
+- [ ] Text tool protocol as the zero-engine-change fallback: a small sidecar
+      running the `chat.m`-style loop over the plain endpoint (the path
+      Hermes' XML steering works through today)
+
+**Phase C — harness validation** — acceptance suite: config edit, SQL text
+replacement, CREATE TABLE → IF-TABLE migration, 20-file TF repo:
+
+- [ ] Kon: point at `-R 9000` (auth `none`, TLS-verify skip), set `context`
+      8000 / `buffer_tokens` 1500; measure per-turn overhead (target
+      ~1-1.5 min) and edit reliability (exact-text `edit` vs `write` fallback
+      at 3-bit quality)
+- [ ] Hermes: run `hermes prompt-size` to lock the budget, verify XML tool
+      parsing against the engine's stream, run a multi-turn task
+- [ ] Record turns/task and wall-clock per task; add a retry policy for the
+      known logit wobble under page-cache starvation
 
 ## Documentation
 
