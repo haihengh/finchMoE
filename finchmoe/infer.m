@@ -925,6 +925,44 @@ static Vocabulary *load_vocab(const char *path) {
 
     fclose(f);
 
+    // Qwen byte-fallback recovery: the byte-level BPE vocab stores the raw
+    // bytes of multi-byte characters as latin-1 code points U+0080..U+00FF
+    // (the HF tokenizers convention — the curly quote ' = U+00E2 U+0080
+    // U+0099). The exporter UTF-8-encoded those, so the stored bytes are
+    // C2/C3 two-byte sequences. Convert them back to the raw bytes so the
+    // decoded text renders correctly (otherwise "’s" shows as mojibake).
+    // The Qwen vocab has no precomposed accented tokens (everything
+    // non-ASCII routes through the byte fallback), so every C2/C3 sequence
+    // is a fallback marker. CJK characters encode in the E4..EF range and
+    // pass through untouched.
+    for (uint32_t i = 0; i < v->num_tokens; i++) {
+        if (!v->tokens[i]) continue;
+        unsigned char *s = (unsigned char *)v->tokens[i];
+        int has_marker = 0;
+        for (int j = 0; s[j]; j++) {
+            if ((s[j] == 0xC2 || s[j] == 0xC3) && s[j+1] >= 0x80 && s[j+1] <= 0xBF) {
+                has_marker = 1; break;
+            }
+        }
+        if (!has_marker) continue;
+        char out[512];
+        int o = 0;
+        for (int j = 0; s[j] && o < 511; ) {
+            if ((s[j] == 0xC2 || s[j] == 0xC3) && s[j+1] >= 0x80 && s[j+1] <= 0x40 + 0xBF - 0xBF) {
+                // (unreachable — the real check below)
+            }
+            if ((s[j] == 0xC2 || s[j] == 0xC3) && s[j+1] >= 0x80 && s[j+1] <= 0xBF) {
+                out[o++] = (char)((((unsigned)s[j] & 0x1F) << 6) | ((unsigned)s[j+1] & 0x3F));
+                j += 2;
+            } else {
+                out[o++] = (char)s[j++];
+            }
+        }
+        out[o] = '\0';
+        strcpy(v->tokens[i], out);
+        v->lengths[i] = o;
+    }
+
     // Find the actual highest token id with a valid string
     uint32_t max_valid = 0;
     for (uint32_t i = 0; i < v->num_tokens; i++) {
