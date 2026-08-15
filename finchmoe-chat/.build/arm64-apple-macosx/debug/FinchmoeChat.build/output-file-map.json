@@ -1,0 +1,33 @@
+{
+  "": {
+    "swift-dependencies": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/primary.swiftdeps"
+  },
+  "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/Sources/FinchmoeChat/ChatModel.swift": {
+    "dependencies": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/ChatModel.d",
+    "object": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/ChatModel.swift.o",
+    "swiftmodule": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/ChatModel~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/ChatModel.swiftdeps",
+    "diagnostics": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/ChatModel.dia"
+  },
+  "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/Sources/FinchmoeChat/ChatView.swift": {
+    "dependencies": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/ChatView.d",
+    "object": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/ChatView.swift.o",
+    "swiftmodule": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/ChatView~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/ChatView.swiftdeps",
+    "diagnostics": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/ChatView.dia"
+  },
+  "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/Sources/FinchmoeChat/FinchmoeChatApp.swift": {
+    "dependencies": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/FinchmoeChatApp.d",
+    "object": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/FinchmoeChatApp.swift.o",
+    "swiftmodule": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/FinchmoeChatApp~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/FinchmoeChatApp.swiftdeps",
+    "diagnostics": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/FinchmoeChatApp.dia"
+  },
+  "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/Sources/FinchmoeChat/SSEClient.swift": {
+    "dependencies": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/SSEClient.d",
+    "object": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/SSEClient.swift.o",
+    "swiftmodule": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/SSEClient~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/SSEClient.swiftdeps",
+    "diagnostics": "/Volumes/samsung 2t/code/finchMoE/finchmoe-chat/.build/arm64-apple-macosx/debug/FinchmoeChat.build/SSEClient.dia"
+  }
+}
