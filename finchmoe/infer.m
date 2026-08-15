@@ -380,6 +380,8 @@ static int g_use_int8 = 0;       // enabled by --int8-experts flag: use 8-bit pa
 static int g_cache_telemetry_enabled = 0;  // enabled by --cache-telemetry flag
 static int g_think_budget = 200;  // max thinking tokens before force-emitting </think> — the model otherwise loops inside the think phase on long-form prompts (2048 was effectively unlimited)
 static float g_temperature = 0.7f;  // sampling temperature (0 = greedy argmax); 0.7 ends long gens naturally (bug 15)
+static float g_min_p = 0.05f;       // min_p sampling: filter tokens below min_p * top_prob — the
+                                    // long-form synonym-drift cure (llama.cpp-style tail filter)
 // 0.3 default: T=0.8 amplifies the mild temporal logit drift (Bug 15) into
 // merged-word artifacts ("abouta", "roboticton") and mid-block repetition
 // loops. 0.1-0.3 is the empirically clean range for this engine; llama.cpp
@@ -1483,6 +1485,22 @@ static int cpu_sample_temp(const float *x, int dim, float temp, int top_k) {
     for (int k = 0; k < heap_n; k++) {
         if (ng_blocked(heap_idx[k])) {
             probs[heap_idx[k]] = 0.0f;
+        }
+    }
+
+    // min_p tail filter: zero every token whose probability is below
+    // min_p * p_max (the strongest surviving candidate). This removes the
+    // low-probability tail that long-form generation drifts into (the
+    // synonym-wandering loops) — the llama.cpp-style cure.
+    if (g_min_p > 0.0f && g_min_p < 1.0f) {
+        float p_max = 0.0f;
+        for (int k = 0; k < heap_n; k++) {
+            float p = probs[heap_idx[k]];
+            if (p > p_max) p_max = p;
+        }
+        float cutoff = g_min_p * p_max;
+        for (int k = 0; k < heap_n; k++) {
+            if (probs[heap_idx[k]] < cutoff) probs[heap_idx[k]] = 0.0f;
         }
     }
 
@@ -11418,6 +11436,7 @@ int main(int argc, char **argv) {
             {"predict",       no_argument,       0, 'D'},
             {"mtp",           no_argument,       0, 'J'},
             {"rep-penalty",   required_argument, 0, 'r'},
+            {"min-p",         required_argument, 0, 702},
             {"prefill-chunk", required_argument, 0, 'b'},
             {"debug-layers",  no_argument,       0, 'X'},
             {"gpu-experts",   no_argument,       0, 'U'},
@@ -11481,6 +11500,7 @@ int main(int argc, char **argv) {
                 case 'H': g_no_think = 1; break;
                 case 'l': g_low_memory = 1; break;
             case 700: g_kv_type = KV_FP16; break;
+            case 702: g_min_p = atof(optarg); break;
             case 701: g_kv_type = KV_TURBO; break;
                 case 'I': g_dump_logits_path = optarg; break;
                 case 'A': g_logit_diag_interval = atoi(optarg); break;
