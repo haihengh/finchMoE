@@ -150,6 +150,8 @@ FINCHMOE_REF_MANIFEST=quant_clean/model_weights_quant.json FINCHMOE_REF_WEIGHTS=
 | `-Q N` | 8192 | GPU KV pre-allocation |
 | `--prefill-chunk N` | **8** | Chunked batched prefill (0 = per-token path; 8 = pooled+batched-attn sweet spot) |
 | `--low-memory` | off | Skip Metal weight wrap |
+| `--kv-fp16` | off | KV cache in FP16 — 2× smaller KV (logits cos 0.999999 vs FP32) |
+| `--kv-turbo` | off | KV cache K int8 + V 4-bit — ~5× smaller KV (logits cos 0.999793; ~10% slower CPU attention) |
 
 ## Model Sizes
 

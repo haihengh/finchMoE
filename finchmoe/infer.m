@@ -3431,15 +3431,143 @@ static void apply_rotary_emb(float *q, float *k, int pos, int num_heads, int num
 // ============================================================================
 
 typedef struct {
-    float *k_cache;  // [max_seq, num_kv_heads * head_dim]
-    float *v_cache;  // [max_seq, num_kv_heads * head_dim]
-    int len;         // current number of cached entries
+    float *k_cache;  // [max_seq, num_kv_heads * head_dim] (FP32 mode)
+    float *v_cache;  // [max_seq, num_kv_heads * head_dim] (FP32 mode)
+    // Quantized storage (FP16 / TURBO modes)
+    uint16_t *k16;       // FP16 mode: K halfs
+    uint16_t *v16;       // FP16 mode: V halfs
+    uint8_t  *k8;        // TURBO mode: K int8 + per-group float scales
+    float    *k8_scales; // [max_seq * kv_dim/64]
+    uint32_t *v4;        // TURBO mode: V 4-bit affine packed (8/uint32)
+    float    *v4_scales; // [max_seq * kv_dim/64]
+    float    *v4_biases; // [max_seq * kv_dim/64]
+    int len;             // current number of cached entries
+    int kv_type;         // 0 = FP32, 1 = FP16, 2 = TURBO (K int8 + V 4-bit)
 } KVCache;
+
+// KV mode (--kv-fp16 / --kv-turbo): FP32 is the default; the quant modes
+// trade a little attention fidelity for 2x (FP16) or ~5x (TURBO) smaller
+// KV caches. TURBO keeps K at 8-bit (scores are K-sensitive) and V at 4-bit.
+#define KV_FP32 0
+#define KV_FP16 1
+#define KV_TURBO 2
+static int g_kv_type = KV_FP32;
+
+#define KV_DIM (NUM_KV_HEADS * HEAD_DIM)  // 512
+#define KV_GROUPS (KV_DIM / 64)           // 8
+
+static void kv_write(KVCache *kv, int pos, const float *k, const float *v) {
+    if (kv->kv_type == KV_FP32) {
+        memcpy(kv->k_cache + (size_t)pos * KV_DIM, k, KV_DIM * sizeof(float));
+        memcpy(kv->v_cache + (size_t)pos * KV_DIM, v, KV_DIM * sizeof(float));
+    } else if (kv->kv_type == KV_FP16) {
+        uint16_t *k16 = kv->k16 + (size_t)pos * KV_DIM;
+        uint16_t *v16 = kv->v16 + (size_t)pos * KV_DIM;
+        for (int i = 0; i < KV_DIM; i++) {
+            uint32_t kb; memcpy(&kb, &k[i], 4); k16[i] = (uint16_t)(kb >> 16);
+            uint32_t vb; memcpy(&vb, &v[i], 4); v16[i] = (uint16_t)(vb >> 16);
+        }
+    } else {  // KV_TURBO: K int8 symmetric, V 4-bit affine (group 64)
+        uint8_t *k8 = kv->k8 + (size_t)pos * KV_DIM;
+        float *ks = kv->k8_scales + (size_t)pos * KV_GROUPS;
+        for (int g = 0; g < KV_GROUPS; g++) {
+            float mx = 0.0f;
+            for (int i = 0; i < 64; i++) {
+                float a = fabsf(k[g * 64 + i]);
+                if (a > mx) mx = a;
+            }
+            float scale = mx > 0.0f ? mx / 127.0f : 1.0f;
+            ks[g] = scale;
+            for (int i = 0; i < 64; i++) {
+                int q = (int)roundf(k[g * 64 + i] / scale);
+                if (q > 127) q = 127;
+                if (q < -128) q = -128;
+                k8[g * 64 + i] = (uint8_t)(q & 0xFF);
+            }
+        }
+        uint32_t *v4 = kv->v4 + (size_t)pos * (KV_DIM / 8);
+        float *vs = kv->v4_scales + (size_t)pos * KV_GROUPS;
+        float *vb = kv->v4_biases + (size_t)pos * KV_GROUPS;
+        for (int g = 0; g < KV_GROUPS; g++) {
+            float mn = v[g * 64], mx = v[g * 64];
+            for (int i = 1; i < 64; i++) {
+                if (v[g * 64 + i] < mn) mn = v[g * 64 + i];
+                if (v[g * 64 + i] > mx) mx = v[g * 64 + i];
+            }
+            float scale = (mx - mn) / 15.0f;
+            vs[g] = scale > 0.0f ? scale : 1.0f;
+            vb[g] = mn;
+            for (int i = 0; i < 64; i++) {
+                int q = (int)roundf((v[g * 64 + i] - mn) / vs[g]);
+                if (q > 15) q = 15;
+                if (q < 0) q = 0;
+                v4[g * 8 + i / 8] |= ((uint32_t)q) << (4 * (i % 8));
+            }
+        }
+    }
+}
+
+static void kv_read_k(KVCache *kv, int pos, int kv_h, float *out) {
+    if (kv->kv_type == KV_FP32) {
+        memcpy(out, kv->k_cache + (size_t)pos * KV_DIM + (size_t)kv_h * HEAD_DIM,
+               HEAD_DIM * sizeof(float));
+    } else if (kv->kv_type == KV_FP16) {
+        const uint16_t *k16 = kv->k16 + (size_t)pos * KV_DIM + (size_t)kv_h * HEAD_DIM;
+        for (int i = 0; i < HEAD_DIM; i++) {
+            uint32_t b = (uint32_t)k16[i] << 16;
+            memcpy(&out[i], &b, 4);
+        }
+    } else {  // KV_TURBO
+        const uint8_t *k8 = kv->k8 + (size_t)pos * KV_DIM + (size_t)kv_h * HEAD_DIM;
+        const float *ks = kv->k8_scales + (size_t)pos * KV_GROUPS + (size_t)kv_h * (HEAD_DIM / 64);
+        for (int g = 0; g < HEAD_DIM / 64; g++) {
+            for (int i = 0; i < 64; i++)
+                out[g * 64 + i] = (float)(int8_t)k8[g * 64 + i] * ks[g];
+        }
+    }
+}
+
+static void kv_read_v(KVCache *kv, int pos, int kv_h, float *out) {
+    if (kv->kv_type == KV_FP32) {
+        memcpy(out, kv->v_cache + (size_t)pos * KV_DIM + (size_t)kv_h * HEAD_DIM,
+               HEAD_DIM * sizeof(float));
+    } else if (kv->kv_type == KV_FP16) {
+        const uint16_t *v16 = kv->v16 + (size_t)pos * KV_DIM + (size_t)kv_h * HEAD_DIM;
+        for (int i = 0; i < HEAD_DIM; i++) {
+            uint32_t b = (uint32_t)v16[i] << 16;
+            memcpy(&out[i], &b, 4);
+        }
+    } else {  // KV_TURBO
+        const uint32_t *v4 = kv->v4 + (size_t)pos * (KV_DIM / 8) + (size_t)kv_h * (HEAD_DIM / 8);
+        const float *vs = kv->v4_scales + (size_t)pos * KV_GROUPS + (size_t)kv_h * (HEAD_DIM / 64);
+        const float *vb = kv->v4_biases + (size_t)pos * KV_GROUPS + (size_t)kv_h * (HEAD_DIM / 64);
+        for (int g = 0; g < HEAD_DIM / 64; g++) {
+            for (int j = 0; j < 8; j++) {
+                uint32_t w = v4[g * 8 + j];
+                for (int i = 0; i < 8; i++)
+                    out[g * 64 + j * 8 + i] = (float)((w >> (4 * i)) & 0xF) * vs[g] + vb[g];
+            }
+        }
+    }
+}
 
 static KVCache *kv_cache_new(void) {
     KVCache *c = calloc(1, sizeof(KVCache));
-    c->k_cache = calloc(g_max_seq_len * NUM_KV_HEADS * HEAD_DIM, sizeof(float));
-    c->v_cache = calloc(g_max_seq_len * NUM_KV_HEADS * HEAD_DIM, sizeof(float));
+    size_t n = (size_t)g_max_seq_len * KV_DIM;
+    c->kv_type = g_kv_type;
+    if (c->kv_type == KV_FP32) {
+        c->k_cache = calloc(n, sizeof(float));
+        c->v_cache = calloc(n, sizeof(float));
+    } else if (c->kv_type == KV_FP16) {
+        c->k16 = calloc(n, sizeof(uint16_t));
+        c->v16 = calloc(n, sizeof(uint16_t));
+    } else {
+        c->k8 = calloc(n, sizeof(uint8_t));
+        c->k8_scales = calloc((size_t)g_max_seq_len * KV_GROUPS, sizeof(float));
+        c->v4 = calloc(n / 8, sizeof(uint32_t));
+        c->v4_scales = calloc((size_t)g_max_seq_len * KV_GROUPS, sizeof(float));
+        c->v4_biases = calloc((size_t)g_max_seq_len * KV_GROUPS, sizeof(float));
+    }
     c->len = 0;
     return c;
 }
@@ -3448,6 +3576,13 @@ static void kv_cache_free(KVCache *c) {
     if (c) {
         free(c->k_cache);
         free(c->v_cache);
+        free(c->k16);
+        free(c->v16);
+        free(c->k8);
+        free(c->k8_scales);
+        free(c->v4);
+        free(c->v4_scales);
+        free(c->v4_biases);
         free(c);
     }
 }
@@ -3627,8 +3762,7 @@ static void full_attention_forward(
 
     // ---- Update KV cache ----
     int cache_pos = kv->len;
-    memcpy(kv->k_cache + cache_pos * kv_dim, k, kv_dim * sizeof(float));
-    memcpy(kv->v_cache + cache_pos * kv_dim, v, kv_dim * sizeof(float));
+    kv_write(kv, cache_pos, k, v);
     kv->len++;
 
     // ---- Scaled dot-product attention ----
@@ -3645,11 +3779,12 @@ static void full_attention_forward(
 
         // Compute attention scores for all cached positions
         float *scores = malloc(kv->len * sizeof(float));
+        static float kv_k_buf[HEAD_DIM], kv_v_buf[HEAD_DIM];
         for (int p = 0; p < kv->len; p++) {
-            float *kp = kv->k_cache + p * kv_dim + kv_h * HEAD_DIM;
+            kv_read_k(kv, p, kv_h, kv_k_buf);
             float dot = 0.0f;
             for (int d = 0; d < HEAD_DIM; d++) {
-                dot += qh[d] * kp[d];
+                dot += qh[d] * kv_k_buf[d];
             }
             scores[p] = dot * scale;
         }
@@ -3660,9 +3795,9 @@ static void full_attention_forward(
         // Weighted sum of values
         float *oh = attn_out + h * HEAD_DIM;
         for (int p = 0; p < kv->len; p++) {
-            float *vp = kv->v_cache + p * kv_dim + kv_h * HEAD_DIM;
+            kv_read_v(kv, p, kv_h, kv_v_buf);
             for (int d = 0; d < HEAD_DIM; d++) {
-                oh[d] += scores[p] * vp[d];
+                oh[d] += scores[p] * kv_v_buf[d];
             }
         }
         free(scores);
@@ -6748,8 +6883,7 @@ static void fused_layer_forward(
 
         // Update KV cache (CPU + GPU mirror)
         int cache_pos = kv->len;
-        memcpy(kv->k_cache + cache_pos * kv_dim, k_out, kv_dim * sizeof(float));
-        memcpy(kv->v_cache + cache_pos * kv_dim, v_out, kv_dim * sizeof(float));
+        kv_write(kv, cache_pos, k_out, v_out);
 
         int fa_idx = (layer_idx + 1) / FULL_ATTN_INTERVAL - 1;
         if (g_metal && g_metal->attn_scores_pipe && fa_idx >= 0 && fa_idx < NUM_FULL_ATTN_LAYERS &&
@@ -6784,17 +6918,18 @@ static void fused_layer_forward(
                 int kv_h = h / heads_per_kv;
                 float *qh = q + h * HEAD_DIM;
                 float *scores = malloc(kv->len * sizeof(float));
+                static float kv_k_buf2[HEAD_DIM], kv_v_buf2[HEAD_DIM];
                 for (int p = 0; p < kv->len; p++) {
-                    float *kp = kv->k_cache + p * kv_dim + kv_h * HEAD_DIM;
+                    kv_read_k(kv, p, kv_h, kv_k_buf2);
                     float dot = 0.0f;
-                    for (int d = 0; d < HEAD_DIM; d++) dot += qh[d] * kp[d];
+                    for (int d = 0; d < HEAD_DIM; d++) dot += qh[d] * kv_k_buf2[d];
                     scores[p] = dot * scale;
                 }
                 cpu_softmax(scores, kv->len);
                 float *oh = attn_out + h * HEAD_DIM;
                 for (int p = 0; p < kv->len; p++) {
-                    float *vp = kv->v_cache + p * kv_dim + kv_h * HEAD_DIM;
-                    for (int d = 0; d < HEAD_DIM; d++) oh[d] += scores[p] * vp[d];
+                    kv_read_v(kv, p, kv_h, kv_v_buf2);
+                    for (int d = 0; d < HEAD_DIM; d++) oh[d] += scores[p] * kv_v_buf2[d];
                 }
                 free(scores);
             }
@@ -8809,8 +8944,7 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
 
             // KV cache update (CPU + GPU mirror)
             int cache_pos = kv->len;
-            memcpy(kv->k_cache + cache_pos * kv_dim, pf_k, kv_dim * sizeof(float));
-            memcpy(kv->v_cache + cache_pos * kv_dim, pf_v, kv_dim * sizeof(float));
+            kv_write(kv, cache_pos, pf_k, pf_v);
 
             int fa_idx = (layer_idx + 1) / FULL_ATTN_INTERVAL - 1;
             if (ctx->attn_scores_pipe && fa_idx >= 0 && fa_idx < NUM_FULL_ATTN_LAYERS &&
@@ -8919,16 +9053,18 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
                     float *qh = pf_q + h * HEAD_DIM;
                     float *scores = malloc(kv->len * sizeof(float));
                     for (int p = 0; p < kv->len; p++) {
-                        float *kp = kv->k_cache + p * kv_dim + kv_h * HEAD_DIM;
+                        static float kv_k_buf3[HEAD_DIM];
+                        kv_read_k(kv, p, kv_h, kv_k_buf3);
                         float dot = 0.0f;
-                        for (int d = 0; d < HEAD_DIM; d++) dot += qh[d] * kp[d];
+                        for (int d = 0; d < HEAD_DIM; d++) dot += qh[d] * kv_k_buf3[d];
                         scores[p] = dot * scale;
                     }
                     cpu_softmax(scores, kv->len);
                     float *oh = attn_out + h * HEAD_DIM;
                     for (int p = 0; p < kv->len; p++) {
-                        float *vp = kv->v_cache + p * kv_dim + kv_h * HEAD_DIM;
-                        for (int d = 0; d < HEAD_DIM; d++) oh[d] += scores[p] * vp[d];
+                        static float kv_v_buf3[HEAD_DIM];
+                        kv_read_v(kv, p, kv_h, kv_v_buf3);
+                        for (int d = 0; d < HEAD_DIM; d++) oh[d] += scores[p] * kv_v_buf3[d];
                     }
                     free(scores);
                 }
@@ -10366,8 +10502,10 @@ static void process_chat_request(ServeState *s, int client_fd,
         for (int i = 0; i < NUM_LAYERS; i++) {
             if (s->kv_caches[i] && s->kv_k_snapshots[i]) {
                 size_t sz = s->sys_prompt_len * kv_dim * sizeof(float);
-                memcpy(s->kv_caches[i]->k_cache, s->kv_k_snapshots[i], sz);
-                memcpy(s->kv_caches[i]->v_cache, s->kv_v_snapshots[i], sz);
+                for (int p = 0; p < s->sys_prompt_len; p++)
+                    kv_write(s->kv_caches[i], p,
+                             s->kv_k_snapshots[i] + (size_t)p * kv_dim,
+                             s->kv_v_snapshots[i] + (size_t)p * kv_dim);
                 s->kv_caches[i]->len = s->kv_snapshot_len[i];
                 if (g_metal) {
                     int fa_idx = (i + 1) / FULL_ATTN_INTERVAL - 1;
@@ -10437,8 +10575,13 @@ static void process_chat_request(ServeState *s, int client_fd,
                 size_t sz = (size_t)s->kv_caches[i]->len * kv_dim * sizeof(float);
                 s->pre_kv_k[i] = realloc(s->pre_kv_k[i], sz);
                 s->pre_kv_v[i] = realloc(s->pre_kv_v[i], sz);
-                memcpy(s->pre_kv_k[i], s->kv_caches[i]->k_cache, sz);
-                memcpy(s->pre_kv_v[i], s->kv_caches[i]->v_cache, sz);
+                for (int p = 0; p < s->kv_caches[i]->len; p++)
+                    for (int hh = 0; hh < NUM_KV_HEADS; hh++) {
+                        kv_read_k(s->kv_caches[i], p, hh,
+                                  s->pre_kv_k[i] + (size_t)p * kv_dim + (size_t)hh * HEAD_DIM);
+                        kv_read_v(s->kv_caches[i], p, hh,
+                                  s->pre_kv_v[i] + (size_t)p * kv_dim + (size_t)hh * HEAD_DIM);
+                    }
                 s->pre_kv_len[i] = s->kv_caches[i]->len;
             }
             if (s->layer_states[i]) {
@@ -10684,8 +10827,10 @@ static void process_chat_request(ServeState *s, int client_fd,
         for (int i = 0; i < NUM_LAYERS; i++) {
             if (s->kv_caches[i] && s->pre_kv_k[i]) {
                 size_t sz = (size_t)s->pre_kv_len[i] * kv_dim * sizeof(float);
-                memcpy(s->kv_caches[i]->k_cache, s->pre_kv_k[i], sz);
-                memcpy(s->kv_caches[i]->v_cache, s->pre_kv_v[i], sz);
+                for (int p = 0; p < s->pre_kv_len[i]; p++)
+                    kv_write(s->kv_caches[i], p,
+                             s->pre_kv_k[i] + (size_t)p * kv_dim,
+                             s->pre_kv_v[i] + (size_t)p * kv_dim);
                 s->kv_caches[i]->len = s->pre_kv_len[i];
                 if (g_metal) {
                     int fa_idx = (i + 1) / FULL_ATTN_INTERVAL - 1;
@@ -10878,8 +11023,13 @@ static void serve_loop(
             size_t sz = sys_pos * kv_dim * sizeof(float);
             s_state.kv_k_snapshots[i] = malloc(sz);
             s_state.kv_v_snapshots[i] = malloc(sz);
-            memcpy(s_state.kv_k_snapshots[i], kv_caches[i]->k_cache, sz);
-            memcpy(s_state.kv_v_snapshots[i], kv_caches[i]->v_cache, sz);
+            for (int p = 0; p < sys_pos; p++)
+                for (int hh = 0; hh < NUM_KV_HEADS; hh++) {
+                    kv_read_k(kv_caches[i], p, hh,
+                              s_state.kv_k_snapshots[i] + (size_t)p * kv_dim + (size_t)hh * HEAD_DIM);
+                    kv_read_v(kv_caches[i], p, hh,
+                              s_state.kv_v_snapshots[i] + (size_t)p * kv_dim + (size_t)hh * HEAD_DIM);
+                }
             s_state.kv_snapshot_len[i] = kv_caches[i]->len;
         }
         if (layer_states[i]) {
@@ -11277,6 +11427,8 @@ int main(int argc, char **argv) {
             {"max-seq-len",   required_argument, 0, 'N'},
             {"gpu-kv-seq",    required_argument, 0, 'Q'},
             {"low-memory",    no_argument,       0, 'l'},
+            {"kv-fp16",       no_argument,       0, 700},
+            {"kv-turbo",      no_argument,       0, 701},
             {"dump-logits",   required_argument, 0, 'I'},
             {"logit-diag",    required_argument, 0, 'A'},
             {"help",          no_argument,       0, 'h'},
@@ -11328,6 +11480,8 @@ int main(int argc, char **argv) {
                 case 'o': g_top_k = atoi(optarg); break;
                 case 'H': g_no_think = 1; break;
                 case 'l': g_low_memory = 1; break;
+            case 700: g_kv_type = KV_FP16; break;
+            case 701: g_kv_type = KV_TURBO; break;
                 case 'I': g_dump_logits_path = optarg; break;
                 case 'A': g_logit_diag_interval = atoi(optarg); break;
                 case 'N': g_max_seq_len = atoi(optarg); break;
