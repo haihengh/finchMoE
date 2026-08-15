@@ -56,6 +56,24 @@ the `finchmoe-m1/` deploy copy (prebuilt binary + quant_clean weights +
 | Prefill 90 tok, chunked (chunk 8) | **~25 s** (24.9/25.2, n=2) | **1.9 s** (n=2, warm; 6.9 cold) | 12.9× slower |
 | Expert `pread_wait` (chunked) | 33.0 ms/layer | 0.019 ms/layer (warm; 6.2 cold) | ~1700× |
 
+### Why the M4 decode moved from 9-10 to 16-22 tok/s (page cache)
+
+The engine streams ~420 MB of expert weights from disk **per generated token**
+(40 layers × 8 active experts × 1.31 MB each, 3-bit). Whether those reads hit
+RAM or the SSD is entirely the OS page cache:
+
+| Machine state | Expert reads | Decode | Prefill `pread_wait` |
+|---|---|---|---|
+| Cold restart (page cache empty) | SSD | 8.8-10.3 tok/s | 6.2 ms/layer |
+| Warm (hot expert pages cached in ~6 GB of reclaimable RAM) | RAM | **16-22 tok/s** | 0.019 ms/layer |
+
+The earlier 9-10 tok/s figure came from a post-restart machine with a cold
+cache; after repeated runs the frequently-routed expert pages become resident
+and the I/O wait disappears. The M1 mini (8 GB) can never warm up: the 14 GB
+expert working set does not fit alongside the engine's ~3.3 GB footprint, so
+every read stays an SSD read (33 ms/layer) — that single gap, not compute,
+explains its 4.1 tok/s.
+
 Findings:
 
 - **Chunked batched prefill does not pay on the M1** — it is ~11% *slower*
