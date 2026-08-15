@@ -79,6 +79,25 @@ CPU-attention layers) is invisible. fp16's short decodes came out slightly
 faster than fp32 (less cache traffic). The M1 mini numbers will land here
 once the same suite runs there.
 
+### SSD wear: streaming weights is read-only — no meaningful impact
+
+The engine streams ~420 MB of expert weights from disk per generated token
+(40 layers × 8 experts × 1.31 MB, 3-bit). Should you worry about SSD
+lifespan? No — the numbers:
+
+- **SSD wear counts WRITES** (NAND program/erase endurance, rated in TBW).
+  The engine writes almost nothing to the disk — the weights are read-only
+  (zero-copy mmap + `pread`), and the only writes are optional debug dumps.
+- **Reads are effectively free for endurance.** The read-disturb effect is
+  real but managed by the controller's background refresh, which writes a
+  tiny fraction of the read volume. Consumer SSDs (150-600 TBW rated) treat
+  this workload as noise.
+- **Worst-case scenario**: an 8 GB machine (always-cold cache) at 4.1 tok/s
+  sustains ~1.7 GB/s of SSD reads — ~53 PB/year if run 24/7. Even then the
+  write-endurance budget is essentially untouched; the *real* cost of
+  SSD-streaming is the **speed** (the I/O bottleneck, see the table above),
+  not the drive's life.
+
 ### Why the M4 decode moved from 9-10 to 16-22 tok/s (page cache)
 
 The engine streams ~420 MB of expert weights from disk **per generated token**
