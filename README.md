@@ -153,12 +153,13 @@ FINCHMOE_REF_MANIFEST=quant_clean/model_weights_quant.json FINCHMOE_REF_WEIGHTS=
 
 ## Model Sizes
 
-| Configuration | Weights | Expert disk | Speed (K=8, M4) | Quality loss vs BF16 | Notes |
-|---------------|---------|-------------|-------------|----------------------|-------|
-| **Default (quant_clean)** | **1.95 GB** (4-bit GDN, 8-bit embed/lm_head) | 14 GB 3-bit | **~10.3 tok/s** (post-restart retest 2026-08-14) | **Small**: 3-bit experts weight CosSim 0.966-0.979, 4-bit non-experts ≥0.995 (requant 2026-08-13), typo-prompt PASS | current production config; 11.4+ was the quant_self-era peak |
-| Protected tier | 2.45 GB (8-bit GDN, `FINCHMOE_GDN8=1`) | 13 GB 3-bit | ~9.1 tok/s | **Minimal**: 8-bit non-experts near-lossless; experts as default tier | quality-safe fallback |
-| BF16 (source) | 67 GB | — | — | None (reference) | reference; the intended requant base |
-| 2bit-dense-v2 (legacy) | 4.96 GB BF16 | 9.4 GB 2-bit | ~5 tok/s | **Large**: edge prompts degrade into repetition loops (llama.cpp Q4_K_M of the clean base handles the same prompts) | marginal quality — being replaced |
+| Configuration | Weights | Expert disk | Total | Speed (K=8, M4) | Quality loss vs BF16 | Notes |
+|---------------|---------|-------------|-------|-------------|----------------------|-------|
+| **Default (quant_clean)** | **1.95 GB** (4-bit GDN, 8-bit embed/lm_head) | 14 GB 3-bit | **~16 GB** | **16-22 tok/s** warm cache (10.3 cold) | **Small**: 3-bit experts weight CosSim 0.966-0.979, 4-bit non-experts ≥0.995 (requant 2026-08-13), typo-prompt PASS | current production config; ~4.8× smaller than BF16 |
+| Protected tier | 2.45 GB (8-bit GDN, `FINCHMOE_GDN8=1`) | 13 GB 3-bit | ~16 GB | ~9.1 tok/s | **Minimal**: 8-bit non-experts near-lossless; experts as default tier | quality-safe fallback |
+| BF16 (source) | 67 GB | — | **71.9 GB** | — | None (reference) | reference; the intended requant base |
+| 2bit-dense-v2 (legacy) | 4.96 GB BF16 | 9.4 GB 2-bit | ~14 GB | ~5 tok/s | **Large**: edge prompts degrade into repetition loops (llama.cpp Q4_K_M of the clean base handles the same prompts) | marginal quality — replaced by the clean rebuild |
+| MTP (optional) | 4.96 GB | 0.45 GB (layer_40) | 5.4 GB | n/a | n/a (head not shippable) | loaded only with `--mtp`; deletable by default |
 
 Quality figures are weight-level CosSim from the requant validation plus spot
 checks. End-to-end loss (e.g. HumanEval pass@1 per tier) is not yet published —
