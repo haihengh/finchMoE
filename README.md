@@ -207,6 +207,15 @@ FINCHMOE_REF_MANIFEST=quant_clean/model_weights_quant.json FINCHMOE_REF_WEIGHTS=
 | 2bit-dense-v2 (legacy) | 4.96 GB BF16 | 9.4 GB 2-bit | ~14 GB | ~5 tok/s | **Large**: edge prompts degrade into repetition loops (llama.cpp Q4_K_M of the clean base handles the same prompts) | marginal quality — replaced by the clean rebuild |
 | MTP (optional) | 4.96 GB | 0.45 GB (layer_40) | 5.4 GB | n/a | n/a (head not shippable) | loaded only with `--mtp`; deletable by default |
 
+**Known limitation — long-form generation**: on requests that invite long
+structured output (~500+ words, essays), the model drifts into a
+meta-planning loop ("I'll finalize… I'll ready now…") around token 200-300
+regardless of temperature (0 / 0.3 / 0.7), rep penalty (1.15-1.35), or the
+n-gram blocker. The engine-side state is proven clean (fresh-prefill
+differential cos 0.99942) — this is the 3-bit quant's long-generation
+stability limit, and it is why the think budget defaults to 200 tokens.
+Short and interactive queries (up to ~200 tokens) are unaffected.
+
 Quality figures are weight-level CosSim from the requant validation plus spot
 checks. End-to-end loss (e.g. HumanEval pass@1 per tier) is not yet published —
 the `humaneval_m1/` harness exists to measure it.
