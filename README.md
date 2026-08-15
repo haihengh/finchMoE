@@ -13,7 +13,7 @@ The trade-off is that the SSD becomes the bottleneck, so the model must stay
 small enough to stream; Qwen 3.6 35B A3B is the sweet spot — a 35B-class
 model with proven capability, at a size the SSD can feed.
 
-**Phase 1 targets MET (2026-08-13)**: ~9-10 tok/s decode on M4 (3-bit experts, page-cache dependent), 1.95 GB weights — see [finchmoe/OPTIMIZATION_PLAN.md](finchmoe/OPTIMIZATION_PLAN.md) for the full progress log.
+**Phase 1 targets MET (2026-08-13)**: ~9-10 tok/s decode on M4 (3-bit experts, page-cache dependent), 1.95 GB weights — see [finchmoe/OPTIMIZATION_PLAN.md](finchmoe/OPTIMIZATION_PLAN.md) for the full progress log. Quantized weights: [huggingface.co/haihengh/Qwen3.6-35B-A3B-finchmoe-3bit](https://huggingface.co/haihengh/Qwen3.6-35B-A3B-finchmoe-3bit).
 
 ## Current Status (2026-08-14)
 
@@ -29,16 +29,15 @@ model with proven capability, at a size the SSD can feed.
 | Bugs fixed | 20 + Phase 1 root causes (see [BUGS.md](BUGS.md) and [finchmoe/PHASE1_NAN_ANALYSIS.md](finchmoe/PHASE1_NAN_ANALYSIS.md)) |
 | Agent harnesses | Targets: **Kon** (coding) + **Hermes** (general agentic); ~1-2 min/turn overhead at ~58 ms/token prefill; native `tools` param pending — see [Agent Harness Targets](#agent-harness-targets) |
 
-Known issues (ranked): (1) intermittent ~1e-4…1e-2 run-to-run logit wobble
-under page-cache starvation — predates the perf refactor, needs a
-healthy-machine session to isolate (post-restart parity battery still
-pending as of 2026-08-14). (2) prefill is GPU+IO co-bound
+Known issues (ranked): (1) long-form generation drift — see the
+"Quantization quality" section (the quant's ~150-250 token stability limit;
+the engine state is proven clean). (2) prefill is GPU+IO co-bound
 (post-restart retest 2026-08-14: cmdA_wait 7.4 ms/layer + pread_wait
 6.2 ms/layer against an ~14 GB expert working set; the static hot-set
 prefetch was measured and does not pay — 26% unique-expert coverage —
 the 5-10× tier needs a learned router predictor, layer→layer expert
-carry-over is only 3.3%). (3) Server
-multi-turn session corruption after turn 1 (stateless fallback active).
+carry-over is only 3.3%). (3) ~~Server multi-turn~~ — FIXED 2026-08-14: truncated turns roll back to a
+pre-turn snapshot + think re-entry ban (sessions accumulate history).
 (4) MTP speculative decoding: forward math verified correct against a
 pristine-BF16 numpy reference, but the model's MTP head is inherently weak
 (cos 0.3-0.8, ~0% acceptance) — not shippable (see finchmoe/mtp_reference.py).
@@ -167,9 +166,12 @@ make chat                              # builds the chat TUI client
 # One-shot generation
 ./finchmoe-infer -t 300 -k 8 -e 0 -B 100 -P "Tell me a story about an LLM."
 
-# Server (OpenAI-compatible, SSE streaming) + chat client
-./finchmoe-infer -R 9000 -k 8 -e 0 -B 100     # terminal 1
-./chat --show-think                            # terminal 2
+# Server (OpenAI-compatible, SSE streaming) + native chat app
+./finchmoe-infer -R 9000 -k 8                    # terminal 1
+cd finchmoe-chat && ./package_app.sh             # terminal 2 (builds FinchmoeChat.app)
+open FinchmoeChat.app                            # SwiftUI client: sessions, streaming,
+                                                # collapsible think blocks, tok/s inspector
+./chat --show-think                              # or the terminal TUI
 
 # Cross-validation (expect CosSim 1.000000 for gated/o_proj/h_mid/h_post)
 FINCHMOE_DUMP_STAGES=1 ./finchmoe-infer -t 1 -k 8 -e 0 -P "Explain what a MoE transformer is in one sentence."
@@ -183,11 +185,11 @@ FINCHMOE_REF_MANIFEST=quant_clean/model_weights_quant.json FINCHMOE_REF_WEIGHTS=
 | `-P TEXT` | — | Input prompt (chat template applied) |
 | `-p FILE` | — | Prompt from token-id file |
 | `-t N` | 20 | Max tokens to generate |
-| `-e F` | 0.3 | Temperature (0 = greedy) |
+| `-e F` | 0.7 | Temperature (0 = greedy) |
 | `--rep-penalty F` | 1.15 | Repetition penalty |
 | `-k N` | 8 | Active experts per layer (model trained with 8) |
 | `-3 / -4 / -2 / -8` | **-3** | Expert bit-width (3-bit is the default) |
-| `-B N` | 2048 | Think budget: force `</think>` after N reasoning tokens |
+| `-B N` | 200 | Think budget: force `</think>` after N reasoning tokens |
 | `-R PORT` | off | HTTP server (OpenAI-compatible: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`) |
 | `-J` | off | MTP speculative decoding (experimental — currently slower, see issues) |
 | `-N N` | 262144 | CPU KV context (256k does NOT fit 16 GB — use 16384-32768) |
@@ -196,6 +198,7 @@ FINCHMOE_REF_MANIFEST=quant_clean/model_weights_quant.json FINCHMOE_REF_WEIGHTS=
 | `--low-memory` | off | Skip Metal weight wrap |
 | `--kv-fp16` | off | KV cache in FP16 — 2× smaller KV (logits cos 0.999999 vs FP32) |
 | `--kv-turbo` | off | KV cache K int8 + V 4-bit — ~5× smaller KV (logits cos 0.999793; ~10% slower CPU attention) |
+| `--min-p F` | 0.05 | min_p tail filter (llama.cpp-style): zero tokens below min_p × top-prob — narrows long-form drift |
 
 ## Model Sizes
 
