@@ -61,7 +61,7 @@ final class ChatModel: ObservableObject {
         if t == 0 { t = 0.7 }  // default 0.7
         temperature = t
         var m = UserDefaults.standard.integer(forKey: "maxTokens")
-        if m == 0 { m = 512 }
+        if m == 0 { m = 4096 }  // essays need headroom; the server caps at the request's max_tokens
         maxTokens = m
 
         client.onDelta = { [weak self] delta in
