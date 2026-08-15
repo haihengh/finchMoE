@@ -71,13 +71,18 @@ vs FP32), and TURBO — K int8 + V 4-bit (**~5× smaller KV**, logits cos
 | fp32 | 16.5-22.0 tok/s | 5.2-5.3 s | 1.9 s | — |
 | `--kv-fp16` | **21.9-22.6 tok/s** | 5.3-5.5 s | 1.93-1.95 s | 17.4 tok/s |
 | `--kv-turbo` | 17.0-21.9 tok/s | 5.0-5.1 s | 2.0-2.4 s | 19.1 tok/s |
-| M1 mini (8 GB) | pending | pending | pending | pending |
+| M1 mini fp32 | 4.05-4.20 tok/s | 23.0 s | 24.8 s | 4.57 tok/s |
+| M1 mini `--kv-fp16` | 3.93-4.17 tok/s | 22.5 s | 24.4 s | 4.50 tok/s |
+| M1 mini `--kv-turbo` | 3.84-4.15 tok/s | 22.2 s | 24.7 s | 4.45 tok/s |
 
 On the M4 (warm cache) the quant modes are within run-to-run noise — the
 expert I/O dominates and the quantized-attention cost (~10-15% on the
 CPU-attention layers) is invisible. fp16's short decodes came out slightly
-faster than fp32 (less cache traffic). The M1 mini numbers will land here
-once the same suite runs there.
+faster than fp32 (less cache traffic). Same finding on the M1 mini (8 GB):
+all three modes are within noise (pread_wait ~33.0 ms/layer in every mode —
+expert I/O dominates completely there). The M1 win is memory, not speed:
+`--kv-turbo` shrinks the KV cache ~5×, which matters when the 3 GB bootstrap
+memory gate is the binding constraint on an 8 GB machine.
 
 ### SSD wear: streaming weights is read-only — no meaningful impact
 
