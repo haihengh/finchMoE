@@ -74,6 +74,20 @@ expert working set does not fit alongside the engine's ~3.3 GB footprint, so
 every read stays an SSD read (33 ms/layer) — that single gap, not compute,
 explains its 4.1 tok/s.
 
+**Where the warm-state RAM goes (measured on the M4, 2026-08-14):**
+
+| Consumer | Resident size |
+|---|---|
+| Engine process (peak RSS, 50-token run) | **~0.7 GB** — KV 320 MB + delta state 63 MB + expert buffers 64 MB + prefill pool 268 MB + touched weight pages |
+| Expert page cache (OS "inactive" RAM) | **~3.7 GB** — the hot 3-bit expert pages the OS keeps resident |
+| **Total warm-state cost** | **~4.4 GB** |
+
+(The engine's ~2.3 GB GPU allocation is mostly *virtual* — the 1.82 GB weight
+file is a zero-copy mmap and only the touched pages become resident; RSS is
+the physically-used figure.) The warm setup needs ~4.4 GB of RAM — beyond the
+8 GB mini's practical headroom (its available pool fluctuates 2.5-3.8 GB),
+which is why it stays permanently cold.
+
 Findings:
 
 - **Chunked batched prefill does not pay on the M1** — it is ~11% *slower*
