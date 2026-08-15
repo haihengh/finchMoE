@@ -19,7 +19,7 @@ model with proven capability, at a size the SSD can feed.
 
 | Metric | Value |
 |--------|-------|
-| Decode speed (M4, K=8) | **~9-10.3 tok/s** (3-bit experts, page-cache dependent; post-restart retest 2026-08-14: 8.8 cold / **10.3 warm**) |
+| Decode speed (M4, K=8) | **16-20 tok/s warm cache** (n=3, 2026-08-14 rerun; 10.3 cold-restart, 8.8 first-run) — 3-bit experts, page-cache dependent |
 | Decode speed (M1 mini, 8 GB) | **~4.1 tok/s**; chunk-8 prefill ~25 s is *slower* than per-token ~22.6 s on 8 GB (IO-bound) — full table in [M1 mini benchmark](#m1-mini-benchmark-2026-08-14) |
 | Prefill speed | **Chunked batched GPU prefill** (default `--prefill-chunk 8`): 90-token prompt 6.2-7.0s, 883-token 51s (**2.1×** vs per-token, 3-bit experts); logits bitwise-identical to the per-token path. Hot-set expert prefetch (build_hot_sets.py) is memory-adaptive — measured 2026-08-14, **does not pay** (26% unique-expert coverage, pread_wait 6.2→6.3 ms), auto-gate stays |
 | Weight file | **1.95 GB** (4-bit GDN tier + 3-bit experts, both default) |
@@ -51,10 +51,10 @@ the `finchmoe-m1/` deploy copy (prebuilt binary + quant_clean weights +
 
 | Metric | M1 mini (8 GB) | M4 reference | Ratio |
 |--------|----------------|--------------|-------|
-| Decode (K=8, 50 tokens) | **~4.1 tok/s** (3.79-4.29, n=3) | 10.3 tok/s | 0.40× |
-| Prefill 90 tok, per-token (chunk 0) | **~22.6 s** (22.4/22.7, n=2) | 10.6 s | 2.1× slower |
-| Prefill 90 tok, chunked (chunk 8) | **~25 s** (24.9/25.2, n=2) | 6.8-7.0 s | 3.7× slower |
-| Expert `pread_wait` (chunked) | 33.0 ms/layer | 6.2 ms/layer | 5.3× slower |
+| Decode (K=8, 50 tokens) | **~4.1 tok/s** (3.79-4.29, n=3) | **16.0-19.9 tok/s** (n=3, warm cache; 10.3 cold, 2026-08-14 rerun) | 0.21-0.26× |
+| Prefill 90 tok, per-token (chunk 0) | **~22.6 s** (22.4/22.7, n=2) | 4.9-5.1 s (n=2, warm; 10.6 cold) | 4.4-4.6× slower |
+| Prefill 90 tok, chunked (chunk 8) | **~25 s** (24.9/25.2, n=2) | **1.9 s** (n=2, warm; 6.9 cold) | 12.9× slower |
+| Expert `pread_wait` (chunked) | 33.0 ms/layer | 0.019 ms/layer (warm; 6.2 cold) | ~1700× |
 
 Findings:
 
