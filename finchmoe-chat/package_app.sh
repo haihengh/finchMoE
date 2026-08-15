@@ -7,8 +7,9 @@ swift build
 
 APP="FinchmoeChat.app"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/debug/FinchmoeChat "$APP/Contents/MacOS/FinchmoeChat"
+cp FinchmoeChat.icns "$APP/Contents/Resources/FinchmoeChat.icns"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -24,6 +25,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+    <key>CFBundleIconFile</key><string>FinchmoeChat</string>
 </dict>
 </plist>
 PLIST

@@ -378,7 +378,7 @@ static int g_use_2bit = 0;       // enabled by --2bit flag: use packed_experts_2
 static int g_use_3bit = 1;       // DEFAULT: 3-bit experts (9.1 tok/s, near-4bit quality); --2bit/--4bit/--8bit override
 static int g_use_int8 = 0;       // enabled by --int8-experts flag: use 8-bit packed experts
 static int g_cache_telemetry_enabled = 0;  // enabled by --cache-telemetry flag
-static int g_think_budget = 2048; // max thinking tokens before force-emitting </think>
+static int g_think_budget = 200;  // max thinking tokens before force-emitting </think> — the model otherwise loops inside the think phase on long-form prompts (2048 was effectively unlimited)
 static float g_temperature = 0.7f;  // sampling temperature (0 = greedy argmax); 0.7 ends long gens naturally (bug 15)
 // 0.3 default: T=0.8 amplifies the mild temporal logit drift (Bug 15) into
 // merged-word artifacts ("abouta", "roboticton") and mid-block repetition
