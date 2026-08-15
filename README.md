@@ -209,12 +209,21 @@ FINCHMOE_REF_MANIFEST=quant_clean/model_weights_quant.json FINCHMOE_REF_WEIGHTS=
 
 **Known limitation — long-form generation**: on requests that invite long
 structured output (~500+ words, essays), the model drifts into a
-meta-planning loop ("I'll finalize… I'll ready now…") around token 200-300
-regardless of temperature (0 / 0.3 / 0.7), rep penalty (1.15-1.35), or the
-n-gram blocker. The engine-side state is proven clean (fresh-prefill
-differential cos 0.99942) — this is the 3-bit quant's long-generation
-stability limit, and it is why the think budget defaults to 200 tokens.
-Short and interactive queries (up to ~200 tokens) are unaffected.
+meta-planning loop ("I'll finalize… I'll ready now…") and then a
+synonym-spiral ("firm steadfast determined resolute…") regardless of
+temperature (0 / 0.3 / 0.7), rep penalty (1.15-1.35), min_p (0.05), or the
+n-gram blocker — all tested 2026-08-15. The engine-side state is proven
+clean (fresh-prefill differential cos 0.99942) — this is the quant's
+long-generation stability limit:
+
+| Tier | Drift onset (essay prompt) | Notes |
+|------|---------------------------|-------|
+| 4-bit GDN (default) | ~100-200 tokens | loops in the think + answer phases |
+| **8-bit GDN protected** (`quant_clean_8gdn`, ~9.1 tok/s) | **~150-250 tokens** | coherent longer; the recommended serve tier for essay-style use |
+
+llama.cpp Q4_K_M of the same model stays clean at 400 tokens (Aug-11
+baseline) — a GGUF importer or a higher-precision expert pack is the real
+long-form fix. Short and interactive queries are unaffected.
 
 Quality figures are weight-level CosSim from the requant validation plus spot
 checks. End-to-end loss (e.g. HumanEval pass@1 per tier) is not yet published —
