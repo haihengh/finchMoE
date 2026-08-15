@@ -24,6 +24,11 @@
 - `a913e25` — MTP harness unblocked (layer-40 experts, path fix); α=0%.
 - `0f102bb` — MTP logit-cosine diagnostic (0.59-0.74 → forward-math bug).
 - `156cddb` — Server: disabled broken incremental session continuation.
+- Chat client (finchmoe-chat, 2026-08-15): native SwiftUI macOS app —
+  sessions (server-side multi-turn), streaming, collapsible think blocks,
+  tok/s inspector, icon; `./package_app.sh` builds the .app.
+- KV cache quantization (--kv-fp16 / --kv-turbo) + min_p sampling
+  (--min-p) + think budget default 200.
 - `8c9b496` — Static per-layer hot-set expert prefetch (memory-adaptive).
 - `1e476ab` — Post-restart retest (2026-08-14): decode **10.3 tok/s** warm
   cache (8.8 cold); chunk-8 prefill **6.8-7.0s** for 90 tokens (1.5× vs
@@ -67,6 +72,12 @@
    MTP head is inherently weak (cos 0.3-0.8, ~0% T=0 acceptance) — per the
    calibration gate, speculative decoding stays disabled. The harness +
    reference tooling remain for any future MTP variant.
+5. **Long-form generation drift** — the 3-bit/4-bit quant drifts into
+   meta-planning/synonym loops at ~100-250 tokens on essay prompts (all
+   samplers tested; 8-bit GDN tier drifts later; llama.cpp Q4_K_M stays
+   clean at 400). The target use case (students, low-budget machines,
+   essays) needs: a GGUF importer (run Q4_K_M directly — also opens the
+   community GGUF ecosystem) or a higher-precision expert repack.
 
 **Reference target**: turbo-fieldfare achieves 5.1-6.3 tok/s at ~2 GB on **M2 8GB** with Gemma 4 26B. M4 is ~1.4× faster than M2 — we now exceed that reference (11.4 tok/s on M4).
 
