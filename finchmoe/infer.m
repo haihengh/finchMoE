@@ -11514,7 +11514,11 @@ int main(int argc, char **argv) {
         }
 
         // Initialize MTP (Multi-Token Prediction) speculative decoding head
-        mtp_init(wf, model_path);
+        // MTP weights are only needed with --mtp (the head is not shippable —
+        // see the MTP notes); the 4.96 GB model_weights_mtp.bin + the 453 MB
+        // layer_40 pack can be deleted when MTP is not used.
+        if (g_use_mtp) mtp_init(wf, model_path);
+        else fprintf(stderr, "[mtp] skipped (--mtp not set — MTP weight files optional)\n");
 
         // ---- Load vocabulary ----
         fflush(stdout); fflush(stderr);

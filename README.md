@@ -42,6 +42,9 @@ multi-turn session corruption after turn 1 (stateless fallback active).
 (4) MTP speculative decoding: forward math verified correct against a
 pristine-BF16 numpy reference, but the model's MTP head is inherently weak
 (cos 0.3-0.8, ~0% acceptance) — not shippable (see finchmoe/mtp_reference.py).
+The MTP weight files (`model_weights_mtp.bin` 4.96 GB + `packed_experts/layer_40.bin`
+453 MB) are OPTIONAL — the engine skips them unless `--mtp` is passed, so they
+can be deleted to reclaim ~5.4 GB of disk.
 
 ### M1 mini benchmark (2026-08-14)
 
