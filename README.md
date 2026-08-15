@@ -59,6 +59,26 @@ the `finchmoe-m1/` deploy copy (prebuilt binary + quant_clean weights +
 | Prefill 90 tok, chunked (chunk 8) | **~25 s** (24.9/25.2, n=2) | **1.9 s** (n=2, warm; 6.9 cold) | 12.9× slower |
 | Expert `pread_wait` (chunked) | 33.0 ms/layer | 0.019 ms/layer (warm; 6.2 cold) | ~1700× |
 
+### KV cache quantization (`--kv-fp16` / `--kv-turbo`) — 2026-08-14
+
+Three KV storage modes (CPU-side cache; the GPU attention kernels and mirrors
+are unchanged): FP32 (default), FP16 (**2× smaller KV**, logits cos 0.999999
+vs FP32), and TURBO — K int8 + V 4-bit (**~5× smaller KV**, logits cos
+0.999793). Run `./bench_suite.sh` for the full comparison.
+
+| Mode | Decode 50 tok (n=3) | Prefill 90-tok flag-0 | Prefill 90-tok chunk-8 | 200-tok decode |
+|------|---------------------|-----------------------|------------------------|----------------|
+| fp32 | 16.5-22.0 tok/s | 5.2-5.3 s | 1.9 s | — |
+| `--kv-fp16` | **21.9-22.6 tok/s** | 5.3-5.5 s | 1.93-1.95 s | 17.4 tok/s |
+| `--kv-turbo` | 17.0-21.9 tok/s | 5.0-5.1 s | 2.0-2.4 s | 19.1 tok/s |
+| M1 mini (8 GB) | pending | pending | pending | pending |
+
+On the M4 (warm cache) the quant modes are within run-to-run noise — the
+expert I/O dominates and the quantized-attention cost (~10-15% on the
+CPU-attention layers) is invisible. fp16's short decodes came out slightly
+faster than fp32 (less cache traffic). The M1 mini numbers will land here
+once the same suite runs there.
+
 ### Why the M4 decode moved from 9-10 to 16-22 tok/s (page cache)
 
 The engine streams ~420 MB of expert weights from disk **per generated token**
