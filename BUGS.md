@@ -739,3 +739,27 @@ not the trigger.
 **Next step**: reproduce on a healthy machine (or after freeing RAM); if the wobble
 persists there, bisect with the FINCHMOE_PF_DUMP hidden-state dumps to find the
 first divergent layer.
+
+## 2026-08-14/15 — post-restart era
+
+- **Wobble (prefill logit nondeterminism)** — FIXED. Root cause: shared conv-state
+  q/k channels (head-pair read-modify-write races in concurrent threadgroups) plus
+  same-CB L2 staleness (barriers/synchronizeResource don't flush device reads on
+  this GPU). Fix: fused_gdn_batched (in-kernel M-loop) + per-head device histories
+  + CB splits + CPU bridges. 30/30 bitwise hunt, all chunk sizes bitwise.
+- **Serve multi-turn "empty turn-2"** — FIXED. Not a state leak: the model imitates
+  a truncated turn's ending shape (unclosed `<think>`). Fix: pre-turn snapshot +
+  rollback, think re-entry ban, EOS think-close. (Differential: a stateless
+  reference with the identical token stream reproduced the continuation logits.)
+- **Long-generation repetition (bug 15)** — RESOLVED. Fresh-prefill differential
+  (cos 0.99942) proved no engine drift; the loop is the model's low-temperature
+  behavior. Default T 0.3 → 0.7.
+- **Long-form essay drift** — KNOWN LIMITATION (documented in README). The quant
+  drifts into meta-planning/synonym loops at ~100-250 tokens on essay prompts
+  regardless of sampler (T/rep/min_p/n-gram all tested). 8-bit GDN tier drifts
+  later; llama.cpp Q4_K_M stays clean at 400 — a GGUF importer is the real fix.
+- **MTP speculative decoding** — DIAGNOSED, not shippable. Engine math verified
+  against a pristine-BF16 numpy reference (identical draft argmaxes); the model's
+  MTP head is inherently weak (cos 0.3-0.8, 0% acceptance). MTP weights optional.
+- **Corrupt MTP expert pack** — FIXED. layer_40.bin regenerated (gate CosSim
+  0.908 → 0.9957).
