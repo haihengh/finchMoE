@@ -32,6 +32,21 @@ grep -n "case '\\\\n'" finchmoe/infer.m
 Both SSE writers must show `*w++ = '\\'; *w++ = 'n';` (backslash first). If either
 shows only `*w++ = 'n';`, the source itself is stale — don't build.
 
+**Also check the tokenizer byte table** (this bit us on 2026-08-14 — the rebuilt
+binary encoded prompt newlines as the letter `n`):
+
+```bash
+git status --short finchmoe/          # list any uncommitted changes
+git diff finchmoe/tokenizer.h         # MUST be empty
+```
+
+`build_byte_unicode_table` in `finchmoe/tokenizer.h` must use the standard GPT-2
+mapping (`else { tok->byte_char[b] = 256 + n; n++; }`). A dirty variant maps
+control bytes to C-escape letters (`\n` → `'n'`), which corrupts every prompt.
+If the diff is non-empty, restore the committed version first:
+`git checkout -- finchmoe/tokenizer.h` (then re-check `git status` for any other
+uncommitted experiments before rebuilding).
+
 ### 3. Rebuild
 
 ```bash
