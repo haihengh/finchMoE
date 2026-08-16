@@ -327,6 +327,20 @@ static int g_compare_experts = -1; // --compare-experts N: compare GPU vs CPU ex
 
 static void debug_print_hidden(const char *tag, int layer_idx, const float *h, int dim) {
     if (!g_debug_layers) return;
+    // FINCHMOE_LAYER_DUMP: append the vector at every hook to
+    // /tmp/layer_dump.bin for cross-path vector comparison. Each record is
+    // prefixed with a tag id (u32) and length (u32) so readers can align.
+    if (getenv("FINCHMOE_LAYER_DUMP")) {
+        FILE *df = fopen("/tmp/layer_dump.bin", "ab");
+        if (df) {
+            uint32_t tagid = (uint32_t)(tag[0] * 256 + tag[1]);  // "in", "po", "qv", ...
+            uint32_t len = (uint32_t)dim;
+            fwrite(&tagid, 4, 1, df);
+            fwrite(&len, 4, 1, df);
+            fwrite(h, sizeof(float), dim, df);
+            fclose(df);
+        }
+    }
     double sum = 0, sum_sq = 0;
     float minv = h[0], maxv = h[0];
     for (int i = 0; i < dim; i++) {
@@ -625,6 +639,7 @@ typedef struct {
     int ndim;
     int shape[4];
     char dtype[8];  // "U32", "BF16", "F32"
+    int ggml_type;  // 0 = manifest-native; 12 = Q4_K, 14 = Q6_K (GGUF mode)
 } TensorInfo;
 
 typedef struct {
@@ -750,7 +765,10 @@ typedef struct {
     void *data;
     size_t size;
     TensorManifest *manifest;
+    void *gguf_stage;  // GGUF mode: the staged F32→BF16 conversion buffer
 } WeightFile;
+
+static void *g_gguf_stage = NULL;
 
 static WeightFile *open_weights(const char *bin_path, const char *json_path) {
     // mmap the binary file
@@ -802,6 +820,9 @@ static void *get_tensor_ptr(WeightFile *wf, const char *name) {
         g_missing_tensor_count++;
         return NULL;
     }
+    // GGUF mode: the staged BF16 tensors live in the conversion buffer
+    if (wf->gguf_stage && strcmp(t->dtype, "BF16") == 0)
+        return (char *)wf->gguf_stage + t->offset;
     return (char *)wf->data + t->offset;
 }
 
@@ -814,7 +835,316 @@ static TensorInfo *get_tensor_info(WeightFile *wf, const char *name) {
 //   8-bit: row_u32 == num_groups * 16  (4 values per uint32)
 // Returns 4 when scales are missing (BF16 path, caller must handle) or
 // shapes are unexpected.
+// ============================================================================
+// GGUF importer (--gguf): parse the llama.cpp container and synthesize the
+// engine's TensorManifest. The engine consumes tensors via HF-style names;
+// a name map translates the GGUF's blk.N.* names. GGUF F32 tensors that the
+// engine reads as BF16 (norms, conv1d, dt_bias, routers) are converted into
+// a staging buffer at load time; A_log (ssm_a) stays F32.
+// Quant types implemented: F32 (0), Q4_K (12), Q6_K (14).
+// ============================================================================
+
+// ggml type traits (block size, type size) for the local GGUF's types
+static size_t ggml_type_size(int t) {
+    switch (t) {
+        case 0:  return 4;   // F32
+        case 1:  return 2;   // F16
+        case 12: return 144; // Q4_K — 256 elems/block
+        case 14: return 210; // Q6_K — 256 elems/block
+        default: return 0;
+    }
+}
+static int ggml_block_elems(int t) {
+    switch (t) {
+        case 12: case 14: return 256;
+        default: return 1;
+    }
+}
+
+// GGUF tensor name → the engine's HF-style manifest name.
+// Returns 1 and fills out (up to 255 chars) on success; 0 = skip this tensor.
+static int gguf_map_name(const char *in, char *out, size_t out_sz) {
+    int layer = -1;
+    // blk.%d. prefix
+    if (sscanf(in, "blk.%d.", &layer) == 1) {
+        // skip the MTP block (blk.40 — unused, as today)
+        if (layer >= NUM_LAYERS) return 0;
+        const char *rest = strchr(in, '.') + 1;   // past "blk."
+        rest = strchr(rest, '.') + 1;             // past the layer number
+        rest = rest ? rest : in;
+        struct { const char *gguf; const char *hf; } map[] = {
+            {"attn_norm.weight",              "model.layers.%d.input_layernorm.weight"},
+            {"post_attention_norm.weight",    "model.layers.%d.post_attention_layernorm.weight"},
+            {"attn_q.weight",                 "model.layers.%d.self_attn.q_proj.weight"},
+            {"attn_k.weight",                 "model.layers.%d.self_attn.k_proj.weight"},
+            {"attn_v.weight",                 "model.layers.%d.self_attn.v_proj.weight"},
+            {"attn_output.weight",            "model.layers.%d.self_attn.o_proj.weight"},
+            {"attn_q_norm.weight",            "model.layers.%d.self_attn.q_norm.weight"},
+            {"attn_k_norm.weight",            "model.layers.%d.self_attn.k_norm.weight"},
+            {"attn_qkv.weight",               "model.layers.%d.linear_attn.in_proj_qkv.weight"},
+            {"attn_gate.weight",              "model.layers.%d.linear_attn.in_proj_z.weight"},
+            {"ssm_alpha.weight",              "model.layers.%d.linear_attn.in_proj_a.weight"},
+            {"ssm_beta.weight",               "model.layers.%d.linear_attn.in_proj_b.weight"},
+            {"ssm_conv1d.weight",             "model.layers.%d.linear_attn.conv1d.weight"},
+            {"ssm_a",                        "model.layers.%d.linear_attn.A_log"},
+            {"ssm_dt.bias",                  "model.layers.%d.linear_attn.dt_bias"},
+            {"ssm_norm.weight",               "model.layers.%d.linear_attn.norm.weight"},
+            {"ssm_out.weight",                "model.layers.%d.linear_attn.out_proj.weight"},
+            {"ffn_gate_inp.weight",           "model.layers.%d.mlp.gate.weight"},
+            {"ffn_gate_shexp.weight",         "model.layers.%d.mlp.shared_expert.gate_proj.weight"},
+            {"ffn_up_shexp.weight",           "model.layers.%d.mlp.shared_expert.up_proj.weight"},
+            {"ffn_down_shexp.weight",         "model.layers.%d.mlp.shared_expert.down_proj.weight"},
+            {"ffn_gate_inp_shexp.weight",     "model.layers.%d.mlp.shared_expert_gate.weight"},
+        };
+        for (size_t i = 0; i < sizeof(map)/sizeof(map[0]); i++) {
+            if (strcmp(rest, map[i].gguf) == 0) {
+                snprintf(out, out_sz, map[i].hf, layer);
+                return 1;
+            }
+        }
+        // the stacked expert tensors + the shared experts are consumed via
+        // the expert table, not the manifest
+        return 0;
+    }
+    if (strcmp(in, "token_embd.weight") == 0) { snprintf(out, out_sz, "model.embed_tokens.weight"); return 1; }
+    if (strcmp(in, "output.weight") == 0)     { snprintf(out, out_sz, "lm_head.weight"); return 1; }
+    if (strcmp(in, "output_norm.weight") == 0){ snprintf(out, out_sz, "model.norm.weight"); return 1; }
+    return 0;
+}
+
+// The GGUF tensors the engine consumes as BF16 (the engine's norm + router
+// paths read uint16_t + bf16_to_f32). F32 → BF16 conversion at load time.
+static int gguf_needs_bf16_stage(const char *hf_name) {
+    return strstr(hf_name, "norm.weight") != NULL ||
+           strstr(hf_name, "conv1d.weight") != NULL ||
+           strstr(hf_name, "dt_bias") != NULL ||
+           strstr(hf_name, "mlp.gate.weight") != NULL ||
+           strstr(hf_name, "shared_expert_gate.weight") != NULL ||
+           // the GDN alpha/beta projections: the engine reads these via the
+           // BF16 raw path in GGUF mode (tensor_bits() = 0 for F32), so the
+           // F32 GGUF data must be staged — otherwise F32 bytes are read as
+           // BF16 pairs (alternating garbage).
+           strstr(hf_name, "in_proj_a.weight") != NULL ||
+           strstr(hf_name, "in_proj_b.weight") != NULL;
+}
+
+typedef struct {
+    size_t gate_off, up_off, down_off;   // file offsets of the stacked tensors
+    size_t gate_slab, up_slab, down_slab; // bytes per expert
+    int gate_type, up_type, down_type;    // ggml types (12 = Q4_K, 14 = Q6_K)
+} GgufExpertInfo;
+static GgufExpertInfo gguf_experts[NUM_LAYERS];
+static int g_gguf_fd = -1;   // reopened fd for the expert preads
+
+static WeightFile *open_gguf(const char *path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) { fprintf(stderr, "ERROR: Cannot open %s: %s\n", path, strerror(errno)); return NULL; }
+    struct stat st;
+    if (fstat(fd, &st) != 0) { close(fd); return NULL; }
+    void *data = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (data == MAP_FAILED) { fprintf(stderr, "ERROR: mmap %s failed\n", path); return NULL; }
+
+    const unsigned char *p = (const unsigned char *)data;
+    size_t sz = (size_t)st.st_size;
+    #define R32() (*(const uint32_t *)p, p += 4, *((const uint32_t *)(p - 4)))
+    #define R64() (*(const uint64_t *)p, p += 8, *((const uint64_t *)(p - 8)))
+    #define RS(len) (const char *)(p + 0)
+    uint32_t magic = R32();
+    if (magic != 0x46554747) { fprintf(stderr, "ERROR: %s is not a GGUF file\n", path); return NULL; }
+    uint32_t version = R32();
+    uint64_t n_tensors = R64();
+    uint64_t n_kv = R64();
+    fprintf(stderr, "[gguf] magic OK, version=%u, %llu tensors, %llu kv\n",
+            version, (unsigned long long)n_tensors, (unsigned long long)n_kv);
+
+    // KV block (find the alignment; skip the rest)
+    uint32_t alignment = 32;
+    for (uint64_t i = 0; i < n_kv; i++) {
+        uint64_t klen = R64();
+        char key[256];
+        if (klen < sizeof(key)) { memcpy(key, p, klen); p += klen; key[klen] = 0; }
+        else { p += klen; key[0] = 0; }
+        uint32_t vt = R32();
+        switch (vt) {
+            case 0: case 1: p += 1; break;                       // u8 / i8
+            case 2: case 3: p += 2; break;                       // u16 / i16
+            case 4: case 5: p += 4; break;                       // u32 / i32
+            case 6: p += 4; break;                               // f32
+            case 7: p += 1; break;                               // bool
+            case 8: { uint64_t sl = R64(); p += sl; break; }     // string
+            case 9: {                                            // array
+                uint32_t at = R32();
+                uint64_t n = R64();
+                if (at == 8) {                                   // array of strings
+                    for (uint64_t j = 0; j < n; j++) {
+                        uint64_t sl = R64();
+                        p += sl;
+                    }
+                } else {
+                    static const size_t esz[] = {1,1,2,2,4,4,4,1,0,0,8,8,8};
+                    size_t e = at < sizeof(esz)/sizeof(esz[0]) ? esz[at] : 8;
+                    p += n * e;
+                }
+                break;
+            }
+            case 10: case 11: case 12: p += 8; break;            // u64 / i64 / f64
+            default: break;
+        }
+    }
+    // (the alignment key is a u32 in practice; handled by the vt==4 case above
+    //  when present — re-scan not needed for this file: alignment = 32 holds)
+
+    // Tensor infos. The data section starts AFTER the infos, aligned — the
+    // GGUF toff fields are relative to that aligned start. Pre-scan the infos
+    // to locate it (the parse loop below re-walks them).
+    const unsigned char *infos_start = p;
+    for (uint64_t i = 0; i < n_tensors; i++) {
+        uint64_t nlen = R64();
+        p += nlen;
+        if (p > (const unsigned char *)data + sz) { fprintf(stderr, "[gguf] tensor infos overrun — corrupt file?\n"); return NULL; }
+        uint32_t nd = R32();
+        p += (size_t)nd * 8 + 4 + 8;   // dims + ggml type + toff
+    }
+    size_t data_off = ((size_t)(p - (const unsigned char *)data) + alignment - 1) & ~(size_t)(alignment - 1);
+    p = infos_start;
+
+    TensorManifest *m = calloc(1, sizeof(TensorManifest));
+    m->capacity = (int)n_tensors + 16;
+    m->tensors = calloc(m->capacity, sizeof(TensorInfo));
+    m->num_tensors = 0;
+    // the staging buffer for the F32→BF16 conversions (grow as needed)
+    static void *stage = NULL;
+    static size_t stage_len = 0, stage_cap = 0;
+
+    int n_q4 = 0, n_q6 = 0, n_f32 = 0, n_skipped = 0;
+    for (uint64_t i = 0; i < n_tensors; i++) {
+        uint64_t nlen = R64();
+        char gname[256];
+        if (nlen < sizeof(gname)) { memcpy(gname, p, nlen); p += nlen; gname[nlen] = 0; }
+        else { fprintf(stderr, "[gguf] long tensor name — abort\n"); return NULL; }
+        uint32_t ndim = R32();
+        uint64_t dims[4] = {0};
+        for (uint32_t d = 0; d < ndim && d < 4; d++) dims[d] = R64();
+        for (uint32_t d = 4; d < ndim; d++) R64();
+        uint32_t gtype = R32();
+        uint64_t toff = R64();
+
+        // capture the stacked expert tensors (consumed via the pread table)
+        {
+            int XL = -1;
+            int is_expert = 0;
+            size_t *offp = NULL, *slabp = NULL; int *typep = NULL;
+            // Full-string match required: sscanf("blk.%d.<rest>") returns 1 for
+            // ANY "blk.N." prefix (the %d converts, trailing literal mismatch
+            // just stops matching), so verify the rest with strcmp via %n.
+            int consumed = 0;
+            if (sscanf(gname, "blk.%d.%n", &XL, &consumed) == 1 &&
+                strcmp(gname + consumed, "ffn_gate_exps.weight") == 0) {
+                is_expert = 1; offp = &gguf_experts[XL].gate_off; slabp = &gguf_experts[XL].gate_slab; typep = &gguf_experts[XL].gate_type;
+            } else if (sscanf(gname, "blk.%d.%n", &XL, &consumed) == 1 &&
+                       strcmp(gname + consumed, "ffn_up_exps.weight") == 0) {
+                is_expert = 1; offp = &gguf_experts[XL].up_off; slabp = &gguf_experts[XL].up_slab; typep = &gguf_experts[XL].up_type;
+            } else if (sscanf(gname, "blk.%d.%n", &XL, &consumed) == 1 &&
+                       strcmp(gname + consumed, "ffn_down_exps.weight") == 0) {
+                is_expert = 1; offp = &gguf_experts[XL].down_off; slabp = &gguf_experts[XL].down_slab; typep = &gguf_experts[XL].down_type;
+            }
+            if (is_expert && XL >= 0 && XL < NUM_LAYERS) {
+                // the slab = n_out rows × row_bytes (the dims: [in, out, 256])
+                size_t bs = ggml_type_size((int)gtype);
+                size_t be = (size_t)ggml_block_elems((int)gtype);
+                size_t row_bytes = (dims[0] / be) * bs;   // dims[0] = in_dim
+                *offp = data_off + toff;
+                *slabp = (size_t)dims[1] * row_bytes;     // dims[1] = out_dim per expert
+                *typep = (int)gtype;
+                continue;
+            }
+        }
+
+        char hf_name[256];
+        if (!gguf_map_name(gname, hf_name, sizeof(hf_name))) {
+            n_skipped++; continue;
+        }
+
+        size_t bs = ggml_type_size((int)gtype);
+        size_t be = (size_t)ggml_block_elems((int)gtype);
+        if (bs == 0) { fprintf(stderr, "[gguf] unsupported type %u for %s\n", gtype, gname); return NULL; }
+        uint64_t nelem = 1;
+        for (uint32_t d = 0; d < ndim; d++) nelem *= dims[d];
+        size_t tsize = (size_t)((nelem + be - 1) / be) * bs;
+
+        TensorInfo *t = &m->tensors[m->num_tensors++];
+        t->name = strdup(hf_name);
+        t->ndim = (int)ndim;
+        for (int d = 0; d < 4; d++) t->shape[d] = (int)dims[d];
+        t->ggml_type = (int)gtype;
+        if (gtype == 12) { n_q4++; strcpy(t->dtype, "Q4K"); }
+        else if (gtype == 14) { n_q6++; strcpy(t->dtype, "Q6K"); }
+        else { n_f32++; strcpy(t->dtype, "F32"); }
+
+        if (gtype == 0 && gguf_needs_bf16_stage(hf_name)) {
+            // F32 → BF16 staging: the engine's norm/router paths read uint16_t
+            const float *src = (const float *)((const unsigned char *)data + data_off + toff);
+            size_t nfl = (size_t)nelem;
+            size_t need = nfl * 2;
+            if (stage_len + need > stage_cap) {
+                stage_cap = stage_cap ? stage_cap * 2 : (1 << 20);
+                while (stage_cap < stage_len + need) stage_cap *= 2;
+                stage = realloc(stage, stage_cap);
+            }
+            uint16_t *dst = (uint16_t *)((char *)stage + stage_len);
+            // NOTE: ssm_conv1d in this GGUF is [4, 8192] with ne0=4 = tap index
+            // (fastest) — i.e. [ch0t0, ch0t1, ch0t2, ch0t3, ch1t0, ...], which
+            // is already the engine's w[c*K + k] channel-major order. A flat
+            // copy is correct; do NOT transpose (verified against HF 2026-08-16).
+            for (size_t j = 0; j < nfl; j++) {
+                uint32_t b; memcpy(&b, &src[j], 4);
+                dst[j] = (uint16_t)(b >> 16);
+            }
+            t->offset = stage_len;
+            t->size = need;
+            t->shape[1] = (int)nfl;   // 1-D layout for the staged tensors
+            t->ndim = 2;
+            strcpy(t->dtype, "BF16");
+            stage_len += need;
+        } else {
+            t->offset = data_off + toff;
+            t->size = tsize;
+        }
+    }
+    m->model_path = strdup(".");
+
+    fprintf(stderr, "[gguf] %d tensors mapped (%d Q4_K, %d Q6_K, %d F32; %d skipped), data @ %zu, staged %zu bytes\n",
+            m->num_tensors, n_q4, n_q6, n_f32, n_skipped, data_off, stage_len);
+
+    WeightFile *wf = calloc(1, sizeof(WeightFile));
+    wf->data = data;
+    wf->size = sz;
+    wf->manifest = m;
+    // the staged BF16 copies live OUTSIDE the mmap — the get_tensor_ptr
+    // pointer arithmetic assumes the manifest offsets address wf->data.
+    // Handle by giving the staged tensors absolute pointer semantics via a
+    // special offset marker: we store the stage pointer delta in the offset
+    // and translate in get_tensor_ptr.
+    g_gguf_stage = stage;
+    wf->gguf_stage = stage;
+    g_gguf_fd = open(path, O_RDONLY);  // for the expert preads
+    return wf;
+    #undef R32
+    #undef R64
+}
+
 static int tensor_bits(WeightFile *wf, const char *base_name) {
+    // GGUF mode: the manifest records the ggml block type
+    if (wf->gguf_stage) {
+        char wname[256];
+        snprintf(wname, sizeof(wname), "%s.weight", base_name);
+        TensorInfo *ti = get_tensor_info(wf, wname);
+        if (!ti) return 0;
+        if (ti->ggml_type == 12) return 10;   // Q4_K
+        if (ti->ggml_type == 14) return 11;   // Q6_K
+        return 0;                             // F32/BF16 (staged) → BF16 path
+    }
     char wname[256], sname[256];
     snprintf(wname, sizeof(wname), "%s.weight", base_name);
     snprintf(sname, sizeof(sname), "%s.scales", base_name);
@@ -1111,11 +1441,122 @@ static PromptTokens *encode_prompt_text_to_tokens(const char *text) {
 // 4-bit dequant matvec: out[out_dim] = W * x[in_dim]
 // W is stored as packed uint32 (8 x 4-bit or 4 x 8-bit values per uint32)
 // scales/biases are bfloat16 per group
+// GGUF block dequant (llama.cpp-reference loops). row = one tensor row
+// (n values, ggml_type 12 = Q4_K / 14 = Q6_K), y = the n floats.
+static float fp32_from_bits(uint32_t b) { float f; memcpy(&f, &b, 4); return f; }
+static uint32_t fp32_to_bits(float f) { uint32_t b; memcpy(&b, &f, 4); return b; }
+// ggml_compute_fp16_to_fp32 (ggml-impl.h): the plain h<<16 bit pattern is only
+// the first step — the exponent must be re-normalized and denormals handled.
+static float fp16_to_f32(uint16_t h) {
+    const uint32_t w = (uint32_t)h << 16;
+    const uint32_t sign = w & 0x80000000u;
+    const uint32_t two_w = w + w;
+    const uint32_t exp_offset = 0xE0u << 23;
+    const float exp_scale = 0x1.0p-112f;
+    const float normalized_value = fp32_from_bits((two_w >> 4) + exp_offset) * exp_scale;
+    const uint32_t magic_mask = 126u << 23;
+    const float magic_bias = 0.5f;
+    const float denormalized_value = fp32_from_bits((two_w >> 17) | magic_mask) - magic_bias;
+    const uint32_t denormalized_cutoff = 1u << 27;
+    const uint32_t result = sign |
+        (two_w < denormalized_cutoff ? fp32_to_bits(denormalized_value) : fp32_to_bits(normalized_value));
+    return fp32_from_bits(result);
+}
+// get_scale_min_k4(j, scales, &sc, &m) from llama.cpp's dequantize_row_q4_K
+static void get_scale_min_k4(int j, const uint8_t *scales, uint8_t *sc, uint8_t *m) {
+    if (j < 4) {
+        *sc = scales[j + 0] & 63;
+        *m  = scales[j + 4] & 63;
+    } else {
+        *sc = (scales[j + 4] & 0xF) | ((scales[j - 4] >> 6) << 4);
+        *m  = (scales[j + 4] >> 4) | ((scales[j - 0] >> 6) << 4);
+    }
+}
+static void gguf_dequant_row(const void *row, float *y, int n, int ggml_type) {
+    const uint8_t *p = (const uint8_t *)row;
+    if (ggml_type == 12) {  // Q4_K: 144B blocks of 256
+        const int nb = n / 256;
+        for (int b = 0; b < nb; b++) {
+            uint16_t dh, dm;
+            memcpy(&dh, p, 2); memcpy(&dm, p + 2, 2);
+            const float d = fp16_to_f32(dh), mmin = fp16_to_f32(dm);
+            const uint8_t *scales = p + 4;
+            const uint8_t *q = p + 16;
+            int is = 0;
+            for (int j = 0; j < 256; j += 64) {
+                // each 32-byte q chunk = 64 values: low nibbles then the
+                // HIGH nibbles of the same bytes (llama.cpp dequantize_row_q4_K)
+                uint8_t sc, m;
+                get_scale_min_k4(is + 0, scales, &sc, &m);
+                const float d1 = d * sc, m1 = mmin * m;
+                get_scale_min_k4(is + 1, scales, &sc, &m);
+                const float d2 = d * sc, m2 = mmin * m;
+                for (int l = 0; l < 32; l++)
+                    y[j + l]      = d1 * (q[l] & 0xF) - m1;
+                for (int l = 0; l < 32; l++)
+                    y[j + l + 32] = d2 * (q[l] >> 4) - m2;
+                q += 32; is += 2;
+            }
+            p += 144; y += 256;
+        }
+    } else if (ggml_type == 14) {  // Q6_K: 210B blocks of 256
+        const int nb = n / 256;
+        for (int b = 0; b < nb; b++) {
+            // block_q6_K layout: ql(128) + qh(64) + scales(16) + d(2 at +208)
+            uint16_t dh; memcpy(&dh, p + 208, 2);
+            const float d = fp16_to_f32(dh);
+            const uint8_t *ql = p + 0;
+            const uint8_t *qh = p + 128;
+            const int8_t *sc = (const int8_t *)(p + 192);
+            for (int nn = 0; nn < 256; nn += 128) {
+                for (int l = 0; l < 32; l++) {
+                    const int is = l / 16;
+                    const float q1 = (float)((int)((ql[l + 0] & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32);
+                    const float q2 = (float)((int)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32);
+                    const float q3 = (float)((int)((ql[l + 0] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32);
+                    const float q4 = (float)((int)((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32);
+                    y[l + 0]  = d * sc[is + 0] * q1;
+                    y[l + 32] = d * sc[is + 2] * q2;
+                    y[l + 64] = d * sc[is + 4] * q3;
+                    y[l + 96] = d * sc[is + 6] * q4;
+                }
+                y += 128; ql += 64; qh += 32; sc += 8;
+            }
+            p += 210;
+        }
+    }
+}
+
+// GGUF matvec: the row-dequant + dot (the cpu_dequant_matvec bits 10/11 path)
+static void gguf_cpu_matvec(const void *W, const float *x, float *out,
+                            int out_dim, int in_dim, int ggml_type) {
+    const uint8_t *wp = (const uint8_t *)W;
+    const size_t row_bytes = (size_t)(in_dim / 256) *
+        (ggml_type == 12 ? 144 : 210);
+    static float *yb = NULL;
+    static int yb_n = 0;
+    if (!yb || yb_n < in_dim) { free(yb); yb = malloc(in_dim * sizeof(float)); yb_n = in_dim; }
+    for (int r = 0; r < out_dim; r++) {
+        gguf_dequant_row(wp + (size_t)r * row_bytes, yb, in_dim, ggml_type);
+        float acc = 0.0f;
+        for (int i = 0; i < in_dim; i++) acc += yb[i] * x[i];
+        out[r] = acc;
+    }
+}
+
 static void cpu_dequant_matvec(
     const uint32_t *W, const uint16_t *scales, const uint16_t *biases,
     const float *x, float *out,
     int out_dim, int in_dim, int group_size, int bits
 ) {
+    // GGUF Q4_K / Q6_K (bits 10 / 11) — the llama.cpp block formats.
+    // Checked BEFORE the scales==NULL BF16 fallback: Q4_K tensors have no
+    // scales, and the raw bytes must never be read as BF16.
+    if (bits == 10 || bits == 11) {
+        gguf_cpu_matvec(W, x, out, out_dim, in_dim, bits == 10 ? 12 : 14);
+        return;
+    }
+
     // BF16 raw path: scales==NULL means unquantized BF16 weight
     if (!scales || !biases) {
         const uint16_t *W_bf16 = (const uint16_t *)W;
@@ -2306,9 +2747,13 @@ static void fast_dequant_matvec(
     const float *x, float *out,
     int out_dim, int in_dim, int group_size, int bits
 ) {
-    // BF16 path: no GPU kernel for raw BF16 matvec
+    // BF16 path: no GPU kernel for raw BF16 matvec.
+    // GGUF mode: Q4_K/Q6_K tensors (bits 10/11) also have no scales — keep
+    // the real bits so cpu_dequant_matvec routes to the block dequant,
+    // never to the raw-BF16 read.
     if (!scales || !biases) {
-        cpu_dequant_matvec(W, NULL, NULL, x, out, out_dim, in_dim, group_size, 0);
+        cpu_dequant_matvec(W, NULL, NULL, x, out, out_dim, in_dim, group_size,
+                           (bits == 10 || bits == 11) ? bits : 0);
         return;
     }
     if (g_metal && g_metal->wf_buf) {
@@ -3293,7 +3738,9 @@ static void fast_batch_matvec(
     const float *x, uint32_t x_dim,
     BatchMatvecSpec *specs, int num_specs
 ) {
-    if (g_metal && g_metal->wf_buf) {
+    // GGUF mode: the GPU kernels don't know Q4_K/Q6_K (bits 10/11) yet —
+    // stay on the CPU dequant path until the GPU block kernels land.
+    if (g_metal && g_metal->wf_buf && !g_gguf_stage) {
         gpu_batch_matvec(g_metal, x, x_dim, specs, num_specs);
     } else {
         for (int i = 0; i < num_specs; i++) {
@@ -3746,10 +4193,17 @@ static void full_attention_forward(
 
     // Batch Q/K/V into one command buffer (3 dispatches, 1 commit)
     if (qw && kw && vw /* BF16: scales may be NULL */) {
+        char bn[256];
+        snprintf(bn, sizeof(bn), "model.layers.%d.self_attn.q_proj", layer_idx);
+        int q_bits = tensor_bits(wf, bn);
+        snprintf(bn, sizeof(bn), "model.layers.%d.self_attn.k_proj", layer_idx);
+        int k_bits = tensor_bits(wf, bn);
+        snprintf(bn, sizeof(bn), "model.layers.%d.self_attn.v_proj", layer_idx);
+        int v_bits = tensor_bits(wf, bn);
         BatchMatvecSpec qkv_specs[3] = {
-            { qw, qs, qb, q_proj_out, (uint32_t)q_proj_dim, HIDDEN_DIM, GROUP_SIZE, 0, 4 },
-            { kw, ks, kb, k,          (uint32_t)kv_dim,     HIDDEN_DIM, GROUP_SIZE, 1, 4 },
-            { vw, vs, vb, v,          (uint32_t)kv_dim,     HIDDEN_DIM, GROUP_SIZE, 2, 4 },
+            { qw, qs, qb, q_proj_out, (uint32_t)q_proj_dim, HIDDEN_DIM, GROUP_SIZE, 0, q_bits },
+            { kw, ks, kb, k,          (uint32_t)kv_dim,     HIDDEN_DIM, GROUP_SIZE, 1, k_bits },
+            { vw, vs, vb, v,          (uint32_t)kv_dim,     HIDDEN_DIM, GROUP_SIZE, 2, v_bits },
         };
         fast_batch_matvec(normed, HIDDEN_DIM, qkv_specs, 3);
     }
@@ -3876,7 +4330,12 @@ static void full_attention_forward(
     uint16_t *os_ptr = get_tensor_ptr(wf, name);
     snprintf(name, sizeof(name), "model.layers.%d.self_attn.o_proj.biases", layer_idx);
     uint16_t *ob = get_tensor_ptr(wf, name);
-    if (ow && os_ptr && ob) fast_dequant_matvec(ow, os_ptr, ob, attn_out, attn_projected, HIDDEN_DIM, q_dim, GROUP_SIZE, 4);
+    if (ow) {
+        char obn[256];
+        snprintf(obn, sizeof(obn), "model.layers.%d.self_attn.o_proj", layer_idx);
+        fast_dequant_matvec(ow, os_ptr, ob, attn_out, attn_projected, HIDDEN_DIM,
+                            q_dim, GROUP_SIZE, tensor_bits(wf, obn));
+    }
 
     if (do_debug) {
         fprintf(stderr, "[FA-DBG] attn_out_rms=%.6f o_proj first5=[%.6f,%.6f,%.6f,%.6f,%.6f]\n",
@@ -4003,13 +4462,28 @@ static void linear_attention_forward(
     uint16_t *a_b = get_tensor_ptr(wf, name);
 
     if (qkv_w && z_w && b_w && a_w /* BF16: scales may be NULL */) {
+        char bn[256];
+        snprintf(bn, sizeof(bn), "model.layers.%d.linear_attn.in_proj_qkv", layer_idx);
+        int qkv_bits = tensor_bits(wf, bn);
+        snprintf(bn, sizeof(bn), "model.layers.%d.linear_attn.in_proj_z", layer_idx);
+        int z_bits = tensor_bits(wf, bn);
+        snprintf(bn, sizeof(bn), "model.layers.%d.linear_attn.in_proj_b", layer_idx);
+        int b_bits = tensor_bits(wf, bn);
+        snprintf(bn, sizeof(bn), "model.layers.%d.linear_attn.in_proj_a", layer_idx);
+        int a_bits = tensor_bits(wf, bn);
         BatchMatvecSpec la_specs[4] = {
-            { qkv_w, qkv_s, qkv_b, qkv,   (uint32_t)qkv_dim,         HIDDEN_DIM, GROUP_SIZE, 0, 4 },
-            { z_w,   z_s,   z_b,   z,      (uint32_t)z_dim,           HIDDEN_DIM, GROUP_SIZE, 1, 4 },
-            { b_w,   b_s,   b_b,   beta,   (uint32_t)LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, 2, 4 },
-            { a_w,   a_s,   a_b,   alpha,  (uint32_t)LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, 3, 4 },
+            { qkv_w, qkv_s, qkv_b, qkv,   (uint32_t)qkv_dim,         HIDDEN_DIM, GROUP_SIZE, 0, qkv_bits },
+            { z_w,   z_s,   z_b,   z,      (uint32_t)z_dim,           HIDDEN_DIM, GROUP_SIZE, 1, z_bits },
+            { b_w,   b_s,   b_b,   beta,   (uint32_t)LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, 2, b_bits },
+            { a_w,   a_s,   a_b,   alpha,  (uint32_t)LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, 3, a_bits },
         };
         fast_batch_matvec(normed, HIDDEN_DIM, la_specs, 4);
+    }
+
+    if (la_debug) {
+        fprintf(stderr, "[LA-DBG] proj qkv_rms=%.6f z_rms=%.6f alpha_rms=%.6f beta_rms=%.6f\n",
+                vec_rms(qkv, qkv_dim), vec_rms(z, z_dim),
+                vec_rms(alpha, LINEAR_NUM_V_HEADS), vec_rms(beta, LINEAR_NUM_V_HEADS));
     }
 
     // ---- Conv1d step ----
@@ -4028,6 +4502,9 @@ static void linear_attention_forward(
             (CONV_KERNEL_SIZE - 2) * qkv_dim * sizeof(float));
     memcpy(state->conv_state + (CONV_KERNEL_SIZE - 2) * qkv_dim, qkv,
            qkv_dim * sizeof(float));
+    if (la_debug) {
+        fprintf(stderr, "[LA-DBG] conv_out_rms=%.6f\n", vec_rms(conv_out, qkv_dim));
+    }
 
     // ---- Split conv_out into q, k, v ----
     // q: [num_k_heads * head_k_dim] = [2048]
@@ -4076,7 +4553,7 @@ static void linear_attention_forward(
 
     float *out_values = calloc(LINEAR_TOTAL_VALUE, sizeof(float));  // [num_v_heads * head_v_dim]
 
-    int k_heads_per_v = LINEAR_NUM_V_HEADS / LINEAR_NUM_K_HEADS;  // 64/16 = 4
+    int k_heads_per_v = LINEAR_NUM_V_HEADS / LINEAR_NUM_K_HEADS;  // 32/16 = 2
 
     // Precompute per-head decay (g) and beta
     float g_decay[LINEAR_NUM_V_HEADS];
@@ -4094,7 +4571,9 @@ static void linear_attention_forward(
     }
 
     for (int vh = 0; vh < LINEAR_NUM_V_HEADS; vh++) {
-        int kh = vh / k_heads_per_v;  // which k head this v head maps to
+        // k-head mapping: torch .repeat() block convention (llama.cpp's
+        // ggml_repeat) — v-heads 16..31 reuse k-heads 0..15, NOT vh/2.
+        int kh = vh % LINEAR_NUM_K_HEADS;
 
         float g = g_decay[vh];
         float b_gate = beta_gate[vh];
@@ -4137,6 +4616,13 @@ static void linear_attention_forward(
         }
     }
 
+    if (la_debug) {
+        fprintf(stderr, "[LA-DBG] g_decay[0..2]=%.6f,%.6f,%.6f beta_gate[0..2]=%.6f,%.6f,%.6f out_values_rms=%.6f\n",
+                g_decay[0], g_decay[1], g_decay[2],
+                beta_gate[0], beta_gate[1], beta_gate[2],
+                vec_rms(out_values, LINEAR_TOTAL_VALUE));
+    }
+
     // ---- RMSNormGated: out = rms_norm(out_values_per_head) * silu(z_per_head) * weight ----
     snprintf(name, sizeof(name), "model.layers.%d.linear_attn.norm.weight", layer_idx);
     uint16_t *gated_norm_w = get_tensor_ptr(wf, name);
@@ -4162,8 +4648,10 @@ static void linear_attention_forward(
     snprintf(name, sizeof(name), "model.layers.%d.linear_attn.out_proj.biases", layer_idx);
     uint16_t *out_b = get_tensor_ptr(wf, name);
     if (out_w /* BF16: scales may be NULL */) {
+        char obn[256];
+        snprintf(obn, sizeof(obn), "model.layers.%d.linear_attn.out_proj", layer_idx);
         fast_dequant_matvec(out_w, out_s, out_b, gated_out, attn_out, HIDDEN_DIM,
-                            LINEAR_TOTAL_VALUE, GROUP_SIZE, 4);
+                            LINEAR_TOTAL_VALUE, GROUP_SIZE, tensor_bits(wf, obn));
     }
 
     // ---- Residual ----
@@ -4265,9 +4753,14 @@ static void moe_forward(
         shared_gate_score = seg_out;  // sigmoid applied later
 
         // 4-bit matvecs (can use GPU)
+        char bn[256];
+        snprintf(bn, sizeof(bn), "model.layers.%d.mlp.shared_expert.gate_proj", layer_idx);
+        int sg_bits = tensor_bits(wf, bn);
+        snprintf(bn, sizeof(bn), "model.layers.%d.mlp.shared_expert.up_proj", layer_idx);
+        int su_bits = tensor_bits(wf, bn);
         BatchMatvecSpec moe_specs[2] = {
-            { sgw,    sgs,    sgb,    shared_gate, (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 0, 4 },
-            { suw,    sus,    sub,    shared_up,   (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 1, 4 },
+            { sgw,    sgs,    sgb,    shared_gate, (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 0, sg_bits },
+            { suw,    sus,    sub,    shared_up,   (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 1, su_bits },
         };
         fast_batch_matvec(h_post, HIDDEN_DIM, moe_specs, 2);
     }
@@ -4388,8 +4881,10 @@ static void moe_forward(
     snprintf(name, sizeof(name), "model.layers.%d.mlp.shared_expert.down_proj.biases", layer_idx);
     uint16_t *sdb = get_tensor_ptr(wf, name);
     if (sdw) {
+        char sdn[256];
+        snprintf(sdn, sizeof(sdn), "model.layers.%d.mlp.shared_expert.down_proj", layer_idx);
         fast_dequant_matvec(sdw, sds, sdb, shared_act, shared_out, HIDDEN_DIM,
-                            SHARED_INTERMEDIATE, GROUP_SIZE, 4);
+                            SHARED_INTERMEDIATE, GROUP_SIZE, tensor_bits(wf, sdn));
     }
 
     // ---- Shared expert gate (sigmoid) -- already computed above ----
@@ -4434,6 +4929,16 @@ static void embed_lookup(WeightFile *wf, int token_id, float *out) {
     if (!w_info) {
         fprintf(stderr, "ERROR: embedding weight not found\n");
         memset(out, 0, HIDDEN_DIM * sizeof(float));
+        return;
+    }
+
+    // GGUF mode: Q4_K / Q6_K block rows
+    if (w_info->ggml_type == 12 || w_info->ggml_type == 14) {
+        const uint8_t *W = (const uint8_t *)((char *)wf->data + w_info->offset);
+        const size_t row_bytes = (size_t)(HIDDEN_DIM / 256) *
+            (w_info->ggml_type == 12 ? 144 : 210);
+        gguf_dequant_row(W + (size_t)token_id * row_bytes, out, HIDDEN_DIM,
+                         w_info->ggml_type);
         return;
     }
 
@@ -4487,6 +4992,13 @@ static void lm_head_forward(WeightFile *wf, const float *hidden, float *logits) 
 
     if (!w_info) {
         fprintf(stderr, "ERROR: lm_head weight not found\n");
+        return;
+    }
+
+    // GGUF mode: Q4_K / Q6_K block matvec (CPU — the GPU kernel is Phase C)
+    if (w_info->ggml_type == 12 || w_info->ggml_type == 14) {
+        const uint8_t *W = (const uint8_t *)((char *)wf->data + w_info->offset);
+        gguf_cpu_matvec(W, hidden, logits, VOCAB_SIZE, HIDDEN_DIM, w_info->ggml_type);
         return;
     }
 
@@ -6079,6 +6591,15 @@ static void finalize_deferred_experts(void) {
         for (int i = 0; i < HIDDEN_DIM; i++) {
             g_deferred.hidden[i] = g_deferred.h_mid[i] + moe_out[i] + shared_out[i];
         }
+        if (getenv("FINCHMOE_NANTRACE")) {
+            fprintf(stderr, "[NANTRACE] L%d h_mid=%.6f moe=%.6f shared=%.6f shared_w=%.6f hidden=%.6f\n",
+                    g_deferred.layer_idx,
+                    vec_rms(g_deferred.h_mid, HIDDEN_DIM),
+                    vec_rms(moe_out, HIDDEN_DIM),
+                    vec_rms(shared_out, HIDDEN_DIM),
+                    shared_weight,
+                    vec_rms(g_deferred.hidden, HIDDEN_DIM));
+        }
     }
 
     if (getenv("FINCHMOE_DUMP_HIDDEN")) {
@@ -6652,7 +7173,7 @@ static void fused_layer_forward(
 
         // Submit CMD1: attention projections
         if (g_timing_enabled) { t0 = now_ms(); }
-        if (g_metal && g_metal->wf_buf && num_attn_specs > 0) {
+        if (g_metal && g_metal->wf_buf && !g_gguf_stage && num_attn_specs > 0) {
             if (getenv("FINCHMOE_PF_DUMP") && pos == 1 && layer_idx == 0) {
                 static FILE *pf_st = NULL;
                 if (!pf_st) pf_st = fopen("/tmp/state_per_token.bin", "wb");
@@ -6701,6 +7222,11 @@ static void fused_layer_forward(
                 debug_print_hidden("z-proj", layer_idx, z_out, LINEAR_TOTAL_VALUE);
                 debug_print_hidden("beta-proj", layer_idx, beta_out, LINEAR_NUM_V_HEADS);
                 debug_print_hidden("alpha-proj", layer_idx, alpha_out, LINEAR_NUM_V_HEADS);
+            }
+            if (g_debug_layers && is_full && num_attn_specs >= 3) {
+                debug_print_hidden("q-proj-fa", layer_idx, q_proj_out, NUM_ATTN_HEADS * HEAD_DIM * 2);
+                debug_print_hidden("k-proj-fa", layer_idx, k_out, NUM_KV_HEADS * HEAD_DIM);
+                debug_print_hidden("v-proj-fa", layer_idx, v_out, NUM_KV_HEADS * HEAD_DIM);
             }
         }
         if (g_timing_enabled) { t1 = now_ms(); g_timing.cmd1_submit += t1 - t0; }
@@ -7058,7 +7584,11 @@ static void fused_layer_forward(
             for (int vh = 0; vh < LINEAR_NUM_V_HEADS; vh++) {
                 float a_val = alpha_out[vh];
                 float dt_b = dt_bias_bf16 ? bf16_to_f32(dt_bias_bf16[vh]) : 0.0f;
-                float A_val = A_log ? expf(A_log[vh]) : 1.0f;
+                // GGUF mode: ssm_a is stored already negated+exponentiated
+                // (-exp(logA)); llama.cpp multiplies it directly
+                // (qwen35moe.cpp: gate = ssm_a * softplus). The packed files
+                // store the raw logA, which the engine exponentiates.
+                float A_val = A_log ? (g_gguf_stage ? -A_log[vh] : expf(A_log[vh])) : 1.0f;
                 float softplus_val = logf(1.0f + expf(a_val + dt_b));
                 g_decay[vh] = expf(-A_val * softplus_val);
                 beta_gate_arr[vh] = cpu_sigmoid(beta_out[vh]);
@@ -7103,7 +7633,7 @@ static void fused_layer_forward(
             } else {
                 // CPU delta-net with Accelerate BLAS
                 for (int vh = 0; vh < LINEAR_NUM_V_HEADS; vh++) {
-                    int kh = vh / k_heads_per_v;
+                    int kh = vh % LINEAR_NUM_K_HEADS;  // torch .repeat() block mapping (llama.cpp)
                     float g = g_decay[vh];
                     float b_gate = beta_gate_arr[vh];
                     float *S = la_state->ssm_state + vh * LINEAR_VALUE_DIM * LINEAR_KEY_DIM;
@@ -7209,7 +7739,7 @@ static void fused_layer_forward(
                          && kv && kv->len >= 32 && kv->len < g_gpu_kv_seq);
 
     if ((attn_out_for_oproj || gpu_attn_fuse) && oproj_w /* BF16 OK: GPU gemv_bf16 */ &&
-        g_metal && g_metal->wf_buf && have_moe_weights &&
+        g_metal && g_metal->wf_buf && !g_gguf_stage && have_moe_weights &&
         g_metal->residual_add && g_metal->rms_norm_sum &&
         g_metal->rms_norm_apply_bf16 && lc->post_attn_norm_w) {
         // ---- FULLY FUSED CMD2 ----
@@ -7604,10 +8134,11 @@ static void fused_layer_forward(
             cpu_dequant_matvec(seg_w, seg_s, seg_b, h_post, &seg_buf,
                                1, HIDDEN_DIM, GROUP_SIZE, 8);
             shared_gate_score = seg_buf;
-            // 4-bit: shared gate/up
+            // shared gate/up (bits from the manifest: 4 in the packed builds,
+            // Q4_K/Q6_K = 10/11 in GGUF mode)
             BatchMatvecSpec moe_specs[2] = {
-                { sgw,    sgs,    sgb,    shared_gate, (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 0, 4 },
-                { suw,    sus,    sub,    shared_up,   (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 1, 4 },
+                { sgw,    sgs,    sgb,    shared_gate, (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 0, lc->sg_bits },
+                { suw,    sus,    sub,    shared_up,   (uint32_t)SHARED_INTERMEDIATE, HIDDEN_DIM, GROUP_SIZE, 1, lc->su_bits },
             };
             fast_batch_matvec(h_post, HIDDEN_DIM, moe_specs, 2);
         }
@@ -7643,6 +8174,7 @@ static void fused_layer_forward(
         if (!pf_gsraw_old) pf_gsraw_old = fopen("/tmp/gates_raw_old.bin", "wb");
         if (pf_gsraw_old) {
             fwrite(gate_scores, sizeof(float), NUM_EXPERTS, pf_gsraw_old);
+            fwrite(gate_w, sizeof(uint16_t), 32, pf_gsraw_old);
             fflush(pf_gsraw_old);
         }
     }
@@ -7697,6 +8229,7 @@ static void fused_layer_forward(
         if (!pf_gsraw_old) pf_gsraw_old = fopen("/tmp/gates_raw_old.bin", "wb");
         if (pf_gsraw_old) {
             fwrite(gate_scores, sizeof(float), NUM_EXPERTS, pf_gsraw_old);
+            fwrite(gate_w, sizeof(uint16_t), 32, pf_gsraw_old);
             fflush(pf_gsraw_old);
         }
     }
@@ -7711,7 +8244,9 @@ static void fused_layer_forward(
 
     // GPU expert path verified bit-identical to CPU path via --compare-experts.
     // Use --cpu-experts to force CPU path for debugging.
-    int force_cpu_experts = g_cpu_experts ? 1 : 0;
+    // GGUF mode always takes the CPU path: the GPU expert kernels read the
+    // packed 1/2/3/4/8-bit formats, not the Q4_K/Q6_K block slabs.
+    int force_cpu_experts = (g_cpu_experts || g_gguf_stage) ? 1 : 0;
     if (force_cpu_experts) goto cpu_expert_fallback;
 
     if (packed_fd >= 0 && g_metal && g_metal->buf_multi_expert_data[0]) {
@@ -7992,7 +8527,7 @@ static void fused_layer_forward(
                 float *act = (float *)[g_metal->buf_shared_act contents];
                 float *out = (float *)[g_metal->buf_shared_out contents];
                 cpu_dequant_matvec(sdw, NULL, NULL, act, out,
-                                   HIDDEN_DIM, SHARED_INTERMEDIATE, GROUP_SIZE, 0);
+                                   HIDDEN_DIM, SHARED_INTERMEDIATE, GROUP_SIZE, lc->sd_bits);
                 // Start a new command buffer for remaining dispatches
                 cmd_experts = [g_metal->queue commandBuffer];
             }
@@ -8367,7 +8902,67 @@ static void fused_layer_forward(
 
     }
     cpu_expert_fallback:
-    if (packed_fd >= 0) {
+    if (g_gguf_stage) {
+        // GGUF mode: routed experts are stacked Q4_K/Q6_K slabs in the mmap —
+        // zero-copy reads straight from the mapped file (no packed files).
+        GgufExpertInfo *ge = &gguf_experts[layer_idx];
+        float *expert_out_cpu = malloc(HIDDEN_DIM * sizeof(float));
+        float total_weight = 0.0f;
+        for (int k = 0; k < K; k++) {
+            int eidx = expert_indices[k];
+            const uint8_t *gate_slab = (const uint8_t *)wf->data + ge->gate_off + (size_t)eidx * ge->gate_slab;
+            const uint8_t *up_slab   = (const uint8_t *)wf->data + ge->up_off   + (size_t)eidx * ge->up_slab;
+            const uint8_t *down_slab = (const uint8_t *)wf->data + ge->down_off + (size_t)eidx * ge->down_slab;
+            if (getenv("FINCHMOE_LAYER_DUMP") && layer_idx == 0 && k == 0) {
+                FILE *df = fopen("/tmp/expert_dump.bin", "wb");
+                if (df) {
+                    fwrite(h_post, sizeof(float), HIDDEN_DIM, df);
+                    fwrite(gate_scores, sizeof(float), NUM_EXPERTS, df);
+                    uint32_t ids[2] = {(uint32_t)eidx, (uint32_t)(ge->gate_off + (size_t)eidx * ge->gate_slab)};
+                    fwrite(ids, 4, 2, df);
+                    fclose(df);
+                }
+            }
+            float *gate_proj_out = malloc(MOE_INTERMEDIATE * sizeof(float));
+            float *up_proj_out = malloc(MOE_INTERMEDIATE * sizeof(float));
+            float *act_out = malloc(MOE_INTERMEDIATE * sizeof(float));
+            gguf_cpu_matvec(gate_slab, h_post, gate_proj_out, MOE_INTERMEDIATE, HIDDEN_DIM, ge->gate_type);
+            gguf_cpu_matvec(up_slab,   h_post, up_proj_out,   MOE_INTERMEDIATE, HIDDEN_DIM, ge->up_type);
+            cpu_swiglu(gate_proj_out, up_proj_out, act_out, MOE_INTERMEDIATE);
+            gguf_cpu_matvec(down_slab, act_out, expert_out_cpu, HIDDEN_DIM, MOE_INTERMEDIATE, ge->down_type);
+            if (getenv("FINCHMOE_LAYER_DUMP") && layer_idx == 0 && k == 0) {
+                FILE *df = fopen("/tmp/expert_dump.bin", "ab");
+                if (df) {
+                    fwrite(gate_proj_out, sizeof(float), MOE_INTERMEDIATE, df);
+                    fwrite(expert_out_cpu, sizeof(float), HIDDEN_DIM, df);
+                    fclose(df);
+                }
+            }
+            free(gate_proj_out);
+            free(up_proj_out);
+            free(act_out);
+            // Guard against NaN/Inf from degenerate expert quantization
+            float er = 0;
+            for (int j = 0; j < HIDDEN_DIM; j++) er += expert_out_cpu[j] * expert_out_cpu[j];
+            if (isfinite(er) && er < 1e20f) {
+                cpu_vec_madd(moe_out, expert_out_cpu, expert_weights[k], HIDDEN_DIM);
+                total_weight += expert_weights[k];
+            }
+        }
+        free(expert_out_cpu);
+        if (total_weight > 0.0f && total_weight < 0.99f) {
+            float inv_tw = 1.0f / total_weight;
+            for (int i = 0; i < HIDDEN_DIM; i++) moe_out[i] *= inv_tw;
+        }
+        // CPU shared expert (mirrors the packed-file paths below)
+        float *shared_act = calloc(SHARED_INTERMEDIATE, sizeof(float));
+        cpu_swiglu(shared_gate, shared_up, shared_act, SHARED_INTERMEDIATE);
+        if (sdw) { /* scales may be NULL in GGUF mode */
+            cpu_dequant_matvec(sdw, sds, sdb, shared_act, shared_out,
+                               HIDDEN_DIM, SHARED_INTERMEDIATE, GROUP_SIZE, lc->sd_bits);
+        }
+        free(shared_act);
+    } else if (packed_fd >= 0) {
         // CPU fallback for experts
         size_t esz = active_expert_size();
         float *expert_out_cpu = malloc(HIDDEN_DIM * sizeof(float));
@@ -8469,7 +9064,7 @@ static void fused_layer_forward(
         cpu_swiglu(shared_gate, shared_up, shared_act, SHARED_INTERMEDIATE);
         if (sdw) { /* BF16: scales may be NULL */
             cpu_dequant_matvec(sdw, sds, sdb, shared_act, shared_out,
-                               HIDDEN_DIM, SHARED_INTERMEDIATE, GROUP_SIZE, 4);
+                               HIDDEN_DIM, SHARED_INTERMEDIATE, GROUP_SIZE, lc->sd_bits);
         }
         free(shared_act);
     } else {
@@ -8478,7 +9073,7 @@ static void fused_layer_forward(
         cpu_swiglu(shared_gate, shared_up, shared_act, SHARED_INTERMEDIATE);
         if (sdw) { /* BF16: scales may be NULL */
             fast_dequant_matvec(sdw, sds, sdb, shared_act, shared_out,
-                                HIDDEN_DIM, SHARED_INTERMEDIATE, GROUP_SIZE, 4);
+                                HIDDEN_DIM, SHARED_INTERMEDIATE, GROUP_SIZE, lc->sd_bits);
         }
         free(shared_act);
     }
@@ -8490,6 +9085,19 @@ static void fused_layer_forward(
     }
 
     // ---- Final combine: hidden = h_mid + moe_out + shared_out ----
+    if (getenv("FINCHMOE_LAYER_DUMP")) {
+        FILE *df = fopen("/tmp/layer_dump.bin", "ab");
+        if (df) {
+            uint32_t tagid = ('c'<<8)|'m';   // combine: h_mid | moe_out | shared_out
+            uint32_t len = HIDDEN_DIM * 3;
+            fwrite(&tagid, 4, 1, df);
+            fwrite(&len, 4, 1, df);
+            fwrite(h_mid, sizeof(float), HIDDEN_DIM, df);
+            fwrite(moe_out, sizeof(float), HIDDEN_DIM, df);
+            fwrite(shared_out, sizeof(float), HIDDEN_DIM, df);
+            fclose(df);
+        }
+    }
     { float hmid_rms=0, moe_rms=0, shr_rms=0;
       for (int i=0;i<HIDDEN_DIM;i++){hmid_rms+=h_mid[i]*h_mid[i];moe_rms+=moe_out[i]*moe_out[i];shr_rms+=shared_out[i]*shared_out[i];}
       hmid_rms=sqrtf(hmid_rms/HIDDEN_DIM); moe_rms=sqrtf(moe_rms/HIDDEN_DIM); shr_rms=sqrtf(shr_rms/HIDDEN_DIM);
@@ -11435,6 +12043,7 @@ int main(int argc, char **argv) {
         const char *model_path = MODEL_PATH_DEFAULT;
         int model_path_from_user = 0;  // set when --model flag used
         const char *weights_path = NULL;
+        const char *gguf_path = NULL;
         const char *manifest_path = NULL;
         const char *vocab_path = NULL;
         const char *prompt_tokens_path = NULL;
@@ -11475,6 +12084,7 @@ int main(int argc, char **argv) {
             {"mtp",           no_argument,       0, 'J'},
             {"rep-penalty",   required_argument, 0, 'r'},
             {"min-p",         required_argument, 0, 702},
+            {"gguf",          required_argument, 0, 703},
             {"prefill-chunk", required_argument, 0, 'b'},
             {"debug-layers",  no_argument,       0, 'X'},
             {"gpu-experts",   no_argument,       0, 'U'},
@@ -11539,6 +12149,7 @@ int main(int argc, char **argv) {
                 case 'l': g_low_memory = 1; break;
             case 700: g_kv_type = KV_FP16; break;
             case 702: g_min_p = atof(optarg); break;
+            case 703: gguf_path = optarg; break;
             case 701: g_kv_type = KV_TURBO; break;
                 case 'I': g_dump_logits_path = optarg; break;
                 case 'A': g_logit_diag_interval = atoi(optarg); break;
@@ -11692,7 +12303,8 @@ int main(int argc, char **argv) {
 
         // ---- Load weights ----
         printf("[phase] Loading weights (mmap + manifest)...\n");
-        WeightFile *wf = open_weights(weights_path, manifest_path);
+        WeightFile *wf = gguf_path ? open_gguf(gguf_path)
+                                 : open_weights(weights_path, manifest_path);
         if (!wf) {
             fprintf(stderr, "ERROR: Failed to load weights\n");
             return 1;
