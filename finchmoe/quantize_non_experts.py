@@ -112,6 +112,47 @@ KEEP_BF16_PATTERNS = [
 ]
 
 
+def pi_idx(n):
+    """Evens-then-odds order: [0,2,4,...,n-2,1,3,5,...,n-1]."""
+    return np.concatenate([np.arange(0, n, 2), np.arange(1, n, 2)])
+
+
+def apply_vhead_permutation(name, arr):
+    """Apply the v-head permutation pi (evens-then-odds) that the GGUF
+    converter applies to the pair-interleaved Qwen3.6 GDN checkpoint.
+
+    The HF checkpoint stores every 32-v-head-indexed tensor as 16
+    interleaved PAIRS [vA_0, vB_0, vA_1, vB_1, ...] (each pair shares one
+    k-head — torch .repeat() convention). llama.cpp's GGUF stores the
+    de-interleaved [vA_0..vA_15, vB_0..vB_15]. The C engine indexes heads
+    directly, so the packed files must be de-interleaved the same way.
+    Verified against the GGUF for A_log, dt_bias, in_proj_z, conv1d v-part
+    (2026-08-16).
+    """
+    def pi_blocks(x, axis, block):
+        n = x.shape[axis] // block
+        idx = np.concatenate([np.arange(i*block, (i+1)*block) for i in pi_idx(n)])
+        return np.take(x, idx, axis=axis)
+
+    if name.endswith('.linear_attn.A_log') or name.endswith('.linear_attn.dt_bias'):
+        return pi_blocks(arr, 0, 1)                 # [32] element-wise
+    if name.endswith('.linear_attn.in_proj_a.weight') or name.endswith('.linear_attn.in_proj_b.weight'):
+        return pi_blocks(arr, 0, 1)                 # [32, 2048] rows
+    if name.endswith('.linear_attn.in_proj_z.weight'):
+        return pi_blocks(arr, 0, 128)               # [4096, 2048] 128-row blocks
+    if name.endswith('.linear_attn.in_proj_qkv.weight'):
+        arr = arr.copy()
+        arr[4096:] = pi_blocks(arr[4096:], 0, 128)  # v-part rows only
+        return arr
+    if name.endswith('.linear_attn.conv1d.weight'):
+        arr = arr.copy()
+        arr[4096:] = pi_blocks(arr[4096:], 0, 128)  # v-part channels only
+        return arr
+    if name.endswith('.linear_attn.out_proj.weight'):
+        return pi_blocks(arr, 1, 128)               # [2048, 4096] input columns
+    return arr
+
+
 def get_quantization_bits(name):
     """Return (bits, group_size) or None to keep BF16"""
     # GDN projections default to 4-bit: halves the dominant per-layer weight
@@ -299,13 +340,17 @@ def main():
             # FINCHMOE_NORM_PLUS1=1 enables the +1 for param-storing models.
             if (os.environ.get('FINCHMOE_NORM_PLUS1') == '1'
                     and ('norm.weight' in nn or 'layernorm.weight' in nn)
+                    # the GDN's gated norm (linear_attn.norm.weight) stores the
+                    # raw weight — only the layer norms get the (1 + w) bake
+                    # (verified against the GGUF 2026-08-16)
+                    and '.linear_attn.norm' not in nn
                     and len(arr.shape) == 1):
                 arr = arr + 1.0
 
             bits_info = quant_plan.get(nn)
             if bits_info and bits_info[0] == 'quant':
                 _, bits, gs = bits_info
-                w = arr.reshape(shape[0], shape[1])
+                w = apply_vhead_permutation(nn, arr.reshape(shape[0], shape[1]))
                 packed, scales, biases = quantize_affine(w, bits, gs)
 
                 # Convert to bytes
@@ -353,8 +398,31 @@ def main():
                                     deq[r, g * gs + u * vpu + v] = w_val
                     verify_data.append((nn, w, deq))  # (name, original, dequantized)
 
+            elif nn.endswith('.linear_attn.A_log'):
+                # The C engine reads A_log as float* (expf per head) — must be
+                # stored F32, not the BF16 the keep-BF16 path would write.
+                # (The Aug-13 rebuild stored it U16 — the engine silently read
+                # denormals and every head decayed with A_val ~ 1.)
+                arr = apply_vhead_permutation(nn, arr.reshape(shape))
+                raw_bytes = arr.astype(np.float32).tobytes()
+                pad = ALIGN - (offset % ALIGN) if offset % ALIGN != 0 else 0
+                if pad:
+                    out_f.write(b'\x00' * pad)
+                    offset += pad
+                out_f.write(raw_bytes)
+                manifest["tensors"][nn] = {
+                    "offset": offset,
+                    "size": len(raw_bytes),
+                    "shape": shape,
+                    "dtype": "F32",
+                }
+                offset += len(raw_bytes)
+                total_bytes += len(raw_bytes)
+                tensor_count += 1
+
             else:
                 # Keep BF16
+                arr = apply_vhead_permutation(nn, arr.reshape(shape))
                 arr_u16 = bf16_encode(arr.reshape(-1)).reshape(shape)
                 raw_bytes = arr_u16.tobytes()
                 pad = ALIGN - (offset % ALIGN) if offset % ALIGN != 0 else 0
