@@ -1638,7 +1638,7 @@ kernel void gated_delta_net_step(
     uint head_id [[threadgroup_position_in_grid]],
     uint vi [[thread_position_in_threadgroup]]
 ) {
-    uint kh = head_id / k_heads_per_v;
+    uint kh = head_id % 16;  // torch .repeat() block mapping: v-heads 16..31 reuse k-heads 0..15 (LINEAR_NUM_K_HEADS)
     float g = g_decay[head_id];
     float beta = beta_gate[head_id];
 
@@ -1964,7 +1964,7 @@ kernel void fused_gdn_core(
     uint head [[threadgroup_position_in_grid]],
     uint tid  [[thread_position_in_threadgroup]]
 ) {
-    uint kh = head / k_heads_per_v;
+    uint kh = head % 16;  // torch .repeat() block mapping (LINEAR_NUM_K_HEADS)
     uint state_base = head * value_dim * key_dim;
     uint k_base = kh * key_dim;
     uint v_base = head * value_dim;
@@ -2054,7 +2054,7 @@ kernel void fused_gdn_full(
     uint head [[threadgroup_position_in_grid]],
     uint tid  [[thread_position_in_threadgroup]]
 ) {
-    uint kh = head / k_heads_per_v;
+    uint kh = head % 16;  // torch .repeat() block mapping (LINEAR_NUM_K_HEADS)
     uint total_key = conv_dim / 4;  // 2048 = LINEAR_TOTAL_KEY
 
     // ---- Step 1: conv1d for the 3 elements this thread owns ----
@@ -2830,7 +2830,7 @@ kernel void fused_gdn_batched(
     uint head [[threadgroup_position_in_grid]],
     uint tid  [[thread_position_in_threadgroup]]
 ) {
-    uint kh = head / k_heads_per_v;
+    uint kh = head % 16;  // torch .repeat() block mapping (LINEAR_NUM_K_HEADS)
     uint total_key = conv_dim / 4;  // 2048 = LINEAR_TOTAL_KEY
     uint num_v_heads = k_heads_per_v * (total_key / key_dim);  // matches caller
 
