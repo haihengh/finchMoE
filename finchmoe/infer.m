@@ -770,6 +770,9 @@ typedef struct {
 
 static void *g_gguf_stage = NULL;
 static void *g_gguf_data_base = NULL;   // the GGUF mmap base (Phase C tensor wraps)
+static size_t g_gguf_stage_len = 0;     // Phase C S4: staged-BF16 buffer size (set in open_gguf)
+static size_t g_gguf_exp_alloc = 0;     // Phase C S4: GGUF expert pool slot size (4MB)
+static int g_pf_pool_slots_gguf = 0;    // Phase C S4: GGUF pool slot count (0 = off)
 
 static WeightFile *open_weights(const char *bin_path, const char *json_path) {
     // mmap the binary file
@@ -1016,7 +1019,8 @@ static WeightFile *open_gguf(const char *path) {
     m->num_tensors = 0;
     // the staging buffer for the F32→BF16 conversions (grow as needed)
     static void *stage = NULL;
-    static size_t stage_len = 0, stage_cap = 0;
+    static size_t stage_cap = 0;
+    g_gguf_stage_len = 0;
 
     int n_q4 = 0, n_q6 = 0, n_f32 = 0, n_skipped = 0;
     for (uint64_t i = 0; i < n_tensors; i++) {
@@ -1088,12 +1092,12 @@ static WeightFile *open_gguf(const char *path) {
             const float *src = (const float *)((const unsigned char *)data + data_off + toff);
             size_t nfl = (size_t)nelem;
             size_t need = nfl * 2;
-            if (stage_len + need > stage_cap) {
+            if (g_gguf_stage_len + need > stage_cap) {
                 stage_cap = stage_cap ? stage_cap * 2 : (1 << 20);
-                while (stage_cap < stage_len + need) stage_cap *= 2;
+                while (stage_cap < g_gguf_stage_len + need) stage_cap *= 2;
                 stage = realloc(stage, stage_cap);
             }
-            uint16_t *dst = (uint16_t *)((char *)stage + stage_len);
+            uint16_t *dst = (uint16_t *)((char *)stage + g_gguf_stage_len);
             // NOTE: ssm_conv1d in this GGUF is [4, 8192] with ne0=4 = tap index
             // (fastest) — i.e. [ch0t0, ch0t1, ch0t2, ch0t3, ch1t0, ...], which
             // is already the engine's w[c*K + k] channel-major order. A flat
@@ -1102,12 +1106,12 @@ static WeightFile *open_gguf(const char *path) {
                 uint32_t b; memcpy(&b, &src[j], 4);
                 dst[j] = (uint16_t)(b >> 16);
             }
-            t->offset = stage_len;
+            t->offset = g_gguf_stage_len;
             t->size = need;
             t->shape[1] = (int)nfl;   // 1-D layout for the staged tensors
             t->ndim = 2;
             strcpy(t->dtype, "BF16");
-            stage_len += need;
+            g_gguf_stage_len += need;
         } else {
             t->offset = data_off + toff;
             t->size = tsize;
@@ -1116,7 +1120,7 @@ static WeightFile *open_gguf(const char *path) {
     m->model_path = strdup(".");
 
     fprintf(stderr, "[gguf] %d tensors mapped (%d Q4_K, %d Q6_K, %d F32; %d skipped), data @ %zu, staged %zu bytes\n",
-            m->num_tensors, n_q4, n_q6, n_f32, n_skipped, data_off, stage_len);
+            m->num_tensors, n_q4, n_q6, n_f32, n_skipped, data_off, g_gguf_stage_len);
 
     WeightFile *wf = calloc(1, sizeof(WeightFile));
     wf->data = data;
@@ -2087,6 +2091,13 @@ typedef struct {
     #define MAX_GGUF_TBUFS 4096   // tensors (~520) + expert slabs (40 layers × 8 × 3 = 960)
     struct { size_t off; id<MTLBuffer> buf; } gguf_tbufs[MAX_GGUF_TBUFS];
     int gguf_tbuf_count;
+    // Phase C S4: chunked GGUF prefill infrastructure
+    id<MTLBuffer> gguf_stage_gpu;            // zero-copy wrap of the staged-BF16 heap buffer
+    id<MTLBuffer> buf_pool_expert_data_gguf; // GGUF expert-slab pool (g_gguf_exp_alloc slots)
+    // Per-position delta-net scratch for the chunked GGUF chain's batched
+    // recurrence. [PREFILL_CHUNK_MAX × N] floats (~19 MB at 256 positions).
+    id<MTLBuffer> buf_pf_delta_q, buf_pf_delta_k, buf_pf_delta_v;
+    id<MTLBuffer> buf_pf_delta_g_decay, buf_pf_delta_beta, buf_pf_delta_out;
     id<MTLComputePipelineState> fused_gate_up_swiglu_pipe;      // 4-bit fused gate+up+swiglu
     id<MTLComputePipelineState> fused_gate_up_swiglu_8bit_pipe; // 8-bit fused gate+up+swiglu
     id<MTLComputePipelineState> fused_gate_up_swiglu_2x_pipe;   // 2-expert fused gate+up+swiglu
@@ -2514,12 +2525,22 @@ static MetalCtx *metal_setup(void) {
         size_t PF_2048 = (size_t)PREFILL_CHUNK_MAX * HIDDEN_DIM * sizeof(float);
         size_t PF_4096 = (size_t)PREFILL_CHUNK_MAX * 4096 * sizeof(float);
         size_t PF_8192 = (size_t)PREFILL_CHUNK_MAX * 8192 * sizeof(float);
+        // Phase C S4: per-position delta-net scratch (chunked GGUF chain)
+        size_t PF_KDIM = (size_t)PREFILL_CHUNK_MAX * LINEAR_TOTAL_KEY * sizeof(float);   // 2048/pos
+        size_t PF_VDIM = (size_t)PREFILL_CHUNK_MAX * LINEAR_TOTAL_VALUE * sizeof(float); // 4096/pos
+        size_t PF_H32  = (size_t)PREFILL_CHUNK_MAX * LINEAR_NUM_V_HEADS * sizeof(float);
         ctx->buf_pf_input    = [ctx->device newBufferWithLength:PF_2048 options:MTLResourceStorageModeShared];
         ctx->buf_pf_residual = [ctx->device newBufferWithLength:PF_2048 options:MTLResourceStorageModeShared];
         ctx->buf_pf_qkv      = [ctx->device newBufferWithLength:PF_8192 options:MTLResourceStorageModeShared];
         ctx->buf_pf_kv       = [ctx->device newBufferWithLength:(size_t)PREFILL_CHUNK_MAX * 1024 * sizeof(float) options:MTLResourceStorageModeShared];
         ctx->buf_pf_z        = [ctx->device newBufferWithLength:PF_4096 options:MTLResourceStorageModeShared];
         ctx->buf_pf_ba       = [ctx->device newBufferWithLength:(size_t)PREFILL_CHUNK_MAX * 64 * sizeof(float) options:MTLResourceStorageModeShared];
+        ctx->buf_pf_delta_q       = [ctx->device newBufferWithLength:PF_KDIM options:MTLResourceStorageModeShared];
+        ctx->buf_pf_delta_k       = [ctx->device newBufferWithLength:PF_KDIM options:MTLResourceStorageModeShared];
+        ctx->buf_pf_delta_v       = [ctx->device newBufferWithLength:PF_VDIM options:MTLResourceStorageModeShared];
+        ctx->buf_pf_delta_g_decay = [ctx->device newBufferWithLength:PF_H32 options:MTLResourceStorageModeShared];
+        ctx->buf_pf_delta_beta    = [ctx->device newBufferWithLength:PF_H32 options:MTLResourceStorageModeShared];
+        ctx->buf_pf_delta_out     = [ctx->device newBufferWithLength:PF_VDIM options:MTLResourceStorageModeShared];
         ctx->buf_pf_oproj_in = [ctx->device newBufferWithLength:PF_4096 options:MTLResourceStorageModeShared];
         ctx->buf_pf_oproj_in2 = [ctx->device newBufferWithLength:PF_4096 options:MTLResourceStorageModeShared];
         ctx->buf_pf_oproj    = [ctx->device newBufferWithLength:PF_2048 options:MTLResourceStorageModeShared];
@@ -2786,6 +2807,63 @@ static id<MTLBuffer> gguf_tbuf_get(MetalCtx *ctx, const void *W, size_t size, ui
     ctx->gguf_tbuf_count++;
     *delta = (uint32_t)(off - lo);
     return buf;
+}
+
+// Phase C S4: lazy zero-copy wrap of the staged-BF16 conversion buffer.
+// The stage is a static heap buffer finalized after open_gguf (which runs
+// after metal_setup), so the wrap is created on first use. Lets the chunked
+// GGUF path bind staged tensors (norms) at exact stage offsets.
+static id<MTLBuffer> gguf_stage_mirror_get(MetalCtx *ctx) {
+    if (!ctx->gguf_stage_gpu && g_gguf_stage && g_gguf_stage_len > 0) {
+        ctx->gguf_stage_gpu = [ctx->device newBufferWithBytesNoCopy:g_gguf_stage
+                                                             length:g_gguf_stage_len
+                                                            options:MTLResourceStorageModeShared
+                                                        deallocator:nil];
+    }
+    return ctx->gguf_stage_gpu;
+}
+
+// Phase C S4: GGUF expert pool slot size = max slab_total over all layers
+// (gate+up+down per expert) rounded up to 2MB. Q4_K-only layers are ~1.7MB;
+// layers with a Q6_K down_proj are ~4.1MB → 4MB slots.
+static size_t gguf_exp_alloc_size(void) {
+    size_t max_slab = 0;
+    for (int l = 0; l < NUM_LAYERS; l++) {
+        size_t total = gguf_experts[l].gate_slab + gguf_experts[l].up_slab + gguf_experts[l].down_slab;
+        if (total > max_slab) max_slab = total;
+    }
+    return (max_slab + 2*1024*1024 - 1) & ~(size_t)(2*1024*1024 - 1);
+}
+
+// Phase C S4: lazy GGUF expert-slab pool (copy-pool for chunked prefill).
+// Same memory-budget ladder as the packed pool (64 → 32 → 16 → 0), computed
+// against the 4MB slot size. 0 slots = per-position fallback path.
+static id<MTLBuffer> gguf_pool_get(MetalCtx *ctx) {
+    if (!g_gguf_stage) return NULL;
+    if (!ctx->buf_pool_expert_data_gguf) {
+        size_t exp_alloc = gguf_exp_alloc_size();
+        g_gguf_exp_alloc = exp_alloc;
+        int p = 64;
+        size_t avail = get_available_memory();
+        while (p >= 16 && (avail < (size_t)p * exp_alloc + (size_t)512 * 1024 * 1024)) p /= 2;
+        if (avail < (size_t)16 * exp_alloc + (size_t)512 * 1024 * 1024) p = 0;
+        g_pf_pool_slots_gguf = p;
+        if (p > 0) {
+            void *pool_aligned = NULL;
+            size_t pool_bytes = (size_t)p * exp_alloc;
+            posix_memalign(&pool_aligned, 2*1024*1024, pool_bytes);
+            memset(pool_aligned, 0, pool_bytes);
+            ctx->buf_pool_expert_data_gguf = [ctx->device newBufferWithBytesNoCopy:pool_aligned
+                                                                            length:pool_bytes
+                                                                           options:MTLResourceStorageModeShared
+                                                                       deallocator:nil];
+            fprintf(stderr, "[pf-pool-gguf] %d expert slots (%.0f MB), pool mode for chunks <= %d positions\n",
+                    p, (double)pool_bytes / 1e6, p / MAX_K);
+        } else {
+            fprintf(stderr, "[pf-pool-gguf] disabled (insufficient memory) — per-position GGUF expert path\n");
+        }
+    }
+    return ctx->buf_pool_expert_data_gguf;
 }
 
 // GGUF Q4_K/Q6_K matvec on GPU. Returns 1 on success (out filled), 0 if the
@@ -3251,6 +3329,24 @@ static void gpu_encode_prefill_matvec(
         // wrap failed — leave the output stale is not acceptable; the caller
         // cannot handle this path (chunked prefill is gated off for GGUF
         // until S3 completes), so this is unreachable in practice.
+    }
+
+    // Phase C S4: bits-0 staged-BF16 tensors (GGUF mode) — bind the stage
+    // mirror at the tensor's stage offset. The staged tensors live in a
+    // heap buffer (not wf_buf), so the wf_buf pointer diff above is garbage.
+    if (bits == 0 && g_gguf_stage && ctx->gguf_stage_gpu) {
+        NSUInteger stage_off = (NSUInteger)((const char *)W - (const char *)g_gguf_stage);
+        [enc setComputePipelineState:ctx->gemv_bf16_prefill];
+        [enc setBuffer:ctx->gguf_stage_gpu offset:stage_off atIndex:0];
+        [enc setBuffer:in_buf     offset:0     atIndex:1];
+        [enc setBuffer:out_buf    offset:out_offset atIndex:2];
+        [enc setBytes:&out_dim length:4 atIndex:3];
+        [enc setBytes:&in_dim  length:4 atIndex:4];
+        [enc dispatchThreadgroups:MTLSizeMake((uint64_t)M * out_dim, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        [enc endEncoding];
+        return;
     }
 
     if (!scales || !biases) {
@@ -10619,16 +10715,31 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
 
 // Chunk mode prerequisites: fused GPU delta-net + default async-pread expert
 // path (no malloc cache / Metal LRU / LZ4 / CPU experts).
-// GGUF mode excluded: the prefill encoders don't know Q4_K/Q6_K (bits 10/11)
-// yet and would misroute those specs to gemv_bf16_prefill (Phase C S0 fix;
-// re-enabled once dequant_matvec_qk_prefill lands in S3).
+// GGUF mode: FINCHMOE_GGUF_CHUNK env gate (the S0 hazard guard originally
+// excluded GGUF entirely — the prefill encoders didn't know Q4_K/Q6_K bits
+// 10/11; S3 landed dequant_matvec_qk_prefill, S4 lands the driver branch).
+static int gguf_chunk_enabled(void) {
+    static int parsed = 0, val = 0;
+    if (!parsed) {
+        const char *e = getenv("FINCHMOE_GGUF_CHUNK");
+        val = !(e && strcmp(e, "0") == 0);   // unset/1 = on, 0 = escape hatch
+        parsed = 1;
+    }
+    return val;
+}
+
 static int prefill_chunk_available(void) {
-    return g_prefill_chunk > 0 &&
-           gpu_linear_attn_enabled && !linear_attn_bypass &&
-           g_metal && g_metal->fused_gdn_full && g_metal->fused_gdn_batched &&
-           g_metal->matvec_prefill_4bit && g_metal->gemv_bf16_prefill &&
-           !g_malloc_cache && !g_expert_cache && !g_use_lz4 && !g_cpu_experts &&
-           !g_gguf_stage;
+    if (!(g_prefill_chunk > 0 && g_metal &&
+          !g_malloc_cache && !g_expert_cache && !g_use_lz4 && !g_cpu_experts))
+        return 0;
+    if (g_gguf_stage) {
+        // Phase C S4: GGUF chunked driver. Enabled in the C3 commit — until
+        // then the branch stays off so the S0 hazard guard holds.
+        return 0 && gguf_chunk_enabled();
+    }
+    return gpu_linear_attn_enabled && !linear_attn_bypass &&
+           g_metal->fused_gdn_full && g_metal->fused_gdn_batched &&
+           g_metal->matvec_prefill_4bit && g_metal->gemv_bf16_prefill;
 }
 
 // Chunked prefill driver: replaces the per-token prefill loops.
