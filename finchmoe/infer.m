@@ -2078,6 +2078,7 @@ typedef struct {
     id<MTLComputePipelineState> matvec_8bit;  // 8-bit expert dequant kernel
     id<MTLComputePipelineState> matvec_qk;    // Phase C: GGUF Q4_K/Q6_K dequant matvec
     id<MTLComputePipelineState> fused_gate_up_swiglu_qk_pipe;  // Phase C S2: GGUF expert gate+up+SwiGLU
+    id<MTLComputePipelineState> matvec_qk_prefill;  // Phase C S3: batched QK prefill matvec
     // Phase C: per-tensor page-aligned zero-copy wraps for GGUF Q4_K/Q6_K
     // tensors. The whole 21.7GB mmap can't be wrapped as one Metal buffer
     // (the driver rejects ~>8GB), and the tensors are only 32-byte aligned —
@@ -2287,6 +2288,7 @@ static MetalCtx *metal_setup(void) {
     ctx->matvec_3bit   = makePipe(@"dequant_matvec_3bit");
     ctx->matvec_qk     = makePipe(@"dequant_matvec_qk");      // Phase C: GGUF Q4_K/Q6_K
     ctx->fused_gate_up_swiglu_qk_pipe = makePipe(@"fused_gate_up_swiglu_qk");  // Phase C S2
+    ctx->matvec_qk_prefill = makePipe(@"dequant_matvec_qk_prefill");            // Phase C S3
     ctx->matvec_8bit   = makePipe(@"dequant_matvec_8bit");
     ctx->fused_gate_up_swiglu_pipe      = makePipe(@"fused_gate_up_swiglu");
     ctx->fused_gate_up_swiglu_8bit_pipe = makePipe(@"fused_gate_up_swiglu_8bit");
@@ -3223,6 +3225,33 @@ static void gpu_encode_prefill_matvec(
     // residual_norm dispatch — without the barrier the GPU may serve stale
     // cache lines (the run-to-run ~1e-2 logit wobble root cause).
     [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+    // Phase C S3: GGUF Q4_K/Q6_K specs (bits 10/11, scales==NULL) — the
+    // batched block-dequant kernel reading a per-tensor wrapped buffer.
+    if ((bits == 10 || bits == 11) && ctx->matvec_qk_prefill) {
+        size_t row_bytes = (size_t)(in_dim / 256) * (bits == 10 ? 144 : 210);
+        uint32_t delta = 0;
+        id<MTLBuffer> tbuf = gguf_tbuf_get(ctx, W, row_bytes * (size_t)out_dim, &delta);
+        if (tbuf) {
+            [enc setComputePipelineState:ctx->matvec_qk_prefill];
+            [enc setBuffer:tbuf     offset:delta      atIndex:0];
+            [enc setBuffer:in_buf   offset:0          atIndex:3];
+            [enc setBuffer:out_buf  offset:out_offset atIndex:4];
+            uint32_t gt = (uint32_t)(bits == 10 ? 12 : 14);
+            [enc setBytes:&out_dim length:4 atIndex:5];
+            [enc setBytes:&in_dim  length:4 atIndex:6];
+            [enc setBytes:&gt      length:4 atIndex:7];
+            uint32_t num_row_tiles = (out_dim + 7) / 8;
+            [enc dispatchThreadgroups:MTLSizeMake((uint64_t)M * num_row_tiles, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            [enc endEncoding];
+            return;
+        }
+        // wrap failed — leave the output stale is not acceptable; the caller
+        // cannot handle this path (chunked prefill is gated off for GGUF
+        // until S3 completes), so this is unreachable in practice.
+    }
 
     if (!scales || !biases) {
         // BF16 GEMV: grid linearized m * out_dim + row
