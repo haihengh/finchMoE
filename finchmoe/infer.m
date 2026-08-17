@@ -11117,11 +11117,14 @@ static void process_chat_request(ServeState *s, int client_fd,
     float *hidden = calloc(HIDDEN_DIM, sizeof(float));
     float *logits = calloc(VOCAB_SIZE, sizeof(float));
 
-    // Session continuation: disabled by default — the incremental path
-    // corrupts context after turn 1 (template tokens leak into responses).
-    // FINCHMOE_SERVE_CONTINUE=1 re-enables it for debugging the state leak.
+    // Session continuation: enabled — the same session_id continues the
+    // conversation from the previous turn's KV/GDN state. (Previously
+    // disabled after the "template tokens leak" bug; that leak was caused
+    // by truncated turns poisoning the next continuation, now handled by
+    // the pre-turn snapshot rollback below. FINCHMOE_SERVE_NOCONTINUE=1
+    // restores stateless per-turn mode for debugging.)
     int is_continuation = 0;
-    if (getenv("FINCHMOE_SERVE_CONTINUE")) {
+    if (!getenv("FINCHMOE_SERVE_NOCONTINUE")) {
         is_continuation = (has_session &&
                            s->active_session_id[0] != '\0' &&
                            strcmp(session_id, s->active_session_id) == 0);
