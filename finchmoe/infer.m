@@ -769,6 +769,7 @@ typedef struct {
 } WeightFile;
 
 static void *g_gguf_stage = NULL;
+static void *g_gguf_data_base = NULL;   // the GGUF mmap base (Phase C tensor wraps)
 
 static WeightFile *open_weights(const char *bin_path, const char *json_path) {
     // mmap the binary file
@@ -1127,6 +1128,7 @@ static WeightFile *open_gguf(const char *path) {
     // special offset marker: we store the stage pointer delta in the offset
     // and translate in get_tensor_ptr.
     g_gguf_stage = stage;
+    g_gguf_data_base = data;
     wf->gguf_stage = stage;
     g_gguf_fd = open(path, O_RDONLY);  // for the expert preads
     return wf;
@@ -2074,6 +2076,15 @@ typedef struct {
     id<MTLComputePipelineState> matvec_2bit;  // 2-bit expert dequant kernel
     id<MTLComputePipelineState> matvec_3bit;  // 3-bit expert dequant kernel
     id<MTLComputePipelineState> matvec_8bit;  // 8-bit expert dequant kernel
+    id<MTLComputePipelineState> matvec_qk;    // Phase C: GGUF Q4_K/Q6_K dequant matvec
+    // Phase C: per-tensor page-aligned zero-copy wraps for GGUF Q4_K/Q6_K
+    // tensors. The whole 21.7GB mmap can't be wrapped as one Metal buffer
+    // (the driver rejects ~>8GB), and the tensors are only 32-byte aligned —
+    // so each wrap starts at the tensor's 16KB page floor and the kernel gets
+    // the sub-page offset via setBuffer:offset:.
+    #define MAX_GGUF_TBUFS 1024
+    struct { size_t off; id<MTLBuffer> buf; } gguf_tbufs[MAX_GGUF_TBUFS];
+    int gguf_tbuf_count;
     id<MTLComputePipelineState> fused_gate_up_swiglu_pipe;      // 4-bit fused gate+up+swiglu
     id<MTLComputePipelineState> fused_gate_up_swiglu_8bit_pipe; // 8-bit fused gate+up+swiglu
     id<MTLComputePipelineState> fused_gate_up_swiglu_2x_pipe;   // 2-expert fused gate+up+swiglu
@@ -2273,6 +2284,7 @@ static MetalCtx *metal_setup(void) {
     ctx->matvec_1bit   = makePipe(@"dequant_matvec_1bit");
     ctx->matvec_2bit   = makePipe(@"dequant_matvec_2bit");
     ctx->matvec_3bit   = makePipe(@"dequant_matvec_3bit");
+    ctx->matvec_qk     = makePipe(@"dequant_matvec_qk");      // Phase C: GGUF Q4_K/Q6_K
     ctx->matvec_8bit   = makePipe(@"dequant_matvec_8bit");
     ctx->fused_gate_up_swiglu_pipe      = makePipe(@"fused_gate_up_swiglu");
     ctx->fused_gate_up_swiglu_8bit_pipe = makePipe(@"fused_gate_up_swiglu_8bit");
@@ -2741,6 +2753,67 @@ static void gpu_dequant_matvec(
     memcpy(out_f32, [o_buf contents], o_size);
 }
 
+// ============================================================================
+// Phase C: GGUF Q4_K/Q6_K GPU matvec helpers.
+// The whole GGUF mmap can't be wrapped as one Metal buffer (the driver
+// rejects ~>8GB), so each tensor gets its own page-aligned zero-copy wrap
+// covering [page_floor(off), page_ceil(off+size)). The kernel binds the
+// buffer with the sub-page offset via setBuffer:offset:.
+// ============================================================================
+static id<MTLBuffer> gguf_tbuf_get(MetalCtx *ctx, const void *W, size_t size, uint32_t *delta) {
+    size_t off = (size_t)((const char *)W - (const char *)g_gguf_data_base);
+    size_t page = 16384;
+    size_t lo = off & ~(page - 1);
+    for (int i = 0; i < ctx->gguf_tbuf_count; i++) {
+        if (ctx->gguf_tbufs[i].off == lo) {
+            *delta = (uint32_t)(off - lo);
+            return ctx->gguf_tbufs[i].buf;
+        }
+    }
+    if (ctx->gguf_tbuf_count >= MAX_GGUF_TBUFS) return NULL;
+    size_t hi = (off + size + page - 1) & ~(page - 1);
+    id<MTLBuffer> buf = [ctx->device newBufferWithBytesNoCopy:(void *)((char *)g_gguf_data_base + lo)
+                                                      length:hi - lo
+                                                     options:MTLResourceStorageModeShared
+                                                 deallocator:nil];
+    if (!buf) return NULL;
+    ctx->gguf_tbufs[ctx->gguf_tbuf_count].off = lo;
+    ctx->gguf_tbufs[ctx->gguf_tbuf_count].buf = buf;
+    ctx->gguf_tbuf_count++;
+    *delta = (uint32_t)(off - lo);
+    return buf;
+}
+
+// GGUF Q4_K/Q6_K matvec on GPU. Returns 1 on success (out filled), 0 if the
+// caller should fall back to gguf_cpu_matvec. in_dim <= 4096 (x_shared limit).
+static int gpu_gguf_dequant_matvec(MetalCtx *ctx, const void *W,
+                                   const float *x, float *out,
+                                   int out_dim, int in_dim, int ggml_type) {
+    if (!ctx->matvec_qk || in_dim > 4096) return 0;
+    size_t row_bytes = (size_t)(in_dim / 256) * (ggml_type == 12 ? 144 : 210);
+    uint32_t delta = 0;
+    id<MTLBuffer> tbuf = gguf_tbuf_get(ctx, W, row_bytes * (size_t)out_dim, &delta);
+    if (!tbuf) return 0;
+    memcpy([ctx->buf_input contents], x, (size_t)in_dim * sizeof(float));
+    id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:ctx->matvec_qk];
+    [enc setBuffer:tbuf offset:delta atIndex:0];
+    [enc setBuffer:ctx->buf_input offset:0 atIndex:3];
+    [enc setBuffer:ctx->buf_output offset:0 atIndex:4];
+    uint32_t od = (uint32_t)out_dim, id_ = (uint32_t)in_dim, gt = (uint32_t)ggml_type;
+    [enc setBytes:&od length:4 atIndex:5];
+    [enc setBytes:&id_ length:4 atIndex:6];
+    [enc setBytes:&gt length:4 atIndex:7];
+    [enc dispatchThreadgroups:MTLSizeMake((out_dim + 7) / 8, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    memcpy(out, [ctx->buf_output contents], (size_t)out_dim * sizeof(float));
+    return 1;
+}
+
 // Wrapper: use GPU if available and weight buffer is set, CPU otherwise
 static void fast_dequant_matvec(
     const uint32_t *W, const uint16_t *scales, const uint16_t *biases,
@@ -2748,10 +2821,15 @@ static void fast_dequant_matvec(
     int out_dim, int in_dim, int group_size, int bits
 ) {
     // BF16 path: no GPU kernel for raw BF16 matvec.
-    // GGUF mode: Q4_K/Q6_K tensors (bits 10/11) also have no scales — keep
-    // the real bits so cpu_dequant_matvec routes to the block dequant,
-    // never to the raw-BF16 read.
+    // GGUF mode: Q4_K/Q6_K tensors (bits 10/11) also have no scales — try the
+    // Phase C GPU block kernel first, else the CPU block dequant. Never the
+    // raw-BF16 read.
     if (!scales || !biases) {
+        if ((bits == 10 || bits == 11) && g_metal && g_metal->matvec_qk &&
+            gpu_gguf_dequant_matvec(g_metal, W, x, out, out_dim, in_dim,
+                                    bits == 10 ? 12 : 14)) {
+            return;
+        }
         cpu_dequant_matvec(W, NULL, NULL, x, out, out_dim, in_dim, group_size,
                            (bits == 10 || bits == 11) ? bits : 0);
         return;
@@ -2795,6 +2873,33 @@ static void gpu_batch_matvec(
 
     for (int i = 0; i < num_specs; i++) {
         BatchMatvecSpec *s = &specs[i];
+
+        // Phase C: GGUF Q4_K/Q6_K specs (bits 10/11, scales==NULL) — encode
+        // with the block-dequant kernel. Must be checked BEFORE the BF16
+        // branch (which would read Q4_K bytes as BF16).
+        if ((s->bits == 10 || s->bits == 11) && ctx->matvec_qk) {
+            size_t row_bytes = (size_t)(s->in_dim / 256) * (s->bits == 10 ? 144 : 210);
+            uint32_t delta = 0;
+            id<MTLBuffer> tbuf = gguf_tbuf_get(ctx, s->W, row_bytes * (size_t)s->out_dim, &delta);
+            if (tbuf) {
+                id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
+                [enc setComputePipelineState:ctx->matvec_qk];
+                [enc setBuffer:tbuf offset:delta atIndex:0];
+                [enc setBuffer:ctx->buf_input offset:0 atIndex:3];
+                [enc setBuffer:ctx->batch_out[s->batch_slot] offset:0 atIndex:4];
+                uint32_t od = s->out_dim, id_ = s->in_dim, gt = (uint32_t)(s->bits == 10 ? 12 : 14);
+                [enc setBytes:&od length:4 atIndex:5];
+                [enc setBytes:&id_ length:4 atIndex:6];
+                [enc setBytes:&gt length:4 atIndex:7];
+                [enc dispatchThreadgroups:MTLSizeMake((s->out_dim + 7) / 8, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [enc endEncoding];
+                continue;
+            }
+            cpu_dequant_matvec(s->W, NULL, NULL, x_f32, s->out_cpu,
+                               s->out_dim, s->in_dim, s->group_size, s->bits);
+            continue;
+        }
 
         // BF16 path: use gemv_bf16 kernel (scales/biases are NULL for unquantized weights)
         if (!s->scales || !s->biases) {
@@ -2876,6 +2981,36 @@ static void gpu_encode_batch_matvec(
 ) {
     // Check for BF16 specs — use GPU BF16 kernel
     for (int i = 0; i < num_specs; i++) {
+        // Phase C: GGUF Q4_K/Q6_K specs (bits 10/11, scales==NULL) — encode
+        // with the block-dequant kernel reading a per-tensor wrapped buffer.
+        // Must be checked BEFORE the BF16 branch below.
+        if ((specs[i].bits == 10 || specs[i].bits == 11) && ctx->matvec_qk) {
+            BatchMatvecSpec *s = &specs[i];
+            size_t row_bytes = (size_t)(s->in_dim / 256) * (s->bits == 10 ? 144 : 210);
+            uint32_t delta = 0;
+            id<MTLBuffer> tbuf = gguf_tbuf_get(ctx, s->W, row_bytes * (size_t)s->out_dim, &delta);
+            if (tbuf) {
+                id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
+                [enc setComputePipelineState:ctx->matvec_qk];
+                [enc setBuffer:tbuf offset:delta atIndex:0];
+                [enc setBuffer:ctx->buf_input offset:0 atIndex:3];
+                [enc setBuffer:ctx->batch_out[s->batch_slot] offset:0 atIndex:4];
+                uint32_t od = s->out_dim, id_ = s->in_dim, gt = (uint32_t)(s->bits == 10 ? 12 : 14);
+                [enc setBytes:&od length:4 atIndex:5];
+                [enc setBytes:&id_ length:4 atIndex:6];
+                [enc setBytes:&gt length:4 atIndex:7];
+                [enc dispatchThreadgroups:MTLSizeMake((s->out_dim + 7) / 8, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [enc endEncoding];
+                continue;
+            }
+            // wrap failed (shouldn't happen for tensors <= 8GB) — compute on
+            // CPU right here (the input is already in buf_input).
+            cpu_dequant_matvec(s->W, NULL, NULL,
+                               (const float *)[ctx->buf_input contents], s->out_cpu,
+                               s->out_dim, s->in_dim, s->group_size, s->bits);
+            continue;
+        }
         if (!specs[i].scales || !specs[i].biases) {
             BatchMatvecSpec *s = &specs[i];
             NSUInteger w_off = (NSUInteger)((const char *)s->W - (const char *)[ctx->wf_buf contents]);
@@ -3740,7 +3875,7 @@ static void fast_batch_matvec(
 ) {
     // GGUF mode: the GPU kernels don't know Q4_K/Q6_K (bits 10/11) yet —
     // stay on the CPU dequant path until the GPU block kernels land.
-    if (g_metal && g_metal->wf_buf && !g_gguf_stage) {
+    if (g_metal && (g_metal->wf_buf || g_gguf_stage)) {
         gpu_batch_matvec(g_metal, x, x_dim, specs, num_specs);
     } else {
         for (int i = 0; i < num_specs; i++) {
@@ -4995,9 +5130,14 @@ static void lm_head_forward(WeightFile *wf, const float *hidden, float *logits) 
         return;
     }
 
-    // GGUF mode: Q4_K / Q6_K block matvec (CPU — the GPU kernel is Phase C)
+    // GGUF mode: Q4_K / Q6_K block matvec (Phase C GPU kernel, CPU fallback)
     if (w_info->ggml_type == 12 || w_info->ggml_type == 14) {
         const uint8_t *W = (const uint8_t *)((char *)wf->data + w_info->offset);
+        if (g_metal && g_metal->matvec_qk &&
+            gpu_gguf_dequant_matvec(g_metal, W, hidden, logits,
+                                    VOCAB_SIZE, HIDDEN_DIM, w_info->ggml_type)) {
+            return;
+        }
         gguf_cpu_matvec(W, hidden, logits, VOCAB_SIZE, HIDDEN_DIM, w_info->ggml_type);
         return;
     }
@@ -7060,6 +7200,11 @@ static void fused_layer_forward(
                           g_metal->conv1d_step && g_metal->rms_norm_qk &&
                           g_metal->compute_decay_beta && g_metal->gated_rms_norm &&
                           g_metal->wf_buf &&
+                          // Phase C: the GDN chain reads staged BF16 tensors
+                          // (conv1d_w, A_log, dt_bias, gated_norm_w) whose
+                          // wf_buf offsets would be garbage in GGUF mode —
+                          // the chain stays CPU there.
+                          !g_gguf_stage &&
                           linear_layer_idx >= 0 && linear_layer_idx < NUM_LINEAR_LAYERS &&
                           lc->conv1d_w && lc->A_log && lc->dt_bias && lc->gated_norm_w &&
                           !linear_attn_bypass);
@@ -7173,7 +7318,10 @@ static void fused_layer_forward(
 
         // Submit CMD1: attention projections
         if (g_timing_enabled) { t0 = now_ms(); }
-        if (g_metal && g_metal->wf_buf && !g_gguf_stage && num_attn_specs > 0) {
+        // Phase C: GGUF mode now uses the GPU batch matvec too (bits 10/11
+        // encode via per-tensor wrapped buffers) — the GDN chain below stays
+        // CPU (can_gpu_linear is gated on !g_gguf_stage).
+        if (g_metal && (g_metal->wf_buf || g_gguf_stage) && num_attn_specs > 0) {
             if (getenv("FINCHMOE_PF_DUMP") && pos == 1 && layer_idx == 0) {
                 static FILE *pf_st = NULL;
                 if (!pf_st) pf_st = fopen("/tmp/state_per_token.bin", "wb");
@@ -10319,12 +10467,16 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
 
 // Chunk mode prerequisites: fused GPU delta-net + default async-pread expert
 // path (no malloc cache / Metal LRU / LZ4 / CPU experts).
+// GGUF mode excluded: the prefill encoders don't know Q4_K/Q6_K (bits 10/11)
+// yet and would misroute those specs to gemv_bf16_prefill (Phase C S0 fix;
+// re-enabled once dequant_matvec_qk_prefill lands in S3).
 static int prefill_chunk_available(void) {
     return g_prefill_chunk > 0 &&
            gpu_linear_attn_enabled && !linear_attn_bypass &&
            g_metal && g_metal->fused_gdn_full && g_metal->fused_gdn_batched &&
            g_metal->matvec_prefill_4bit && g_metal->gemv_bf16_prefill &&
-           !g_malloc_cache && !g_expert_cache && !g_use_lz4 && !g_cpu_experts;
+           !g_malloc_cache && !g_expert_cache && !g_use_lz4 && !g_cpu_experts &&
+           !g_gguf_stage;
 }
 
 // Chunked prefill driver: replaces the per-token prefill loops.
@@ -12209,13 +12361,15 @@ int main(int argc, char **argv) {
         io_pool_init();
 
         // ---- Initialize malloc expert cache (if requested) ----
-        if (malloc_cache_entries > 0) {
+        // (Dead weight in GGUF mode — the expert slabs live in the mmap and
+        // are read directly; the cache would pre-allocate GBs never used.)
+        if (malloc_cache_entries > 0 && !gguf_path) {
             g_malloc_cache = malloc_cache_init(malloc_cache_entries, g_metal ? g_metal->device : MTLCreateSystemDefaultDevice());
             cache_entries = 0;  // disable Metal LRU cache when malloc cache is active
         }
 
         // ---- Initialize expert LRU cache ----
-        if (cache_entries > 0 && g_metal) {
+        if (cache_entries > 0 && g_metal && !gguf_path) {
             g_expert_cache = expert_cache_new(g_metal->device, cache_entries);
         }
 
