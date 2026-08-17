@@ -2077,12 +2077,13 @@ typedef struct {
     id<MTLComputePipelineState> matvec_3bit;  // 3-bit expert dequant kernel
     id<MTLComputePipelineState> matvec_8bit;  // 8-bit expert dequant kernel
     id<MTLComputePipelineState> matvec_qk;    // Phase C: GGUF Q4_K/Q6_K dequant matvec
+    id<MTLComputePipelineState> fused_gate_up_swiglu_qk_pipe;  // Phase C S2: GGUF expert gate+up+SwiGLU
     // Phase C: per-tensor page-aligned zero-copy wraps for GGUF Q4_K/Q6_K
     // tensors. The whole 21.7GB mmap can't be wrapped as one Metal buffer
     // (the driver rejects ~>8GB), and the tensors are only 32-byte aligned —
     // so each wrap starts at the tensor's 16KB page floor and the kernel gets
     // the sub-page offset via setBuffer:offset:.
-    #define MAX_GGUF_TBUFS 1024
+    #define MAX_GGUF_TBUFS 4096   // tensors (~520) + expert slabs (40 layers × 8 × 3 = 960)
     struct { size_t off; id<MTLBuffer> buf; } gguf_tbufs[MAX_GGUF_TBUFS];
     int gguf_tbuf_count;
     id<MTLComputePipelineState> fused_gate_up_swiglu_pipe;      // 4-bit fused gate+up+swiglu
@@ -2285,6 +2286,7 @@ static MetalCtx *metal_setup(void) {
     ctx->matvec_2bit   = makePipe(@"dequant_matvec_2bit");
     ctx->matvec_3bit   = makePipe(@"dequant_matvec_3bit");
     ctx->matvec_qk     = makePipe(@"dequant_matvec_qk");      // Phase C: GGUF Q4_K/Q6_K
+    ctx->fused_gate_up_swiglu_qk_pipe = makePipe(@"fused_gate_up_swiglu_qk");  // Phase C S2
     ctx->matvec_8bit   = makePipe(@"dequant_matvec_8bit");
     ctx->fused_gate_up_swiglu_pipe      = makePipe(@"fused_gate_up_swiglu");
     ctx->fused_gate_up_swiglu_8bit_pipe = makePipe(@"fused_gate_up_swiglu_8bit");
@@ -2811,6 +2813,93 @@ static int gpu_gguf_dequant_matvec(MetalCtx *ctx, const void *W,
     [cb commit];
     [cb waitUntilCompleted];
     memcpy(out, [ctx->buf_output contents], (size_t)out_dim * sizeof(float));
+    return 1;
+}
+
+// Phase C S2: GGUF routed experts on GPU. One command buffer per layer:
+// per expert, a fused gate+up+SwiGLU (Q4_K slabs read from per-tensor wraps,
+// no pread/copies) into buf_expert_act, then the down matvec (dequant_matvec_qk
+// with x = buf_expert_act) into buf_multi_expert_out[k]. Returns 1 on success
+// (moe_out accumulated with the same weighted-combine semantics as the CPU
+// path), 0 if any wrap/pipeline is missing (caller falls back to CPU).
+static int gpu_gguf_experts_forward(MetalCtx *ctx, WeightFile *wf, int layer_idx,
+                                    const float *h_post,
+                                    const int *expert_indices, const float *expert_weights,
+                                    int K, float *moe_out) {
+    if (!ctx->fused_gate_up_swiglu_qk_pipe || !ctx->matvec_qk) return 0;
+    GgufExpertInfo *ge = &gguf_experts[layer_idx];
+    if (ge->gate_type != 12 || ge->up_type != 12) return 0;  // fused kernel is Q4_K-only
+
+    uint32_t gd[8], ud[8], dd[8];
+    id<MTLBuffer> gb[8], ub[8], db[8];
+    for (int k = 0; k < K; k++) {
+        int eidx = expert_indices[k];
+        const uint8_t *gate_slab = (const uint8_t *)wf->data + ge->gate_off + (size_t)eidx * ge->gate_slab;
+        const uint8_t *up_slab   = (const uint8_t *)wf->data + ge->up_off   + (size_t)eidx * ge->up_slab;
+        const uint8_t *down_slab = (const uint8_t *)wf->data + ge->down_off + (size_t)eidx * ge->down_slab;
+        gb[k] = gguf_tbuf_get(ctx, gate_slab, ge->gate_slab, &gd[k]);
+        ub[k] = gguf_tbuf_get(ctx, up_slab,   ge->up_slab,   &ud[k]);
+        db[k] = gguf_tbuf_get(ctx, down_slab, ge->down_slab, &dd[k]);
+        if (!gb[k] || !ub[k] || !db[k]) return 0;
+    }
+
+    memcpy([ctx->buf_multi_expert_input contents], h_post, HIDDEN_DIM * sizeof(float));
+    id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+    for (int k = 0; k < K; k++) {
+        int eidx = expert_indices[k];
+        NSUInteger g_off = (NSUInteger)gd[k];
+        NSUInteger u_off = (NSUInteger)ud[k];
+        NSUInteger d_off = (NSUInteger)dd[k];
+        uint32_t od = MOE_INTERMEDIATE, id_ = HIDDEN_DIM;
+        // fused gate+up+SwiGLU -> buf_expert_act
+        {
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:ctx->fused_gate_up_swiglu_qk_pipe];
+            [enc setBuffer:gb[k] offset:gd[k] atIndex:0];
+            [enc setBuffer:ub[k] offset:ud[k] atIndex:1];
+            [enc setBuffer:ctx->buf_multi_expert_input offset:0 atIndex:2];
+            [enc setBuffer:ctx->buf_expert_act offset:0 atIndex:3];
+            [enc setBytes:&od length:4 atIndex:4];
+            [enc setBytes:&id_ length:4 atIndex:5];
+            [enc dispatchThreadgroups:MTLSizeMake(MOE_INTERMEDIATE, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            [enc endEncoding];
+        }
+        // down: buf_expert_act -> buf_multi_expert_out[k] offset 0
+        {
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            uint32_t dod = HIDDEN_DIM, did = MOE_INTERMEDIATE, dgt = (uint32_t)ge->down_type;
+            [enc setComputePipelineState:ctx->matvec_qk];
+            [enc setBuffer:db[k] offset:dd[k] atIndex:0];
+            [enc setBuffer:ctx->buf_expert_act offset:0 atIndex:3];
+            [enc setBuffer:ctx->buf_multi_expert_out[k] offset:0 atIndex:4];
+            [enc setBytes:&dod length:4 atIndex:5];
+            [enc setBytes:&did length:4 atIndex:6];
+            [enc setBytes:&dgt length:4 atIndex:7];
+            [enc dispatchThreadgroups:MTLSizeMake((HIDDEN_DIM + 7) / 8, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            [enc endEncoding];
+        }
+    }
+    [cb commit];
+    [cb waitUntilCompleted];
+
+    // CPU combine — mirrors the CPU fallback (weighted madd + finite guard
+    // + total-weight renormalization).
+    float total_weight = 0.0f;
+    for (int k = 0; k < K; k++) {
+        float *expert_out = (float *)[ctx->buf_multi_expert_out[k] contents];
+        float er = 0.0f;
+        for (int j = 0; j < HIDDEN_DIM; j++) er += expert_out[j] * expert_out[j];
+        if (isfinite(er) && er < 1e20f) {
+            cpu_vec_madd(moe_out, expert_out, expert_weights[k], HIDDEN_DIM);
+            total_weight += expert_weights[k];
+        }
+    }
+    if (total_weight > 0.0f && total_weight < 0.99f) {
+        float inv_tw = 1.0f / total_weight;
+        for (int i = 0; i < HIDDEN_DIM; i++) moe_out[i] *= inv_tw;
+    }
     return 1;
 }
 
@@ -9053,9 +9142,30 @@ static void fused_layer_forward(
     if (g_gguf_stage) {
         // GGUF mode: routed experts are stacked Q4_K/Q6_K slabs in the mmap —
         // zero-copy reads straight from the mapped file (no packed files).
+        // Phase C S2: the GPU path dispatches the slabs from per-tensor wraps;
+        // the CPU loop below is the fallback (--cpu-experts or wrap failure).
         GgufExpertInfo *ge = &gguf_experts[layer_idx];
         float *expert_out_cpu = malloc(HIDDEN_DIM * sizeof(float));
         float total_weight = 0.0f;
+        // The GPU expert dispatch is verified bit-correct (CPU-vs-GPU parity
+        // cos 1.000000) but SLOWER than the CPU fallback today: the per-layer
+        // commit+wait serializes the pipeline and the slab pages churn the
+        // GPU residency (the lm_head slows 45->447ms). Gated behind
+        // FINCHMOE_GGUF_GPU_EXPERTS until the deferred/overlap dispatch lands.
+        int experts_on_gpu = 0;
+        if (!g_cpu_experts && g_metal && getenv("FINCHMOE_GGUF_GPU_EXPERTS")) {
+            double t_exp = now_ms();
+            experts_on_gpu = gpu_gguf_experts_forward(g_metal, wf, layer_idx, h_post,
+                                                      expert_indices, expert_weights, K, moe_out);
+            if (getenv("FINCHMOE_EXPTIME") && layer_idx < 40) {
+                static double acc = 0; static int n = 0;
+                acc += now_ms() - t_exp; n++;
+                if (n % 40 == 0) fprintf(stderr, "[exptime] avg %.3f ms/layer (n=%d)\n", acc / n, n);
+            }
+        }
+        if (experts_on_gpu) {
+            // moe_out already accumulated + renormalized by the GPU path
+        } else {
         for (int k = 0; k < K; k++) {
             int eidx = expert_indices[k];
             const uint8_t *gate_slab = (const uint8_t *)wf->data + ge->gate_off + (size_t)eidx * ge->gate_slab;
@@ -9102,6 +9212,7 @@ static void fused_layer_forward(
             float inv_tw = 1.0f / total_weight;
             for (int i = 0; i < HIDDEN_DIM; i++) moe_out[i] *= inv_tw;
         }
+        }  // else (CPU expert loop)
         // CPU shared expert (mirrors the packed-file paths below)
         float *shared_act = calloc(SHARED_INTERMEDIATE, sizeof(float));
         cpu_swiglu(shared_gate, shared_up, shared_act, SHARED_INTERMEDIATE);
@@ -12873,12 +12984,18 @@ int main(int argc, char **argv) {
 
             for (int layer = 0; layer < NUM_LAYERS; layer++) {
                 int is_full = ((layer + 1) % FULL_ATTN_INTERVAL == 0);
+                double t_lay = now_ms();
                 fused_layer_forward(wf, layer, hidden,
                                     is_full ? kv_caches[layer] : NULL,
                                     is_full ? NULL : layer_states[layer],
                                     pos,
                                     layer_mmaps[layer] != MAP_FAILED ? layer_mmaps[layer] : NULL,
                                     K, layer_fds[layer]);
+                if (getenv("FINCHMOE_LAYERTIME")) {
+                    static double acc_l = 0; static int n_l = 0;
+                    acc_l += now_ms() - t_lay; n_l++;
+                    if (n_l % 40 == 0) fprintf(stderr, "[layertime] avg %.3f ms/layer (n=%d)\n", acc_l / n_l, n_l);
+                }
                 { float hr=0; for(int j=0;j<HIDDEN_DIM;j++) hr+=hidden[j]*hidden[j];
                   hr=sqrtf(hr/HIDDEN_DIM);
                   if(!isfinite(hr)) fprintf(stderr,"[LOOP] layer %d: hidden rms=nan!\n",layer); }
