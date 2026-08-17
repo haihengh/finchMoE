@@ -2962,3 +2962,131 @@ kernel void fused_gdn_batched(
 
     }
 }
+
+// ============================================================================
+// Phase C: GGUF Q4_K / Q6_K block dequant-matvec (the GGUF-path GPU kernels).
+// Structural clone of dequant_matvec_4bit_v3: ROWS_PER_TG 8, 256 threads,
+// one row per simdgroup, cooperative x_shared load, lane-strided words,
+// FMA-folded dequant. The per-word decode replaces the nibble decode with
+// ggml's block_q4_K / block_q6_K layouts (matches gguf_dequant_row in
+// infer.m bit-for-bit for fp16 and scale unpacking).
+// ============================================================================
+
+// ggml_compute_fp16_to_fp32: the h<<16 pattern is only the first step — the
+// exponent must be re-normalized and denormals handled. Bit-exact replica of
+// fp16_to_f32 in infer.m (must match: Q4_K's d/dmin and Q6_K's d are fp16).
+static float m_fp16_to_f32(uint h) {
+    uint w = h << 16;
+    uint sign = w & 0x80000000u;
+    uint two_w = w + w;
+    uint exp_offset = 0xE0u << 23;
+    float exp_scale = 0x1.0p-112f;
+    float normalized = as_type<float>((two_w >> 4) + exp_offset) * exp_scale;
+    uint magic_mask = 126u << 23;
+    float magic_bias = 0.5f;
+    float denorm = as_type<float>((two_w >> 17) | magic_mask) - magic_bias;
+    uint denorm_cutoff = 1u << 27;
+    uint result = sign | (two_w < denorm_cutoff ? as_type<uint>(denorm)
+                                                : as_type<uint>(normalized));
+    return as_type<float>(result);
+}
+
+// get_scale_min_k4 (llama.cpp dequantize_row_q4_K) — 6-bit scale/min pairs.
+static uchar2 get_scale_min_k4(uint j, device const uchar* scales) {
+    uchar sc, m;
+    if (j < 4) {
+        sc = scales[j + 0] & 63;
+        m  = scales[j + 4] & 63;
+    } else {
+        sc = (scales[j + 4] & 0xF) | ((scales[j - 4] >> 6) << 4);
+        m  = (scales[j + 4] >> 4) | ((scales[j - 0] >> 6) << 4);
+    }
+    return uchar2(sc, m);
+}
+
+#define ROWS_PER_TG_QK 8
+
+kernel void dequant_matvec_qk(
+    device const uchar*  W          [[buffer(0)]],  // tensor base (per-tensor wrapped buffer)
+    device const float*  x          [[buffer(3)]],  // [in_dim]
+    device float*        out        [[buffer(4)]],  // [out_dim]
+    constant uint&       out_dim    [[buffer(5)]],
+    constant uint&       in_dim     [[buffer(6)]],
+    constant uint&       ggml_type  [[buffer(7)]],  // 12 = Q4_K, 14 = Q6_K
+    uint tgid      [[threadgroup_position_in_grid]],
+    uint lid       [[thread_position_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = tgid * ROWS_PER_TG_QK + simd_group;
+    uint words = in_dim / 8;   // 8 values per word
+    uint blocks = in_dim / 256;
+    uint row_bytes = blocks * (ggml_type == 12 ? 144u : 210u);
+
+    threadgroup float x_shared[4096];
+    for (uint i = lid; i < in_dim; i += 256) x_shared[i] = x[i];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (row >= out_dim) return;
+
+    device const uchar* w_row = W + (ulong)row * row_bytes;
+    float acc = 0.0f;
+
+    for (uint w = simd_lane; w < words; w += 32) {
+        uint block = w >> 5;
+        uint wb = w & 31;
+        device const uchar* b = w_row + (ulong)block * (ggml_type == 12 ? 144u : 210u);
+        uint xb = w * 8;
+
+        if (ggml_type == 12) {
+            // ---- Q4_K: 144B/256. d(+0) mmin(+2) fp16, scales(+4, 12B),
+            // q(+16, 128B). 4 sub-blocks of 64: 32B each, low nibbles then
+            // high nibbles of the SAME bytes; (sc,m) change every 32 values.
+            float d    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 0)));
+            float mmin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 2)));
+            uint j    = (wb >> 3) * 2 + ((wb >> 2) & 1);   // scale-pair index
+            uint nhalf = (wb >> 2) & 1;                    // 0 = low nibbles
+            uchar2 sm = get_scale_min_k4(j, b + 4);
+            float dsc = d * (float)sm.x;
+            float mm  = mmin * (float)sm.y;
+            // 8 consecutive q bytes (8-byte aligned within the 32B sub-block)
+            ulong qbytes = *(device ulong*)(b + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+            for (uint i = 0; i < 8; i++) {
+                // 8 bits per byte: byte i's nibble lives at shift 8*i (+4 high)
+                uint nib = (uint)((qbytes >> (8 * i + 4 * nhalf)) & 0xF);
+                float xv = x_shared[xb + i];
+                // NOTE: the fma(a, dsc*xv, -mm*xv) form miscompiled to 0 on
+                // the M4 Metal compiler (verified in isolation 2026-08-17) —
+                // use the direct form: (nib*dsc - mm)*xv.
+                acc += ((float)nib * dsc - mm) * xv;
+            }
+        } else {
+            // ---- Q6_K: 210B/256. ql(+0, 128B), qh(+128, 64B),
+            // int8 scales(+192, 16B), d fp16 at +208. 6-bit values:
+            // (ql nibble | (qh 2-bit << 4)) - 32; scale index = (vi>>4)&7
+            // per 128-chunk. 210*block ≡ 2 mod 4 — BYTE loads only.
+            uint chunk = wb >> 4;
+            uint wbp   = wb & 15;
+            float d    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 208)));
+            int sc = (int)b[192 + chunk * 8 + (wbp >> 1)];
+            if (sc >= 128) sc -= 256;                       // int8 sign-extend
+            float dsc = d * (float)sc;
+            uint vb = wbp * 8;
+            for (uint i = 0; i < 8; i++) {
+                uint vi = vb + i;
+                uint qb = chunk * 64 + (vi & 63);
+                uint hb = chunk * 32 + (vi & 31);
+                uint sh = 2 * ((vi >> 5) & 3);
+                // ql byte = vi&63 serves q1+q2 (low nibble, vi<64) and
+                // q3+q4 (high nibble, vi>=64) — the split is at vi>>6, NOT
+                // at the 64-byte ql window edge.
+                uint nib = (b[qb] >> (4 * ((vi >> 6) & 1))) & 0xF;
+                uint qraw = nib | (((b[128 + hb] >> sh) & 3) << 4);
+                float xv = x_shared[xb + i];
+                acc += dsc * ((float)qraw - 32.0f) * xv;
+            }
+        }
+    }
+
+    float sum = simd_sum(acc);
+    if (simd_lane == 0) out[row] = sum;
+}
