@@ -7227,6 +7227,176 @@ static void gpu_encode_gdn_chain(MetalCtx *ctx, id<MTLCommandBuffer> cmdbuf,
     }
 }
 
+// CPU linear-attention chain for one position: conv1d + q/k RMSNorm +
+// GDN recurrence + RMSNormGated. Inputs are the CMD1 projection outputs
+// (static scratch). Updates la_state->conv_state (CPU) and, when the GPU
+// recurrence pipeline exists, buf_delta_state[linear_layer_idx] in place.
+// Returns s_gated_out (static scratch). Shared by the per-token path and
+// the chunked GGUF driver's CPU fallback.
+static float *linear_attn_chain_cpu(LayerWeightCache *lc, LinearAttnState *la_state,
+                                    int layer_idx,
+                                    const float *qkv_out, const float *z_out,
+                                    const float *beta_out, const float *alpha_out) {
+    int qkv_dim = LINEAR_CONV_DIM;
+
+    // Conv1d step
+    uint16_t *conv_w = lc->conv1d_w;
+    float *conv_out = s_conv_out;
+    memset(conv_out, 0, qkv_dim * sizeof(float));
+    if (conv_w) {
+        cpu_conv1d_step(la_state->conv_state, qkv_out, conv_w, conv_out,
+                        qkv_dim, CONV_KERNEL_SIZE);
+    }
+    // Update conv state
+    memmove(la_state->conv_state, la_state->conv_state + qkv_dim,
+            (CONV_KERNEL_SIZE - 2) * qkv_dim * sizeof(float));
+    memcpy(la_state->conv_state + (CONV_KERNEL_SIZE - 2) * qkv_dim, qkv_out,
+           qkv_dim * sizeof(float));
+
+    // Split into q, k, v
+    float *lin_q = conv_out;
+    float *lin_k = conv_out + LINEAR_TOTAL_KEY;
+    float *lin_v = conv_out + 2 * LINEAR_TOTAL_KEY;
+
+    // RMS normalize q and k
+    float inv_scale = 1.0f / sqrtf((float)LINEAR_KEY_DIM);
+    for (int h = 0; h < LINEAR_NUM_K_HEADS; h++) {
+        float *qh = lin_q + h * LINEAR_KEY_DIM;
+        cpu_rms_norm_bare(qh, qh, LINEAR_KEY_DIM, 1e-6f);
+        float q_scale = inv_scale * inv_scale;
+        for (int d = 0; d < LINEAR_KEY_DIM; d++) qh[d] *= q_scale;
+    }
+    for (int h = 0; h < LINEAR_NUM_K_HEADS; h++) {
+        float *kh = lin_k + h * LINEAR_KEY_DIM;
+        cpu_rms_norm_bare(kh, kh, LINEAR_KEY_DIM, 1e-6f);
+        for (int d = 0; d < LINEAR_KEY_DIM; d++) kh[d] *= inv_scale;
+    }
+
+    // Gated delta net recurrence
+    float *A_log = lc->A_log;
+    uint16_t *dt_bias_bf16 = lc->dt_bias;
+
+    float *out_values = s_out_vals;
+    memset(out_values, 0, LINEAR_TOTAL_VALUE * sizeof(float));
+    int k_heads_per_v = LINEAR_NUM_V_HEADS / LINEAR_NUM_K_HEADS;
+
+    float g_decay[LINEAR_NUM_V_HEADS];
+    float beta_gate_arr[LINEAR_NUM_V_HEADS];
+    for (int vh = 0; vh < LINEAR_NUM_V_HEADS; vh++) {
+        float a_val = alpha_out[vh];
+        float dt_b = dt_bias_bf16 ? bf16_to_f32(dt_bias_bf16[vh]) : 0.0f;
+        // GGUF mode: ssm_a is stored already negated+exponentiated
+        // (-exp(logA)); llama.cpp multiplies it directly
+        // (qwen35moe.cpp: gate = ssm_a * softplus). The packed files
+        // store the raw logA, which the engine exponentiates.
+        float A_val = A_log ? (g_gguf_stage ? -A_log[vh] : expf(A_log[vh])) : 1.0f;
+        float softplus_val = logf(1.0f + expf(a_val + dt_b));
+        g_decay[vh] = expf(-A_val * softplus_val);
+        beta_gate_arr[vh] = cpu_sigmoid(beta_out[vh]);
+    }
+
+    // Compute linear_layer_idx: count of non-full-attention layers before this one.
+    // Full attention at (layer_idx+1) % 4 == 0, i.e. layers 3,7,11,...
+    // linear_layer_idx = layer_idx - number_of_full_layers_at_or_before
+    //                  = layer_idx - (layer_idx + 1) / FULL_ATTN_INTERVAL
+    int linear_layer_idx = layer_idx - (layer_idx + 1) / FULL_ATTN_INTERVAL;
+
+    // GPU delta-net path (falls back to CPU if pipeline unavailable)
+    if (g_metal && g_metal->delta_net_step &&
+        linear_layer_idx >= 0 && linear_layer_idx < NUM_LINEAR_LAYERS) {
+        // Upload CPU-computed data to GPU scratch buffers
+        memcpy([g_metal->buf_delta_q contents], lin_q, LINEAR_TOTAL_KEY * sizeof(float));
+        memcpy([g_metal->buf_delta_k contents], lin_k, LINEAR_TOTAL_KEY * sizeof(float));
+        memcpy([g_metal->buf_delta_v contents], lin_v, LINEAR_TOTAL_VALUE * sizeof(float));
+        memcpy([g_metal->buf_delta_g_decay contents], g_decay, LINEAR_NUM_V_HEADS * sizeof(float));
+        memcpy([g_metal->buf_delta_beta contents], beta_gate_arr, LINEAR_NUM_V_HEADS * sizeof(float));
+
+        id<MTLCommandBuffer> cmd_dn = [g_metal->queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd_dn computeCommandEncoder];
+        [enc setComputePipelineState:g_metal->delta_net_step];
+        [enc setBuffer:g_metal->buf_delta_state[linear_layer_idx] offset:0 atIndex:0];
+        [enc setBuffer:g_metal->buf_delta_q       offset:0 atIndex:1];
+        [enc setBuffer:g_metal->buf_delta_k       offset:0 atIndex:2];
+        [enc setBuffer:g_metal->buf_delta_v       offset:0 atIndex:3];
+        [enc setBuffer:g_metal->buf_delta_g_decay offset:0 atIndex:4];
+        [enc setBuffer:g_metal->buf_delta_beta    offset:0 atIndex:5];
+        [enc setBuffer:g_metal->buf_delta_output  offset:0 atIndex:6];
+        uint32_t khpv = (uint32_t)k_heads_per_v;
+        [enc setBytes:&khpv length:sizeof(khpv) atIndex:7];
+        [enc dispatchThreadgroups:MTLSizeMake(LINEAR_NUM_V_HEADS, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        [enc endEncoding];
+        [cmd_dn commit];
+        [cmd_dn waitUntilCompleted];
+
+        // Read back GPU result
+        memcpy(out_values, [g_metal->buf_delta_output contents], LINEAR_TOTAL_VALUE * sizeof(float));
+    } else {
+        // CPU delta-net with Accelerate BLAS
+        for (int vh = 0; vh < LINEAR_NUM_V_HEADS; vh++) {
+            int kh = vh % LINEAR_NUM_K_HEADS;  // torch .repeat() block mapping (llama.cpp)
+            float g = g_decay[vh];
+            float b_gate = beta_gate_arr[vh];
+            float *S = la_state->ssm_state + vh * LINEAR_VALUE_DIM * LINEAR_KEY_DIM;
+            float *v_h = lin_v + vh * LINEAR_VALUE_DIM;
+            float *k_h = lin_k + kh * LINEAR_KEY_DIM;
+
+            // Step 1: Decay S *= g (BLAS sscal on entire state matrix)
+            cblas_sscal(LINEAR_VALUE_DIM * LINEAR_KEY_DIM, g, S, 1);
+
+            // Step 2: kv_mem = S @ k (each row dot k)
+            // S is [VALUE_DIM x KEY_DIM] row-major, k is [KEY_DIM]
+            // kv_mem[vi] = sum_ki(S[vi,ki] * k[ki]) = matrix-vector: S @ k
+            float kv_mem_vec[LINEAR_VALUE_DIM];
+            cblas_sgemv(CblasRowMajor, CblasNoTrans,
+                        LINEAR_VALUE_DIM, LINEAR_KEY_DIM,
+                        1.0f, S, LINEAR_KEY_DIM, k_h, 1,
+                        0.0f, kv_mem_vec, 1);
+
+            // Step 3: delta = (v - kv_mem) * beta, then rank-1 update S += k * delta^T
+            // delta[vi] = (v[vi] - kv_mem[vi]) * beta
+            float delta_vec[LINEAR_VALUE_DIM];
+            for (int vi = 0; vi < LINEAR_VALUE_DIM; vi++) {
+                delta_vec[vi] = (v_h[vi] - kv_mem_vec[vi]) * b_gate;
+            }
+            // S += delta @ k^T (rank-1 update: sger)
+            // S[vi,ki] += delta[vi] * k[ki]
+            cblas_sger(CblasRowMajor, LINEAR_VALUE_DIM, LINEAR_KEY_DIM,
+                       1.0f, delta_vec, 1, k_h, 1, S, LINEAR_KEY_DIM);
+
+            // Step 4: output = S @ q (matrix-vector multiply)
+            float *q_h = lin_q + kh * LINEAR_KEY_DIM;
+            float *o_h = out_values + vh * LINEAR_VALUE_DIM;
+            cblas_sgemv(CblasRowMajor, CblasNoTrans,
+                        LINEAR_VALUE_DIM, LINEAR_KEY_DIM,
+                        1.0f, S, LINEAR_KEY_DIM, q_h, 1,
+                        0.0f, o_h, 1);
+        }
+    }
+
+    // RMSNormGated
+    uint16_t *gated_norm_w = lc->gated_norm_w;
+    float *gated_out = s_gated_out;
+    memset(gated_out, 0, LINEAR_TOTAL_VALUE * sizeof(float));
+    for (int vh = 0; vh < LINEAR_NUM_V_HEADS; vh++) {
+        float *oh = out_values + vh * LINEAR_VALUE_DIM;
+        float *zh = z_out + vh * LINEAR_VALUE_DIM;
+        float *gh = gated_out + vh * LINEAR_VALUE_DIM;
+        if (gated_norm_w) {
+            cpu_rms_norm_gated(oh, zh, gated_norm_w, gh, LINEAR_VALUE_DIM, RMS_NORM_EPS);
+        } else {
+            memcpy(gh, oh, LINEAR_VALUE_DIM * sizeof(float));
+        }
+    }
+
+    if (g_debug_layers) {
+        debug_print_hidden("delta-out", layer_idx, out_values, LINEAR_TOTAL_VALUE);
+        debug_print_hidden("gated-out", layer_idx, gated_out, LINEAR_TOTAL_VALUE);
+    }
+
+    return gated_out;
+}
+
 static void fused_layer_forward(
     WeightFile *wf,
     int layer_idx,
@@ -7801,165 +7971,8 @@ static void fused_layer_forward(
     } else {
         // ---- Linear attention CPU compute ----
         if (!linear_attn_bypass) {
-            int qkv_dim = LINEAR_CONV_DIM;
-
-            // Conv1d step
-            uint16_t *conv_w = lc->conv1d_w;
-            float *conv_out = s_conv_out;
-            memset(conv_out, 0, qkv_dim * sizeof(float));
-            if (conv_w) {
-                cpu_conv1d_step(la_state->conv_state, qkv_out, conv_w, conv_out,
-                                qkv_dim, CONV_KERNEL_SIZE);
-            }
-            // Update conv state
-            memmove(la_state->conv_state, la_state->conv_state + qkv_dim,
-                    (CONV_KERNEL_SIZE - 2) * qkv_dim * sizeof(float));
-            memcpy(la_state->conv_state + (CONV_KERNEL_SIZE - 2) * qkv_dim, qkv_out,
-                   qkv_dim * sizeof(float));
-
-            // Split into q, k, v
-            float *lin_q = conv_out;
-            float *lin_k = conv_out + LINEAR_TOTAL_KEY;
-            float *lin_v = conv_out + 2 * LINEAR_TOTAL_KEY;
-
-            // RMS normalize q and k
-            float inv_scale = 1.0f / sqrtf((float)LINEAR_KEY_DIM);
-            for (int h = 0; h < LINEAR_NUM_K_HEADS; h++) {
-                float *qh = lin_q + h * LINEAR_KEY_DIM;
-                cpu_rms_norm_bare(qh, qh, LINEAR_KEY_DIM, 1e-6f);
-                float q_scale = inv_scale * inv_scale;
-                for (int d = 0; d < LINEAR_KEY_DIM; d++) qh[d] *= q_scale;
-            }
-            for (int h = 0; h < LINEAR_NUM_K_HEADS; h++) {
-                float *kh = lin_k + h * LINEAR_KEY_DIM;
-                cpu_rms_norm_bare(kh, kh, LINEAR_KEY_DIM, 1e-6f);
-                for (int d = 0; d < LINEAR_KEY_DIM; d++) kh[d] *= inv_scale;
-            }
-
-            // Gated delta net recurrence
-            float *A_log = lc->A_log;
-            uint16_t *dt_bias_bf16 = lc->dt_bias;
-
-            float *out_values = s_out_vals;
-            memset(out_values, 0, LINEAR_TOTAL_VALUE * sizeof(float));
-            int k_heads_per_v = LINEAR_NUM_V_HEADS / LINEAR_NUM_K_HEADS;
-
-            float g_decay[LINEAR_NUM_V_HEADS];
-            float beta_gate_arr[LINEAR_NUM_V_HEADS];
-            for (int vh = 0; vh < LINEAR_NUM_V_HEADS; vh++) {
-                float a_val = alpha_out[vh];
-                float dt_b = dt_bias_bf16 ? bf16_to_f32(dt_bias_bf16[vh]) : 0.0f;
-                // GGUF mode: ssm_a is stored already negated+exponentiated
-                // (-exp(logA)); llama.cpp multiplies it directly
-                // (qwen35moe.cpp: gate = ssm_a * softplus). The packed files
-                // store the raw logA, which the engine exponentiates.
-                float A_val = A_log ? (g_gguf_stage ? -A_log[vh] : expf(A_log[vh])) : 1.0f;
-                float softplus_val = logf(1.0f + expf(a_val + dt_b));
-                g_decay[vh] = expf(-A_val * softplus_val);
-                beta_gate_arr[vh] = cpu_sigmoid(beta_out[vh]);
-            }
-
-            // Compute linear_layer_idx: count of non-full-attention layers before this one.
-            // Full attention at (layer_idx+1) % 4 == 0, i.e. layers 3,7,11,...
-            // linear_layer_idx = layer_idx - number_of_full_layers_at_or_before
-            //                  = layer_idx - (layer_idx + 1) / FULL_ATTN_INTERVAL
-            int linear_layer_idx = layer_idx - (layer_idx + 1) / FULL_ATTN_INTERVAL;
-
-            // GPU delta-net path (falls back to CPU if pipeline unavailable)
-            if (g_metal && g_metal->delta_net_step &&
-                linear_layer_idx >= 0 && linear_layer_idx < NUM_LINEAR_LAYERS) {
-                // Upload CPU-computed data to GPU scratch buffers
-                memcpy([g_metal->buf_delta_q contents], lin_q, LINEAR_TOTAL_KEY * sizeof(float));
-                memcpy([g_metal->buf_delta_k contents], lin_k, LINEAR_TOTAL_KEY * sizeof(float));
-                memcpy([g_metal->buf_delta_v contents], lin_v, LINEAR_TOTAL_VALUE * sizeof(float));
-                memcpy([g_metal->buf_delta_g_decay contents], g_decay, LINEAR_NUM_V_HEADS * sizeof(float));
-                memcpy([g_metal->buf_delta_beta contents], beta_gate_arr, LINEAR_NUM_V_HEADS * sizeof(float));
-
-                id<MTLCommandBuffer> cmd_dn = [g_metal->queue commandBuffer];
-                id<MTLComputeCommandEncoder> enc = [cmd_dn computeCommandEncoder];
-                [enc setComputePipelineState:g_metal->delta_net_step];
-                [enc setBuffer:g_metal->buf_delta_state[linear_layer_idx] offset:0 atIndex:0];
-                [enc setBuffer:g_metal->buf_delta_q       offset:0 atIndex:1];
-                [enc setBuffer:g_metal->buf_delta_k       offset:0 atIndex:2];
-                [enc setBuffer:g_metal->buf_delta_v       offset:0 atIndex:3];
-                [enc setBuffer:g_metal->buf_delta_g_decay offset:0 atIndex:4];
-                [enc setBuffer:g_metal->buf_delta_beta    offset:0 atIndex:5];
-                [enc setBuffer:g_metal->buf_delta_output  offset:0 atIndex:6];
-                uint32_t khpv = (uint32_t)k_heads_per_v;
-                [enc setBytes:&khpv length:sizeof(khpv) atIndex:7];
-                [enc dispatchThreadgroups:MTLSizeMake(LINEAR_NUM_V_HEADS, 1, 1)
-                    threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-                [enc endEncoding];
-                [cmd_dn commit];
-                [cmd_dn waitUntilCompleted];
-
-                // Read back GPU result
-                memcpy(out_values, [g_metal->buf_delta_output contents], LINEAR_TOTAL_VALUE * sizeof(float));
-            } else {
-                // CPU delta-net with Accelerate BLAS
-                for (int vh = 0; vh < LINEAR_NUM_V_HEADS; vh++) {
-                    int kh = vh % LINEAR_NUM_K_HEADS;  // torch .repeat() block mapping (llama.cpp)
-                    float g = g_decay[vh];
-                    float b_gate = beta_gate_arr[vh];
-                    float *S = la_state->ssm_state + vh * LINEAR_VALUE_DIM * LINEAR_KEY_DIM;
-                    float *v_h = lin_v + vh * LINEAR_VALUE_DIM;
-                    float *k_h = lin_k + kh * LINEAR_KEY_DIM;
-
-                    // Step 1: Decay S *= g (BLAS sscal on entire state matrix)
-                    cblas_sscal(LINEAR_VALUE_DIM * LINEAR_KEY_DIM, g, S, 1);
-
-                    // Step 2: kv_mem = S @ k (each row dot k)
-                    // S is [VALUE_DIM x KEY_DIM] row-major, k is [KEY_DIM]
-                    // kv_mem[vi] = sum_ki(S[vi,ki] * k[ki]) = matrix-vector: S @ k
-                    float kv_mem_vec[LINEAR_VALUE_DIM];
-                    cblas_sgemv(CblasRowMajor, CblasNoTrans,
-                                LINEAR_VALUE_DIM, LINEAR_KEY_DIM,
-                                1.0f, S, LINEAR_KEY_DIM, k_h, 1,
-                                0.0f, kv_mem_vec, 1);
-
-                    // Step 3: delta = (v - kv_mem) * beta, then rank-1 update S += k * delta^T
-                    // delta[vi] = (v[vi] - kv_mem[vi]) * beta
-                    float delta_vec[LINEAR_VALUE_DIM];
-                    for (int vi = 0; vi < LINEAR_VALUE_DIM; vi++) {
-                        delta_vec[vi] = (v_h[vi] - kv_mem_vec[vi]) * b_gate;
-                    }
-                    // S += delta @ k^T (rank-1 update: sger)
-                    // S[vi,ki] += delta[vi] * k[ki]
-                    cblas_sger(CblasRowMajor, LINEAR_VALUE_DIM, LINEAR_KEY_DIM,
-                               1.0f, delta_vec, 1, k_h, 1, S, LINEAR_KEY_DIM);
-
-                    // Step 4: output = S @ q (matrix-vector multiply)
-                    float *q_h = lin_q + kh * LINEAR_KEY_DIM;
-                    float *o_h = out_values + vh * LINEAR_VALUE_DIM;
-                    cblas_sgemv(CblasRowMajor, CblasNoTrans,
-                                LINEAR_VALUE_DIM, LINEAR_KEY_DIM,
-                                1.0f, S, LINEAR_KEY_DIM, q_h, 1,
-                                0.0f, o_h, 1);
-                }
-            }
-
-            // RMSNormGated
-            uint16_t *gated_norm_w = lc->gated_norm_w;
-            float *gated_out = s_gated_out;
-            memset(gated_out, 0, LINEAR_TOTAL_VALUE * sizeof(float));
-            for (int vh = 0; vh < LINEAR_NUM_V_HEADS; vh++) {
-                float *oh = out_values + vh * LINEAR_VALUE_DIM;
-                float *zh = z_out + vh * LINEAR_VALUE_DIM;
-                float *gh = gated_out + vh * LINEAR_VALUE_DIM;
-                if (gated_norm_w) {
-                    cpu_rms_norm_gated(oh, zh, gated_norm_w, gh, LINEAR_VALUE_DIM, RMS_NORM_EPS);
-                } else {
-                    memcpy(gh, oh, LINEAR_VALUE_DIM * sizeof(float));
-                }
-            }
-
-            if (g_debug_layers) {
-                debug_print_hidden("delta-out", layer_idx, out_values, LINEAR_TOTAL_VALUE);
-                debug_print_hidden("gated-out", layer_idx, gated_out, LINEAR_TOTAL_VALUE);
-            }
-
-            attn_out_for_oproj = gated_out;
-
+            attn_out_for_oproj = linear_attn_chain_cpu(lc, la_state, layer_idx,
+                                                       qkv_out, z_out, beta_out, alpha_out);
             // conv_out, out_values are static — no free needed
             // gated_out is static — freed/released after CMD2 submission below
         }
