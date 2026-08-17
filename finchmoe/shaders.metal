@@ -3090,3 +3090,69 @@ kernel void dequant_matvec_qk(
     float sum = simd_sum(acc);
     if (simd_lane == 0) out[row] = sum;
 }
+
+// ============================================================================
+// Phase C S2: fused gate+up+SwiGLU for GGUF Q4_K expert slabs.
+// Clone of fused_gate_up_swiglu (1 TG per output row, threadgroup sg/su[32]
+// reduction) with the Q4_K block decode. Both gate and up share the same
+// x and the same block geometry (both Q4_K in this model's export).
+// ============================================================================
+kernel void fused_gate_up_swiglu_qk(
+    device const uchar* gate_W  [[buffer(0)]],  // Q4_K [out_dim, in_dim]
+    device const uchar* up_W    [[buffer(1)]],  // Q4_K [out_dim, in_dim]
+    device const float*  x      [[buffer(2)]],  // [in_dim]
+    device float*        out    [[buffer(3)]],  // [out_dim] SwiGLU result
+    constant uint&       out_dim [[buffer(4)]],
+    constant uint&       in_dim  [[buffer(5)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint lid  [[thread_position_in_threadgroup]],
+    uint tg_size [[threads_per_threadgroup]]
+) {
+    if (tgid >= out_dim) return;
+    uint words = in_dim / 8;
+    uint row_bytes = (in_dim / 256) * 144u;
+    device const uchar* gr = gate_W + (ulong)tgid * row_bytes;
+    device const uchar* ur = up_W   + (ulong)tgid * row_bytes;
+    float ga = 0.0f, ua = 0.0f;
+    // group-strided over words (like the original's group-strided loop)
+    for (uint w = lid; w < words; w += tg_size) {
+        uint block = w >> 5;
+        uint wb = w & 31;
+        uint j    = (wb >> 3) * 2 + ((wb >> 2) & 1);
+        uint nhalf = (wb >> 2) & 1;
+        device const uchar* gb = gr + (ulong)block * 144u;
+        device const uchar* ub = ur + (ulong)block * 144u;
+        float dg    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(gb + 0)));
+        float mgmin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(gb + 2)));
+        float dug    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(ub + 0)));
+        float mumin  = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(ub + 2)));
+        uchar2 smg = get_scale_min_k4(j, gb + 4);
+        uchar2 smu = get_scale_min_k4(j, ub + 4);
+        float gdsc = dg * (float)smg.x;
+        float gmm  = mgmin * (float)smg.y;
+        float udsc = dug * (float)smu.x;
+        float umm  = mumin * (float)smu.y;
+        ulong gq = *(device ulong*)(gb + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+        ulong uq = *(device ulong*)(ub + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+        uint xb = w * 8;
+        for (uint i = 0; i < 8; i++) {
+            uint gnib = (uint)((gq >> (8 * i + 4 * nhalf)) & 0xF);
+            uint unib = (uint)((uq >> (8 * i + 4 * nhalf)) & 0xF);
+            float xv = x[xb + i];
+            ga += ((float)gnib * gdsc - gmm) * xv;
+            ua += ((float)unib * udsc - umm) * xv;
+        }
+    }
+    // identical reduction to fused_gate_up_swiglu (select-based simd_sum —
+    // divergent simd_sum is UB on Apple GPUs)
+    threadgroup float sg[32] = {0}, su[32] = {0};
+    float rg = simd_sum(ga), ru = simd_sum(ua);
+    uint sl = lid % 32, si = lid / 32, ns = (tg_size + 31) / 32;
+    if (sl == 0) { sg[si] = rg; su[si] = ru; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float part_g = (si == 0 && sl < ns) ? sg[sl] : 0.0f;
+    float part_u = (si == 0 && sl < ns) ? su[sl] : 0.0f;
+    float vg = simd_sum(part_g);
+    float vu = simd_sum(part_u);
+    if (si == 0 && sl == 0) out[tgid] = (vg / (1.0f + exp(-vg))) * vu;
+}
