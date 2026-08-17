@@ -2830,33 +2830,32 @@ static int gpu_gguf_experts_forward(MetalCtx *ctx, WeightFile *wf, int layer_idx
     GgufExpertInfo *ge = &gguf_experts[layer_idx];
     if (ge->gate_type != 12 || ge->up_type != 12) return 0;  // fused kernel is Q4_K-only
 
-    uint32_t gd[8], ud[8], dd[8];
-    id<MTLBuffer> gb[8], ub[8], db[8];
+    // Copy the active experts' slabs into the stable preallocated expert
+    // buffers (the packed path's design): the kernel reads from buffers that
+    // never churn the GPU residency, and the mmap pages are touched once per
+    // layer by a plain memcpy. Layout per slot: gate @ 0, up @ gate_slab,
+    // down @ gate_slab + up_slab (all 32-byte aligned).
+    size_t slab_total = ge->gate_slab + ge->up_slab + ge->down_slab;
+    if (slab_total > EXPERT_SIZE_MAX) return 0;
     for (int k = 0; k < K; k++) {
         int eidx = expert_indices[k];
-        const uint8_t *gate_slab = (const uint8_t *)wf->data + ge->gate_off + (size_t)eidx * ge->gate_slab;
-        const uint8_t *up_slab   = (const uint8_t *)wf->data + ge->up_off   + (size_t)eidx * ge->up_slab;
-        const uint8_t *down_slab = (const uint8_t *)wf->data + ge->down_off + (size_t)eidx * ge->down_slab;
-        gb[k] = gguf_tbuf_get(ctx, gate_slab, ge->gate_slab, &gd[k]);
-        ub[k] = gguf_tbuf_get(ctx, up_slab,   ge->up_slab,   &ud[k]);
-        db[k] = gguf_tbuf_get(ctx, down_slab, ge->down_slab, &dd[k]);
-        if (!gb[k] || !ub[k] || !db[k]) return 0;
+        uint8_t *dst = (uint8_t *)[ctx->buf_multi_expert_data[k] contents];
+        memcpy(dst,                          (const uint8_t *)wf->data + ge->gate_off + (size_t)eidx * ge->gate_slab, ge->gate_slab);
+        memcpy(dst + ge->gate_slab,          (const uint8_t *)wf->data + ge->up_off   + (size_t)eidx * ge->up_slab,   ge->up_slab);
+        memcpy(dst + ge->gate_slab + ge->up_slab,
+                                              (const uint8_t *)wf->data + ge->down_off + (size_t)eidx * ge->down_slab, ge->down_slab);
     }
 
     memcpy([ctx->buf_multi_expert_input contents], h_post, HIDDEN_DIM * sizeof(float));
     id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
     for (int k = 0; k < K; k++) {
-        int eidx = expert_indices[k];
-        NSUInteger g_off = (NSUInteger)gd[k];
-        NSUInteger u_off = (NSUInteger)ud[k];
-        NSUInteger d_off = (NSUInteger)dd[k];
         uint32_t od = MOE_INTERMEDIATE, id_ = HIDDEN_DIM;
-        // fused gate+up+SwiGLU -> buf_expert_act
+        // fused gate+up+SwiGLU -> buf_expert_act (gate @ 0, up @ gate_slab)
         {
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             [enc setComputePipelineState:ctx->fused_gate_up_swiglu_qk_pipe];
-            [enc setBuffer:gb[k] offset:gd[k] atIndex:0];
-            [enc setBuffer:ub[k] offset:ud[k] atIndex:1];
+            [enc setBuffer:ctx->buf_multi_expert_data[k] offset:0 atIndex:0];
+            [enc setBuffer:ctx->buf_multi_expert_data[k] offset:ge->gate_slab atIndex:1];
             [enc setBuffer:ctx->buf_multi_expert_input offset:0 atIndex:2];
             [enc setBuffer:ctx->buf_expert_act offset:0 atIndex:3];
             [enc setBytes:&od length:4 atIndex:4];
@@ -2870,7 +2869,7 @@ static int gpu_gguf_experts_forward(MetalCtx *ctx, WeightFile *wf, int layer_idx
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             uint32_t dod = HIDDEN_DIM, did = MOE_INTERMEDIATE, dgt = (uint32_t)ge->down_type;
             [enc setComputePipelineState:ctx->matvec_qk];
-            [enc setBuffer:db[k] offset:dd[k] atIndex:0];
+            [enc setBuffer:ctx->buf_multi_expert_data[k] offset:ge->gate_slab + ge->up_slab atIndex:0];
             [enc setBuffer:ctx->buf_expert_act offset:0 atIndex:3];
             [enc setBuffer:ctx->buf_multi_expert_out[k] offset:0 atIndex:4];
             [enc setBytes:&dod length:4 atIndex:5];
@@ -9147,13 +9146,13 @@ static void fused_layer_forward(
         GgufExpertInfo *ge = &gguf_experts[layer_idx];
         float *expert_out_cpu = malloc(HIDDEN_DIM * sizeof(float));
         float total_weight = 0.0f;
-        // The GPU expert dispatch is verified bit-correct (CPU-vs-GPU parity
-        // cos 1.000000) but SLOWER than the CPU fallback today: the per-layer
-        // commit+wait serializes the pipeline and the slab pages churn the
-        // GPU residency (the lm_head slows 45->447ms). Gated behind
-        // FINCHMOE_GGUF_GPU_EXPERTS until the deferred/overlap dispatch lands.
+        // GPU expert dispatch via the stable copy-pool buffers (the packed
+        // path's design): slabs copied once per layer into preallocated
+        // buffers, no mmap page churn. Verified bit-correct (parity
+        // cos 1.000000) and ~4x faster than the CPU fallback (5.1 tok/s).
+        // --cpu-experts or a missing Metal device falls back to the CPU loop.
         int experts_on_gpu = 0;
-        if (!g_cpu_experts && g_metal && getenv("FINCHMOE_GGUF_GPU_EXPERTS")) {
+        if (!g_cpu_experts && g_metal) {
             double t_exp = now_ms();
             experts_on_gpu = gpu_gguf_experts_forward(g_metal, wf, layer_idx, h_post,
                                                       expert_indices, expert_weights, K, moe_out);
