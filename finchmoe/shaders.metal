@@ -3156,3 +3156,78 @@ kernel void fused_gate_up_swiglu_qk(
     float vu = simd_sum(part_u);
     if (si == 0 && sl == 0) out[tgid] = (vg / (1.0f + exp(-vg))) * vu;
 }
+
+// ============================================================================
+// Phase C S3: M-position batched Q4_K/Q6_K dequant-matvec for chunked prefill.
+// Linearized grid m * num_row_tiles + row_tile (the dequant_matvec_4bit_prefill
+// shape); decode identical to dequant_matvec_qk.
+// ============================================================================
+kernel void dequant_matvec_qk_prefill(
+    device const uchar*  W          [[buffer(0)]],
+    device const float*  x_inputs   [[buffer(3)]],  // [M, in_dim]
+    device float*        out        [[buffer(4)]],  // [M, out_dim]
+    constant uint&       out_dim    [[buffer(5)]],
+    constant uint&       in_dim     [[buffer(6)]],
+    constant uint&       ggml_type  [[buffer(7)]],
+    uint tgid      [[threadgroup_position_in_grid]],
+    uint lid       [[thread_position_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint num_row_tiles = (out_dim + ROWS_PER_TG_QK - 1) / ROWS_PER_TG_QK;
+    uint m = tgid / num_row_tiles;
+    uint row_tile = tgid % num_row_tiles;
+    uint row = row_tile * ROWS_PER_TG_QK + simd_group;
+    uint words = in_dim / 8;
+    uint row_bytes = (in_dim / 256) * (ggml_type == 12 ? 144u : 210u);
+
+    threadgroup float x_shared[4096];
+    const device float* x = x_inputs + (size_t)m * in_dim;
+    for (uint i = lid; i < in_dim; i += 256) x_shared[i] = x[i];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (row >= out_dim) return;
+
+    device const uchar* w_row = W + (ulong)row * row_bytes;
+    float acc = 0.0f;
+    for (uint w = simd_lane; w < words; w += 32) {
+        uint block = w >> 5;
+        uint wb = w & 31;
+        device const uchar* b = w_row + (ulong)block * (ggml_type == 12 ? 144u : 210u);
+        uint xb = w * 8;
+        if (ggml_type == 12) {
+            float d    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 0)));
+            float mmin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 2)));
+            uint j    = (wb >> 3) * 2 + ((wb >> 2) & 1);
+            uint nhalf = (wb >> 2) & 1;
+            uchar2 sm = get_scale_min_k4(j, b + 4);
+            float dsc = d * (float)sm.x;
+            float mm  = mmin * (float)sm.y;
+            ulong qbytes = *(device ulong*)(b + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+            for (uint i = 0; i < 8; i++) {
+                uint nib = (uint)((qbytes >> (8 * i + 4 * nhalf)) & 0xF);
+                float xv = x_shared[xb + i];
+                acc += ((float)nib * dsc - mm) * xv;
+            }
+        } else {
+            uint chunk = wb >> 4;
+            uint wbp   = wb & 15;
+            float d    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 208)));
+            int sc = (int)b[192 + chunk * 8 + (wbp >> 1)];
+            if (sc >= 128) sc -= 256;
+            float dsc = d * (float)sc;
+            uint vb = wbp * 8;
+            for (uint i = 0; i < 8; i++) {
+                uint vi = vb + i;
+                uint qb = chunk * 64 + (vi & 63);
+                uint hb = chunk * 32 + (vi & 31);
+                uint sh = 2 * ((vi >> 5) & 3);
+                uint nib = (b[qb] >> (4 * ((vi >> 6) & 1))) & 0xF;
+                uint qraw = nib | (((b[128 + hb] >> sh) & 3) << 4);
+                float xv = x_shared[xb + i];
+                acc += dsc * ((float)qraw - 32.0f) * xv;
+            }
+        }
+    }
+    float sum = simd_sum(acc);
+    if (simd_lane == 0) out[(size_t)m * out_dim + row] = sum;
+}
