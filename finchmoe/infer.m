@@ -632,17 +632,9 @@ static void timing_print(void) {
 }
 
 // Chunked-prefill per-phase timing summary (FINCHMOE_PF_TIMING=1).
-static double g_pf_enc_micro = 0; static int g_pf_enc_n = 0;   // S8 probe: matvec-encode micro timing
-static double g_pf_cbcreate_ms = 0, g_pf_pregap_ms = 0; static int g_pf_cbcreate_n = 0;   // S8 probe: CB create + pre-encode gap
 static void chunk_timing_print(void) {
     if (!g_chunk_timing_enabled || g_chunk_timing.layers == 0) return;
     int n = g_chunk_timing.layers;
-    if (g_pf_enc_n > 0)
-        fprintf(stderr, "  enc_micro (matvecs only): %7.3f (n=%d)\n",
-                g_pf_enc_micro / g_pf_enc_n, g_pf_enc_n);
-    if (g_pf_cbcreate_n > 0)
-        fprintf(stderr, "  cb_create: %7.3f  pre-encode gap: %7.3f (n=%d)\n",
-                g_pf_cbcreate_ms / g_pf_cbcreate_n, g_pf_pregap_ms / g_pf_cbcreate_n, g_pf_cbcreate_n);
     fprintf(stderr, "\n[pf-timing] Chunked prefill per-layer breakdown (avg of %d layer calls, ms):\n", n);
     fprintf(stderr, "  cmdA_encode:   %7.3f\n", g_chunk_timing.cmdA_encode / n);
     fprintf(stderr, "  cmdA_wait:     %7.3f\n", g_chunk_timing.cmdA_wait / n);
@@ -6167,7 +6159,6 @@ static ExpertLRUCache *g_expert_cache = NULL;
 static uint64_t g_spec_route_attempts = 0;   // total speculative routing attempts
 static uint64_t g_spec_route_hits = 0;        // correctly predicted experts (found in cache at real routing time)
 static uint64_t g_spec_route_preloads = 0;    // async preloads initiated (cache misses at speculation time)
-static uint64_t g_spec_temporal_hits = 0;     // S8 probe: prev-position same-layer expert overlap
 
 // ---- Temporal prediction pipeline ----
 // Stores previous token's expert routing per layer. On the next token,
@@ -7568,7 +7559,7 @@ static void init_layer_scratch(void) {
 // dispatches had on this GPU (the run-to-run wobble root cause).
 static void gpu_encode_gdn_batched(MetalCtx *ctx, id<MTLCommandBuffer> cmdbuf,
                                    int linear_layer_idx, LayerWeightCache *lc,
-                                   uint32_t M) {
+                                   uint32_t M, int reader_barrier) {
     uint32_t conv_dim = LINEAR_CONV_DIM;
     NSUInteger conv_w_off   = (NSUInteger)((const char *)lc->conv1d_w   - (const char *)[ctx->wf_buf contents]);
     NSUInteger a_log_off    = (NSUInteger)((const char *)lc->A_log      - (const char *)[ctx->wf_buf contents]);
@@ -7579,11 +7570,8 @@ static void gpu_encode_gdn_batched(MetalCtx *ctx, id<MTLCommandBuffer> cmdbuf,
     float eps = RMS_NORM_EPS;
     id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
     [enc setComputePipelineState:ctx->fused_gdn_batched];
-    // Reader-side barrier: the S8 merged-CB path encodes the qkv/z/ba
-    // matvecs in the SAME command buffer before this dispatch — the barrier
-    // (paired with the caller's synchronizeResource) makes their writes
-    // visible. Harmless in the 2-CB path.
-    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    // Reader-side barrier (S8 merged-CB path ONLY).
+    if (reader_barrier) [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
     [enc setBuffer:ctx->buf_conv_state[linear_layer_idx] offset:0 atIndex:0];
     [enc setBuffer:ctx->buf_pf_qkv       offset:0          atIndex:1];
     [enc setBuffer:ctx->wf_buf           offset:conv_w_off atIndex:2];
@@ -8414,26 +8402,6 @@ static void fused_layer_forward(
 
     if (g_timing_enabled) { t0 = now_ms(); }
     s_spec_count = 0;
-
-    // Phase C S8: speculative-prefill accuracy probe (FINCHMOE_SPEC_PROBE=1).
-    // Computes the spec top-K from the PRE-attention normed input and compares
-    // it against the real post-gated-norm routing later in this call —
-    // measures the ceiling for speculative expert preads in the chunked path.
-    static int spec_probe = -1;
-    if (spec_probe < 0) spec_probe = getenv("FINCHMOE_SPEC_PROBE") != NULL;
-    if (spec_probe && packed_fd >= 0 && lc->gate_w && !g_gguf_stage) {
-        float *spec_scores = s_spec_gate_scores;
-        memset(spec_scores, 0, NUM_EXPERTS * sizeof(float));
-        cpu_dequant_matvec(lc->gate_w, lc->gate_s, lc->gate_b,
-                           normed, spec_scores,
-                           NUM_EXPERTS, HIDDEN_DIM, GROUP_SIZE, 8);
-        cpu_softmax(spec_scores, NUM_EXPERTS);
-        int spec_K = (K > MAX_K) ? MAX_K : K;
-        float spec_weights[MAX_K];
-        cpu_topk(spec_scores, NUM_EXPERTS, spec_K, s_spec_indices, spec_weights);
-        s_spec_count = spec_K;
-        g_spec_route_attempts += spec_K;
-    }
 
     if (spec_routing_enabled && (g_expert_cache || g_malloc_cache) && packed_fd >= 0 && lc->gate_w) {
         float *spec_scores = s_spec_gate_scores;
@@ -9334,34 +9302,6 @@ static void fused_layer_forward(
                 }
             }
         }
-    }
-
-    // Phase C S8 probe: temporal prediction accuracy for prefill — how many
-    // of THIS position's experts were routed by the PREVIOUS position at the
-    // same layer (the chunk g → g+1 prediction source).
-    static int spec_temporal_last[60][MAX_K];
-    static int spec_temporal_count[60];
-    static int spec_temporal_init = 0;
-    if (spec_probe) {
-        if (!spec_temporal_init) {
-            for (int l = 0; l < 60; l++) spec_temporal_count[l] = 0;
-            spec_temporal_init = 1;
-        }
-        int cmp_K = (K > MAX_K) ? MAX_K : K;
-        if (spec_temporal_count[layer_idx] > 0) {
-            for (int r = 0; r < cmp_K; r++) {
-                for (int t = 0; t < spec_temporal_count[layer_idx]; t++) {
-                    if (spec_temporal_last[layer_idx][t] == expert_indices[r]) {
-                        g_spec_temporal_hits++;
-                        break;
-                    }
-                }
-            }
-        }
-        for (int r = 0; r < cmp_K; r++) {
-            spec_temporal_last[layer_idx][r] = expert_indices[r];
-        }
-        spec_temporal_count[layer_idx] = cmp_K;
     }
 
     if (g_timing_enabled) { t1 = now_ms(); g_timing.routing_cpu += t1 - t0; }
@@ -11398,10 +11338,7 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
     if (g_chunk_timing_enabled) t_layer = now_ms();
 
     // ===================== Phase A ====================
-    double t_cbc = 0, t_pregap = 0;
-    if (g_chunk_timing_enabled) t_cbc = now_ms();
     id<MTLCommandBuffer> cmdA = [ctx->queue commandBuffer];
-    if (g_chunk_timing_enabled) { t_pregap = now_ms(); g_pf_cbcreate_ms += t_pregap - t_cbc; g_pf_cbcreate_n++; }
     if (g_chunk_timing_enabled) t_ph = now_ms();
 
     // Layer-0 input: CPU RMS norm from embed batch + residual = embed batch.
@@ -11596,8 +11533,6 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
             }
         } else {
             // ---- Linear-attention layer: batched projections ----
-            if (g_chunk_timing_enabled) g_pf_pregap_ms += now_ms() - t_pregap;
-            if (g_chunk_timing_enabled) { double te = now_ms();
             gpu_encode_prefill_matvec(ctx, cmdA, lc->qkv_w, lc->qkv_s, lc->qkv_b,
                 ctx->buf_pf_input, ctx->buf_pf_qkv,
                 LINEAR_CONV_DIM, HIDDEN_DIM, GROUP_SIZE, lc->qkv_bits, M, 0);
@@ -11612,7 +11547,6 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
                 ctx->buf_pf_input, ctx->buf_pf_ba,
                 LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, lc->a_bits, M,
                 (NSUInteger)M * 32 * sizeof(float));
-            g_pf_enc_micro += now_ms() - te; g_pf_enc_n++; }
             // The GDN must NOT read the matvec outputs (qkv/z/ba) in the same
             // command buffer — the GPU serves stale L2 lines for same-CB
             // device-to-device reads (the run-to-run wobble root cause,
@@ -11623,42 +11557,30 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
                 g_chunk_timing.cmdA_encode += now_ms() - t_ph;
                 t_ph = now_ms();
             }
-            // Phase C S8: matvecs + fused GDN in ONE CB (the S4.1 sync
-            // pattern), DEFAULT ON. The old 2-CB split enforced the retired
-            // "CB boundary = only reliable flush" rule; S6a verified same-CB
-            // chaining (syncResource + reader barrier) bitwise on the GGUF
-            // mode-2 path, and this merge is bitwise vs the 2-CB path
-            // (cmp-clean -I A/B). Saves one commit+wait + wake tax per
-            // linear layer-pass (-7.1% 90-token prefill). Kill switch:
-            // FINCHMOE_PF_GDNMERGE=0.
+            // S8: matvecs + fused GDN in ONE CB (S4.1 sync pattern),
+            // bitwise vs the 2-CB path on both test prompts. ENV-GATED OFF:
+            // measured ~neutral on the 90-token prefill (the one-round-trip
+            // saving overlaps the expert pread I/O). FINCHMOE_PF_GDNMERGE=1
+            // enables it.
             static int gdnmerge = -1;
             if (gdnmerge < 0) {
                 const char *ge = getenv("FINCHMOE_PF_GDNMERGE");
-                gdnmerge = (ge && atoi(ge) == 0) ? 0 : 1;
+                gdnmerge = (ge && atoi(ge) != 0) ? 1 : 0;
             }
             if (gdnmerge) {
                 metal_sync_buffer(cmdA, ctx->buf_pf_qkv);
                 metal_sync_buffer(cmdA, ctx->buf_pf_z);
                 metal_sync_buffer(cmdA, ctx->buf_pf_ba);
-                gpu_encode_gdn_batched(ctx, cmdA, linear_layer_idx, lc, M);
+                gpu_encode_gdn_batched(ctx, cmdA, linear_layer_idx, lc, M, 1);
                 [cmdA commit];
                 [cmdA waitUntilCompleted];
                 if (g_chunk_timing_enabled) g_chunk_timing.cmdA_wait += now_ms() - t_ph;
             } else {
             [cmdA commit];
             [cmdA waitUntilCompleted];
-            if (g_chunk_timing_enabled) {
-                g_chunk_timing.cmdA_wait += now_ms() - t_ph;
-                t_ph = now_ms();   // S8 accounting fix — the wait was leaking
-                                   // into the next cmdA_encode bucket
-            }
+            if (g_chunk_timing_enabled) g_chunk_timing.cmdA_wait += now_ms() - t_ph;
             cmdA = [ctx->queue commandBuffer];
-            static double g_pf_gdnenc_ms = 0; static int g_pf_gdnenc_n = 0;
-            double t_gn0 = 0; if (g_chunk_timing_enabled) t_gn0 = now_ms();
-            gpu_encode_gdn_batched(ctx, cmdA, linear_layer_idx, lc, M);
-            if (g_chunk_timing_enabled) { g_pf_gdnenc_ms += now_ms() - t_gn0; g_pf_gdnenc_n++; }
-            if (g_pf_gdnenc_n == 360)
-                fprintf(stderr, "[gdn-enc] avg %.3f ms after 360 calls\n", g_pf_gdnenc_ms / g_pf_gdnenc_n);
+            gpu_encode_gdn_batched(ctx, cmdA, linear_layer_idx, lc, M, 0);
             // CB boundary + CPU-copy bridge: the out_proj (encoded below) must
             // NOT read the chains' oproj_in device-to-device — barriers and
             // synchronizeResource both fail to flush L2 on this GPU (the
@@ -11683,8 +11605,6 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
         }
     } else {
         // ---- Full-attention layer: batched q/k/v ----
-        if (g_chunk_timing_enabled) g_pf_pregap_ms += now_ms() - t_pregap;
-        if (g_chunk_timing_enabled) { double te = now_ms();
         int q_proj_dim = NUM_ATTN_HEADS * HEAD_DIM * 2;
         int kv_dim = NUM_KV_HEADS * HEAD_DIM;
         gpu_encode_prefill_matvec(ctx, cmdA, lc->q_w, lc->q_s, lc->q_b,
@@ -11698,7 +11618,6 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
             ctx->buf_pf_input, ctx->buf_pf_kv,
             kv_dim, HIDDEN_DIM, GROUP_SIZE, lc->v_bits, M,
             (NSUInteger)M * kv_dim * sizeof(float));
-        g_pf_enc_micro += now_ms() - te; g_pf_enc_n++; }
     }
     if (is_full) {
         if (g_chunk_timing_enabled) {
@@ -15998,12 +15917,6 @@ int main(int argc, char **argv) {
                    g_spec_route_attempts, g_spec_route_preloads, g_spec_route_hits,
                    g_spec_route_attempts > 0
                        ? 100.0 * g_spec_route_hits / g_spec_route_attempts : 0.0);
-            if (getenv("FINCHMOE_SPEC_PROBE")) {
-                printf("Spec temporal:  %llu hits / %llu attempts (%.1f%% prev-position overlap)\n",
-                       g_spec_temporal_hits, g_spec_route_attempts,
-                       g_spec_route_attempts > 0
-                           ? 100.0 * g_spec_temporal_hits / g_spec_route_attempts : 0.0);
-            }
         }
 
         if (g_freq_tracking) freq_print_analysis(K);
