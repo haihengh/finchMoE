@@ -2,12 +2,28 @@
 # Reference logit dump for GGUF cross-validation.
 # SAFETY: must be run ALONE on the 16GB mini (see crash forensics 2026-08-15).
 # Watches vm_stat and aborts the run if free memory collapses.
+#
+# Usage: run_logit_dump_safe.sh [prompt-tokens-file] [out-file]
+#   prompt-tokens-file: [n u32][n × u32] token IDs (e.g. from
+#     FINCHMOE_DUMP_PROMPT_TOKENS=file — the 90-token soak flow). Defaults to
+#     the hardcoded 13-token prompt.
 set -u
 cd "$(dirname "$0")/../llama.cpp" || exit 1
 
 MODEL=../models/Qwen3.6-35B-A3B-Q4_K_M.gguf
-TOKENS="248045,846,198,9419,248046,198,248045,74455,198,248068,271,248069,271"
-OUT=../finchmoe/logits_ref.bin
+OUT=${2:-../finchmoe/logits_ref.bin}
+if [ -n "${1:-}" ]; then
+    TOKENS=$(python3 -c "
+import struct, sys
+d = open(sys.argv[1], 'rb').read()
+n = struct.unpack('I', d[:4])[0]
+ids = struct.unpack('<%dI' % n, d[4:4+4*n])
+print(','.join(str(i) for i in ids))
+" "$1")
+    echo "[safe-run] prompt: $(wc -c < "$1") bytes, $(echo "$TOKENS" | tr ',' '\n' | wc -l | tr -d ' ') tokens"
+else
+    TOKENS="248045,846,198,9419,248046,198,248045,74455,198,248068,271,248069,271"
+fi
 
 # pre-flight: require >= 6GB reclaimable (free+speculative+inactive; 16KB pages)
 reclaim_kb=$(vm_stat | awk '/Pages free/{gsub(/\./,"");print $3} /Pages speculative/{gsub(/\./,"");s=$4} /Pages inactive/{gsub(/\./,"");i=$5} END{print ($1+s+i)*16/1024}')
