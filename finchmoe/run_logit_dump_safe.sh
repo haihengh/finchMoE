@@ -26,7 +26,8 @@ else
 fi
 
 # pre-flight: require >= 6GB reclaimable (free+speculative+inactive; 16KB pages)
-reclaim_kb=$(vm_stat | awk '/Pages free/{gsub(/\./,"");print $3} /Pages speculative/{gsub(/\./,"");s=$4} /Pages inactive/{gsub(/\./,"");i=$5} END{print ($1+s+i)*16/1024}')
+# note: +0 coerces vm_stat's trailing-period numbers to integers (gsub doesn't re-split fields)
+reclaim_kb=$(vm_stat | awk '/Pages free/{free=$3+0} /Pages speculative/{spec=$3+0} /Pages inactive/{inact=$3+0} END{print int((free+spec+inact)*16/1024)}')
 if [ "${reclaim_kb:-0}" -lt 6000000 ]; then
     echo "ABORT: only ${reclaim_kb} MB reclaimable — close more apps first" >&2
     exit 2
@@ -40,8 +41,8 @@ LOW=0
 # big inactive file cache is normal macOS behavior on a fresh boot — the
 # kernel serves allocations from inactive. The compressor is the real tell.
 while kill -0 $PID 2>/dev/null; do
-    f=$(vm_stat | awk '/Pages free/{gsub(/\./,"");print $3}')
-    c=$(vm_stat | awk '/Pages occupied by compressor/{gsub(/\./,"");print $5}')
+    f=$(vm_stat | awk '/Pages free/{print $3+0}')
+    c=$(vm_stat | awk '/Pages occupied by compressor/{print $5+0}')
     if [ "${f:-0}" -lt 12000 ] && [ "${c:-0}" -gt 250000 ]; then  # <190MB free AND >4GB compressed
         LOW=$((LOW+1))
         [ "$LOW" -ge 3 ] && { echo "ABORT: free=${f}*16KB compressed=${c}*16KB — killing logit_dump" >&2; kill -9 $PID; exit 3; }
