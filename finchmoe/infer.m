@@ -2002,6 +2002,19 @@ static void ng_register(int tok) {
     ng_last[0] = tok;
 }
 
+// Reset all sampler scratch state (n-gram blocker + rep-penalty ring) at the
+// start of each generation. Without this, the serve loop leaks one request's
+// n-grams into the next: greedy (T=0) sampling is stateful and the same
+// prompt gives DIFFERENT completions depending on request order (found via
+// the HumanEval harness: identical requests returned 1/20/8 tokens).
+static void sampler_state_reset(void) {
+    ng_last[0] = ng_last[1] = -1;
+    ng_win_pos = 0;
+    ng_win_fill = 0;
+    g_rep_pos = 0;
+    g_rep_count = 0;
+}
+
 // Greedy selection with hard n-gram blocking: argmax, and if the winner is
 // blocked, -INF it and repeat until an unblocked token is found.
 static int sample_greedy_blocked(const float *logits, int dim) {
@@ -13383,8 +13396,26 @@ static char *extract_prompt(const char *buf) {
     if (!result) return NULL;
     int i = 0;
     while (*p && *p != '"' && i < 65535) {
-        if (*p == '\\') { p++; if (*p) result[i++] = *p++; }
-        else result[i++] = *p++;
+        // Proper JSON unescape — the old code dropped the backslash and
+        // copied the next char verbatim, so "\n" became the literal letter
+        // 'n' in the prompt. The model then imitated the mangled input and
+        // generated 'n' where newlines belong (HumanEval harness bug).
+        if (*p == '\\' && *(p + 1)) {
+            p++;
+            switch (*p) {
+                case 'n':  result[i++] = '\n'; p++; break;
+                case 't':  result[i++] = '\t'; p++; break;
+                case 'r':  result[i++] = '\r'; p++; break;
+                case 'b':  result[i++] = '\b'; p++; break;
+                case 'f':  result[i++] = '\f'; p++; break;
+                case '"':  result[i++] = '"';  p++; break;
+                case '/':  result[i++] = '/';  p++; break;
+                case '\\': result[i++] = '\\'; p++; break;
+                default:   result[i++] = '\\'; result[i++] = *p++; break;
+            }
+        } else {
+            result[i++] = *p++;
+        }
     }
     result[i] = '\0';
     return result;
@@ -13828,6 +13859,11 @@ static void process_chat_request(ServeState *s, int client_fd,
                                  const char *session_id, int has_session,
                                  const char *request_id, int is_completion) {
 
+    // Per-request sampler isolation: the n-gram blocker + rep-penalty ring
+    // are global scratch — without a reset here, greedy sampling is stateful
+    // across requests (identical prompts gave different completions).
+    sampler_state_reset();
+
     float *hidden = calloc(HIDDEN_DIM, sizeof(float));
     float *logits = calloc(VOCAB_SIZE, sizeof(float));
 
@@ -14144,6 +14180,10 @@ static void process_chat_request(ServeState *s, int client_fd,
         }
 
         const char *tok_str = decode_token(s->vocab, next_token);
+        if (getenv("FINCHMOE_SERVE_DEBUG")) {
+            fprintf(stderr, "[serve-tok] id=%d text=%s\n", next_token,
+                    tok_str ? tok_str : "(null)");
+        }
         if (!in_think && tok_str && gen_resp_len + (int)strlen(tok_str) < 256*1024 - 1) {
             int tlen = (int)strlen(tok_str);
             memcpy(gen_response + gen_resp_len, tok_str, tlen);
@@ -15611,6 +15651,11 @@ int main(int argc, char **argv) {
                         VOCAB_SIZE, (double)(VOCAB_SIZE * sizeof(float)) / 1e6, g_dump_logits_path);
             }
         }
+
+        // Sampler isolation for the (single) CLI generation — mirrors the
+        // serve-path reset; makes T=0 deterministic regardless of any prior
+        // sampler use in this process.
+        sampler_state_reset();
 
         // ---- Sample first token ----
         int next_token = cpu_sample_temp(logits, VOCAB_SIZE, g_temperature, g_top_k);
