@@ -15,7 +15,7 @@ model with proven capability, at a size the SSD can feed.
 
 **Phase 1 targets MET (2026-08-13)**: ~9-10 tok/s decode on M4 (3-bit experts, page-cache dependent), 1.95 GB weights — see [finchmoe/OPTIMIZATION_PLAN.md](finchmoe/OPTIMIZATION_PLAN.md) for the full progress log. Quantized weights: [huggingface.co/haihengh/Qwen3.6-35B-A3B-finchmoe-3bit](https://huggingface.co/haihengh/Qwen3.6-35B-A3B-finchmoe-3bit).
 
-## Current Status (2026-08-14)
+## Current Status (2026-08-18)
 
 | Metric | Value |
 |--------|-------|
@@ -40,10 +40,44 @@ carry-over is only 3.3%). (3) ~~Server multi-turn~~ — FIXED 2026-08-14: trunca
 pre-turn snapshot + think re-entry ban (sessions accumulate history).
 (4) MTP speculative decoding: forward math verified correct against a
 pristine-BF16 numpy reference, but the model's MTP head is inherently weak
-(cos 0.3-0.8, ~0% acceptance) — not shippable (see finchmoe/mtp_reference.py).
+(cos 0.3-0.8, ~0% acceptance) — not shippable (see finchTool/tools/mtp_reference.py).
 The MTP weight files (`model_weights_mtp.bin` 4.96 GB + `packed_experts/layer_40.bin`
 453 MB) are OPTIONAL — the engine skips them unless `--mtp` is passed, so they
 can be deleted to reclaim ~5.4 GB of disk.
+
+### GGUF mode (`--gguf FILE`) — Phase C (2026-08-18)
+
+The engine loads llama.cpp GGUF files directly (zero-copy mmap + per-tensor
+Metal wraps; Q4_K/Q6_K dequant on GPU). Targets the Q4_K_M tier of the model
+(the "real long-form fix" candidate). Status:
+
+| Metric | Value |
+|--------|-------|
+| Prefill (chunked, default) | 13-token prompt **~0.9-1.2 s** TTFT vs ~2.9 s per-token (2×); 90 tokens **~5.5 s** vs ~29 s (5×). Chunked GGUF prefill is the default. |
+| Decode | **~1.06 tok/s** (dequant-bound; the native 3-bit path is 16-22 tok/s) |
+| Correctness | Bitwise vs the pool-path reference at 13 tokens (cos 1.000000); 90-token chunked vs per-token cos 1.000000 (after the sl≥32 attention fix below); llama.cpp cross-validation cos 0.9998 / 0.9962 (1/13 tokens) |
+| RAM | weights stream from the 21.7 GB GGUF mmap; 256 MB expert pool + per-layer wraps |
+
+**Phase C S6 findings (2026-08-18)** — the per-wait cost is fully decomposed
+(`FINCHMOE_CBLAT` probes): a kernel-carrying command buffer costs ~0.26 ms of
+dispatch overhead regardless of work (empty-CB round trip is 0.013 ms); the GPU
+pays a queue-drain wake tax after idle gaps (0.07 ms@0.1 ms, 0.55 ms@1 ms,
+1.4 ms@3 ms — the routing+pread gap before CMD3 is the biggest); file-backed
+weight reads pay per-16KB DART page-walk costs (the 2 MB-aligned anonymous
+expert pool walks free — the preads are IOMMU priming, not just copies).
+Env-gated probes: `FINCHMOE_GGUF_GDN_GPU` (0=CPU chain, 1=fused chain CB,
+2=fused+cmdA merged in ONE CB — bitwise, opt-in), `FINCHMOE_PF_PINGPONG`
+(split-pool CMD3 groups — neutral), `FINCHMOE_GGUF_STAGE2` (aligned copies of
+GPU-read tensors — helps kernels, costs expert-slab cache), `FINCHMOE_PF_NOPREAD`
+(direct-mmap CMD3 — dead end: GPU faults on untouched pages ~0.5 ms each and
+>100 MB no-copy wraps return wrong data).
+
+**Fixed 2026-08-18 — GGUF attention at sl ≥ 32**: the per-token path signaled
+GPU attention but never encoded the dispatches (they live in the fused CMD2,
+gated off for GGUF), so o_proj silently read stale `buf_attn_out` from token 32
+onward — per-token vs chunked diverged at cos 0.818 on the 90-token soak.
+GGUF per-token/decode now use CPU attention at sl ≥ 32; 90-token cross-path
+is bitwise (cos 1.000000).
 
 ### M1 mini benchmark (2026-08-14)
 
@@ -175,7 +209,14 @@ open FinchmoeChat.app                            # SwiftUI client: sessions, str
 
 # Cross-validation (expect CosSim 1.000000 for gated/o_proj/h_mid/h_post)
 FINCHMOE_DUMP_STAGES=1 ./finchmoe-infer -t 1 -k 8 -e 0 -P "Explain what a MoE transformer is in one sentence."
-FINCHMOE_REF_MANIFEST=quant_clean/model_weights_quant.json FINCHMOE_REF_WEIGHTS=quant_clean/model_weights_quant.bin python3 debug_gdn_reference.py /tmp/stage_dump.bin
+FINCHMOE_REF_MANIFEST=quant_clean/model_weights_quant.json FINCHMOE_REF_WEIGHTS=quant_clean/model_weights_quant.bin python3 finchTool/tools/debug_gdn_reference.py /tmp/stage_dump.bin
+
+# GGUF mode (llama.cpp files, Q4_K/Q6_K GPU dequant, chunked prefill default)
+./finchmoe-infer --gguf ../models/Qwen3.6-35B-A3B-Q4_K_M.gguf -L --prompt "The capital of France is Paris." -t 40
+./bench_gguf.sh 13 prompt_tokens_gguf.bin        # llama.cpp + CPU + GPU cross-validation
+# 90-token soak regression (per-token vs chunked must be bitwise):
+#   --prefill-chunk 0 vs 8 --dump-logits on the capitals prompt, compare with
+#   python3 finchTool/tools/compare_gguf_logits.py
 ```
 
 ### Key Flags
@@ -199,6 +240,8 @@ FINCHMOE_REF_MANIFEST=quant_clean/model_weights_quant.json FINCHMOE_REF_WEIGHTS=
 | `--kv-fp16` | off | KV cache in FP16 — 2× smaller KV (logits cos 0.999999 vs FP32) |
 | `--kv-turbo` | off | KV cache K int8 + V 4-bit — ~5× smaller KV (logits cos 0.999793; ~10% slower CPU attention) |
 | `--min-p F` | 0.05 | min_p tail filter (llama.cpp-style): zero tokens below min_p × top-prob — narrows long-form drift |
+| `--gguf FILE` | off | Load a GGUF file directly (Q4_K/Q6_K GPU dequant, chunked prefill default ON, ~1.06 tok/s decode) |
+| `-I FILE` | — | Dump first-token logits (cross-validation with finchTool/tools/compare_gguf_logits.py) |
 
 ## Model Sizes
 
@@ -379,35 +422,56 @@ replacement, CREATE TABLE → IF-TABLE migration, 20-file TF repo:
 | `generate_expert_index.py` | Expert tensor index (offset math, MTP-aware) |
 | `compress_experts.py` | Expert compression variants |
 | `export_tokenizer.py` | vocab.bin from the HF tokenizer (BPE merges) |
-| `extract_mtp_experts.py` | MTP auxiliary-head expert extraction |
 | `build_hot_sets.py` | Per-layer hot expert sets from `--collect-routing` logs → hot_sets.bin (prefill prefetch) |
 
-### Debugging & verification (finchmoe/)
+### Benchmarks (finchmoe/)
 
 | Tool | Purpose |
 |------|---------|
-| `debug_compare.py` | Weight/manifest consistency checks + logits comparison helper |
+| `bench_suite.sh` | Decode/prefill comparison matrix (KV modes, chunk sizes) |
+| `bench_prefill.sh` | Prefill benchmark + bitwise parity matrix (chunk sizes × timings) |
+| `bench_gguf.sh` | GGUF gate runner: llama.cpp reference + finchmoe CPU + GPU, cos comparison |
+| `run_logit_dump_safe.sh` | llama.cpp logit_dump with the memory watchdog |
+
+### Debugging & verification (finchTool/tools/)
+
+| Tool | Purpose |
+|------|---------|
+| `compare_gguf_logits.py` | cos/argmax/max-diff of `-I` logit dumps (used by bench_gguf.sh) |
+| `compare_pb_traces.py` | First-diverging (token, layer) on Phase-B traces |
+| `analyze_s4_dumps.py` | Phase C S4 kernel-parity dumps |
+| `analyze_longgen.py` | Long-generation health: n-gram repetition, EOS, think tags, drift |
 | `debug_gdn_reference.py` | Numpy GDN reference (stage cross-validation, CosSim 1.000000) |
-| `debug_e2e_logits.py` | End-to-end logits cross-check |
+| `debug_compare.py` / `debug_e2e_logits.py` | Weight/logits consistency checks |
 | `debug_full_forward.py` / `debug_layer_compare.py` / `debug_layer_diff.py` | Full-forward and per-layer reference diffs |
 | `debug_full_attn_moe.py` / `debug_2token_gdn.py` | Attention/MoE and GDN targeted references |
 | `debug_bf16_vs_4bit.py` / `debug_mlx_inference.py` | Format and MLX-loader verification |
 | `verify_clean_rebuild.py` | CosSim verification of the clean-rebuild weights (3-bit experts, non-experts) |
-| `bench_prefill.sh` | Prefill benchmark + bitwise parity matrix (chunk sizes × timings) |
+| `extract_mtp_experts.py` / `mtp_reference.py` | MTP head extraction + numpy reference |
+| `wobble_hunt.sh` / `wobble_trace_hunt.sh` | Run-to-run wobble hunting |
 | `finchTool/` | Standalone Metal kernel verification suite (matvec/attention kernels) |
-| `test_engine_path.m` | Engine-path standalone test |
+| `test_engine_path.m` | Engine-path standalone test (finchmoe/) |
 
 ### Runtime diagnostics (engine flags & env vars)
 
 | Flag / Env | Purpose |
 |------------|---------|
-| `--timing` / `FINCHMOE_PF_TIMING=1` | Per-phase timing (per-token path / chunked prefill path) |
+| `--timing` / `FINCHMOE_PF_TIMING=1` | Per-phase timing (per-token / chunked prefill; now includes per-commit idle gaps: cmdA/delta/cmdB/cmd3_gap — the GPU wake-tax attribution) |
 | `--debug-layers` | Per-layer hidden-state statistics |
 | `--compare-experts N` | GPU vs CPU expert outputs for layer N |
-| `--dump-logits FILE` | First-token logits for cross-validation |
+| `--dump-logits FILE` / `-I FILE` | First-token logits for cross-validation |
 | `--collect-routing FILE` | Routing logs (layer, hidden, top-K, top-24) for predictor training |
 | `FINCHMOE_DUMP_HIDDEN` / `FINCHMOE_PF_DUMP` / `FINCHMOE_DUMP_STAGES` | Per-layer hidden / chunked-stage dumps for parity forensics |
 | `FINCHMOE_PF_PREFETCH=1` | Force-enable hot-set prefetch (bypasses the memory gate) |
+| `FINCHMOE_GGUF_GDN_GPU` | GGUF linear chain: 0 = CPU chain (default), 1 = fused GPU chain (S5), 2 = cmdA matvecs + fused chain in ONE CB (S6a) |
+| `FINCHMOE_PF_TIMING=1` + `FINCHMOE_PF_CMD3WAIT=1` | Isolate the deferred CMD3 tail from cmdA_wait |
+| `FINCHMOE_PF_KLOOP/GKLOOP/C3LOOP=N` | Repeat cmdA/fused-GDN/CMD3 encodes N× in one CB (kernel-only timing) |
+| `FINCHMOE_PF_C3SKIP=N` | Skip CMD3 expert dispatches (timing-only — outputs go stale) |
+| `FINCHMOE_PF_NODEDUP` | Disable expert-pread dedup (escape hatch) |
+| `FINCHMOE_PF_PINGPONG=1` | Split-pool CMD3 groups (opt-in; measured neutral on M4) |
+| `FINCHMOE_PF_NOPREAD=1` | Direct-mmap CMD3 (probe — known slow/wrong, see GGUF status) |
+| `FINCHMOE_GGUF_STAGE2=1/2` | 2MB-aligned copies of GPU-read QK tensors (probe — wins kernels, costs expert-slab cache) |
+| `FINCHMOE_CBLAT=N/K/KA` | Command-buffer latency probes (empty / kernel / keep-alive ticker) |
 
 ## Project Layout
 
@@ -417,7 +481,8 @@ finchMoE/
 ├── finchmoe/                     # engine + tools (see tables above)
 │   ├── infer.m                   # main engine (C/Metal, ~15k lines)
 │   ├── shaders.metal             # Metal kernels (4/3/2/1/8-bit dequant, fused GDN, routing, attention)
-│   └── chat.m                    # chat TUI client
+│   ├── chat.m                    # chat TUI client
+│   └── finchTool/                # Metal kernel verification suite + tools/ (python/shell diagnostics)
 ├── models/                       # Qwen3.6-35B-A3B variants + GGUF references
 │   └── Qwen3.6-35B-A3B-bf16/     # pristine BF16 base (requant source, expert packs)
 ├── quant_clean/                  # current production weights (model_weights_quant.bin/.json)

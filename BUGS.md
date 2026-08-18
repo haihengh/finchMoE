@@ -763,3 +763,20 @@ first divergent layer.
   MTP head is inherently weak (cos 0.3-0.8, 0% acceptance). MTP weights optional.
 - **Corrupt MTP expert pack** — FIXED. layer_40.bin regenerated (gate CosSim
   0.908 → 0.9957).
+- **GGUF per-token GPU attention (sl ≥ 32)** — FIXED 2026-08-18. The 90-token
+  multi-chunk soak (per-token vs chunked, `--dump-logits`) diverged at cos
+  0.818, deterministic and identical on the pre-S6 binary. PB-trace keyed
+  scan: first big divergence at token 31 layer 3 — the first position with
+  sl ≥ 32 (the first GPU-attention position). Root cause: in GGUF mode the
+  per-token path set attn_out_for_oproj = NULL (GPU-attention signal), but
+  the attention dispatches live inside the fully-fused CMD2 which is gated
+  `!g_gguf_stage` — never encoded — so o_proj silently read stale
+  buf_attn_out from token 32 onward. GGUF decode past sl 32 was equally
+  broken and never caught (GGUF decode quality was only tested below 32
+  tokens). Fix: `!g_gguf_stage` on the per-token gpu_attn_ready gate —
+  GGUF per-token/decode use CPU attention at sl ≥ 32 (native path
+  unchanged). Verified: 90-token per-token vs chunked cos 1.000000,
+  13-token regression cos 1.000000. Also added the S4.1 sync pattern
+  (synchronizeResource + barriers) to the per-position attention encoder
+  chains in both paths. The 90-token capitals-prompt soak is now the
+  standard cross-path regression.
