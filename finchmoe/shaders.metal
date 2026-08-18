@@ -2963,6 +2963,7 @@ kernel void fused_gdn_batched(
     }
 }
 
+
 // ============================================================================
 // Phase C: GGUF Q4_K / Q6_K block dequant-matvec (the GGUF-path GPU kernels).
 // Structural clone of dequant_matvec_4bit_v3: ROWS_PER_TG 8, 256 threads,
@@ -3005,6 +3006,212 @@ static uchar2 get_scale_min_k4(uint j, device const uchar* scales) {
 }
 
 #define ROWS_PER_TG_QK 8
+
+// ============================================================================
+// Phase C S5: fused_gdn_batched_qk — the GGUF Q4_K variant of the fused
+// batched GDN chain. Same structure as fused_gdn_batched (verbatim conv /
+// recurrence / gated-norm math, in-kernel M-position loop, per-thread q/k
+// histories, GPU conv_state for the v channels) with two GGUF deltas:
+//   1. in_proj a/b run IN-KERNEL: Q4_K block-decode matvec per head-TG,
+//      thread 0 only, sequential word order (mirrors gguf_cpu_matvec's
+//      dequant-then-MAC form; the per-element expression matches
+//      dequant_matvec_qk so the dequant arithmetic is identical).
+//   2. A_val = -A_log (GGUF stores ssm_a negated+exponentiated — see
+//      linear_attn_chain_cpu's ternary).
+// b_w/a_w are Q4_K [32, in_dim] rows (144B/256 row bytes); x is the layer
+// input [M, in_dim] (buf_pf_input, written by the previous layer's CMD3 —
+// cross-CB read, coherent). qkv_in/z are written by cmdA in the PREVIOUS
+// command buffer (the packed 2-CB structure — same-CB device reads hit the
+// stale-L2 hazard, so this kernel runs in its own CB after a wait).
+// ============================================================================
+kernel void fused_gdn_batched_qk(
+    device float       *conv_state,      // [3 * conv_dim] persistent, v channels only
+    device const float *qkv_in,          // [M * conv_dim]
+    device const uint16_t *conv_w,       // [conv_dim * 4] bf16
+    device const float *z,               // [M * num_v_heads * value_dim]
+    device const uchar *b_w,             // Q4_K [num_v_heads, in_dim] beta weights
+    device const uchar *a_w,             // Q4_K [num_v_heads, in_dim] alpha weights
+    device const float *x,               // [M * in_dim] layer input
+    device const float *A_log,           // [num_v_heads] F32
+    device const uint16_t *dt_bias,      // [num_v_heads] bf16
+    device const uint16_t *norm_weight,  // [value_dim] bf16
+    device float       *state,           // [num_v_heads * value_dim * key_dim] persistent
+    device float       *output,          // [M * num_v_heads * value_dim] gated output
+    device float       *qk_hist,         // [3 * (2*total_key)] per-thread q/k conv history
+    constant uint &conv_dim,             // 8192
+    constant uint &in_dim,               // 2048
+    constant uint &k_heads_per_v,        // 2
+    constant uint &key_dim,              // 128
+    constant uint &value_dim,            // 128
+    constant uint &M,                    // positions per chunk
+    constant float &eps,                 // 1e-6
+    uint head [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]]
+) {
+    uint kh = head % 16;  // torch .repeat() block mapping (LINEAR_NUM_K_HEADS)
+    uint total_key = conv_dim / 4;  // 2048 = LINEAR_TOTAL_KEY
+    uint num_v_heads = k_heads_per_v * (total_key / key_dim);  // matches caller
+    uint words = in_dim / 8;
+    uint row_bytes = (in_dim / 256) * 144u;  // Q4_K
+
+    threadgroup float conv_q[128];
+    threadgroup float conv_k[128];
+    threadgroup float conv_v[128];
+    threadgroup float g_decay, beta_gate;
+    threadgroup float part_q[128];
+    threadgroup float part_k[128];
+    threadgroup float partial[128];
+
+    for (uint m = 0; m < M; m++) {
+        device const float *qkv_m = qkv_in + (size_t)m * conv_dim;
+        device const float *z_m   = z + (size_t)m * num_v_heads * value_dim;
+        device float *out_m = output + (size_t)m * num_v_heads * value_dim;
+
+        uint q_c = kh * key_dim + tid;
+        uint k_c = total_key + kh * key_dim + tid;
+        uint v_c = 2 * total_key + head * value_dim + tid;
+
+        {
+            uint c = q_c;
+            uint wb = c * 4;
+            // Per-thread device history (see fused_gdn_full): the q/k conv
+            // channels are shared between head pairs — concurrent TGs
+            // shifting shared conv_state channels tore each other's reads.
+            device float *qh = qk_hist + head * 3 * key_dim + tid;
+            float acc = qh[0 * key_dim] * bf16_to_f32(conv_w[wb + 0])
+                      + qh[1 * key_dim] * bf16_to_f32(conv_w[wb + 1])
+                      + qh[2 * key_dim] * bf16_to_f32(conv_w[wb + 2])
+                      + qkv_m[c] * bf16_to_f32(conv_w[wb + 3]);
+            conv_q[tid] = acc / (1.0f + exp(-acc));  // SiLU
+            qh[0 * key_dim] = qh[1 * key_dim];
+            qh[1 * key_dim] = qh[2 * key_dim];
+            qh[2 * key_dim] = qkv_m[c];
+        }
+        {
+            uint c = k_c;
+            uint wb = c * 4;
+            device float *kh_hist = qk_hist + 32 * 3 * key_dim + head * 3 * key_dim + tid;
+            float acc = kh_hist[0 * key_dim] * bf16_to_f32(conv_w[wb + 0])
+                      + kh_hist[1 * key_dim] * bf16_to_f32(conv_w[wb + 1])
+                      + kh_hist[2 * key_dim] * bf16_to_f32(conv_w[wb + 2])
+                      + qkv_m[c] * bf16_to_f32(conv_w[wb + 3]);
+            conv_k[tid] = acc / (1.0f + exp(-acc));
+            kh_hist[0 * key_dim] = kh_hist[1 * key_dim];
+            kh_hist[1 * key_dim] = kh_hist[2 * key_dim];
+            kh_hist[2 * key_dim] = qkv_m[c];
+        }
+        {
+            uint c = v_c;
+            uint wb = c * 4;
+            float acc = conv_state[0 * conv_dim + c] * bf16_to_f32(conv_w[wb + 0])
+                      + conv_state[1 * conv_dim + c] * bf16_to_f32(conv_w[wb + 1])
+                      + conv_state[2 * conv_dim + c] * bf16_to_f32(conv_w[wb + 2])
+                      + qkv_m[c] * bf16_to_f32(conv_w[wb + 3]);
+            conv_v[tid] = acc / (1.0f + exp(-acc));
+            conv_state[0 * conv_dim + c] = conv_state[1 * conv_dim + c];
+            conv_state[1 * conv_dim + c] = conv_state[2 * conv_dim + c];
+            conv_state[2 * conv_dim + c] = qkv_m[c];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // ---- Step 2: rms_norm_qk (q gets inv^2, k gets inv) ----
+        part_q[tid] = conv_q[tid] * conv_q[tid];
+        part_k[tid] = conv_k[tid] * conv_k[tid];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0) {
+            float sq = 0, sk = 0;
+            for (uint i = 0; i < key_dim; i++) { sq += part_q[i]; sk += part_k[i]; }
+            part_q[0] = sq;
+            part_k[0] = sk;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float inv_scale = rsqrt(float(key_dim));
+        float inv_q = rsqrt(part_q[0] / float(key_dim) + 1e-6f);
+        float inv_k = rsqrt(part_k[0] / float(key_dim) + 1e-6f);
+        conv_q[tid] = conv_q[tid] * inv_q * inv_scale * inv_scale;
+        conv_k[tid] = conv_k[tid] * inv_k * inv_scale;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // ---- Step 3: in_proj a/b (in-kernel Q4_K matvec, thread 0) + decay ----
+        if (tid == 0) {
+            device const uchar* br = b_w + (ulong)head * row_bytes;
+            device const uchar* ar = a_w + (ulong)head * row_bytes;
+            device const float *x_m = x + (size_t)m * in_dim;
+            float bacc = 0.0f, aacc = 0.0f;
+            // Sequential word order mirrors gguf_cpu_matvec's dequant-then-
+            // MAC loop; per-element expression matches dequant_matvec_qk.
+            for (uint w = 0; w < words; w++) {
+                uint block = w >> 5;
+                uint wb = w & 31;
+                device const uchar* bb = br + (ulong)block * 144u;
+                device const uchar* ab = ar + (ulong)block * 144u;
+                uint j    = (wb >> 3) * 2 + ((wb >> 2) & 1);
+                uint nhalf = (wb >> 2) & 1;
+                float db    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(bb + 0)));
+                float mbmin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(bb + 2)));
+                float da    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(ab + 0)));
+                float mamin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(ab + 2)));
+                uchar2 smb = get_scale_min_k4(j, bb + 4);
+                uchar2 sma = get_scale_min_k4(j, ab + 4);
+                float bdsc = db * (float)smb.x;
+                float bmm  = mbmin * (float)smb.y;
+                float adsc = da * (float)sma.x;
+                float amm  = mamin * (float)sma.y;
+                ulong bq = *(device ulong*)(bb + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+                ulong aq = *(device ulong*)(ab + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+                for (uint i = 0; i < 8; i++) {
+                    uint bnb = (uint)((bq >> (8 * i + 4 * nhalf)) & 0xF);
+                    uint anb = (uint)((aq >> (8 * i + 4 * nhalf)) & 0xF);
+                    float xv = x_m[w * 8 + i];
+                    bacc += ((float)bnb * bdsc - bmm) * xv;
+                    aacc += ((float)anb * adsc - amm) * xv;
+                }
+            }
+            float dt_b  = bf16_to_f32(dt_bias[head]);
+            float A_val = -A_log[head];   // GGUF: ssm_a stored negated+exp'd
+            float softplus_val = log(1.0f + exp(aacc + dt_b));
+            g_decay   = exp(-A_val * softplus_val);
+            beta_gate = 1.0f / (1.0f + exp(-bacc));
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // ---- Step 4: GDN recurrence (each thread owns one state row) ----
+        uint state_base = head * value_dim * key_dim;
+        float kv_mem = 0.0f;
+        for (uint ki = 0; ki < key_dim; ki++) {
+            float s = state[state_base + tid * key_dim + ki] * g_decay;
+            state[state_base + tid * key_dim + ki] = s;
+            kv_mem += s * conv_k[ki];
+        }
+        float delta = (conv_v[tid] - kv_mem) * beta_gate;
+        for (uint ki = 0; ki < key_dim; ki++) {
+            state[state_base + tid * key_dim + ki] += conv_k[ki] * delta;
+        }
+        float out_val = 0.0f;
+        for (uint ki = 0; ki < key_dim; ki++) {
+            out_val += state[state_base + tid * key_dim + ki] * conv_q[ki];
+        }
+
+        // ---- Step 5: gated rms norm ----
+        uint base = head * value_dim;
+        partial[tid] = out_val * out_val;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0) {
+            float s = 0;
+            for (uint i = 0; i < value_dim; i++) s += partial[i];
+            partial[0] = s;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float inv_rms = rsqrt(partial[0] / float(value_dim) + eps);
+
+        float normed = out_val * inv_rms;
+        float zval = z_m[base + tid];
+        float gate = zval / (1.0f + exp(-zval));  // SiLU
+        float w = bf16_to_f32(norm_weight[tid]);
+        out_m[base + tid] = normed * gate * w;
+
+    }
+}
 
 kernel void dequant_matvec_qk(
     device const uchar*  W          [[buffer(0)]],  // tensor base (per-tensor wrapped buffer)
