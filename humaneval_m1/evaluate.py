@@ -49,7 +49,11 @@ def run_check(task, completion, timeout_sec=10):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--results", default=RESULTS, help="results file")
     args = ap.parse_args()
+
+    global RESULTS
+    RESULTS = args.results
 
     tasks = load_dataset()
     results = load_results()
