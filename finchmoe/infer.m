@@ -8556,21 +8556,149 @@ static void fused_layer_forward(
 
         // GPU attention: defer dispatches to CMD2 (fused into single cmd buffer).
         // Only enabled when seq_len >= 32 (below that, CPU is faster).
-        // Phase C S6 fix: GGUF mode must stay on CPU attention here — the
+        // Phase C S6 fix: GGUF mode defaults to CPU attention here — the
         // attention dispatches live inside the fully-fused CMD2, which is
         // gated off for GGUF (g_gguf_stage); with attn_out_for_oproj=NULL
         // and no dispatches, o_proj silently read STALE buf_attn_out from
         // token 32 onward (the 90-token per-token divergence, cos 0.818).
+        // Phase C S7 L3: FINCHMOE_GGUF_GPU_ATTN=1 re-enables GPU attention for
+        // GGUF — the dispatches are encoded in a dedicated CB in the branch
+        // below (the native fused CMD2 stays gated off). CPU attention is
+        // O(seq_len), so this also fixes long-context decode scaling.
+        static int gguf_gpu_attn = -1;
+        if (gguf_gpu_attn < 0) gguf_gpu_attn = getenv("FINCHMOE_GGUF_GPU_ATTN") != NULL;
+        int gguf_oproj_fallback = 0;   // set if the GGUF CB couldn't encode o_proj
         int gpu_attn_ready = (g_metal && g_metal->attn_scores_pipe &&
                               fa_idx >= 0 && fa_idx < NUM_FULL_ATTN_LAYERS &&
                               kv->len >= 32 && kv->len < g_gpu_kv_seq &&
-                              !g_gguf_stage);
+                              (!g_gguf_stage || gguf_gpu_attn));
 
         if (gpu_attn_ready) {
             // Copy Q and gate to GPU; attention dispatches will be in CMD2
             memcpy([g_metal->buf_attn_q contents], q, q_dim * sizeof(float));
             memcpy([g_metal->buf_attn_gate contents], q_gate, q_dim * sizeof(float));
             // attn_out_for_oproj will be set to NULL below — CMD2 reads buf_attn_out
+            if (g_gguf_stage) {
+                // ---- Phase C S7 L3: GGUF attention + o_proj in ONE CB ----
+                // Same A1-A4 dispatches as the native fused CMD2 (with the
+                // S4.1 sync pattern) plus the Q4_K/Q6_K o_proj matvec
+                // (matvec_qk via the reused tensor-wrap buffer — the same
+                // encode as gpu_gguf_dequant_matvec). Replaces the O(seq_len)
+                // CPU attention loop and the one-off o_proj CB with a single
+                // commit+wait.
+                uint32_t ghd = HEAD_DIM, gkvd = (uint32_t)kv_dim;
+                uint32_t gsl = (uint32_t)kv->len;
+                uint32_t gseq = (uint32_t)g_gpu_kv_seq;
+                uint32_t ghpkv = (uint32_t)heads_per_kv;
+                id<MTLCommandBuffer> cmd_attn = [g_metal->queue commandBuffer];
+                // Enc A1: attn_scores_batched
+                {
+                    id<MTLComputeCommandEncoder> enc = [cmd_attn computeCommandEncoder];
+                    [enc setComputePipelineState:g_metal->attn_scores_pipe];
+                    [enc setBuffer:g_metal->buf_attn_q        offset:0 atIndex:0];
+                    [enc setBuffer:g_metal->buf_kv_k[fa_idx]  offset:0 atIndex:1];
+                    [enc setBuffer:g_metal->buf_attn_scores   offset:0 atIndex:2];
+                    [enc setBytes:&ghd       length:4 atIndex:3];
+                    [enc setBytes:&gkvd      length:4 atIndex:4];
+                    [enc setBytes:&gsl       length:4 atIndex:5];
+                    [enc setBytes:&gseq      length:4 atIndex:6];
+                    [enc setBytes:&scale     length:4 atIndex:7];
+                    [enc setBytes:&ghpkv     length:4 atIndex:8];
+                    [enc setBytes:&gsl       length:4 atIndex:9];
+                    uint32_t total_tgs = gsl * NUM_ATTN_HEADS;
+                    [enc dispatchThreadgroups:MTLSizeMake(total_tgs, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    [enc endEncoding];
+                }
+                // Enc A2: attn_softmax_batched (writer sync + reader barrier)
+                metal_sync_buffer(cmd_attn, g_metal->buf_attn_scores);
+                {
+                    id<MTLComputeCommandEncoder> enc = [cmd_attn computeCommandEncoder];
+                    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+                    [enc setComputePipelineState:g_metal->attn_softmax_pipe];
+                    [enc setBuffer:g_metal->buf_attn_scores offset:0 atIndex:0];
+                    [enc setBytes:&gsl       length:4 atIndex:1];
+                    [enc setBytes:&gseq      length:4 atIndex:2];
+                    [enc dispatchThreadgroups:MTLSizeMake(NUM_ATTN_HEADS, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+                    [enc endEncoding];
+                }
+                // Enc A3: attn_values_batched
+                metal_sync_buffer(cmd_attn, g_metal->buf_attn_scores);
+                {
+                    id<MTLComputeCommandEncoder> enc = [cmd_attn computeCommandEncoder];
+                    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+                    [enc setComputePipelineState:g_metal->attn_values_pipe];
+                    [enc setBuffer:g_metal->buf_attn_scores   offset:0 atIndex:0];
+                    [enc setBuffer:g_metal->buf_kv_v[fa_idx]  offset:0 atIndex:1];
+                    [enc setBuffer:g_metal->buf_attn_out      offset:0 atIndex:2];
+                    [enc setBytes:&ghd      length:4 atIndex:3];
+                    [enc setBytes:&gkvd     length:4 atIndex:4];
+                    [enc setBytes:&gsl      length:4 atIndex:5];
+                    [enc setBytes:&gseq     length:4 atIndex:6];
+                    [enc setBytes:&ghpkv    length:4 atIndex:7];
+                    uint32_t total_threads = HEAD_DIM * NUM_ATTN_HEADS;
+                    uint32_t tgs = (total_threads + 255) / 256;
+                    [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+                    [enc endEncoding];
+                }
+                // Enc A4: sigmoid_gate
+                metal_sync_buffer(cmd_attn, g_metal->buf_attn_out);
+                {
+                    uint32_t gqd = NUM_ATTN_HEADS * HEAD_DIM;
+                    id<MTLComputeCommandEncoder> enc = [cmd_attn computeCommandEncoder];
+                    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+                    [enc setComputePipelineState:g_metal->sigmoid_gate_pipe];
+                    [enc setBuffer:g_metal->buf_attn_out  offset:0 atIndex:0];
+                    [enc setBuffer:g_metal->buf_attn_gate offset:0 atIndex:1];
+                    [enc setBytes:&gqd length:4 atIndex:2];
+                    uint32_t tgs = (gqd + 255) / 256;
+                    [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+                    [enc endEncoding];
+                }
+                // Enc 5: o_proj (matvec_qk from the mmap slab). Only for
+                // in_dim <= 4096 — the verified one-off GPU path has the same
+                // limit; full-attn layers (8192) keep the CPU o_proj via the
+                // fallback flag below.
+                metal_sync_buffer(cmd_attn, g_metal->buf_attn_out);
+                id<MTLBuffer> o_tbuf = NULL;
+                uint32_t o_delta = 0;
+                if (oproj_in_dim <= 4096) {
+                    size_t o_row_bytes = (size_t)(oproj_in_dim / 256) *
+                                         ((oproj_bits == 10) ? 144 : 210);
+                    o_tbuf = gguf_tbuf_get(g_metal, oproj_w,
+                                           o_row_bytes * HIDDEN_DIM, &o_delta);
+                }
+                if (o_tbuf) {
+                    id<MTLComputeCommandEncoder> enc = [cmd_attn computeCommandEncoder];
+                    [enc setComputePipelineState:g_metal->matvec_qk];
+                    [enc setBuffer:o_tbuf offset:o_delta atIndex:0];
+                    [enc setBuffer:g_metal->buf_attn_out offset:0 atIndex:3];
+                    [enc setBuffer:g_metal->buf_output offset:0 atIndex:4];
+                    uint32_t ood = HIDDEN_DIM, oid_ = (uint32_t)oproj_in_dim;
+                    uint32_t ogt = (uint32_t)(oproj_bits == 10 ? 12 : 14);
+                    [enc setBytes:&ood length:4 atIndex:5];
+                    [enc setBytes:&oid_ length:4 atIndex:6];
+                    [enc setBytes:&ogt length:4 atIndex:7];
+                    [enc dispatchThreadgroups:MTLSizeMake((HIDDEN_DIM + 7) / 8, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    [enc endEncoding];
+                }
+                [cmd_attn commit];
+                [cmd_attn waitUntilCompleted];
+                memcpy(attn_out, [g_metal->buf_attn_out contents], q_dim * sizeof(float));
+                if (o_tbuf) {
+                    memcpy(attn_projected, [g_metal->buf_output contents],
+                           HIDDEN_DIM * sizeof(float));
+                } else {
+                    gguf_oproj_fallback = 1;   // wrap alloc failed — CPU o_proj below
+                }
+            }
         } else {
             // CPU fallback
             for (int h = 0; h < NUM_ATTN_HEADS; h++) {
@@ -8598,7 +8726,7 @@ static void fused_layer_forward(
             }
         }
 
-        if (gpu_attn_ready) {
+        if (gpu_attn_ready && !gguf_oproj_fallback) {
             attn_out_for_oproj = NULL;  // signal CMD2 to use GPU buf_attn_out
         } else {
             attn_out_for_oproj = attn_out;
