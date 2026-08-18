@@ -3073,6 +3073,60 @@ typedef struct InferPreadTask {
     uint32_t lz4_comp_size; // compressed size to read from disk
 } InferPreadTask;
 static void io_pool_dispatch(InferPreadTask *tasks, int num_tasks);
+static void async_pread_multi_start(const int *fds, const off_t *offsets,
+                                    void *const *dsts, const size_t *sizes, int n);
+typedef struct {
+    InferPreadTask tasks[PREFILL_CHUNK_MAX * MAX_K];
+    int num_tasks;
+    int valid[PREFILL_CHUNK_MAX * MAX_K];
+    dispatch_group_t group;
+    int active;
+} AsyncPreadState;
+static AsyncPreadState g_async_pread;
+static void async_pread_wait(void);
+
+// Phase C S7 Lever 1: GGUF temporal-prediction preads into buffer set B.
+// The guess for THIS token's routing is LAST token's (stored after the expert
+// call). Fired at layer entry so the reads overlap the qkv/attn/cmd2 CPU work
+// (~2.3ms window); the predicted slabs were read last token, so their pages
+// are warm. Consumed (hit-checked) by gpu_gguf_experts_forward.
+// Kill switch: FINCHMOE_GGUF_NOPRED=1.
+static int g_gguf_pred_experts[NUM_LAYERS][MAX_K];
+static int g_gguf_pred_count[NUM_LAYERS];
+static int g_gguf_pred_valid = 0;
+static int g_gguf_pred_fired = 0;
+static long g_gguf_pred_hits = 0, g_gguf_pred_tries = 0;
+static double g_gguf_pred_wait_ms = 0;
+static void gguf_pred_fire(int layer_idx) {
+    g_gguf_pred_fired = 0;
+    if (!g_gguf_stage || !g_pred_generating || !g_gguf_pred_valid) return;
+    if (g_gguf_pred_count[layer_idx] <= 0) return;
+    static int nopred = -1;
+    if (nopred < 0) nopred = getenv("FINCHMOE_GGUF_NOPRED") != NULL;
+    if (nopred) return;
+    GgufExpertInfo *ge = &gguf_experts[layer_idx];
+    int n = g_gguf_pred_count[layer_idx];
+    static int fds[PREFILL_CHUNK_MAX * MAX_K];
+    static off_t offs[PREFILL_CHUNK_MAX * MAX_K];
+    static void *dsts[PREFILL_CHUNK_MAX * MAX_K];
+    static size_t sizes[PREFILL_CHUNK_MAX * MAX_K];
+    int nr = 0;
+    for (int p = 0; p < n; p++) {
+        int e = g_gguf_pred_experts[layer_idx][p];
+        uint8_t *dst = (uint8_t *)[g_metal->buf_multi_expert_data_B[p] contents];
+        fds[nr] = g_gguf_fd;
+        offs[nr] = (off_t)(ge->gate_off + (size_t)e * ge->gate_slab);
+        dsts[nr] = dst; sizes[nr] = ge->gate_slab; nr++;
+        fds[nr] = g_gguf_fd;
+        offs[nr] = (off_t)(ge->up_off + (size_t)e * ge->up_slab);
+        dsts[nr] = dst + ge->gate_slab; sizes[nr] = ge->up_slab; nr++;
+        fds[nr] = g_gguf_fd;
+        offs[nr] = (off_t)(ge->down_off + (size_t)e * ge->down_slab);
+        dsts[nr] = dst + ge->gate_slab + ge->up_slab; sizes[nr] = ge->down_slab; nr++;
+    }
+    async_pread_multi_start(fds, offs, dsts, sizes, nr);
+    g_gguf_pred_fired = 1;
+}
 
 // Phase C S2: GGUF routed experts on GPU. One command buffer per layer:
 // per expert, a fused gate+up+SwiGLU (Q4_K slabs read from per-tensor wraps,
@@ -3087,6 +3141,11 @@ static int gpu_gguf_experts_forward(MetalCtx *ctx, WeightFile *wf, int layer_idx
     if (!ctx->fused_gate_up_swiglu_qk_pipe || !ctx->matvec_qk) return 0;
     GgufExpertInfo *ge = &gguf_experts[layer_idx];
     if (ge->gate_type != 12 || ge->up_type != 12) return 0;  // fused kernel is Q4_K-only
+    // Claim any pending prediction fire for THIS layer. Early-return paths
+    // above discard it — a stale flag must never leak into the next layer's
+    // call (its predictions are for a different layer's experts).
+    int pred_fired_local = g_gguf_pred_fired;
+    g_gguf_pred_fired = 0;
 
     // Copy the active experts' slabs into the stable preallocated expert
     // buffers (the packed path's design): the kernel reads from buffers that
@@ -3101,6 +3160,44 @@ static int gpu_gguf_experts_forward(MetalCtx *ctx, WeightFile *wf, int layer_idx
     static double pmc = 0, penc = 0, pw = 0, pco = 0; static int pn = 0;
     if (probe < 0) { const char *e = getenv("FINCHMOE_EXPTIME"); probe = (e && atoi(e) >= 2); }
     double t_mc0 = 0, t_enc0 = 0, t_w0 = 0, t_co0 = 0;
+    // Phase C S7 Lever 1: consume the prediction preads fired at layer entry.
+    // A hit means buffer set B already holds this expert's slab (byte-identical
+    // to what the copy would produce) — bind the GPU kernels to B and skip the
+    // copy. Misses fall through to the copy paths below.
+    id<MTLBuffer> expert_bufs[MAX_K];
+    int pred_hit[MAX_K] = {0};
+    for (int k = 0; k < MAX_K; k++) expert_bufs[k] = ctx->buf_multi_expert_data[k];
+    if (pred_fired_local) {
+        // Index pre-check: if no routed expert matches any predicted one, the
+        // B data is useless — skip the wait entirely and go straight to the
+        // copy paths.
+        int want_wait = 0;
+        for (int k = 0; k < K && !want_wait; k++) {
+            for (int p = 0; p < g_gguf_pred_count[layer_idx]; p++) {
+                if (expert_indices[k] == g_gguf_pred_experts[layer_idx][p]) { want_wait = 1; break; }
+            }
+        }
+        int hit_count = 0;
+        if (want_wait) {
+            double t_pw0 = now_ms();
+            async_pread_wait();
+            g_gguf_pred_wait_ms += now_ms() - t_pw0;
+            for (int k = 0; k < K; k++) {
+                for (int p = 0; p < g_gguf_pred_count[layer_idx]; p++) {
+                    if (expert_indices[k] == g_gguf_pred_experts[layer_idx][p] &&
+                        g_async_pread.valid[p * 3] && g_async_pread.valid[p * 3 + 1] &&
+                        g_async_pread.valid[p * 3 + 2]) {
+                        expert_bufs[k] = ctx->buf_multi_expert_data_B[p];
+                        pred_hit[k] = 1;
+                        hit_count++;
+                        break;
+                    }
+                }
+            }
+        }
+        g_gguf_pred_hits += hit_count;
+        g_gguf_pred_tries += K;
+    }
     if (probe) t_mc0 = now_ms();
     // Phase C S7: parallel slab preads. The serial memcpy was latency-bound on
     // cold pages (one thread, one page at a time); io_pool preads (8 threads)
@@ -3114,6 +3211,7 @@ static int gpu_gguf_experts_forward(MetalCtx *ctx, WeightFile *wf, int layer_idx
     if (no_cache < 0) no_cache = getenv("FINCHMOE_GGUF_NOSLABCACHE") != NULL;
     if (no_cache) {
         for (int k = 0; k < K; k++) {
+            if (pred_hit[k]) continue;
             int eidx = expert_indices[k];
             uint8_t *dst = (uint8_t *)[ctx->buf_multi_expert_data[k] contents];
             memcpy(dst,                          (const uint8_t *)wf->data + ge->gate_off + (size_t)eidx * ge->gate_slab, ge->gate_slab);
@@ -3126,6 +3224,7 @@ static int gpu_gguf_experts_forward(MetalCtx *ctx, WeightFile *wf, int layer_idx
         int n_tasks = 0;
         int k_of_task[MAX_K * 3];
         for (int k = 0; k < K; k++) {
+            if (pred_hit[k]) continue;
             int eidx = expert_indices[k];
             uint8_t *dst = (uint8_t *)[ctx->buf_multi_expert_data[k] contents];
             tasks[n_tasks].fd = g_gguf_fd;
@@ -3183,8 +3282,8 @@ static int gpu_gguf_experts_forward(MetalCtx *ctx, WeightFile *wf, int layer_idx
         {
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             [enc setComputePipelineState:ctx->fused_gate_up_swiglu_qk_pipe];
-            [enc setBuffer:ctx->buf_multi_expert_data[k] offset:0 atIndex:0];
-            [enc setBuffer:ctx->buf_multi_expert_data[k] offset:ge->gate_slab atIndex:1];
+            [enc setBuffer:expert_bufs[k] offset:0 atIndex:0];
+            [enc setBuffer:expert_bufs[k] offset:ge->gate_slab atIndex:1];
             [enc setBuffer:ctx->buf_multi_expert_input offset:0 atIndex:2];
             [enc setBuffer:ctx->buf_expert_act offset:0 atIndex:3];
             [enc setBytes:&od length:4 atIndex:4];
@@ -3198,7 +3297,7 @@ static int gpu_gguf_experts_forward(MetalCtx *ctx, WeightFile *wf, int layer_idx
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             uint32_t dod = HIDDEN_DIM, did = MOE_INTERMEDIATE, dgt = (uint32_t)ge->down_type;
             [enc setComputePipelineState:ctx->matvec_qk];
-            [enc setBuffer:ctx->buf_multi_expert_data[k] offset:ge->gate_slab + ge->up_slab atIndex:0];
+            [enc setBuffer:expert_bufs[k] offset:ge->gate_slab + ge->up_slab atIndex:0];
             [enc setBuffer:ctx->buf_expert_act offset:0 atIndex:3];
             [enc setBuffer:ctx->buf_multi_expert_out[k] offset:0 atIndex:4];
             [enc setBytes:&dod length:4 atIndex:5];
@@ -3230,11 +3329,22 @@ static int gpu_gguf_experts_forward(MetalCtx *ctx, WeightFile *wf, int layer_idx
         float inv_tw = 1.0f / total_weight;
         for (int i = 0; i < HIDDEN_DIM; i++) moe_out[i] *= inv_tw;
     }
+    // Store this token's routing for the NEXT token's prediction preads.
+    if (g_pred_generating) {
+        for (int k = 0; k < K; k++) g_gguf_pred_experts[layer_idx][k] = expert_indices[k];
+        g_gguf_pred_count[layer_idx] = K;
+        if (layer_idx == NUM_LAYERS - 1) g_gguf_pred_valid = 1;
+    }
+    // Phase C S7 Lever 1: fire the NEXT layer's prediction preads now — the
+    // window is this layer's CB wait+combine plus the next layer's
+    // qkv/attn/cmd2 CPU work (~3.5-4ms total). Layer 0 of the next token is
+    // fired by layer 39 here at the end of the previous token.
+    if (layer_idx + 1 < NUM_LAYERS) gguf_pred_fire(layer_idx + 1);
     if (probe) {
         pmc += t_enc0 - t_mc0; penc += t_w0 - t_enc0; pw += t_co0 - t_w0; pco += now_ms() - t_co0;
         if (++pn % NUM_LAYERS == 0)
-            fprintf(stderr, "[expsplit] copy %.3f encode %.3f wait %.3f combine %.3f ms/layer (n=%d)\n",
-                    pmc/pn, penc/pn, pw/pn, pco/pn, pn);
+            fprintf(stderr, "[expsplit] copy %.3f encode %.3f wait %.3f combine %.3f ms/layer, predwait %.3f, pred hits %ld/%ld (n=%d)\n",
+                    pmc/pn, penc/pn, pw/pn, pco/pn, g_gguf_pred_wait_ms / pn, g_gguf_pred_hits, g_gguf_pred_tries, pn);
     }
     return 1;
 }
@@ -5806,13 +5916,8 @@ static void io_pool_dispatch(InferPreadTask *tasks, int num_tasks) {
 // Starts pread on background GCD threads immediately after routing.
 // The pread overlaps with shared expert prep + next layer's CMD1+attn+CMD2.
 // Wait for completion right before CMD3 needs the expert data.
-typedef struct {
-    InferPreadTask tasks[PREFILL_CHUNK_MAX * MAX_K];
-    int num_tasks;
-    int valid[PREFILL_CHUNK_MAX * MAX_K];
-    dispatch_group_t group;
-    int active;
-} AsyncPreadState;
+// (AsyncPreadState + g_async_pread + async_pread_wait are declared above —
+// the GGUF prediction path uses them before their natural definitions.)
 static AsyncPreadState g_async_pread = {0};
 
 static void async_pread_start(int packed_fd, int *expert_indices, int K,
@@ -13850,7 +13955,7 @@ static void process_chat_request(ServeState *s, int client_fd,
     logit_diag_dump(logits, VOCAB_SIZE, next_token, 0);
 
     // ---- Auto-regressive generation with SSE streaming ----
-    if (g_pred_enabled) {
+    if (g_pred_enabled || g_gguf_stage) {   // GGUF: S7 Lever 1 temporal prediction
         g_pred_generating = 1;
         g_pred_valid = 0;
     }
@@ -15416,7 +15521,7 @@ int main(int argc, char **argv) {
 
         // ---- Auto-regressive generation ----
         if (g_timing_enabled) timing_reset();
-        if (g_pred_enabled) {
+        if (g_pred_enabled || g_gguf_stage) {   // GGUF: S7 Lever 1 temporal prediction
             g_pred_generating = 1;  // enable prediction storage/use during generation
             g_pred_valid = 0;       // reset — first gen token builds predictions
         }
