@@ -3438,3 +3438,286 @@ kernel void dequant_matvec_qk_prefill(
     float sum = simd_sum(acc);
     if (simd_lane == 0) out[(size_t)m * out_dim + row] = sum;
 }
+
+// ============================================================================
+// Phase C S4.1: M-batched CMD3 kernels — the per-position dispatches cost
+// ~14-18us of GPU launch overhead each (168 per layer); these fold the M
+// positions of a group into ONE dispatch per kernel. All arithmetic is
+// verbatim from the per-position kernels (bitwise parity target); the pool
+// slot offsets (deduped per (m,k)) arrive as per-m byte-offset arrays.
+// ============================================================================
+
+// Fused gate+up+SwiGLU for Q4_K expert slabs, M positions of a group.
+// S3-layout: 8 rows per TG (one row per simdgroup), lane-strided words,
+// simd_sum reduction, NO barriers — the per-row 256-thread TG shape cost
+// ~1.86ms/layer in barrier + launch overhead (C3SKIP decomposition).
+// Per-element decode arithmetic is verbatim fused_gate_up_swiglu_qk; only
+// the summation order changes (32-lane tree) — G5-class divergence vs the
+// per-position fallback (observed bitwise on this GPU anyway).
+// NOTE: each (position, k) slot holds a DIFFERENT routed expert's weights,
+// so the weights are bound per gm (gate_offs[gm]) — the pool re-reads are
+// the real unique weight traffic.
+kernel void fused_gate_up_swiglu_qk_pool_prefill(
+    device const uchar* gate_W  [[buffer(0)]],  // pool buffer base
+    device const uchar* up_W    [[buffer(1)]],  // pool buffer base
+    device const float*  x      [[buffer(2)]],  // [M, in_dim]
+    device float*        out    [[buffer(3)]],  // [M, out_dim]
+    constant uint&       out_dim [[buffer(4)]],
+    constant uint&       in_dim  [[buffer(5)]],
+    device const uint*   gate_offs [[buffer(6)]],  // [gM] byte offsets (slot)
+    device const uint*   up_offs   [[buffer(7)]],  // [gM] byte offsets (slot + gate_slab)
+    constant uint&       m_base    [[buffer(8)]],
+    uint tgid      [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint num_row_tiles = (out_dim + ROWS_PER_TG_QK - 1) / ROWS_PER_TG_QK;
+    uint gm = tgid / num_row_tiles;
+    uint row_tile = tgid % num_row_tiles;
+    uint row = row_tile * ROWS_PER_TG_QK + simd_group;
+    if (row >= out_dim) return;
+    uint m = m_base + gm;
+    uint words = in_dim / 8;
+    uint row_bytes = (in_dim / 256) * 144u;
+    device const uchar* gr = gate_W + (ulong)gate_offs[gm] + (ulong)row * row_bytes;
+    device const uchar* ur = up_W   + (ulong)up_offs[gm]   + (ulong)row * row_bytes;
+    device const float* xm = x + (size_t)m * in_dim;
+    float ga = 0.0f, ua = 0.0f;
+    for (uint w = simd_lane; w < words; w += 32) {
+        uint block = w >> 5;
+        uint wb = w & 31;
+        uint j    = (wb >> 3) * 2 + ((wb >> 2) & 1);
+        uint nhalf = (wb >> 2) & 1;
+        device const uchar* gb = gr + (ulong)block * 144u;
+        device const uchar* ub = ur + (ulong)block * 144u;
+        float dg    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(gb + 0)));
+        float mgmin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(gb + 2)));
+        float dug    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(ub + 0)));
+        float mumin  = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(ub + 2)));
+        uchar2 smg = get_scale_min_k4(j, gb + 4);
+        uchar2 smu = get_scale_min_k4(j, ub + 4);
+        float gdsc = dg * (float)smg.x;
+        float gmm  = mgmin * (float)smg.y;
+        float udsc = dug * (float)smu.x;
+        float umm  = mumin * (float)smu.y;
+        ulong gq = *(device ulong*)(gb + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+        ulong uq = *(device ulong*)(ub + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+        uint xb = w * 8;
+        for (uint i = 0; i < 8; i++) {
+            uint gnib = (uint)((gq >> (8 * i + 4 * nhalf)) & 0xF);
+            uint unib = (uint)((uq >> (8 * i + 4 * nhalf)) & 0xF);
+            float xv = xm[xb + i];
+            ga += ((float)gnib * gdsc - gmm) * xv;
+            ua += ((float)unib * udsc - umm) * xv;
+        }
+    }
+    float rg = simd_sum(ga), ru = simd_sum(ua);
+    if (simd_lane == 0)
+        out[(size_t)m * out_dim + row] = (rg / (1.0f + exp(-rg))) * ru;
+}
+
+// Q4_K/Q6_K dequant-matvec for expert down slabs, M positions of a group.
+// Clone of dequant_matvec_qk_prefill with per-m pool-slot weight offsets
+// (the S3 kernel's arithmetic is verbatim — same lane-strided order as the
+// per-position matvec_qk, so the down output is bitwise identical).
+kernel void dequant_matvec_qk_pool_prefill(
+    device const uchar*  W          [[buffer(0)]],
+    device const float*  x_inputs   [[buffer(3)]],  // [M, in_dim]
+    device float*        out        [[buffer(4)]],  // [M, out_dim]
+    constant uint&       out_dim    [[buffer(5)]],
+    constant uint&       in_dim     [[buffer(6)]],
+    constant uint&       ggml_type  [[buffer(7)]],
+    device const uint*   w_offs     [[buffer(8)]],  // [gM] byte offsets (slot + down delta)
+    constant uint&       m_base     [[buffer(9)]],
+    uint tgid      [[threadgroup_position_in_grid]],
+    uint lid       [[thread_position_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint num_row_tiles = (out_dim + ROWS_PER_TG_QK - 1) / ROWS_PER_TG_QK;
+    uint gm = tgid / num_row_tiles;
+    uint row_tile = tgid % num_row_tiles;
+    uint m = m_base + gm;
+    uint row = row_tile * ROWS_PER_TG_QK + simd_group;
+    uint words = in_dim / 8;
+    uint row_bytes = (in_dim / 256) * (ggml_type == 12 ? 144u : 210u);
+
+    threadgroup float x_shared[4096];
+    const device float* x = x_inputs + (size_t)m * in_dim;
+    for (uint i = lid; i < in_dim; i += 256) x_shared[i] = x[i];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (row >= out_dim) return;
+
+    device const uchar* w_row = W + (ulong)w_offs[gm] + (ulong)row * row_bytes;
+    float acc = 0.0f;
+    for (uint w = simd_lane; w < words; w += 32) {
+        uint block = w >> 5;
+        uint wb = w & 31;
+        device const uchar* b = w_row + (ulong)block * (ggml_type == 12 ? 144u : 210u);
+        uint xb = w * 8;
+        if (ggml_type == 12) {
+            float d    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 0)));
+            float mmin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 2)));
+            uint j    = (wb >> 3) * 2 + ((wb >> 2) & 1);
+            uint nhalf = (wb >> 2) & 1;
+            uchar2 sm = get_scale_min_k4(j, b + 4);
+            float dsc = d * (float)sm.x;
+            float mm  = mmin * (float)sm.y;
+            ulong qbytes = *(device ulong*)(b + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+            for (uint i = 0; i < 8; i++) {
+                uint nib = (uint)((qbytes >> (8 * i + 4 * nhalf)) & 0xF);
+                float xv = x_shared[xb + i];
+                acc += ((float)nib * dsc - mm) * xv;
+            }
+        } else {
+            uint chunk = wb >> 4;
+            uint wbp   = wb & 15;
+            float d    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 208)));
+            int sc = (int)b[192 + chunk * 8 + (wbp >> 1)];
+            if (sc >= 128) sc -= 256;
+            float dsc = d * (float)sc;
+            uint vb = wbp * 8;
+            for (uint i = 0; i < 8; i++) {
+                uint vi = vb + i;
+                uint qb = chunk * 64 + (vi & 63);
+                uint hb = chunk * 32 + (vi & 31);
+                uint sh = 2 * ((vi >> 5) & 3);
+                uint nib = (b[qb] >> (4 * ((vi >> 6) & 1))) & 0xF;
+                uint qraw = nib | (((b[128 + hb] >> sh) & 3) << 4);
+                float xv = x_shared[xb + i];
+                acc += dsc * ((float)qraw - 32.0f) * xv;
+            }
+        }
+    }
+    float sum = simd_sum(acc);
+    if (simd_lane == 0) out[(size_t)m * out_dim + row] = sum;
+}
+
+// Shared-expert SwiGLU, M positions of a group. Grid: (tgs, gM), 256 threads.
+// Verbatim swiglu_fused per element.
+kernel void swiglu_prefill_batch(
+    device const float* gate [[buffer(0)]],  // [M, dim]
+    device const float* up   [[buffer(1)]],  // [M, dim]
+    device float*       out  [[buffer(2)]],  // [M, dim]
+    constant uint&      dim  [[buffer(3)]],
+    constant uint&      m_base [[buffer(4)]],
+    uint2 tpos [[thread_position_in_grid]]
+) {
+    uint i = tpos.x;
+    if (i >= dim) return;
+    uint m = m_base + tpos.y;
+    size_t base = (size_t)m * dim;
+    float g = gate[base + i];
+    float silu_g = g / (1.0f + exp(-g));
+    out[base + i] = silu_g * up[base + i];
+}
+
+// RMS norm sum-of-squares, M positions of a group (clone of
+// rms_norm_sum_sq_prefill with m from the grid). Grid: (gM, 1), 256 threads.
+kernel void rms_norm_sum_sq_prefill_batch(
+    device const float* x       [[buffer(0)]],  // [M, dim]
+    device float*       sum_sq  [[buffer(1)]],  // [M]
+    constant uint&      dim     [[buffer(2)]],
+    constant uint&      m_base  [[buffer(3)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint lid [[thread_position_in_threadgroup]],
+    uint tg_size [[threads_per_threadgroup]]
+) {
+    threadgroup float shared[32];
+    uint m = m_base + tgid;
+
+    size_t base = (size_t)m * dim;
+    float acc = 0.0f;
+    for (uint i = lid; i < dim; i += tg_size) {
+        float val = x[base + i];
+        acc += val * val;
+    }
+
+    float simd_val = simd_sum(acc);
+    uint simd_lane = lid % 32;
+    uint simd_group = lid / 32;
+
+    if (simd_lane == 0) {
+        shared[simd_group] = simd_val;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group == 0) {
+        float val = (simd_lane < (tg_size + 31) / 32) ? shared[simd_lane] : 0.0f;
+        val = simd_sum(val);
+        if (simd_lane == 0) {
+            sum_sq[m] = val;
+        }
+    }
+}
+
+// RMS norm apply (bf16 weights), M positions of a group (clone of
+// rms_norm_apply_bf16_prefill with m from the flat grid). Grid: (tgs*gM, 1).
+kernel void rms_norm_apply_bf16_prefill_batch(
+    device const float*    x       [[buffer(0)]],  // [M, dim]
+    device const uint16_t* weight  [[buffer(1)]],  // [dim] bf16
+    device const float*    sum_sq  [[buffer(2)]],  // [M]
+    device float*          out     [[buffer(3)]],  // [M, dim]
+    constant uint&         dim     [[buffer(4)]],
+    constant float&        eps     [[buffer(5)]],
+    constant uint&         m_base  [[buffer(6)]],
+    constant uint&         tiles_x [[buffer(7)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]]
+) {
+    uint xt = tgid % tiles_x;
+    uint gm = tgid / tiles_x;
+    uint i = xt * 256 + tid;
+    if (i >= dim) return;
+    uint m = m_base + gm;
+
+    float rms = rsqrt(sum_sq[m] / float(dim) + eps);
+    float w = bf16_to_f32(weight[i]);
+    out[(size_t)m * dim + i] = x[(size_t)m * dim + i] * rms * w;
+}
+
+// MoE combine + residual, M positions of a group (clone of
+// moe_combine_residual_prefill with m from the flat grid). Grid: (tgs*gM, 1).
+kernel void moe_combine_residual_prefill_batch(
+    device const float* h_mid       [[buffer(0)]],   // [M, dim]
+    device const float* shared_out  [[buffer(1)]],   // [M, dim]
+    device float*       hidden_out  [[buffer(2)]],   // [M, dim]
+    device const float* expert_out0 [[buffer(3)]],   // [M, dim]
+    device const float* expert_out1 [[buffer(4)]],
+    device const float* expert_out2 [[buffer(5)]],
+    device const float* expert_out3 [[buffer(6)]],
+    device const float* expert_out4 [[buffer(7)]],
+    device const float* expert_out5 [[buffer(8)]],
+    device const float* expert_out6 [[buffer(9)]],
+    device const float* expert_out7 [[buffer(10)]],
+    device const float* params      [[buffer(11)]],  // [M, 10]
+    constant uint&      dim         [[buffer(12)]],
+    constant uint&      K           [[buffer(13)]],
+    constant uint&      m_base      [[buffer(14)]],
+    constant uint&      tiles_x     [[buffer(15)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]]
+) {
+    uint xt = tgid % tiles_x;
+    uint gm = tgid / tiles_x;
+    uint i = xt * 256 + tid;
+    if (i >= dim) return;
+    uint m = m_base + gm;
+
+    size_t base = (size_t)m * dim;
+    const device float* p = params + (size_t)m * 10;
+
+    float shared_gate = 1.0f / (1.0f + exp(-p[8]));
+
+    float moe = 0.0f;
+    if (K > 0) moe += p[0] * expert_out0[base + i];
+    if (K > 1) moe += p[1] * expert_out1[base + i];
+    if (K > 2) moe += p[2] * expert_out2[base + i];
+    if (K > 3) moe += p[3] * expert_out3[base + i];
+    if (K > 4) moe += p[4] * expert_out4[base + i];
+    if (K > 5) moe += p[5] * expert_out5[base + i];
+    if (K > 6) moe += p[6] * expert_out6[base + i];
+    if (K > 7) moe += p[7] * expert_out7[base + i];
+
+    hidden_out[base + i] = h_mid[base + i] + moe + shared_gate * shared_out[base + i];
+}
