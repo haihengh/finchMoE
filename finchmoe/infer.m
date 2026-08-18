@@ -2837,7 +2837,10 @@ static size_t gguf_exp_alloc_size(void) {
 
 // Phase C S4: lazy GGUF expert-slab pool (copy-pool for chunked prefill).
 // Same memory-budget ladder as the packed pool (64 → 32 → 16 → 0), computed
-// against the 4MB slot size. 0 slots = per-position fallback path.
+// against the 4MB slot size. 0 slots = per-position fallback path. Also
+// guarantees the per-position PF expert scratch buffers exist — they're
+// normally allocated by the packed-pool block, whose ladder can zero out
+// independently of this one.
 static id<MTLBuffer> gguf_pool_get(MetalCtx *ctx) {
     if (!g_gguf_stage) return NULL;
     if (!ctx->buf_pool_expert_data_gguf) {
@@ -2862,6 +2865,19 @@ static id<MTLBuffer> gguf_pool_get(MetalCtx *ctx) {
         } else {
             fprintf(stderr, "[pf-pool-gguf] disabled (insufficient memory) — per-position GGUF expert path\n");
         }
+    }
+    if (!ctx->buf_pf_expert_input) {
+        size_t P2048 = (size_t)PREFILL_CHUNK_MAX * HIDDEN_DIM * sizeof(float);
+        size_t P512  = (size_t)PREFILL_CHUNK_MAX * MOE_INTERMEDIATE * sizeof(float);
+        ctx->buf_pf_expert_input = [ctx->device newBufferWithLength:P2048 options:MTLResourceStorageModeShared];
+        for (int k = 0; k < MAX_K; k++) {
+            ctx->buf_pf_expert_gate[k] = [ctx->device newBufferWithLength:P512 options:MTLResourceStorageModeShared];
+            ctx->buf_pf_expert_up[k]   = [ctx->device newBufferWithLength:P512 options:MTLResourceStorageModeShared];
+            ctx->buf_pf_expert_act[k]  = [ctx->device newBufferWithLength:P512 options:MTLResourceStorageModeShared];
+        }
+        ctx->buf_pf_shared_gate = [ctx->device newBufferWithLength:P512 options:MTLResourceStorageModeShared];
+        ctx->buf_pf_shared_up   = [ctx->device newBufferWithLength:P512 options:MTLResourceStorageModeShared];
+        ctx->buf_pf_shared_act  = [ctx->device newBufferWithLength:P512 options:MTLResourceStorageModeShared];
     }
     return ctx->buf_pool_expert_data_gguf;
 }
@@ -5614,7 +5630,11 @@ static void async_pread_wait(void) {
     if (!g_async_pread.active) return;
     dispatch_group_wait(g_async_pread.group, DISPATCH_TIME_FOREVER);
     for (int k = 0; k < g_async_pread.num_tasks; k++) {
-        g_async_pread.valid[k] = (g_async_pread.tasks[k].result == (ssize_t)active_expert_size());
+        // Compare against the task's OWN size — Phase C S4 reads GGUF
+        // slabs (gate/up/down chunks), which differ from active_expert_size.
+        // Packed callers always pass size == active_expert_size(), so their
+        // behavior is unchanged.
+        g_async_pread.valid[k] = (g_async_pread.tasks[k].result == (ssize_t)g_async_pread.tasks[k].size);
     }
     g_async_pread.active = 0;
 }
@@ -5651,7 +5671,7 @@ static void async_pread_prefetch_wait(void) {
     if (!g_prefetch_pread.active) return;
     dispatch_group_wait(g_prefetch_pread.group, DISPATCH_TIME_FOREVER);
     for (int k = 0; k < g_prefetch_pread.num_tasks; k++) {
-        g_prefetch_pread.valid[k] = (g_prefetch_pread.tasks[k].result == (ssize_t)active_expert_size());
+        g_prefetch_pread.valid[k] = (g_prefetch_pread.tasks[k].result == (ssize_t)g_prefetch_pread.tasks[k].size);
     }
     g_prefetch_pread.active = 0;
 }
@@ -7349,6 +7369,16 @@ static float *linear_attn_chain_cpu(LayerWeightCache *lc, LinearAttnState *la_st
     memcpy(la_state->conv_state + (CONV_KERNEL_SIZE - 2) * qkv_dim, qkv_out,
            qkv_dim * sizeof(float));
 
+    // TEMP DEBUG: per-token conv state dump for layer 2
+    if (getenv("FINCHMOE_GGUF_DBG") && layer_idx == 2) {
+        static FILE *cv2 = NULL;
+        if (!cv2) cv2 = fopen("/tmp/conv2_ref.bin", "wb");
+        if (cv2) {
+            fwrite(la_state->conv_state, sizeof(float), 3 * LINEAR_CONV_DIM, cv2);
+            fflush(cv2);
+        }
+    }
+
     // Split into q, k, v
     float *lin_q = conv_out;
     float *lin_k = conv_out + LINEAR_TOTAL_KEY;
@@ -7427,6 +7457,16 @@ static float *linear_attn_chain_cpu(LayerWeightCache *lc, LinearAttnState *la_st
 
         // Read back GPU result
         memcpy(out_values, [g_metal->buf_delta_output contents], LINEAR_TOTAL_VALUE * sizeof(float));
+
+        // TEMP DEBUG: per-token state dump for layer 2 (cross-path state check)
+        if (getenv("FINCHMOE_GGUF_DBG") && layer_idx == 2) {
+            static FILE *st2 = NULL;
+            if (!st2) st2 = fopen("/tmp/state2_ref.bin", "wb");
+            if (st2) {
+                fwrite([g_metal->buf_delta_state[linear_layer_idx] contents], sizeof(float), 32*128*128, st2);
+                fflush(st2);
+            }
+        }
     } else {
         // CPU delta-net with Accelerate BLAS
         for (int vh = 0; vh < LINEAR_NUM_V_HEADS; vh++) {
@@ -8067,6 +8107,24 @@ static void fused_layer_forward(
     } else {
         // ---- Linear attention CPU compute ----
         if (!linear_attn_bypass) {
+            // TEMP DEBUG: per-token qkv/z CPU cross-check (layer 2)
+            if (getenv("FINCHMOE_GGUF_DBG") && layer_idx == 2 && normed) {
+                static FILE *ptq = NULL;
+                if (!ptq) ptq = fopen("/tmp/qkv2_ref.bin", "wb");
+                if (ptq) {
+                    static float cpu_qkv[LINEAR_CONV_DIM], cpu_z[LINEAR_TOTAL_VALUE];
+                    gguf_cpu_matvec(lc->qkv_w, normed, cpu_qkv, LINEAR_CONV_DIM, HIDDEN_DIM,
+                                    lc->qkv_bits == 10 ? 12 : 14);
+                    gguf_cpu_matvec(lc->z_w, normed, cpu_z, LINEAR_TOTAL_VALUE, HIDDEN_DIM,
+                                    lc->z_bits == 10 ? 12 : 14);
+                    fwrite(cpu_qkv, sizeof(float), LINEAR_CONV_DIM, ptq);
+                    fwrite(qkv_out, sizeof(float), LINEAR_CONV_DIM, ptq);
+                    fwrite(cpu_z, sizeof(float), LINEAR_TOTAL_VALUE, ptq);
+                    fwrite(z_out, sizeof(float), LINEAR_TOTAL_VALUE, ptq);
+                    fwrite(normed, sizeof(float), HIDDEN_DIM, ptq);   // the chain input
+                    fflush(ptq);
+                }
+            }
             attn_out_for_oproj = linear_attn_chain_cpu(lc, la_state, layer_idx,
                                                        qkv_out, z_out, beta_out, alpha_out);
             // conv_out, out_values are static — no free needed
@@ -8549,6 +8607,9 @@ static void fused_layer_forward(
         if (pf_gsraw_old) {
             fwrite(gate_scores, sizeof(float), NUM_EXPERTS, pf_gsraw_old);
             fwrite(gate_w, sizeof(uint16_t), 32, pf_gsraw_old);
+            // TEMP DEBUG: per-token shared gate/up for the sg/su comparison
+            fwrite(shared_gate, sizeof(float), SHARED_INTERMEDIATE, pf_gsraw_old);
+            fwrite(shared_up, sizeof(float), SHARED_INTERMEDIATE, pf_gsraw_old);
             fflush(pf_gsraw_old);
         }
     }
@@ -8604,6 +8665,9 @@ static void fused_layer_forward(
         if (pf_gsraw_old) {
             fwrite(gate_scores, sizeof(float), NUM_EXPERTS, pf_gsraw_old);
             fwrite(gate_w, sizeof(uint16_t), 32, pf_gsraw_old);
+            // TEMP DEBUG: per-token shared gate/up for the sg/su comparison
+            fwrite(shared_gate, sizeof(float), SHARED_INTERMEDIATE, pf_gsraw_old);
+            fwrite(shared_up, sizeof(float), SHARED_INTERMEDIATE, pf_gsraw_old);
             fflush(pf_gsraw_old);
         }
     }
@@ -9284,6 +9348,21 @@ static void fused_layer_forward(
         GgufExpertInfo *ge = &gguf_experts[layer_idx];
         float *expert_out_cpu = malloc(HIDDEN_DIM * sizeof(float));
         float total_weight = 0.0f;
+        // TEMP DEBUG: per-token routing dump (pos, layer, indices, weights) — G5 gate
+        if (getenv("FINCHMOE_GGUF_DBG") && layer_idx <= 1) {
+            static FILE *pte = NULL;
+            if (!pte) pte = fopen("/tmp/pt_experts.bin", "wb");
+            if (pte) {
+                int32_t hd[2] = { pos, layer_idx };
+                int32_t idx[8];
+                for (int k = 0; k < 8; k++) idx[k] = k < K ? expert_indices[k] : -1;
+                fwrite(hd, sizeof(int32_t), 2, pte);
+                fwrite(idx, sizeof(int32_t), 8, pte);
+                fwrite(expert_weights, sizeof(float), 8, pte);
+                fwrite(gate_scores, sizeof(float), NUM_EXPERTS, pte);
+                fflush(pte);
+            }
+        }
         // GPU expert dispatch via the stable copy-pool buffers (the packed
         // path's design): slabs copied once per layer into preallocated
         // buffers, no mmap page churn. Verified bit-correct (parity
@@ -9509,6 +9588,18 @@ static void fused_layer_forward(
         hidden[i] = h_mid[i] + moe_out[i] + shared_out[i];
     }
 
+    // TEMP DEBUG: per-token post-combine hidden dump (pos, layer) — G5 gate
+    if (getenv("FINCHMOE_GGUF_DBG")) {
+        static FILE *pth = NULL;
+        if (!pth) pth = fopen("/tmp/pt_hidden.bin", "wb");
+        if (pth) {
+            int32_t hd[2] = { pos, layer_idx };
+            fwrite(hd, sizeof(int32_t), 2, pth);
+            fwrite(hidden, sizeof(float), HIDDEN_DIM, pth);
+            fflush(pth);
+        }
+    }
+
     debug_print_hidden("output", layer_idx, hidden, HIDDEN_DIM);
 
     if (g_timing_enabled) {
@@ -9539,6 +9630,307 @@ static void fused_layer_forward(
 // buffers (expert data slots [8m..8m+7] of buf_pool_expert_data, pf slot m
 // for input/gate/up/act/shared) instead of the single-slot buffers.
 // buf_pf_combine_params slot m must already be filled by the caller.
+// Phase C S4: chunked GGUF linear-attention chain. CPU per position (the
+// exact arithmetic of linear_attn_chain_cpu: conv1d, q/k RMSNorm, decay/beta
+// with the GGUF A_log ternary), then ONE command buffer of M sequential
+// delta_net_step dispatches on buf_delta_state[linear_layer_idx] — bitwise
+// vs the per-token baseline (same kernel, state buffer, inputs; the in-place
+// state RMW is hazard-serialized by Metal). Without the pipeline, the CPU
+// BLAS recurrence runs per position on la_state->ssm_state (same condition
+// as the per-token chain). in_proj_a/b are computed on CPU (staged BF16,
+// bits 0). Results land in buf_pf_oproj_in slots (RMSNormGated on CPU);
+// beta/alpha mirror into buf_pf_ba slots so the parity dumps and Phase-B
+// trace see the same layout as packed mode.
+static void prefill_chunk_chain_gguf(MetalCtx *ctx, LayerWeightCache *lc,
+                                     LinearAttnState *la_state, int layer_idx,
+                                     int linear_layer_idx, uint32_t M) {
+    int qkv_dim = LINEAR_CONV_DIM;
+    uint16_t *conv_w = lc->conv1d_w;
+    uint16_t *gated_norm_w = lc->gated_norm_w;
+    const float *qkv_batch = (const float *)[ctx->buf_pf_qkv contents];
+    const float *z_batch   = (const float *)[ctx->buf_pf_z contents];
+    const float *input_batch = (const float *)[ctx->buf_pf_input contents];
+    float *oproj_in = (float *)[ctx->buf_pf_oproj_in contents];
+    float *ba_out   = (float *)[ctx->buf_pf_ba contents];
+
+    int gpu_recur = (ctx->delta_net_step &&
+                     linear_layer_idx >= 0 && linear_layer_idx < NUM_LINEAR_LAYERS);
+
+    if (linear_attn_bypass) {
+        // Mirrors the per-token bypass: attn contribution is zero, so
+        // o_proj reads zeros and h_mid = residual.
+        memset(oproj_in, 0, (size_t)M * LINEAR_TOTAL_VALUE * sizeof(float));
+        memset(ba_out, 0, (size_t)M * 64 * sizeof(float));
+        return;
+    }
+
+    // Per-position CPU scratch (reused; chunked prefill never overlaps the
+    // per-token path's use of these statics).
+    float *conv_out = s_conv_out;
+    float *out_values = s_out_vals;
+    float *beta_out = s_beta_proj_out;
+    float *alpha_out = s_alpha_proj_out;
+
+    int k_heads_per_v = LINEAR_NUM_V_HEADS / LINEAR_NUM_K_HEADS;
+
+    for (uint32_t m = 0; m < M; m++) {
+        const float *qkv_out = qkv_batch + (size_t)m * qkv_dim;
+        const float *z_out   = z_batch   + (size_t)m * LINEAR_TOTAL_VALUE;
+        const float *input_m = input_batch + (size_t)m * HIDDEN_DIM;
+
+        // in_proj_a/b on CPU. In this GGUF they are Q4_K (bits 10); other
+        // GGUF files stage them as BF16 (bits 0) — cpu_dequant_matvec
+        // dispatches both (10/11 → gguf_cpu_matvec, 0 → raw BF16).
+        cpu_dequant_matvec(lc->b_w, NULL, NULL, input_m, beta_out,
+                           LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, lc->b_bits);
+        cpu_dequant_matvec(lc->a_w, NULL, NULL, input_m, alpha_out,
+                           LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, lc->a_bits);
+        memcpy(ba_out + (size_t)m * 32, beta_out, 32 * sizeof(float));
+        memcpy(ba_out + (size_t)(M + m) * 32, alpha_out, 32 * sizeof(float));
+
+        // TEMP DEBUG: chunked conv state ENTRY dump for layer 2
+        if (getenv("FINCHMOE_GGUF_DBG") && layer_idx == 2) {
+            static FILE *cv2e = NULL;
+            if (!cv2e) cv2e = fopen("/tmp/conv2_entry.bin", "wb");
+            if (cv2e) {
+                fwrite(la_state->conv_state, sizeof(float), 3 * LINEAR_CONV_DIM, cv2e);
+                fflush(cv2e);
+            }
+            fprintf(stderr, "[S4DBG] layer 2 chain: la_state=%p conv_state=%p\n",
+                    (void *)la_state, (void *)la_state->conv_state);
+        }
+
+        // Conv1d step + state update (identical to linear_attn_chain_cpu)
+        memset(conv_out, 0, qkv_dim * sizeof(float));
+        if (conv_w) {
+            cpu_conv1d_step(la_state->conv_state, qkv_out, conv_w, conv_out,
+                            qkv_dim, CONV_KERNEL_SIZE);
+        }
+        memmove(la_state->conv_state, la_state->conv_state + qkv_dim,
+                (CONV_KERNEL_SIZE - 2) * qkv_dim * sizeof(float));
+        memcpy(la_state->conv_state + (CONV_KERNEL_SIZE - 2) * qkv_dim, qkv_out,
+               qkv_dim * sizeof(float));
+
+        // TEMP DEBUG: chunked conv state dump for layer 2 (entry + exit)
+        if (getenv("FINCHMOE_GGUF_DBG") && layer_idx == 2) {
+            static FILE *cv2n = NULL;
+            if (!cv2n) cv2n = fopen("/tmp/conv2_new.bin", "wb");
+            if (cv2n) {
+                fwrite(la_state->conv_state, sizeof(float), 3 * LINEAR_CONV_DIM, cv2n);
+                fflush(cv2n);
+            }
+        }
+
+        // Split into q, k, v + q/k RMSNorm (identical arithmetic)
+        float *lin_q = conv_out;
+        float *lin_k = conv_out + LINEAR_TOTAL_KEY;
+        float *lin_v = conv_out + 2 * LINEAR_TOTAL_KEY;
+        float inv_scale = 1.0f / sqrtf((float)LINEAR_KEY_DIM);
+        for (int h = 0; h < LINEAR_NUM_K_HEADS; h++) {
+            float *qh = lin_q + h * LINEAR_KEY_DIM;
+            cpu_rms_norm_bare(qh, qh, LINEAR_KEY_DIM, 1e-6f);
+            float q_scale = inv_scale * inv_scale;
+            for (int d = 0; d < LINEAR_KEY_DIM; d++) qh[d] *= q_scale;
+        }
+        for (int h = 0; h < LINEAR_NUM_K_HEADS; h++) {
+            float *kh = lin_k + h * LINEAR_KEY_DIM;
+            cpu_rms_norm_bare(kh, kh, LINEAR_KEY_DIM, 1e-6f);
+            for (int d = 0; d < LINEAR_KEY_DIM; d++) kh[d] *= inv_scale;
+        }
+
+        // decay/beta (identical arithmetic, GGUF A_log ternary)
+        float *A_log = lc->A_log;
+        uint16_t *dt_bias_bf16 = lc->dt_bias;
+        float g_decay[LINEAR_NUM_V_HEADS];
+        float beta_gate_arr[LINEAR_NUM_V_HEADS];
+        for (int vh = 0; vh < LINEAR_NUM_V_HEADS; vh++) {
+            float a_val = alpha_out[vh];
+            float dt_b = dt_bias_bf16 ? bf16_to_f32(dt_bias_bf16[vh]) : 0.0f;
+            float A_val = A_log ? (g_gguf_stage ? -A_log[vh] : expf(A_log[vh])) : 1.0f;
+            float softplus_val = logf(1.0f + expf(a_val + dt_b));
+            g_decay[vh] = expf(-A_val * softplus_val);
+            beta_gate_arr[vh] = cpu_sigmoid(beta_out[vh]);
+        }
+
+        if (gpu_recur) {
+            // Stage into per-position GPU slots; the recurrence dispatches
+            // run batched after the CPU loop.
+            memcpy((float *)[ctx->buf_pf_delta_q contents] + (size_t)m * LINEAR_TOTAL_KEY,
+                   lin_q, LINEAR_TOTAL_KEY * sizeof(float));
+            memcpy((float *)[ctx->buf_pf_delta_k contents] + (size_t)m * LINEAR_TOTAL_KEY,
+                   lin_k, LINEAR_TOTAL_KEY * sizeof(float));
+            memcpy((float *)[ctx->buf_pf_delta_v contents] + (size_t)m * LINEAR_TOTAL_VALUE,
+                   lin_v, LINEAR_TOTAL_VALUE * sizeof(float));
+            memcpy((float *)[ctx->buf_pf_delta_g_decay contents] + (size_t)m * LINEAR_NUM_V_HEADS,
+                   g_decay, LINEAR_NUM_V_HEADS * sizeof(float));
+            memcpy((float *)[ctx->buf_pf_delta_beta contents] + (size_t)m * LINEAR_NUM_V_HEADS,
+                   beta_gate_arr, LINEAR_NUM_V_HEADS * sizeof(float));
+        } else {
+            // CPU BLAS recurrence (mirrors linear_attn_chain_cpu's fallback)
+            for (int vh = 0; vh < LINEAR_NUM_V_HEADS; vh++) {
+                int kh = vh % LINEAR_NUM_K_HEADS;  // torch .repeat() block mapping (llama.cpp)
+                float g = g_decay[vh];
+                float b_gate = beta_gate_arr[vh];
+                float *S = la_state->ssm_state + vh * LINEAR_VALUE_DIM * LINEAR_KEY_DIM;
+                float *v_h = lin_v + vh * LINEAR_VALUE_DIM;
+                float *k_h = lin_k + kh * LINEAR_KEY_DIM;
+                cblas_sscal(LINEAR_VALUE_DIM * LINEAR_KEY_DIM, g, S, 1);
+                float kv_mem_vec[LINEAR_VALUE_DIM];
+                cblas_sgemv(CblasRowMajor, CblasNoTrans,
+                            LINEAR_VALUE_DIM, LINEAR_KEY_DIM,
+                            1.0f, S, LINEAR_KEY_DIM, k_h, 1,
+                            0.0f, kv_mem_vec, 1);
+                float delta_vec[LINEAR_VALUE_DIM];
+                for (int vi = 0; vi < LINEAR_VALUE_DIM; vi++) {
+                    delta_vec[vi] = (v_h[vi] - kv_mem_vec[vi]) * b_gate;
+                }
+                cblas_sger(CblasRowMajor, LINEAR_VALUE_DIM, LINEAR_KEY_DIM,
+                           1.0f, delta_vec, 1, k_h, 1, S, LINEAR_KEY_DIM);
+                float *q_h = lin_q + kh * LINEAR_KEY_DIM;
+                float *o_h = out_values + vh * LINEAR_VALUE_DIM;
+                cblas_sgemv(CblasRowMajor, CblasNoTrans,
+                            LINEAR_VALUE_DIM, LINEAR_KEY_DIM,
+                            1.0f, S, LINEAR_KEY_DIM, q_h, 1,
+                            0.0f, o_h, 1);
+            }
+            // RMSNormGated + write oproj_in slot m
+            float *slot_out = oproj_in + (size_t)m * LINEAR_TOTAL_VALUE;
+            for (int vh = 0; vh < LINEAR_NUM_V_HEADS; vh++) {
+                float *oh = out_values + vh * LINEAR_VALUE_DIM;
+                float *zh = z_out + vh * LINEAR_VALUE_DIM;
+                float *gh = slot_out + vh * LINEAR_VALUE_DIM;
+                if (gated_norm_w) {
+                    cpu_rms_norm_gated(oh, zh, gated_norm_w, gh, LINEAR_VALUE_DIM, RMS_NORM_EPS);
+                } else {
+                    memcpy(gh, oh, LINEAR_VALUE_DIM * sizeof(float));
+                }
+            }
+        }
+    }
+
+    // TEMP DEBUG: CPU reference qkv/z for layer 2 (matvec cross-check)
+    if (getenv("FINCHMOE_GGUF_DBG") && layer_idx == 2) {
+        static FILE *q2dbg = NULL;
+        if (!q2dbg) q2dbg = fopen("/tmp/qkv2_dbg.bin", "wb");
+        if (q2dbg) {
+            static float cpu_qkv[LINEAR_CONV_DIM], cpu_z[LINEAR_TOTAL_VALUE];
+            gguf_cpu_matvec(lc->qkv_w, input_batch, cpu_qkv, LINEAR_CONV_DIM, HIDDEN_DIM,
+                            lc->qkv_bits == 10 ? 12 : 14);
+            gguf_cpu_matvec(lc->z_w, input_batch, cpu_z, LINEAR_TOTAL_VALUE, HIDDEN_DIM,
+                            lc->z_bits == 10 ? 12 : 14);
+            fwrite(cpu_qkv, sizeof(float), LINEAR_CONV_DIM, q2dbg);
+            fwrite((const float *)[ctx->buf_pf_qkv contents], sizeof(float), LINEAR_CONV_DIM, q2dbg);
+            fwrite(cpu_z, sizeof(float), LINEAR_TOTAL_VALUE, q2dbg);
+            fwrite((const float *)[ctx->buf_pf_z contents], sizeof(float), LINEAR_TOTAL_VALUE, q2dbg);
+            fflush(q2dbg);
+        }
+    }
+
+    if (gpu_recur) {
+        // TEMP DEBUG: save pre-dispatch state for layer 2 (CPU ref cross-check)
+        static float saved_state[32 * 128 * 128];
+        if (getenv("FINCHMOE_GGUF_DBG") && layer_idx == 2) {
+            memcpy(saved_state, [ctx->buf_delta_state[linear_layer_idx] contents], sizeof(saved_state));
+        }
+        // M sequential delta_net_step dispatches in one CB — the in-place
+        // state RMW is hazard-serialized by Metal (each dispatch rebinds the
+        // per-position slots before dispatching).
+        id<MTLCommandBuffer> cmd_dn = [ctx->queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmd_dn computeCommandEncoder];
+        [enc setComputePipelineState:ctx->delta_net_step];
+        uint32_t khpv = (uint32_t)k_heads_per_v;
+        for (uint32_t m = 0; m < M; m++) {
+            [enc setBuffer:ctx->buf_delta_state[linear_layer_idx] offset:0 atIndex:0];
+            [enc setBuffer:ctx->buf_pf_delta_q       offset:(NSUInteger)m * LINEAR_TOTAL_KEY * sizeof(float) atIndex:1];
+            [enc setBuffer:ctx->buf_pf_delta_k       offset:(NSUInteger)m * LINEAR_TOTAL_KEY * sizeof(float) atIndex:2];
+            [enc setBuffer:ctx->buf_pf_delta_v       offset:(NSUInteger)m * LINEAR_TOTAL_VALUE * sizeof(float) atIndex:3];
+            [enc setBuffer:ctx->buf_pf_delta_g_decay offset:(NSUInteger)m * LINEAR_NUM_V_HEADS * sizeof(float) atIndex:4];
+            [enc setBuffer:ctx->buf_pf_delta_beta    offset:(NSUInteger)m * LINEAR_NUM_V_HEADS * sizeof(float) atIndex:5];
+            [enc setBuffer:ctx->buf_pf_delta_out     offset:(NSUInteger)m * LINEAR_TOTAL_VALUE * sizeof(float) atIndex:6];
+            [enc setBytes:&khpv length:sizeof(khpv) atIndex:7];
+            [enc dispatchThreadgroups:MTLSizeMake(LINEAR_NUM_V_HEADS, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
+        [enc endEncoding];
+        [cmd_dn commit];
+        [cmd_dn waitUntilCompleted];
+
+        // Readback out slots + RMSNormGated per position
+        const float *outs = (const float *)[ctx->buf_pf_delta_out contents];
+        for (uint32_t m = 0; m < M; m++) {
+            const float *out_m = outs + (size_t)m * LINEAR_TOTAL_VALUE;
+            const float *z_out = z_batch + (size_t)m * LINEAR_TOTAL_VALUE;
+            float *slot_out = oproj_in + (size_t)m * LINEAR_TOTAL_VALUE;
+            for (int vh = 0; vh < LINEAR_NUM_V_HEADS; vh++) {
+                const float *oh = out_m + vh * LINEAR_VALUE_DIM;
+                const float *zh = z_out + vh * LINEAR_VALUE_DIM;
+                float *gh = slot_out + vh * LINEAR_VALUE_DIM;
+                if (gated_norm_w) {
+                    cpu_rms_norm_gated(oh, zh, gated_norm_w, gh, LINEAR_VALUE_DIM, RMS_NORM_EPS);
+                } else {
+                    memcpy(gh, oh, LINEAR_VALUE_DIM * sizeof(float));
+                }
+            }
+        }
+
+        // TEMP DEBUG: chunked post-dispatch state dump for layer 2
+        if (getenv("FINCHMOE_GGUF_DBG") && layer_idx == 2) {
+            static FILE *st2n = NULL;
+            if (!st2n) st2n = fopen("/tmp/state2_new.bin", "wb");
+            if (st2n) {
+                fwrite([ctx->buf_delta_state[linear_layer_idx] contents], sizeof(float), 32*128*128, st2n);
+                fflush(st2n);
+            }
+        }
+
+        // TEMP DEBUG: CPU-BLAS reference recurrence for layer 2 (from the
+        // saved pre-dispatch state + the staged inputs), vs the GPU output.
+        if (getenv("FINCHMOE_GGUF_DBG") && layer_idx == 2) {
+            static FILE *c2dbg = NULL;
+            if (!c2dbg) c2dbg = fopen("/tmp/chain2_dbg.bin", "wb");
+            if (c2dbg) {
+                static float S2[32 * 128 * 128];
+                memcpy(S2, saved_state, sizeof(S2));
+                const float *lq = (const float *)[ctx->buf_pf_delta_q contents];
+                const float *lk = (const float *)[ctx->buf_pf_delta_k contents];
+                const float *lv = (const float *)[ctx->buf_pf_delta_v contents];
+                const float *gd = (const float *)[ctx->buf_pf_delta_g_decay contents];
+                const float *bt = (const float *)[ctx->buf_pf_delta_beta contents];
+                static float out_ref[LINEAR_TOTAL_VALUE];
+                for (int vh = 0; vh < LINEAR_NUM_V_HEADS; vh++) {
+                    int kh = vh % LINEAR_NUM_K_HEADS;
+                    float g = gd[vh];
+                    float b_gate = bt[vh];
+                    float *S = S2 + vh * LINEAR_VALUE_DIM * LINEAR_KEY_DIM;
+                    float *v_h = (float *)lv + vh * LINEAR_VALUE_DIM;
+                    float *k_h = (float *)lk + kh * LINEAR_KEY_DIM;
+                    cblas_sscal(LINEAR_VALUE_DIM * LINEAR_KEY_DIM, g, S, 1);
+                    float kv_mem_vec[LINEAR_VALUE_DIM];
+                    cblas_sgemv(CblasRowMajor, CblasNoTrans,
+                                LINEAR_VALUE_DIM, LINEAR_KEY_DIM,
+                                1.0f, S, LINEAR_KEY_DIM, k_h, 1,
+                                0.0f, kv_mem_vec, 1);
+                    float delta_vec[LINEAR_VALUE_DIM];
+                    for (int vi = 0; vi < LINEAR_VALUE_DIM; vi++) {
+                        delta_vec[vi] = (v_h[vi] - kv_mem_vec[vi]) * b_gate;
+                    }
+                    cblas_sger(CblasRowMajor, LINEAR_VALUE_DIM, LINEAR_KEY_DIM,
+                               1.0f, delta_vec, 1, k_h, 1, S, LINEAR_KEY_DIM);
+                    float *q_h = (float *)lq + kh * LINEAR_KEY_DIM;
+                    float *o_h = out_ref + vh * LINEAR_VALUE_DIM;
+                    cblas_sgemv(CblasRowMajor, CblasNoTrans,
+                                LINEAR_VALUE_DIM, LINEAR_KEY_DIM,
+                                1.0f, S, LINEAR_KEY_DIM, q_h, 1,
+                                0.0f, o_h, 1);
+                }
+                fwrite(out_ref, sizeof(float), LINEAR_TOTAL_VALUE, c2dbg);            // CPU ref
+                fwrite((const float *)[ctx->buf_pf_delta_out contents], sizeof(float), LINEAR_TOTAL_VALUE, c2dbg);  // GPU
+                fflush(c2dbg);
+            }
+        }
+    }
+}
+
 static id<MTLCommandBuffer> prefill_chunk_cmd3(int layer_idx, uint32_t m,
                                                 int actual_K, const int *valid,
                                                 float shared_gate_score,
@@ -9560,8 +9952,51 @@ static id<MTLCommandBuffer> prefill_chunk_cmd3(int layer_idx, uint32_t m,
     id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
     [cmd encodeWaitForEvent:ctx->expert_sync_event value:ctx->expert_sync_value];
 
-    gpu_encode_experts_batched(ctx, cmd, actual_K, valid, ctx->buf_multi_expert_data,
-                               out_off, data_bufs, data_offs, pool_mode ? m : 0);
+    if (g_gguf_stage) {
+        // Phase C S4: GGUF expert encode — the S2 kernels reading the
+        // copy-pool slots (pool mode) or buf_multi_expert_data[k] (fallback,
+        // slabs memcpy'd there by the caller). All bindings are per-position
+        // offsets; no packed-quant layout constants.
+        GgufExpertInfo *ge = &gguf_experts[layer_idx];
+        NSUInteger x_off = pool_mode ? (NSUInteger)m * HIDDEN_DIM * sizeof(float) : 0;
+        NSUInteger act_off = pool_mode ? (NSUInteger)m * MOE_INTERMEDIATE * sizeof(float) : 0;
+        for (int k = 0; k < actual_K; k++) {
+            if (!valid[k]) continue;
+            id<MTLBuffer> dbuf = data_bufs ? data_bufs[k] : ctx->buf_multi_expert_data[k];
+            NSUInteger doff = data_bufs ? data_offs[k] : 0;
+            uint32_t od = MOE_INTERMEDIATE, id_ = HIDDEN_DIM;
+            {
+                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+                [enc setComputePipelineState:ctx->fused_gate_up_swiglu_qk_pipe];
+                [enc setBuffer:dbuf offset:doff atIndex:0];
+                [enc setBuffer:dbuf offset:doff + ge->gate_slab atIndex:1];
+                [enc setBuffer:ctx->buf_pf_expert_input offset:x_off atIndex:2];
+                [enc setBuffer:ctx->buf_pf_expert_act[k] offset:act_off atIndex:3];
+                [enc setBytes:&od length:4 atIndex:4];
+                [enc setBytes:&id_ length:4 atIndex:5];
+                [enc dispatchThreadgroups:MTLSizeMake(MOE_INTERMEDIATE, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [enc endEncoding];
+            }
+            {
+                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+                uint32_t dod = HIDDEN_DIM, did = MOE_INTERMEDIATE, dgt = (uint32_t)ge->down_type;
+                [enc setComputePipelineState:ctx->matvec_qk];
+                [enc setBuffer:dbuf offset:doff + ge->gate_slab + ge->up_slab atIndex:0];
+                [enc setBuffer:ctx->buf_pf_expert_act[k] offset:act_off atIndex:3];
+                [enc setBuffer:ctx->buf_multi_expert_out[k] offset:out_off atIndex:4];
+                [enc setBytes:&dod length:4 atIndex:5];
+                [enc setBytes:&did length:4 atIndex:6];
+                [enc setBytes:&dgt length:4 atIndex:7];
+                [enc dispatchThreadgroups:MTLSizeMake((HIDDEN_DIM + 7) / 8, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [enc endEncoding];
+            }
+        }
+    } else {
+        gpu_encode_experts_batched(ctx, cmd, actual_K, valid, ctx->buf_multi_expert_data,
+                                   out_off, data_bufs, data_offs, pool_mode ? m : 0);
+    }
 
     // Shared expert SwiGLU
     {
@@ -9580,7 +10015,37 @@ static id<MTLCommandBuffer> prefill_chunk_cmd3(int layer_idx, uint32_t m,
 
     // Shared down_proj (out at slot m)
     if (lc->sd_w) {
-        if (lc->sd_s && lc->sd_b) {
+        if (g_gguf_stage && (lc->sd_bits == 10 || lc->sd_bits == 11)) {
+            // Phase C S4: QK shared down via a per-tensor wrap (~40 wraps
+            // total, one per layer — no gguf_tbufs pressure).
+            size_t row_bytes = (size_t)(SHARED_INTERMEDIATE / 256) * (lc->sd_bits == 10 ? 144 : 210);
+            uint32_t delta = 0;
+            id<MTLBuffer> tbuf = gguf_tbuf_get(ctx, lc->sd_w, row_bytes * HIDDEN_DIM, &delta);
+            if (tbuf) {
+                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+                uint32_t od = HIDDEN_DIM, idm = SHARED_INTERMEDIATE;
+                uint32_t gt = (uint32_t)(lc->sd_bits == 10 ? 12 : 14);
+                [enc setComputePipelineState:ctx->matvec_qk];
+                [enc setBuffer:tbuf offset:delta atIndex:0];
+                [enc setBuffer:sh_act offset:mid_off atIndex:3];
+                [enc setBuffer:ctx->buf_shared_out offset:out_off atIndex:4];
+                [enc setBytes:&od length:4 atIndex:5];
+                [enc setBytes:&idm length:4 atIndex:6];
+                [enc setBytes:&gt length:4 atIndex:7];
+                [enc dispatchThreadgroups:MTLSizeMake((HIDDEN_DIM + 7) / 8, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [enc endEncoding];
+            } else {
+                // wrap failed — commit first, CPU compute, restart the CB
+                [cmd commit];
+                [cmd waitUntilCompleted];
+                float *act = (float *)[sh_act contents] + (pool_mode ? (size_t)m * MOE_INTERMEDIATE : 0);
+                float *out = (float *)[ctx->buf_shared_out contents] + (size_t)m * HIDDEN_DIM;
+                gguf_cpu_matvec(lc->sd_w, act, out, HIDDEN_DIM, SHARED_INTERMEDIATE,
+                                lc->sd_bits == 10 ? 12 : 14);
+                cmd = [ctx->queue commandBuffer];
+            }
+        } else if (lc->sd_s && lc->sd_b) {
             gpu_encode_dequant_matvec_with_io_bufs(
                 ctx, cmd, lc->sd_w, lc->sd_s, lc->sd_b,
                 sh_act, ctx->buf_shared_out,
@@ -9649,15 +10114,26 @@ static id<MTLCommandBuffer> prefill_chunk_cmd3(int layer_idx, uint32_t m,
         // Enc C3: rms_norm_apply_bf16_prefill (slot m -> buf_pf_input slot m)
         {
             uint16_t *next_norm_w = layer_cache[layer_idx + 1].input_norm_w;
-            NSUInteger norm_off = (NSUInteger)((const char *)next_norm_w -
-                                               (const char *)[ctx->wf_buf contents]);
+            // Phase C S4: GGUF norm weights live in the staged-BF16 heap —
+            // bind the stage mirror (same ternary as the residual-norm site).
+            NSUInteger norm_off;
+            id<MTLBuffer> norm_buf;
+            if (g_gguf_stage) {
+                norm_buf = ctx->gguf_stage_gpu;
+                norm_off = (NSUInteger)((const char *)next_norm_w -
+                                        (const char *)g_gguf_stage);
+            } else {
+                norm_buf = ctx->wf_buf;
+                norm_off = (NSUInteger)((const char *)next_norm_w -
+                                        (const char *)[ctx->wf_buf contents]);
+            }
             id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
             uint32_t dim = HIDDEN_DIM;
             float eps = RMS_NORM_EPS;
             uint32_t m32 = m;
             [enc setComputePipelineState:ctx->rms_norm_apply_bf16_prefill];
             [enc setBuffer:ctx->buf_pf_moe_hidden offset:0       atIndex:0]; // x
-            [enc setBuffer:ctx->wf_buf            offset:norm_off atIndex:1]; // weight
+            [enc setBuffer:norm_buf               offset:norm_off atIndex:1]; // weight
             [enc setBuffer:ctx->buf_pf_sum_sq     offset:0       atIndex:2]; // sum_sq
             [enc setBuffer:ctx->buf_pf_input      offset:0       atIndex:3]; // out
             [enc setBytes:&dim length:4 atIndex:4];
@@ -9675,7 +10151,7 @@ static id<MTLCommandBuffer> prefill_chunk_cmd3(int layer_idx, uint32_t m,
     if (g_chunk_timing_enabled) g_chunk_timing.cmd3_encode += now_ms() - t_cmd3;
 
     // Debug: dump CMD3 components AFTER completion (debug-only wait)
-    if (getenv("FINCHMOE_PF_DUMP") && layer_idx == 0 && m == 0) {
+    if (getenv("FINCHMOE_PF_DUMP") && (layer_idx == 0 || layer_idx == 1) && m == 0) {
         [cmd waitUntilCompleted];
         static FILE *pf_c3 = NULL;
         if (!pf_c3) pf_c3 = fopen("/tmp/cmd3_components.bin", "wb");
@@ -9693,6 +10169,44 @@ static id<MTLCommandBuffer> prefill_chunk_cmd3(int layer_idx, uint32_t m,
             fwrite((const float *)[sh_up contents] + mid_off / sizeof(float), sizeof(float), SHARED_INTERMEDIATE, pf_c3);
             fwrite((const float *)[sh_act contents] + mid_off / sizeof(float), sizeof(float), SHARED_INTERMEDIATE, pf_c3);
             fflush(pf_c3);
+        }
+        // TEMP DEBUG: pool slot bytes AFTER the CMD3 completes (race check)
+        if (getenv("FINCHMOE_GGUF_DBG") && g_gguf_stage && data_bufs) {
+            static FILE *sl2 = NULL;
+            if (!sl2) sl2 = fopen("/tmp/slot_after.bin", "wb");
+            if (sl2) {
+                GgufExpertInfo *gx = &gguf_experts[layer_idx];
+                int32_t hdr = (int32_t)layer_idx;
+                fwrite(&hdr, 4, 1, sl2);
+                // CPU full expert chain from the slot bytes as they are NOW
+                static float g_out[MOE_INTERMEDIATE], u_out[MOE_INTERMEDIATE], act[MOE_INTERMEDIATE], eo[HIDDEN_DIM];
+                const float *x = (const float *)[ctx->buf_pf_expert_input contents];
+                const char *slot0 = (const char *)[data_bufs[0] contents] + data_offs[0];
+                gguf_cpu_matvec(slot0, x, g_out, MOE_INTERMEDIATE, HIDDEN_DIM, gx->gate_type);
+                gguf_cpu_matvec(slot0 + gx->gate_slab, x, u_out, MOE_INTERMEDIATE, HIDDEN_DIM, gx->up_type);
+                cpu_swiglu(g_out, u_out, act, MOE_INTERMEDIATE);
+                gguf_cpu_matvec(slot0 + gx->gate_slab + gx->up_slab, act, eo, HIDDEN_DIM, MOE_INTERMEDIATE, gx->down_type);
+                fwrite(eo, sizeof(float), HIDDEN_DIM, sl2);
+                fwrite(x, sizeof(float), HIDDEN_DIM, sl2);   // the input as seen at CMD3 time
+                fflush(sl2);
+            }
+        }
+
+        // TEMP DEBUG: CPU reference for the shared down (same act)
+        if (getenv("FINCHMOE_GGUF_DBG") && g_gguf_stage && lc->sd_w) {
+            static FILE *sdbg = NULL;
+            if (!sdbg) sdbg = fopen("/tmp/shared_cpu.bin", "wb");
+            if (sdbg) {
+                const float *act = (const float *)[sh_act contents] + mid_off / sizeof(float);
+                static float cpu_so[HIDDEN_DIM];
+                gguf_cpu_matvec(lc->sd_w, act, cpu_so, HIDDEN_DIM, SHARED_INTERMEDIATE,
+                                lc->sd_bits == 10 ? 12 : 14);
+                fwrite(cpu_so, sizeof(float), HIDDEN_DIM, sdbg);                     // CPU down
+                fwrite((const float *)[ctx->buf_shared_out contents] + (size_t)m * HIDDEN_DIM,
+                       sizeof(float), HIDDEN_DIM, sdbg);                             // GPU down
+                fwrite(act, sizeof(float), SHARED_INTERMEDIATE, sdbg);               // act
+                fflush(sdbg);
+            }
         }
     }
 
@@ -9861,48 +10375,73 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
     }
 
     if (!is_full) {
-        // ---- Linear-attention layer: batched projections ----
-        gpu_encode_prefill_matvec(ctx, cmdA, lc->qkv_w, lc->qkv_s, lc->qkv_b,
-            ctx->buf_pf_input, ctx->buf_pf_qkv,
-            LINEAR_CONV_DIM, HIDDEN_DIM, GROUP_SIZE, lc->qkv_bits, M, 0);
-        gpu_encode_prefill_matvec(ctx, cmdA, lc->z_w, lc->z_s, lc->z_b,
-            ctx->buf_pf_input, ctx->buf_pf_z,
-            LINEAR_TOTAL_VALUE, HIDDEN_DIM, GROUP_SIZE, lc->z_bits, M, 0);
-        // beta region [0, M*32), alpha region [M*32, 2*M*32)
-        gpu_encode_prefill_matvec(ctx, cmdA, lc->b_w, lc->b_s, lc->b_b,
-            ctx->buf_pf_input, ctx->buf_pf_ba,
-            LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, lc->b_bits, M, 0);
-        gpu_encode_prefill_matvec(ctx, cmdA, lc->a_w, lc->a_s, lc->a_b,
-            ctx->buf_pf_input, ctx->buf_pf_ba,
-            LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, lc->a_bits, M,
-            (NSUInteger)M * 32 * sizeof(float));
-        // The GDN must NOT read the matvec outputs (qkv/z/ba) in the same
-        // command buffer — the GPU serves stale L2 lines for same-CB
-        // device-to-device reads (the run-to-run wobble root cause,
-        // verified: the kernel's qkv read differed between runs while the
-        // CPU readback of the same buffer was bitwise). A CB boundary is
-        // the only reliable flush on this GPU.
-        if (g_chunk_timing_enabled) {
-            g_chunk_timing.cmdA_encode += now_ms() - t_ph;
-            t_ph = now_ms();
+        if (g_gguf_stage) {
+            // ---- Phase C S4: GGUF linear layer ----
+            // Batched QK projections (S3 kernel); in_proj_a/b run on CPU
+            // inside the chain (staged BF16, bits 0 — the nil-wf_buf BF16
+            // branch would rely on the raw-address accident, so the chain
+            // computes them explicitly).
+            gpu_encode_prefill_matvec(ctx, cmdA, lc->qkv_w, lc->qkv_s, lc->qkv_b,
+                ctx->buf_pf_input, ctx->buf_pf_qkv,
+                LINEAR_CONV_DIM, HIDDEN_DIM, GROUP_SIZE, lc->qkv_bits, M, 0);
+            gpu_encode_prefill_matvec(ctx, cmdA, lc->z_w, lc->z_s, lc->z_b,
+                ctx->buf_pf_input, ctx->buf_pf_z,
+                LINEAR_TOTAL_VALUE, HIDDEN_DIM, GROUP_SIZE, lc->z_bits, M, 0);
+            if (g_chunk_timing_enabled) {
+                g_chunk_timing.cmdA_encode += now_ms() - t_ph;
+                t_ph = now_ms();
+            }
+            [cmdA commit];
+            [cmdA waitUntilCompleted];
+            if (g_chunk_timing_enabled) g_chunk_timing.cmdA_wait += now_ms() - t_ph;
+            // CPU chain per position + batched GPU recurrence; writes
+            // buf_pf_oproj_in slots (and buf_pf_ba for the dumps).
+            prefill_chunk_chain_gguf(ctx, lc, la_state, layer_idx,
+                                     linear_layer_idx, M);
+        } else {
+            // ---- Linear-attention layer: batched projections ----
+            gpu_encode_prefill_matvec(ctx, cmdA, lc->qkv_w, lc->qkv_s, lc->qkv_b,
+                ctx->buf_pf_input, ctx->buf_pf_qkv,
+                LINEAR_CONV_DIM, HIDDEN_DIM, GROUP_SIZE, lc->qkv_bits, M, 0);
+            gpu_encode_prefill_matvec(ctx, cmdA, lc->z_w, lc->z_s, lc->z_b,
+                ctx->buf_pf_input, ctx->buf_pf_z,
+                LINEAR_TOTAL_VALUE, HIDDEN_DIM, GROUP_SIZE, lc->z_bits, M, 0);
+            // beta region [0, M*32), alpha region [M*32, 2*M*32)
+            gpu_encode_prefill_matvec(ctx, cmdA, lc->b_w, lc->b_s, lc->b_b,
+                ctx->buf_pf_input, ctx->buf_pf_ba,
+                LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, lc->b_bits, M, 0);
+            gpu_encode_prefill_matvec(ctx, cmdA, lc->a_w, lc->a_s, lc->a_b,
+                ctx->buf_pf_input, ctx->buf_pf_ba,
+                LINEAR_NUM_V_HEADS, HIDDEN_DIM, GROUP_SIZE, lc->a_bits, M,
+                (NSUInteger)M * 32 * sizeof(float));
+            // The GDN must NOT read the matvec outputs (qkv/z/ba) in the same
+            // command buffer — the GPU serves stale L2 lines for same-CB
+            // device-to-device reads (the run-to-run wobble root cause,
+            // verified: the kernel's qkv read differed between runs while the
+            // CPU readback of the same buffer was bitwise). A CB boundary is
+            // the only reliable flush on this GPU.
+            if (g_chunk_timing_enabled) {
+                g_chunk_timing.cmdA_encode += now_ms() - t_ph;
+                t_ph = now_ms();
+            }
+            [cmdA commit];
+            [cmdA waitUntilCompleted];
+            if (g_chunk_timing_enabled) g_chunk_timing.cmdA_wait += now_ms() - t_ph;
+            cmdA = [ctx->queue commandBuffer];
+            gpu_encode_gdn_batched(ctx, cmdA, linear_layer_idx, lc, M);
+            // CB boundary + CPU-copy bridge: the out_proj (encoded below) must
+            // NOT read the chains' oproj_in device-to-device — barriers and
+            // synchronizeResource both fail to flush L2 on this GPU (the
+            // run-to-run wobble root cause). A CPU readback after the wait is
+            // always coherent, so route the data through buf_pf_oproj_in2.
+            if (g_chunk_timing_enabled) {
+                g_chunk_timing.cmdA_encode += now_ms() - t_ph;
+                t_ph = now_ms();
+            }
+            [cmdA commit];
+            [cmdA waitUntilCompleted];
+            if (g_chunk_timing_enabled) g_chunk_timing.cmdA_wait += now_ms() - t_ph;
         }
-        [cmdA commit];
-        [cmdA waitUntilCompleted];
-        if (g_chunk_timing_enabled) g_chunk_timing.cmdA_wait += now_ms() - t_ph;
-        cmdA = [ctx->queue commandBuffer];
-        gpu_encode_gdn_batched(ctx, cmdA, linear_layer_idx, lc, M);
-        // CB boundary + CPU-copy bridge: the out_proj (encoded below) must
-        // NOT read the chains' oproj_in device-to-device — barriers and
-        // synchronizeResource both fail to flush L2 on this GPU (the
-        // run-to-run wobble root cause). A CPU readback after the wait is
-        // always coherent, so route the data through buf_pf_oproj_in2.
-        if (g_chunk_timing_enabled) {
-            g_chunk_timing.cmdA_encode += now_ms() - t_ph;
-            t_ph = now_ms();
-        }
-        [cmdA commit];
-        [cmdA waitUntilCompleted];
-        if (g_chunk_timing_enabled) g_chunk_timing.cmdA_wait += now_ms() - t_ph;
         memcpy([ctx->buf_pf_oproj_in2 contents], [ctx->buf_pf_oproj_in contents],
                (size_t)M * LINEAR_TOTAL_VALUE * sizeof(float));
     } else {
@@ -10262,8 +10801,20 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
 
     // Residual + post-attn norm (batched, one TG per position)
     {
-        NSUInteger norm_off = (NSUInteger)((const char *)lc->post_attn_norm_w -
-                                           (const char *)[ctx->wf_buf contents]);
+        // Phase C S4: GGUF norm weights are staged BF16 in the heap stage
+        // buffer — bind the stage mirror at the stage offset (the wf_buf
+        // pointer diff would be garbage: wf_buf is nil in GGUF mode).
+        NSUInteger norm_off;
+        id<MTLBuffer> norm_buf;
+        if (g_gguf_stage) {
+            norm_buf = ctx->gguf_stage_gpu;
+            norm_off = (NSUInteger)((const char *)lc->post_attn_norm_w -
+                                    (const char *)g_gguf_stage);
+        } else {
+            norm_buf = ctx->wf_buf;
+            norm_off = (NSUInteger)((const char *)lc->post_attn_norm_w -
+                                    (const char *)[ctx->wf_buf contents]);
+        }
         // Order after the o_proj matvec (and GDN chains) in the same CB —
         // same stale-cache-line hazard as gpu_encode_prefill_matvec.
         metal_sync_buffer(cmdB, ctx->buf_pf_oproj);
@@ -10275,7 +10826,7 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
         [enc setComputePipelineState:ctx->residual_norm_fused_prefill];
         [enc setBuffer:resid_buf            offset:0       atIndex:0];
         [enc setBuffer:ctx->buf_pf_oproj    offset:0       atIndex:1];
-        [enc setBuffer:ctx->wf_buf          offset:norm_off atIndex:2];
+        [enc setBuffer:norm_buf             offset:norm_off atIndex:2];
         [enc setBuffer:ctx->buf_pf_h_mid    offset:0       atIndex:3];
         [enc setBuffer:ctx->buf_pf_h_post   offset:0       atIndex:4];
         [enc setBytes:&dim length:4 atIndex:5];
@@ -10543,7 +11094,259 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
     // layer's routing/preads/CMD3s) into pool[(L+1)%2]; this layer's hot
     // experts were prefetched during layer L-1 into pool[L%2].
     int pool_ok = (g_pf_pool_slots >= (int)(8 * M)) && !g_use_int8 && ctx->buf_pool_expert_data;
-    if (pool_ok) {
+    if (g_gguf_stage) {
+        // ---- Phase C S4: GGUF expert dispatch ----
+        // Uniform group-pool path: positions process in groups of
+        // G = pool_slots/8 (the 4MB copy pool covers G positions' experts
+        // at once). Per group: routing → 3 slab preads per expert into the
+        // slots → per-position CMD3s (S2 kernels reading the stable pool
+        // buffers) → wait for the group's last CMD3 before the next group's
+        // preads overwrite the slots. No per-position waits inside a group
+        // (slots are per-position-disjoint); the final group keeps its
+        // deferred overlap with the next layer's cmdA.
+        static int pf_idx[PREFILL_CHUNK_MAX][MAX_K];
+        static float pf_w[PREFILL_CHUNK_MAX][MAX_K];
+        static id<MTLBuffer> __unsafe_unretained pf_data_bufs[PREFILL_CHUNK_MAX * MAX_K];
+        static NSUInteger pf_data_offs[PREFILL_CHUNK_MAX * MAX_K];
+        static int pf_valid_all[PREFILL_CHUNK_MAX * MAX_K];
+        static int fds[PREFILL_CHUNK_MAX * MAX_K * 3];
+        static off_t offs[PREFILL_CHUNK_MAX * MAX_K * 3];
+        static void *dsts[PREFILL_CHUNK_MAX * MAX_K * 3];
+        static size_t sizes[PREFILL_CHUNK_MAX * MAX_K * 3];
+        int actual_K = (K > MAX_K) ? MAX_K : K;
+        GgufExpertInfo *ge = &gguf_experts[layer_idx];
+        NSUInteger exp_alloc = g_gguf_exp_alloc;
+        char *pool_base = (char *)[ctx->buf_pool_expert_data_gguf contents];
+        int G = g_pf_pool_slots_gguf / MAX_K;
+        if (G < 1) G = 1;
+        if (G > (int)M) G = (int)M;
+        if (getenv("FINCHMOE_PF_NOPOOL")) G = 1;   // debug: force per-position groups
+
+        for (uint32_t gbase = 0; gbase < M; gbase += (uint32_t)G) {
+            int gM = ((gbase + (uint32_t)G) <= M) ? G : (int)(M - gbase);
+
+            // Pass 1: routing + staging for this group's positions
+            for (int gm = 0; gm < gM; gm++) {
+                uint32_t m = gbase + (uint32_t)gm;
+                double t_route = 0;
+                if (g_chunk_timing_enabled) t_route = now_ms();
+                float gate_scores[NUM_EXPERTS];
+                memcpy(gate_scores, gate_scores_batch + (size_t)m * NUM_EXPERTS,
+                       NUM_EXPERTS * sizeof(float));
+                cpu_softmax(gate_scores, NUM_EXPERTS);
+                int expert_indices[MAX_K];
+                float expert_weights[MAX_K];
+                cpu_topk(gate_scores, NUM_EXPERTS, K, expert_indices, expert_weights);
+                cpu_normalize_weights(expert_weights, K);
+                if (g_chunk_timing_enabled) g_chunk_timing.routing_cpu += now_ms() - t_route;
+                if (g_freq_tracking) {
+                    for (int k = 0; k < K; k++) {
+                        g_expert_freq[layer_idx][expert_indices[k]]++;
+                    }
+                    if (layer_idx == 0) g_freq_total_tokens++;
+                }
+                for (int k = 0; k < MAX_K; k++) {
+                    pf_idx[m][k] = expert_indices[k];
+                    pf_w[m][k] = expert_weights[k];
+                }
+                memcpy((float *)[ctx->buf_pf_expert_input contents] + (size_t)m * HIDDEN_DIM,
+                       h_post_batch + (size_t)m * HIDDEN_DIM, HIDDEN_DIM * sizeof(float));
+                memcpy((float *)[ctx->buf_pf_shared_gate contents] + (size_t)m * SHARED_INTERMEDIATE,
+                       shared_batch + (size_t)m * SHARED_INTERMEDIATE,
+                       SHARED_INTERMEDIATE * sizeof(float));
+                memcpy((float *)[ctx->buf_pf_shared_up contents] + (size_t)m * SHARED_INTERMEDIATE,
+                       shared_batch + (size_t)M * SHARED_INTERMEDIATE + (size_t)m * SHARED_INTERMEDIATE,
+                       SHARED_INTERMEDIATE * sizeof(float));
+            }
+
+            // 3 slab preads per expert into slot (8*gm+k) — group-local slot
+            // indices, so the pool covers G positions at once.
+            {
+                int n_read = 0;
+                for (int gm = 0; gm < gM; gm++) {
+                    uint32_t m = gbase + (uint32_t)gm;
+                    for (int k = 0; k < actual_K; k++) {
+                        int e = pf_idx[m][k];
+                        size_t slot = ((size_t)(8 * gm) + (size_t)k) * exp_alloc;
+                        fds[n_read] = g_gguf_fd;
+                        offs[n_read] = (off_t)(ge->gate_off + (size_t)e * ge->gate_slab);
+                        dsts[n_read] = pool_base + slot;
+                        sizes[n_read] = ge->gate_slab;
+                        n_read++;
+                        fds[n_read] = g_gguf_fd;
+                        offs[n_read] = (off_t)(ge->up_off + (size_t)e * ge->up_slab);
+                        dsts[n_read] = pool_base + slot + ge->gate_slab;
+                        sizes[n_read] = ge->up_slab;
+                        n_read++;
+                        fds[n_read] = g_gguf_fd;
+                        offs[n_read] = (off_t)(ge->down_off + (size_t)e * ge->down_slab);
+                        dsts[n_read] = pool_base + slot + ge->gate_slab + ge->up_slab;
+                        sizes[n_read] = ge->down_slab;
+                        n_read++;
+                        pf_data_bufs[(size_t)m * MAX_K + k] = ctx->buf_pool_expert_data_gguf;
+                        pf_data_offs[(size_t)m * MAX_K + k] = slot;
+                    }
+                }
+                double t_pread = 0;
+                if (g_chunk_timing_enabled) t_pread = now_ms();
+                async_pread_multi_start(fds, offs, dsts, sizes, n_read);
+                async_pread_wait();
+                // validity: all 3 reads of an expert must have completed
+                for (int gm = 0; gm < gM; gm++) {
+                    uint32_t m = gbase + (uint32_t)gm;
+                    for (int k = 0; k < actual_K; k++) {
+                        int owner = (int)(gm * actual_K + k);
+                        int v = 1;
+                        for (int r = 0; r < 3; r++) {
+                            if (!g_async_pread.valid[owner * 3 + r]) { v = 0; break; }
+                        }
+                        pf_valid_all[(size_t)m * MAX_K + k] = v;
+                    }
+                }
+                // TEMP DEBUG: pool-slot-vs-mmap byte check for layer 1 k=0
+                if (getenv("FINCHMOE_GGUF_DBG") && layer_idx == 1) {
+                    static FILE *pb2 = NULL;
+                    if (!pb2) pb2 = fopen("/tmp/poolslot.bin", "wb");
+                    if (pb2) {
+                        int e = pf_idx[0][0];
+                        char *slot = pool_base + 0 * exp_alloc;
+                        const char *mm = (const char *)wf->data + ge->gate_off + (size_t)e * ge->gate_slab;
+                        fwrite(slot, 1, ge->gate_slab, pb2);
+                        fwrite(mm, 1, ge->gate_slab, pb2);
+                        const char *slot_up = slot + ge->gate_slab;
+                        const char *mm_up = (const char *)wf->data + ge->up_off + (size_t)e * ge->up_slab;
+                        fwrite(slot_up, 1, ge->up_slab, pb2);
+                        fwrite(mm_up, 1, ge->up_slab, pb2);
+                        const char *slot_dn = slot_up + ge->up_slab;
+                        const char *mm_dn = (const char *)wf->data + ge->down_off + (size_t)e * ge->down_slab;
+                        fwrite(slot_dn, 1, ge->down_slab, pb2);
+                        fwrite(mm_dn, 1, ge->down_slab, pb2);
+                        fflush(pb2);
+                    }
+                }
+                if (g_chunk_timing_enabled) g_chunk_timing.pread_wait += now_ms() - t_pread;
+            }
+
+            // Combine params + validity for the group
+            {
+                float *params = (float *)[ctx->buf_pf_combine_params contents];
+                for (int gm = 0; gm < gM; gm++) {
+                    uint32_t m = gbase + (uint32_t)gm;
+                    memset(params + (size_t)m * 10, 0, 10 * sizeof(float));
+                    for (int k = 0; k < actual_K; k++) {
+                        int v = pf_valid_all[(size_t)m * MAX_K + k];
+                        params[(size_t)m * 10 + k] = v ? pf_w[m][k] : 0.0f;
+                    }
+                    params[(size_t)m * 10 + 8] = seg_batch[m];
+                }
+            }
+
+            // TEMP DEBUG: CPU reference for C3's input norm (layer 1's C3 output)
+            if (getenv("FINCHMOE_GGUF_DBG") && layer_idx == 2) {
+                static FILE *indbg = NULL;
+                if (!indbg) indbg = fopen("/tmp/inputnorm_cpu.bin", "wb");
+                if (indbg) {
+                    const float *moe_b = (const float *)[ctx->buf_pf_moe_hidden contents];
+                    static float normed[HIDDEN_DIM];
+                    cpu_rms_norm(moe_b, layer_cache[layer_idx].input_norm_w, normed, HIDDEN_DIM, RMS_NORM_EPS);
+                    fwrite(normed, sizeof(float), HIDDEN_DIM, indbg);                            // CPU ref
+                    fwrite((const float *)[ctx->buf_pf_input contents], sizeof(float), HIDDEN_DIM, indbg);  // GPU C3
+                    // TEMP: residual-norm cross-check: CPU norm of h_mid vs GPU h_post
+                    static float hp_cpu[HIDDEN_DIM];
+                    cpu_rms_norm((const float *)[ctx->buf_pf_h_mid contents],
+                                 lc->post_attn_norm_w, hp_cpu, HIDDEN_DIM, RMS_NORM_EPS);
+                    fwrite(hp_cpu, sizeof(float), HIDDEN_DIM, indbg);
+                    fwrite((const float *)[ctx->buf_pf_h_post contents], sizeof(float), HIDDEN_DIM, indbg);  // GPU residual_norm
+                    fwrite((const float *)[ctx->buf_pf_h_mid contents], sizeof(float), HIDDEN_DIM, indbg);
+                    fflush(indbg);
+                }
+            }
+
+            // TEMP DEBUG: CPU reference expert outputs for layer 0 + 1 + 39 (mmap slabs)
+            if (getenv("FINCHMOE_GGUF_DBG") && (layer_idx == 0 || layer_idx == 1 || layer_idx == NUM_LAYERS - 1)) {
+                static FILE *edbg = NULL;
+                if (!edbg) edbg = fopen("/tmp/expert_cpu0.bin", "wb");
+                if (edbg) {
+                    int32_t hdr[2] = { (int32_t)layer_idx, (int32_t)gM };
+                    fwrite(hdr, sizeof(int32_t), 2, edbg);
+                    const float *x = h_post_batch;   // position 0 of the group
+                    for (int k = 0; k < actual_K; k++) {
+                        int e = pf_idx[0][k];
+                        static float g_out[MOE_INTERMEDIATE], u_out[MOE_INTERMEDIATE], act[MOE_INTERMEDIATE], eo[HIDDEN_DIM];
+                        gguf_cpu_matvec((const uint8_t *)wf->data + ge->gate_off + (size_t)e * ge->gate_slab,
+                                        x, g_out, MOE_INTERMEDIATE, HIDDEN_DIM, ge->gate_type);
+                        gguf_cpu_matvec((const uint8_t *)wf->data + ge->up_off + (size_t)e * ge->up_slab,
+                                        x, u_out, MOE_INTERMEDIATE, HIDDEN_DIM, ge->up_type);
+                        cpu_swiglu(g_out, u_out, act, MOE_INTERMEDIATE);
+                        gguf_cpu_matvec((const uint8_t *)wf->data + ge->down_off + (size_t)e * ge->down_slab,
+                                        act, eo, HIDDEN_DIM, MOE_INTERMEDIATE, ge->down_type);
+                        fwrite(&e, 4, 1, edbg);
+                        fwrite(eo, sizeof(float), HIDDEN_DIM, edbg);
+                    }
+                    fflush(edbg);
+                }
+                // TEMP DEBUG: the Phase-B input for the CPU ref
+                static FILE *ib = NULL;
+                if (!ib) ib = fopen("/tmp/expert_input_phaseb.bin", "wb");
+                if (ib) {
+                    int32_t hdr = (int32_t)layer_idx;
+                    fwrite(&hdr, 4, 1, ib);
+                    fwrite(h_post_batch, sizeof(float), HIDDEN_DIM, ib);
+                    fflush(ib);
+                }
+            }
+
+            // TEMP DEBUG: at chunk 10 layer 1, CPU refs from ALL layers' slabs
+            if (getenv("FINCHMOE_GGUF_DBG") && layer_idx == 1) {
+                static int l1calls = 0;
+                if (l1calls == 10) {
+                    static FILE *xdbg = NULL;
+                    if (!xdbg) xdbg = fopen("/tmp/expert_xlayer.bin", "wb");
+                    if (xdbg) {
+                        const float *x = h_post_batch;
+                        for (int XL = 0; XL < NUM_LAYERS; XL++) {
+                            GgufExpertInfo *gx = &gguf_experts[XL];
+                            for (int k = 0; k < actual_K; k++) {
+                                int e = pf_idx[0][k];
+                                static float g_out[MOE_INTERMEDIATE], u_out[MOE_INTERMEDIATE], act[MOE_INTERMEDIATE], eo[HIDDEN_DIM];
+                                gguf_cpu_matvec((const uint8_t *)wf->data + gx->gate_off + (size_t)e * gx->gate_slab,
+                                                x, g_out, MOE_INTERMEDIATE, HIDDEN_DIM, gx->gate_type);
+                                gguf_cpu_matvec((const uint8_t *)wf->data + gx->up_off + (size_t)e * gx->up_slab,
+                                                x, u_out, MOE_INTERMEDIATE, HIDDEN_DIM, gx->up_type);
+                                cpu_swiglu(g_out, u_out, act, MOE_INTERMEDIATE);
+                                gguf_cpu_matvec((const uint8_t *)wf->data + gx->down_off + (size_t)e * gx->down_slab,
+                                                act, eo, HIDDEN_DIM, MOE_INTERMEDIATE, gx->down_type);
+                                fwrite(eo, sizeof(float), HIDDEN_DIM, xdbg);
+                            }
+                        }
+                        fflush(xdbg);
+                    }
+                }
+                l1calls++;
+            }
+
+            // Pass 2: CMD3s for the group (deferred commits)
+            for (int gm = 0; gm < gM; gm++) {
+                uint32_t m = gbase + (uint32_t)gm;
+                int valid[MAX_K];
+                for (int k = 0; k < actual_K; k++) {
+                    valid[k] = pf_valid_all[(size_t)m * MAX_K + k];
+                }
+                pf_cmd3_slots[m] = prefill_chunk_cmd3(layer_idx, m, actual_K, valid,
+                                                      seg_batch[m], 1,
+                                                      &pf_data_bufs[(size_t)m * MAX_K],
+                                                      &pf_data_offs[(size_t)m * MAX_K]);
+            }
+            // Group backpressure: wait for the group's last CMD3 before the
+            // next group's preads overwrite the pool slots. The final group
+            // keeps its deferred overlap with the next layer's cmdA.
+            if (gbase + (uint32_t)G < M && pf_cmd3_slots[gbase + (uint32_t)gM - 1]) {
+                if (g_chunk_timing_enabled) t_ph = now_ms();
+                [pf_cmd3_slots[gbase + (uint32_t)gM - 1] waitUntilCompleted];
+                if (g_chunk_timing_enabled) g_chunk_timing.backpressure += now_ms() - t_ph;
+            }
+        }
+    } else if (pool_ok) {
         static int pf_idx[PREFILL_CHUNK_MAX][MAX_K];
         static float pf_w[PREFILL_CHUNK_MAX][MAX_K];
         static id<MTLBuffer> __unsafe_unretained pf_data_bufs[PREFILL_CHUNK_MAX * MAX_K];
@@ -10722,7 +11525,13 @@ static int gguf_chunk_enabled(void) {
     static int parsed = 0, val = 0;
     if (!parsed) {
         const char *e = getenv("FINCHMOE_GGUF_CHUNK");
-        val = !(e && strcmp(e, "0") == 0);   // unset/1 = on, 0 = escape hatch
+        // C3: default-on (unset = 1) after the G5 parity gate went green.
+        // G5 result: all components parity-clean (bitwise where kernels are
+        // shared, <= 1e-5 where they differ); the sole divergence is an exact
+        // gate-score tie (0 ULP) at one (pos, layer) flipping topk — final
+        // logits cos 0.99943 vs per-token, argmax identical. Escape hatch:
+        // FINCHMOE_GGUF_CHUNK=0.
+        val = !(e && strcmp(e, "0") == 0);
         parsed = 1;
     }
     return val;
@@ -10733,9 +11542,20 @@ static int prefill_chunk_available(void) {
           !g_malloc_cache && !g_expert_cache && !g_use_lz4 && !g_cpu_experts))
         return 0;
     if (g_gguf_stage) {
-        // Phase C S4: GGUF chunked driver. Enabled in the C3 commit — until
-        // then the branch stays off so the S0 hazard guard holds.
-        return 0 && gguf_chunk_enabled();
+        // Phase C S4: GGUF chunked driver. Env-gated (FINCHMOE_GGUF_CHUNK,
+        // default off until the G5 parity gate goes green). Requires the
+        // stage mirror + expert pool (both lazy-created on first call).
+        // NOTE: gpu_linear_attn_enabled is deliberately NOT required — the
+        // bench harness passes -L, and the chunked GGUF chain runs on CPU
+        // regardless (the per-token baseline does too).
+        return gguf_chunk_enabled() && !linear_attn_bypass &&
+               g_metal->matvec_qk_prefill && g_metal->fused_gate_up_swiglu_qk_pipe &&
+               g_metal->matvec_qk && g_metal->gemv_bf16_prefill &&
+               g_metal->residual_norm_fused_prefill &&
+               g_metal->moe_combine_residual_prefill &&
+               g_metal->rms_norm_sum_sq_prefill &&
+               g_metal->rms_norm_apply_bf16_prefill &&
+               gguf_stage_mirror_get(g_metal) && gguf_pool_get(g_metal);
     }
     return gpu_linear_attn_enabled && !linear_attn_bypass &&
            g_metal->fused_gdn_full && g_metal->fused_gdn_batched &&
@@ -10759,6 +11579,9 @@ static void prefill_chunked_run(WeightFile *wf, float *hidden,
     // The layer weight cache is normally built lazily inside
     // fused_layer_forward's first call — the chunked path runs first.
     if (!layer_cache_built) build_layer_cache(wf);
+    // Same for the static scratch (the chunked GGUF chain uses
+    // s_conv_out/s_out_vals/s_beta_proj_out/s_alpha_proj_out).
+    init_layer_scratch();
 
     id<MTLCommandBuffer> last_cmd3 = nil;   // final chunk's last-layer CMD3 (final position)
     int last_M = 0;
@@ -10807,7 +11630,7 @@ static void prefill_chunked_run(WeightFile *wf, float *hidden,
         // CMD3s don't combine into a buffer (only the driver's finalize
         // does, for the last position), so wait for the chunk's last CB and
         // CPU-combine per position, mirroring the finalize arithmetic.
-        if (g_use_mtp && g_metal && chunk_last) {
+        if (g_use_mtp && g_metal && g_mtp.loaded && chunk_last) {
             [chunk_last waitUntilCompleted];
             const float *h_mid = (const float *)[g_metal->buf_pf_h_mid contents];
             const float *params = (const float *)[g_metal->buf_pf_combine_params contents];
@@ -10868,12 +11691,29 @@ static void prefill_chunked_run(WeightFile *wf, float *hidden,
         float moe_out[HIDDEN_DIM];
         memset(moe_out, 0, sizeof(moe_out));
         const float *params = (const float *)[ctx->buf_pf_combine_params contents] + (size_t)m * 10;
+        // Phase C S4: the per-token GGUF combine skips non-finite expert
+        // outputs and renormalizes the surviving weights (gpu_gguf_experts_
+        // forward's CPU combine). Mirror it here so the final hidden matches
+        // the GGUF baseline's semantics; packed mode keeps the exact
+        // finalize_deferred_experts arithmetic (the guard never fires on
+        // healthy outputs, so the extra branches cost nothing).
+        float gguf_total_weight = 0.0f;
         for (int k = 0; k < MAX_K; k++) {
             float w = params[k];
             if (w == 0.0f) continue;  // invalid expert (mirrors finalize's valid-skip)
             const float *eo = (const float *)[ctx->buf_multi_expert_out[k] contents]
                               + (size_t)m * HIDDEN_DIM;
+            if (g_gguf_stage) {
+                float er = 0.0f;
+                for (int j = 0; j < HIDDEN_DIM; j++) er += eo[j] * eo[j];
+                if (!(isfinite(er) && er < 1e20f)) continue;
+                gguf_total_weight += w;
+            }
             cpu_vec_madd(moe_out, eo, w, HIDDEN_DIM);
+        }
+        if (g_gguf_stage && gguf_total_weight > 0.0f && gguf_total_weight < 0.99f) {
+            float inv_tw = 1.0f / gguf_total_weight;
+            for (int i = 0; i < HIDDEN_DIM; i++) moe_out[i] *= inv_tw;
         }
         // Premultiply shared output by the gate first (separate loop, mirrors
         // finalize's in-place shared_out *= sigmoid(score)), then plain adds.
@@ -13115,7 +13955,7 @@ int main(int argc, char **argv) {
                 (prefill_batch_ms - first_tok_ms) / (pt->count - 2) : first_tok_ms;
             printf("  [prefill] %d/%d tokens: %.0f ms (first: %.0f ms, rest avg: %.0f ms)%s\n",
                    pt->count - 1, pt->count, prefill_batch_ms, first_tok_ms, avg_ms,
-                   g_prefill_chunk > 0 ? " [chunked]" : "");
+                   (prefill_chunk_available() && pt->count > 1) ? " [chunked]" : "");
         }
 
         // ---- Last prefill token (or single-token prompt) ----
