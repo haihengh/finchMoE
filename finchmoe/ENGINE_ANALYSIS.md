@@ -528,7 +528,7 @@ The random-read nature of expert access (different experts per layer per token) 
 |---|-------------|-----------|------------|----------|
 | 1 | **2-bit experts** | +2 tok/s | Low | Already supported (`--2bit`). I/O volume halved. Slight quality tradeoff. |
 | 2 | **Pre-warm expert cache** | +1-2 tok/s | Low | ❌ REJECTED 2026-08-14: hot-set prefetch measured — 26%/39.5% coverage, does NOT pay (restart-retest-plan). |
-| 3 | **Increase GPU KV sequence** | Free | Low | `--gpu-kv-seq 16384` (from 8192). More GPU attention = less CPU overhead for long sequences. Open — test before defaulting. |
+| 3 | **Increase GPU KV sequence** | Free | Low | ✅ EVALUATED 2026-08-18: `-Q 16384` available but NOT defaulted — GPU KV buffers grow 0.3→0.6 GB wired, which steals page cache (S6 lesson: every wired MB costs pread speed), and GGUF mode doesn't use GPU attention by default. "Free" only on 16 GB native; keep 8192 default. |
 | 4 | **Fuse CMD1+CMD2** | +0.5 tok/s | Medium | ✅ DONE (native path `cmd12_fused`). GGUF: partial — S7 L3 fuses attention+o_proj in one CB (env-gated). |
 
 ### 6.2 Medium-Impact, Medium-Risk
