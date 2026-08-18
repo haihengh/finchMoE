@@ -2229,6 +2229,7 @@ typedef struct {
     id<MTLComputePipelineState> fused_gdn_core;  // fused decay+beta+GDN+gated_norm
     id<MTLComputePipelineState> fused_gdn_full;  // conv1d+qk-norm+GDN+gated_norm, single kernel
     id<MTLComputePipelineState> fused_gdn_batched;  // fused_gdn_full with in-kernel M loop (chunked prefill)
+    id<MTLComputePipelineState> fused_gdn_batched_qk;  // Phase C S5: GGUF Q4_K in_proj variant (env-gated)
     // Persistent GPU state buffers for linear attention layers
     #define NUM_LINEAR_LAYERS 30
     id<MTLBuffer> buf_delta_state[NUM_LINEAR_LAYERS];   // [32*128*128] float per layer
@@ -2376,6 +2377,7 @@ static MetalCtx *metal_setup(void) {
     ctx->fused_gdn_core    = makePipe(@"fused_gdn_core");
     ctx->fused_gdn_full    = makePipe(@"fused_gdn_full");
     ctx->fused_gdn_batched = makePipe(@"fused_gdn_batched");
+    ctx->fused_gdn_batched_qk = makePipe(@"fused_gdn_batched_qk");
     ctx->matvec_prefill_4bit  = makePipe(@"dequant_matvec_4bit_prefill");
     ctx->matvec_prefill_8bit  = makePipe(@"dequant_matvec_8bit_prefill");
     ctx->gemv_bf16_prefill    = makePipe(@"gemv_bf16_prefill");
@@ -7198,6 +7200,76 @@ static void gpu_encode_gdn_batched(MetalCtx *ctx, id<MTLCommandBuffer> cmdbuf,
     [enc endEncoding];
 }
 
+// Phase C S5: fused_gdn_batched_qk encoder (GGUF chunked chain on GPU).
+// Stage-mirror binds for the staged tensors (conv_w / A_log / dt_bias /
+// gated_norm_w — same heap as the norm weights in the residual-norm block);
+// b_w/a_w are Q4_K in the GGUF mmap → per-tensor wraps (gguf_tbuf_get).
+// Returns 0 on success, -1 if a required wrap/stage bind failed (caller
+// falls back to the CPU chain).
+static int gpu_encode_gdn_batched_gguf(MetalCtx *ctx, id<MTLCommandBuffer> cmdbuf,
+                                       int linear_layer_idx, LayerWeightCache *lc,
+                                       uint32_t M) {
+    if (!ctx->fused_gdn_batched_qk || !ctx->gguf_stage_gpu) return -1;
+    // The fused kernel decodes Q4_K in_proj rows — only valid for GGUF files
+    // where in_proj_a/b are Q4_K (bits 10). Files with BF16-staged in_proj
+    // (bits 0) fall back to the CPU chain.
+    if (lc->b_bits != 10 || lc->a_bits != 10) return -1;
+    const char *stage = (const char *)g_gguf_stage;
+    size_t stage_len = g_gguf_stage_len;
+    // conv1d.weight / dt_bias / linear_attn.norm.weight are F32→BF16-staged
+    // (gguf_needs_bf16_stage); A_log is F32 in the mmap (wrap separately).
+    const char *ptrs[3] = {
+        (const char *)lc->conv1d_w,
+        (const char *)lc->dt_bias,
+        (const char *)lc->gated_norm_w,
+    };
+    NSUInteger offs[3] = {0};
+    for (int i = 0; i < 3; i++) {
+        if (ptrs[i] < stage || ptrs[i] >= stage + stage_len) return -1;
+        offs[i] = (NSUInteger)(ptrs[i] - stage);
+    }
+    // b_w / a_w: Q4_K rows of [32, HIDDEN_DIM] (144B/256).
+    size_t row_bytes = (size_t)(HIDDEN_DIM / 256) * 144;
+    uint32_t b_delta = 0, a_delta = 0, alog_delta = 0;
+    id<MTLBuffer> b_buf = gguf_tbuf_get(ctx, lc->b_w, row_bytes * LINEAR_NUM_V_HEADS, &b_delta);
+    id<MTLBuffer> a_buf = gguf_tbuf_get(ctx, lc->a_w, row_bytes * LINEAR_NUM_V_HEADS, &a_delta);
+    id<MTLBuffer> alog_buf = gguf_tbuf_get(ctx, lc->A_log, LINEAR_NUM_V_HEADS * sizeof(float), &alog_delta);
+    if (!b_buf || !a_buf || !alog_buf) return -1;
+
+    uint32_t conv_dim = LINEAR_CONV_DIM;
+    uint32_t in_dim = HIDDEN_DIM;
+    uint32_t khpv = LINEAR_NUM_V_HEADS / LINEAR_NUM_K_HEADS;
+    uint32_t kdim = LINEAR_KEY_DIM, vdim = LINEAR_VALUE_DIM;
+    float eps = RMS_NORM_EPS;
+    id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
+    [enc setComputePipelineState:ctx->fused_gdn_batched_qk];
+    [enc setBuffer:ctx->buf_conv_state[linear_layer_idx] offset:0 atIndex:0];
+    [enc setBuffer:ctx->buf_pf_qkv       offset:0          atIndex:1];
+    [enc setBuffer:ctx->gguf_stage_gpu   offset:offs[0]    atIndex:2];
+    [enc setBuffer:ctx->buf_pf_z         offset:0          atIndex:3];
+    [enc setBuffer:b_buf                 offset:b_delta    atIndex:4];
+    [enc setBuffer:a_buf                 offset:a_delta    atIndex:5];
+    [enc setBuffer:ctx->buf_pf_input     offset:0          atIndex:6];
+    [enc setBuffer:alog_buf              offset:alog_delta atIndex:7];
+    [enc setBuffer:ctx->gguf_stage_gpu   offset:offs[1]    atIndex:8];
+    [enc setBuffer:ctx->gguf_stage_gpu   offset:offs[2]    atIndex:9];
+    [enc setBuffer:ctx->buf_delta_state[linear_layer_idx] offset:0 atIndex:10];
+    [enc setBuffer:ctx->buf_pf_oproj_in offset:0          atIndex:11];
+    [enc setBuffer:ctx->buf_conv_qk[linear_layer_idx] offset:0 atIndex:12];
+    [enc setBytes:&conv_dim length:4 atIndex:13];
+    [enc setBytes:&in_dim   length:4 atIndex:14];
+    [enc setBytes:&khpv     length:4 atIndex:15];
+    [enc setBytes:&kdim     length:4 atIndex:16];
+    [enc setBytes:&vdim     length:4 atIndex:17];
+    [enc setBytes:&M        length:4 atIndex:18];
+    [enc setBytes:&eps      length:4 atIndex:19];
+    [enc dispatchThreadgroups:MTLSizeMake(LINEAR_NUM_V_HEADS, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(LINEAR_VALUE_DIM, 1, 1)];
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    [enc endEncoding];
+    return 0;
+}
+
 static void gpu_encode_gdn_chain_slot(MetalCtx *ctx, id<MTLCommandBuffer> cmdbuf,
                                       int linear_layer_idx, LayerWeightCache *lc,
                                       uint32_t m, uint32_t M) {
@@ -10370,6 +10442,8 @@ static id<MTLCommandBuffer> pf_cmd3_slots[PREFILL_CHUNK_MAX];
 // One layer of chunked prefill for M positions (chunk_base .. chunk_base+M-1).
 // Fills pf_cmd3_slots[m] with each position's deferred CMD3 and returns the
 // final position's CMD3 via *last_cmd3_out.
+static int gguf_gdn_gpu_enabled(void);  // defined with gguf_chunk_enabled below
+
 static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
                                 const float *embed_batch, int chunk_base,
                                 uint32_t M, int pos_base,
@@ -10489,8 +10563,49 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
             }
             // CPU chain per position + batched GPU recurrence; writes
             // buf_pf_oproj_in slots (and buf_pf_ba for the dumps).
-            prefill_chunk_chain_gguf(ctx, lc, la_state, layer_idx,
-                                     linear_layer_idx, M);
+            // Phase C S5: FINCHMOE_GGUF_GDN_GPU selects the fused GPU chain
+            // (conv + in_proj + decay + delta + gated norm in one CB — the
+            // packed 2-CB structure; qkv/z are cross-CB reads, coherent).
+            // Falls back to the CPU chain when the pipe is missing or a
+            // wrap/stage bind fails. The CPU conv state is bridged by the
+            // driver after the chunk loop (prefill_chunked_run's GDN bridge).
+            {
+                int fused_ok = 0;
+                if (gguf_gdn_gpu_enabled()) {
+                    id<MTLCommandBuffer> cmdG = [ctx->queue commandBuffer];
+                    // FINCHMOE_PF_GKLOOP=N repeats the fused dispatch N times
+                    // (timing-only — the state RMW repeats, corrupting it).
+                    static int gkloop = 0, gkparsed = 0;
+                    if (!gkparsed) {
+                        const char *ke = getenv("FINCHMOE_PF_GKLOOP");
+                        gkloop = ke ? atoi(ke) : 1;
+                        if (gkloop < 1) gkloop = 1;
+                        gkparsed = 1;
+                        if (gkloop > 1) fprintf(stderr, "[gkloop] fused GDN iteration x%d (timing-only)\n", gkloop);
+                    }
+                    int enc_ok = 0;
+                    for (int gi = 0; gi < gkloop; gi++) {
+                        enc_ok = gpu_encode_gdn_batched_gguf(ctx, cmdG, linear_layer_idx, lc, M);
+                        if (enc_ok != 0) break;
+                    }
+                    if (ctx->fused_gdn_batched_qk && enc_ok == 0) {
+                        double t_gdn = 0;
+                        if (g_chunk_timing_enabled) t_gdn = now_ms();
+                        [cmdG commit];
+                        [cmdG waitUntilCompleted];
+                        if (g_chunk_timing_enabled) {
+                            double d = now_ms() - t_gdn;
+                            g_chunk_timing.delta_wait += d;
+                            pf_per_layer_add(layer_idx, 2, d);
+                        }
+                        fused_ok = 1;
+                    }
+                }
+                if (!fused_ok) {
+                    prefill_chunk_chain_gguf(ctx, lc, la_state, layer_idx,
+                                             linear_layer_idx, M);
+                }
+            }
         } else {
             // ---- Linear-attention layer: batched projections ----
             gpu_encode_prefill_matvec(ctx, cmdA, lc->qkv_w, lc->qkv_s, lc->qkv_b,
@@ -11694,6 +11809,24 @@ static int gguf_chunk_enabled(void) {
     return val;
 }
 
+// Phase C S5: fused GPU GDN chain for the chunked GGUF driver (the
+// fused_gdn_batched_qk kernel). Opt-in via FINCHMOE_GGUF_GDN_GPU=1.
+// Measured on the M4 (2026-08-17): bitwise parity (cos 1.000000) and a
+// working decode bridge, but perf-neutral vs the CPU chain (fused ~1.37ms
+// vs ~1.1ms per layer — the delta state RMW dominates either way, and the
+// chain's CPU work was already off the GPU's critical path). Default OFF;
+// revisit on CPU-weak targets (iPhone tier) where the CPU chain's serial
+// work is relatively more expensive.
+static int gguf_gdn_gpu_enabled(void) {
+    static int parsed = 0, val = 0;
+    if (!parsed) {
+        const char *e = getenv("FINCHMOE_GGUF_GDN_GPU");
+        val = (e != NULL && strcmp(e, "0") != 0);
+        parsed = 1;
+    }
+    return val;
+}
+
 static int prefill_chunk_available(void) {
     if (!(g_prefill_chunk > 0 && g_metal &&
           !g_malloc_cache && !g_expert_cache && !g_use_lz4 && !g_cpu_experts))
@@ -11739,6 +11872,42 @@ static void prefill_chunked_run(WeightFile *wf, float *hidden,
     // Same for the static scratch (the chunked GGUF chain uses
     // s_conv_out/s_out_vals/s_beta_proj_out/s_alpha_proj_out).
     init_layer_scratch();
+
+    // Phase C S5: seed the GPU conv histories from the CPU la_state (fresh
+    // sessions are zero; serve continuations carry the prior turn's state).
+    // buf_conv_qk holds the per-head q/k histories, buf_conv_state the
+    // v-channel history — both are what fused_gdn_batched_qk maintains in
+    // place. The ssm state (buf_delta_state) needs no seed: the serve sync
+    // uploads it, and the CPU chain's GPU delta shares the same buffer.
+    if (g_gguf_stage && gguf_gdn_gpu_enabled() && g_metal->fused_gdn_batched_qk) {
+        int li = 0;
+        for (int i = 0; i < NUM_LAYERS; i++) {
+            if ((i + 1) % FULL_ATTN_INTERVAL == 0) continue;
+            LinearAttnState *la = (LinearAttnState *)layer_states[i];
+            if (li >= NUM_LINEAR_LAYERS || !la) break;
+            float *qh = (float *)[g_metal->buf_conv_qk[li] contents];
+            float *cs = (float *)[g_metal->buf_conv_state[li] contents];
+            for (int s = 0; s < CONV_KERNEL_SIZE - 1; s++) {
+                for (int h = 0; h < LINEAR_NUM_V_HEADS; h++) {
+                    // q history: qk_hist[h*3*kd + s*kd]
+                    memcpy(qh + (size_t)h * (3 * LINEAR_KEY_DIM) + (size_t)s * LINEAR_KEY_DIM,
+                           la->conv_state + (size_t)s * LINEAR_CONV_DIM + (size_t)h * LINEAR_KEY_DIM,
+                           LINEAR_KEY_DIM * sizeof(float));
+                    // k history: qk_hist[32*3*kd + h*3*kd + s*kd]
+                    memcpy(qh + (size_t)(LINEAR_NUM_V_HEADS * 3 * LINEAR_KEY_DIM
+                                         + h * 3 * LINEAR_KEY_DIM) + (size_t)s * LINEAR_KEY_DIM,
+                           la->conv_state + (size_t)s * LINEAR_CONV_DIM + LINEAR_TOTAL_KEY
+                                         + (size_t)h * LINEAR_KEY_DIM,
+                           LINEAR_KEY_DIM * sizeof(float));
+                }
+                // v history: buf_conv_state[s*conv_dim + 2*total_key]
+                memcpy(cs + (size_t)s * LINEAR_CONV_DIM + 2 * LINEAR_TOTAL_KEY,
+                       la->conv_state + (size_t)s * LINEAR_CONV_DIM + 2 * LINEAR_TOTAL_KEY,
+                       2 * LINEAR_TOTAL_KEY * sizeof(float));
+            }
+            li++;
+        }
+    }
 
     id<MTLCommandBuffer> last_cmd3 = nil;   // final chunk's last-layer CMD3 (final position)
     int last_M = 0;
@@ -11879,6 +12048,36 @@ static void prefill_chunked_run(WeightFile *wf, float *hidden,
         for (int i = 0; i < HIDDEN_DIM; i++) shared_scaled[i] = shared_gate * so[i];
         for (int i = 0; i < HIDDEN_DIM; i++) {
             hidden[i] = h_mid[i] + moe_out[i] + shared_scaled[i];
+        }
+    }
+
+    // Phase C S5: bridge the GPU conv histories back to the CPU la_state
+    // layout so the decode chain (per-token CPU conv) continues from the
+    // post-prefill state. Inverse of the seed above.
+    if (g_gguf_stage && gguf_gdn_gpu_enabled() && g_metal->fused_gdn_batched_qk) {
+        int li = 0;
+        for (int i = 0; i < NUM_LAYERS; i++) {
+            if ((i + 1) % FULL_ATTN_INTERVAL == 0) continue;
+            LinearAttnState *la = (LinearAttnState *)layer_states[i];
+            if (li >= NUM_LINEAR_LAYERS || !la) break;
+            const float *qh = (const float *)[g_metal->buf_conv_qk[li] contents];
+            const float *cs = (const float *)[g_metal->buf_conv_state[li] contents];
+            for (int s = 0; s < CONV_KERNEL_SIZE - 1; s++) {
+                for (int h = 0; h < LINEAR_NUM_V_HEADS; h++) {
+                    memcpy(la->conv_state + (size_t)s * LINEAR_CONV_DIM + (size_t)h * LINEAR_KEY_DIM,
+                           qh + (size_t)h * (3 * LINEAR_KEY_DIM) + (size_t)s * LINEAR_KEY_DIM,
+                           LINEAR_KEY_DIM * sizeof(float));
+                    memcpy(la->conv_state + (size_t)s * LINEAR_CONV_DIM + LINEAR_TOTAL_KEY
+                                         + (size_t)h * LINEAR_KEY_DIM,
+                           qh + (size_t)(LINEAR_NUM_V_HEADS * 3 * LINEAR_KEY_DIM
+                                         + h * 3 * LINEAR_KEY_DIM) + (size_t)s * LINEAR_KEY_DIM,
+                           LINEAR_KEY_DIM * sizeof(float));
+                }
+                memcpy(la->conv_state + (size_t)s * LINEAR_CONV_DIM + 2 * LINEAR_TOTAL_KEY,
+                       cs + (size_t)s * LINEAR_CONV_DIM + 2 * LINEAR_TOTAL_KEY,
+                       2 * LINEAR_TOTAL_KEY * sizeof(float));
+            }
+            li++;
         }
     }
 
