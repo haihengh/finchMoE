@@ -311,12 +311,33 @@ typedef struct {
     double cmd3_encode;      // CMD3 encode + deferred commit per position
     double backpressure;     // CMD3(m-1) backpressure waits
     double combine_wait;     // final driver combine wait
+    // Phase C S4 perf pass: GGUF chain internals + CMD3 decomposition
+    double chain_cpu;        // chain per-position CPU loop (in_proj/conv/norms)
+    double delta_wait;       // batched delta_net_step CB commit + wait
+    double chain_readback;   // delta out readback + gated norm (CPU)
+    double bridge;           // oproj_in -> oproj_in2 CPU bridge memcpy
+    double cmd3_wait;        // explicit final-CMD3 wait (FINCHMOE_PF_CMD3WAIT)
     double total;            // total across all layer calls
     int layers;              // number of layer calls timed
 } ChunkLayerTimingAccum;
 
 static ChunkLayerTimingAccum g_chunk_timing = {0};
 static int g_chunk_timing_enabled = 0;  // set from FINCHMOE_PF_TIMING env
+// Phase C S4 perf pass: per-layer phase attribution. Columns (all ms):
+// 0 cmdA_wait, 1 chain_cpu, 2 delta_wait, 3 chain_readback, 4 bridge,
+// 5 cmdB_wait, 6 routing_cpu, 7 pread_wait, 8 cmd3_encode, 9 cmd3_wait,
+// 10 total.
+static double g_pf_per_layer[NUM_LAYERS][11] = {{0}};
+static int g_pf_per_layer_count[NUM_LAYERS] = {0};
+// Phase C S4 perf pass: GGUF expert pread dedup stats (unique vs total
+// slots per layer, accumulated over all layer calls).
+static int g_gguf_dedup_unique = 0;
+static int g_gguf_dedup_slots = 0;
+// Phase C S4 perf pass: per-layer delta recorder (no-op when timing is off).
+static inline void pf_per_layer_add(int layer_idx, int col, double ms) {
+    if (g_chunk_timing_enabled && layer_idx >= 0 && layer_idx < NUM_LAYERS)
+        g_pf_per_layer[layer_idx][col] += ms;
+}
 // Phase-B trace accumulation (FINCHMOE_DUMP_PHASEB) — written once per prefill
 static float *g_pb_acc = NULL;
 static size_t g_pb_len = 0;
@@ -604,8 +625,33 @@ static void chunk_timing_print(void) {
     fprintf(stderr, "  cmd3_encode:   %7.3f\n", g_chunk_timing.cmd3_encode / n);
     fprintf(stderr, "  backpressure:  %7.3f\n", g_chunk_timing.backpressure / n);
     fprintf(stderr, "  combine_wait:  %7.3f\n", g_chunk_timing.combine_wait / n);
+    fprintf(stderr, "  chain_cpu:     %7.3f\n", g_chunk_timing.chain_cpu / n);
+    fprintf(stderr, "  delta_wait:    %7.3f\n", g_chunk_timing.delta_wait / n);
+    fprintf(stderr, "  chain_rb:      %7.3f\n", g_chunk_timing.chain_readback / n);
+    fprintf(stderr, "  bridge:        %7.3f\n", g_chunk_timing.bridge / n);
+    fprintf(stderr, "  cmd3_wait:     %7.3f\n", g_chunk_timing.cmd3_wait / n);
+    if (g_gguf_dedup_slots > 0) {
+        fprintf(stderr, "  expert dedup:  %d unique / %d slots (%.1f%%) across all layers\n",
+                g_gguf_dedup_unique, g_gguf_dedup_slots,
+                100.0 * (double)g_gguf_dedup_unique / (double)g_gguf_dedup_slots);
+    }
     fprintf(stderr, "  layer_total:   %7.3f\n", g_chunk_timing.total / n);
     fprintf(stderr, "  total_all:     %7.1f ms across %d layers\n", g_chunk_timing.total, n);
+    // Per-layer table (avg across chunk calls): shows which layers carry
+    // the deferred CMD3 tail inside cmdA_wait and where preads dominate.
+    int shown = 0;
+    fprintf(stderr, "  per-layer (avg ms):  lay cmdA_wt chain_cpu dlt_wt chain_rb bridge cmdB_wt route pread_wt c3_enc c3_wt total\n");
+    for (int l = 0; l < NUM_LAYERS; l++) {
+        if (!g_pf_per_layer_count[l]) continue;
+        shown++;
+        double d = (double)g_pf_per_layer_count[l];
+        fprintf(stderr, "    %3d %6.2f %7.3f %6.3f %7.3f %6.3f %6.3f %5.3f %7.3f %6.3f %6.3f %6.2f\n",
+                l, g_pf_per_layer[l][0] / d, g_pf_per_layer[l][1] / d, g_pf_per_layer[l][2] / d,
+                g_pf_per_layer[l][3] / d, g_pf_per_layer[l][4] / d, g_pf_per_layer[l][5] / d,
+                g_pf_per_layer[l][6] / d, g_pf_per_layer[l][7] / d, g_pf_per_layer[l][8] / d,
+                g_pf_per_layer[l][9] / d, g_pf_per_layer[l][10] / d);
+    }
+    if (!shown) fprintf(stderr, "    (no per-layer records)\n");
 }
 
 // ============================================================================
@@ -9673,6 +9719,11 @@ static void prefill_chunk_chain_gguf(MetalCtx *ctx, LayerWeightCache *lc,
 
     int k_heads_per_v = LINEAR_NUM_V_HEADS / LINEAR_NUM_K_HEADS;
 
+    // Phase C S4 perf pass: split the chain into CPU loop / GPU delta wait /
+    // CPU readback so the per-layer table can attribute the chain's time.
+    double t_chain_cpu = 0, t_delta_wait = 0, t_chain_rb = 0;
+    if (g_chunk_timing_enabled) t_chain_cpu = now_ms();
+
     for (uint32_t m = 0; m < M; m++) {
         const float *qkv_out = qkv_batch + (size_t)m * qkv_dim;
         const float *z_out   = z_batch   + (size_t)m * LINEAR_TOTAL_VALUE;
@@ -9826,6 +9877,13 @@ static void prefill_chunk_chain_gguf(MetalCtx *ctx, LayerWeightCache *lc,
         }
     }
 
+    if (g_chunk_timing_enabled) {
+        double d = now_ms() - t_chain_cpu;
+        g_chunk_timing.chain_cpu += d;
+        pf_per_layer_add(layer_idx, 1, d);
+        t_delta_wait = now_ms();
+    }
+
     if (gpu_recur) {
         // TEMP DEBUG: save pre-dispatch state for layer 2 (CPU ref cross-check)
         static float saved_state[32 * 128 * 128];
@@ -9854,6 +9912,12 @@ static void prefill_chunk_chain_gguf(MetalCtx *ctx, LayerWeightCache *lc,
         [enc endEncoding];
         [cmd_dn commit];
         [cmd_dn waitUntilCompleted];
+        if (g_chunk_timing_enabled) {
+            double d = now_ms() - t_delta_wait;
+            g_chunk_timing.delta_wait += d;
+            pf_per_layer_add(layer_idx, 2, d);
+            t_chain_rb = now_ms();
+        }
 
         // Readback out slots + RMSNormGated per position
         const float *outs = (const float *)[ctx->buf_pf_delta_out contents];
@@ -9871,6 +9935,11 @@ static void prefill_chunk_chain_gguf(MetalCtx *ctx, LayerWeightCache *lc,
                     memcpy(gh, oh, LINEAR_VALUE_DIM * sizeof(float));
                 }
             }
+        }
+        if (g_chunk_timing_enabled) {
+            double d = now_ms() - t_chain_rb;
+            g_chunk_timing.chain_readback += d;
+            pf_per_layer_add(layer_idx, 3, d);
         }
 
         // TEMP DEBUG: chunked post-dispatch state dump for layer 2
@@ -10148,7 +10217,11 @@ static id<MTLCommandBuffer> prefill_chunk_cmd3(int layer_idx, uint32_t m,
 
     // DEFERRED commit — submit async, don't wait.
     [cmd commit];
-    if (g_chunk_timing_enabled) g_chunk_timing.cmd3_encode += now_ms() - t_cmd3;
+    if (g_chunk_timing_enabled) {
+        double d = now_ms() - t_cmd3;
+        g_chunk_timing.cmd3_encode += d;
+        pf_per_layer_add(layer_idx, 8, d);
+    }
 
     // Debug: dump CMD3 components AFTER completion (debug-only wait)
     if (getenv("FINCHMOE_PF_DUMP") && (layer_idx == 0 || layer_idx == 1) && m == 0) {
@@ -10381,19 +10454,39 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
             // inside the chain (staged BF16, bits 0 — the nil-wf_buf BF16
             // branch would rely on the raw-address accident, so the chain
             // computes them explicitly).
-            gpu_encode_prefill_matvec(ctx, cmdA, lc->qkv_w, lc->qkv_s, lc->qkv_b,
-                ctx->buf_pf_input, ctx->buf_pf_qkv,
-                LINEAR_CONV_DIM, HIDDEN_DIM, GROUP_SIZE, lc->qkv_bits, M, 0);
-            gpu_encode_prefill_matvec(ctx, cmdA, lc->z_w, lc->z_s, lc->z_b,
-                ctx->buf_pf_input, ctx->buf_pf_z,
-                LINEAR_TOTAL_VALUE, HIDDEN_DIM, GROUP_SIZE, lc->z_bits, M, 0);
+            // Phase C S4 perf pass: FINCHMOE_PF_KLOOP=N repeats the QKV+Z
+            // encodes N times inside cmdA (outputs overwritten each pass —
+            // timing-only mode). cmdA_wait/N isolates per-iteration kernel
+            // time from CB commit/wait latency.
+            {
+                static int kloop = 0, kparsed = 0;
+                if (!kparsed) {
+                    const char *ke = getenv("FINCHMOE_PF_KLOOP");
+                    kloop = ke ? atoi(ke) : 1;
+                    if (kloop < 1) kloop = 1;
+                    kparsed = 1;
+                    if (kloop > 1) fprintf(stderr, "[kloop] cmdA iteration x%d (timing-only)\n", kloop);
+                }
+                for (int ki = 0; ki < kloop; ki++) {
+                    gpu_encode_prefill_matvec(ctx, cmdA, lc->qkv_w, lc->qkv_s, lc->qkv_b,
+                        ctx->buf_pf_input, ctx->buf_pf_qkv,
+                        LINEAR_CONV_DIM, HIDDEN_DIM, GROUP_SIZE, lc->qkv_bits, M, 0);
+                    gpu_encode_prefill_matvec(ctx, cmdA, lc->z_w, lc->z_s, lc->z_b,
+                        ctx->buf_pf_input, ctx->buf_pf_z,
+                        LINEAR_TOTAL_VALUE, HIDDEN_DIM, GROUP_SIZE, lc->z_bits, M, 0);
+                }
+            }
             if (g_chunk_timing_enabled) {
                 g_chunk_timing.cmdA_encode += now_ms() - t_ph;
                 t_ph = now_ms();
             }
             [cmdA commit];
             [cmdA waitUntilCompleted];
-            if (g_chunk_timing_enabled) g_chunk_timing.cmdA_wait += now_ms() - t_ph;
+            if (g_chunk_timing_enabled) {
+                double d = now_ms() - t_ph;
+                g_chunk_timing.cmdA_wait += d;
+                pf_per_layer_add(layer_idx, 0, d);
+            }
             // CPU chain per position + batched GPU recurrence; writes
             // buf_pf_oproj_in slots (and buf_pf_ba for the dumps).
             prefill_chunk_chain_gguf(ctx, lc, la_state, layer_idx,
@@ -10442,8 +10535,14 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
             [cmdA waitUntilCompleted];
             if (g_chunk_timing_enabled) g_chunk_timing.cmdA_wait += now_ms() - t_ph;
         }
+        if (g_chunk_timing_enabled) t_ph = now_ms();
         memcpy([ctx->buf_pf_oproj_in2 contents], [ctx->buf_pf_oproj_in contents],
                (size_t)M * LINEAR_TOTAL_VALUE * sizeof(float));
+        if (g_chunk_timing_enabled) {
+            double d = now_ms() - t_ph;
+            g_chunk_timing.bridge += d;
+            pf_per_layer_add(layer_idx, 4, d);
+        }
     } else {
         // ---- Full-attention layer: batched q/k/v ----
         int q_proj_dim = NUM_ATTN_HEADS * HEAD_DIM * 2;
@@ -10861,7 +10960,11 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
     }
     [cmdB commit];
     [cmdB waitUntilCompleted];
-    if (g_chunk_timing_enabled) g_chunk_timing.cmdB_wait += now_ms() - t_ph;
+    if (g_chunk_timing_enabled) {
+        double d = now_ms() - t_ph;
+        g_chunk_timing.cmdB_wait += d;
+        pf_per_layer_add(layer_idx, 5, d);
+    }
 
     // Debug dumps that read cmdA/cmdB-written buffers (moved below the merged
     // wait — for linear layers cmdA is no longer waited mid-layer).
@@ -11138,7 +11241,11 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
                 float expert_weights[MAX_K];
                 cpu_topk(gate_scores, NUM_EXPERTS, K, expert_indices, expert_weights);
                 cpu_normalize_weights(expert_weights, K);
-                if (g_chunk_timing_enabled) g_chunk_timing.routing_cpu += now_ms() - t_route;
+                if (g_chunk_timing_enabled) {
+                    double d = now_ms() - t_route;
+                    g_chunk_timing.routing_cpu += d;
+                    pf_per_layer_add(layer_idx, 6, d);
+                }
                 if (g_freq_tracking) {
                     for (int k = 0; k < K; k++) {
                         g_expert_freq[layer_idx][expert_indices[k]]++;
@@ -11159,49 +11266,78 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
                        SHARED_INTERMEDIATE * sizeof(float));
             }
 
-            // 3 slab preads per expert into slot (8*gm+k) — group-local slot
-            // indices, so the pool covers G positions at once.
+            // 3 slab preads per expert into a pool slot — deduped across the
+            // group (Phase C S4 perf pass): positions sharing an expert read
+            // ONE copy into ONE slot, and their CMD3s share the slot (the S2
+            // kernels only READ the pool, so sharing is safe). Pool bytes are
+            // bitwise identical to the per-position layout, so parity with
+            // the per-token baseline is preserved. Both the pread copy
+            // traffic and the CMD3 dequant reads scale with unique experts.
+            // Escape hatch: FINCHMOE_PF_NODEDUP forces the old layout.
             {
-                int n_read = 0;
+                static int pf_seen_e[PREFILL_CHUNK_MAX * MAX_K];
+                static int pf_uniq_owner[PREFILL_CHUNK_MAX * MAX_K];
+                static int pf_uniq_valid[PREFILL_CHUNK_MAX * MAX_K];
+                int dedup = !getenv("FINCHMOE_PF_NODEDUP");
+                int n_seen = 0, n_read = 0;
                 for (int gm = 0; gm < gM; gm++) {
                     uint32_t m = gbase + (uint32_t)gm;
                     for (int k = 0; k < actual_K; k++) {
                         int e = pf_idx[m][k];
-                        size_t slot = ((size_t)(8 * gm) + (size_t)k) * exp_alloc;
-                        fds[n_read] = g_gguf_fd;
-                        offs[n_read] = (off_t)(ge->gate_off + (size_t)e * ge->gate_slab);
-                        dsts[n_read] = pool_base + slot;
-                        sizes[n_read] = ge->gate_slab;
-                        n_read++;
-                        fds[n_read] = g_gguf_fd;
-                        offs[n_read] = (off_t)(ge->up_off + (size_t)e * ge->up_slab);
-                        dsts[n_read] = pool_base + slot + ge->gate_slab;
-                        sizes[n_read] = ge->up_slab;
-                        n_read++;
-                        fds[n_read] = g_gguf_fd;
-                        offs[n_read] = (off_t)(ge->down_off + (size_t)e * ge->down_slab);
-                        dsts[n_read] = pool_base + slot + ge->gate_slab + ge->up_slab;
-                        sizes[n_read] = ge->down_slab;
-                        n_read++;
+                        int owner = -1;
+                        if (dedup) {
+                            for (int s = 0; s < n_seen; s++) {
+                                if (pf_seen_e[s] == e) { owner = s; break; }
+                            }
+                        }
+                        if (owner < 0) {
+                            owner = n_seen++;
+                            pf_seen_e[owner] = e;
+                            size_t slot = (size_t)owner * exp_alloc;
+                            fds[n_read] = g_gguf_fd;
+                            offs[n_read] = (off_t)(ge->gate_off + (size_t)e * ge->gate_slab);
+                            dsts[n_read] = pool_base + slot;
+                            sizes[n_read] = ge->gate_slab;
+                            n_read++;
+                            fds[n_read] = g_gguf_fd;
+                            offs[n_read] = (off_t)(ge->up_off + (size_t)e * ge->up_slab);
+                            dsts[n_read] = pool_base + slot + ge->gate_slab;
+                            sizes[n_read] = ge->up_slab;
+                            n_read++;
+                            fds[n_read] = g_gguf_fd;
+                            offs[n_read] = (off_t)(ge->down_off + (size_t)e * ge->down_slab);
+                            dsts[n_read] = pool_base + slot + ge->gate_slab + ge->up_slab;
+                            sizes[n_read] = ge->down_slab;
+                            n_read++;
+                        }
                         pf_data_bufs[(size_t)m * MAX_K + k] = ctx->buf_pool_expert_data_gguf;
-                        pf_data_offs[(size_t)m * MAX_K + k] = slot;
+                        pf_data_offs[(size_t)m * MAX_K + k] = (NSUInteger)owner * exp_alloc;
+                        pf_uniq_owner[(size_t)m * MAX_K + k] = owner;
                     }
                 }
                 double t_pread = 0;
                 if (g_chunk_timing_enabled) t_pread = now_ms();
                 async_pread_multi_start(fds, offs, dsts, sizes, n_read);
                 async_pread_wait();
-                // validity: all 3 reads of an expert must have completed
+                // validity: all 3 reads of an expert must have completed —
+                // per unique owner, then fanned out to the (m, k) entries.
+                for (int s = 0; s < n_seen; s++) {
+                    int v = 1;
+                    for (int r = 0; r < 3; r++) {
+                        if (!g_async_pread.valid[s * 3 + r]) { v = 0; break; }
+                    }
+                    pf_uniq_valid[s] = v;
+                }
                 for (int gm = 0; gm < gM; gm++) {
                     uint32_t m = gbase + (uint32_t)gm;
                     for (int k = 0; k < actual_K; k++) {
-                        int owner = (int)(gm * actual_K + k);
-                        int v = 1;
-                        for (int r = 0; r < 3; r++) {
-                            if (!g_async_pread.valid[owner * 3 + r]) { v = 0; break; }
-                        }
-                        pf_valid_all[(size_t)m * MAX_K + k] = v;
+                        pf_valid_all[(size_t)m * MAX_K + k] =
+                            pf_uniq_valid[pf_uniq_owner[(size_t)m * MAX_K + k]];
                     }
+                }
+                if (g_chunk_timing_enabled) {
+                    g_gguf_dedup_unique += n_seen;
+                    g_gguf_dedup_slots += (int)gM * actual_K;
                 }
                 // TEMP DEBUG: pool-slot-vs-mmap byte check for layer 1 k=0
                 if (getenv("FINCHMOE_GGUF_DBG") && layer_idx == 1) {
@@ -11224,7 +11360,11 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
                         fflush(pb2);
                     }
                 }
-                if (g_chunk_timing_enabled) g_chunk_timing.pread_wait += now_ms() - t_pread;
+                if (g_chunk_timing_enabled) {
+                    double d = now_ms() - t_pread;
+                    g_chunk_timing.pread_wait += d;
+                    pf_per_layer_add(layer_idx, 7, d);
+                }
             }
 
             // Combine params + validity for the group
@@ -11344,6 +11484,18 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
                 if (g_chunk_timing_enabled) t_ph = now_ms();
                 [pf_cmd3_slots[gbase + (uint32_t)gM - 1] waitUntilCompleted];
                 if (g_chunk_timing_enabled) g_chunk_timing.backpressure += now_ms() - t_ph;
+            }
+        }
+        // Phase C S4 perf pass: optional explicit wait for the final group's
+        // last CMD3 (FINCHMOE_PF_CMD3WAIT) — attributes the deferred-overlap
+        // time that normally hides inside the next layer's cmdA_wait.
+        if (getenv("FINCHMOE_PF_CMD3WAIT") && pf_cmd3_slots[M - 1]) {
+            if (g_chunk_timing_enabled) t_ph = now_ms();
+            [pf_cmd3_slots[M - 1] waitUntilCompleted];
+            if (g_chunk_timing_enabled) {
+                double d = now_ms() - t_ph;
+                g_chunk_timing.cmd3_wait += d;
+                pf_per_layer_add(layer_idx, 9, d);
             }
         }
     } else if (pool_ok) {
@@ -11512,6 +11664,11 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
     if (g_chunk_timing_enabled) {
         g_chunk_timing.total += now_ms() - t_layer;
         g_chunk_timing.layers++;
+        // Phase C S4 perf pass: per-layer phase attribution (col 10 = total;
+        // the other columns are recorded per-delta at their accumulation
+        // sites via pf_per_layer_add).
+        pf_per_layer_add(layer_idx, 10, now_ms() - t_layer);
+        g_pf_per_layer_count[layer_idx]++;
     }
     (void)la_state;
 }
