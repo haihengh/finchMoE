@@ -8349,9 +8349,15 @@ static void fused_layer_forward(
 
         // GPU attention: defer dispatches to CMD2 (fused into single cmd buffer).
         // Only enabled when seq_len >= 32 (below that, CPU is faster).
+        // Phase C S6 fix: GGUF mode must stay on CPU attention here — the
+        // attention dispatches live inside the fully-fused CMD2, which is
+        // gated off for GGUF (g_gguf_stage); with attn_out_for_oproj=NULL
+        // and no dispatches, o_proj silently read STALE buf_attn_out from
+        // token 32 onward (the 90-token per-token divergence, cos 0.818).
         int gpu_attn_ready = (g_metal && g_metal->attn_scores_pipe &&
                               fa_idx >= 0 && fa_idx < NUM_FULL_ATTN_LAYERS &&
-                              kv->len >= 32 && kv->len < g_gpu_kv_seq);
+                              kv->len >= 32 && kv->len < g_gpu_kv_seq &&
+                              !g_gguf_stage);
 
         if (gpu_attn_ready) {
             // Copy Q and gate to GPU; attention dispatches will be in CMD2
@@ -8528,19 +8534,30 @@ static void fused_layer_forward(
                 [enc endEncoding];
             }
             // Enc A2: attn_softmax_batched
+            // Phase C S6 fix: the scores→softmax→values→sigmoid chain ran
+            // with NO sync between dispatches — the same-CB stale-L2 hazard
+            // (the run-to-run wobble root cause; the batched prefill CB
+            // carries barriers + synchronizeResource and is bitwise vs CPU
+            // at 90 tokens, this path was not). Writer-side syncs + reader
+            // barriers per the S4.1 pattern.
+            metal_sync_buffer(cmd_fused, g_metal->buf_attn_scores);
             {
                 id<MTLComputeCommandEncoder> enc = [cmd_fused computeCommandEncoder];
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
                 [enc setComputePipelineState:g_metal->attn_softmax_pipe];
                 [enc setBuffer:g_metal->buf_attn_scores offset:0 atIndex:0];
                 [enc setBytes:&sl         length:4 atIndex:1];
                 [enc setBytes:&seq_stride  length:4 atIndex:2];
                 [enc dispatchThreadgroups:MTLSizeMake(NUM_ATTN_HEADS, 1, 1)
                     threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
                 [enc endEncoding];
             }
             // Enc A3: attn_values_batched
+            metal_sync_buffer(cmd_fused, g_metal->buf_attn_scores);
             {
                 id<MTLComputeCommandEncoder> enc = [cmd_fused computeCommandEncoder];
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
                 [enc setComputePipelineState:g_metal->attn_values_pipe];
                 [enc setBuffer:g_metal->buf_attn_scores   offset:0 atIndex:0];
                 [enc setBuffer:g_metal->buf_kv_v[fa_idx]  offset:0 atIndex:1];
@@ -8554,12 +8571,15 @@ static void fused_layer_forward(
                 uint32_t tgs = (total_threads + 255) / 256;
                 [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1)
                     threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
                 [enc endEncoding];
             }
             // Enc A4: sigmoid_gate
+            metal_sync_buffer(cmd_fused, g_metal->buf_attn_out);
             {
                 uint32_t qdim = NUM_ATTN_HEADS * HEAD_DIM;
                 id<MTLComputeCommandEncoder> enc = [cmd_fused computeCommandEncoder];
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
                 [enc setComputePipelineState:g_metal->sigmoid_gate_pipe];
                 [enc setBuffer:g_metal->buf_attn_out  offset:0 atIndex:0];
                 [enc setBuffer:g_metal->buf_attn_gate offset:0 atIndex:1];
@@ -8567,8 +8587,11 @@ static void fused_layer_forward(
                 uint32_t tgs = (qdim + 255) / 256;
                 [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1)
                     threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
                 [enc endEncoding];
             }
+            // o_proj (Enc 5, below) reads buf_attn_out — sync it too.
+            metal_sync_buffer(cmd_fused, g_metal->buf_attn_out);
         }
 
         // ---- o_proj matvec ----
@@ -11370,17 +11393,24 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
                     [enc endEncoding];
                 }
                 {
+                    // S6 fix: intra-CB syncs (same stale-L2 hazard class as
+                    // the per-token CMD2 chain — see the comment there).
+                    metal_sync_buffer(cmd_attn, ctx->buf_attn_scores);
                     id<MTLComputeCommandEncoder> enc = [cmd_attn computeCommandEncoder];
+                    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
                     [enc setComputePipelineState:ctx->attn_softmax_pipe];
                     [enc setBuffer:ctx->buf_attn_scores offset:0 atIndex:0];
                     [enc setBytes:&sl         length:4 atIndex:1];
                     [enc setBytes:&seq_stride length:4 atIndex:2];
                     [enc dispatchThreadgroups:MTLSizeMake(NUM_ATTN_HEADS, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
                     [enc endEncoding];
                 }
                 {
+                    metal_sync_buffer(cmd_attn, ctx->buf_attn_scores);
                     id<MTLComputeCommandEncoder> enc = [cmd_attn computeCommandEncoder];
+                    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
                     [enc setComputePipelineState:ctx->attn_values_pipe];
                     [enc setBuffer:ctx->buf_attn_scores   offset:0 atIndex:0];
                     [enc setBuffer:ctx->buf_kv_v[fa_idx]  offset:0 atIndex:1];
@@ -11394,11 +11424,14 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
                     uint32_t tgs = (total_threads + 255) / 256;
                     [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
                     [enc endEncoding];
                 }
                 {
+                    metal_sync_buffer(cmd_attn, ctx->buf_attn_out);
                     uint32_t qdim = NUM_ATTN_HEADS * HEAD_DIM;
                     id<MTLComputeCommandEncoder> enc = [cmd_attn computeCommandEncoder];
+                    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
                     [enc setComputePipelineState:ctx->sigmoid_gate_pipe];
                     [enc setBuffer:ctx->buf_attn_out  offset:0 atIndex:0];
                     [enc setBuffer:ctx->buf_attn_gate offset:0 atIndex:1];
@@ -11406,6 +11439,7 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
                     uint32_t tgs = (qdim + 255) / 256;
                     [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
                     [enc endEncoding];
                 }
                 [cmd_attn commit];
