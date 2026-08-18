@@ -527,18 +527,18 @@ The random-read nature of expert access (different experts per layer per token) 
 | # | Optimization | Est. Gain | Complexity | Approach |
 |---|-------------|-----------|------------|----------|
 | 1 | **2-bit experts** | +2 tok/s | Low | Already supported (`--2bit`). I/O volume halved. Slight quality tradeoff. |
-| 2 | **Pre-warm expert cache** | +1-2 tok/s | Low | Prefetch experts for common prompts. First 50 tokens are cold (SSD reads). After warmup, 5-6 tok/s. |
-| 3 | **Increase GPU KV sequence** | Free | Low | `--gpu-kv-seq 16384` (from 8192). More GPU attention = less CPU overhead for long sequences. |
-| 4 | **Fuse CMD1+CMD2** | +0.5 tok/s | Medium | Eliminate 1 commit+wait per layer (~5 ms). Requires combining attention projections with o_proj+norms into single command buffer. |
+| 2 | **Pre-warm expert cache** | +1-2 tok/s | Low | ❌ REJECTED 2026-08-14: hot-set prefetch measured — 26%/39.5% coverage, does NOT pay (restart-retest-plan). |
+| 3 | **Increase GPU KV sequence** | Free | Low | `--gpu-kv-seq 16384` (from 8192). More GPU attention = less CPU overhead for long sequences. Open — test before defaulting. |
+| 4 | **Fuse CMD1+CMD2** | +0.5 tok/s | Medium | ✅ DONE (native path `cmd12_fused`). GGUF: partial — S7 L3 fuses attention+o_proj in one CB (env-gated). |
 
 ### 6.2 Medium-Impact, Medium-Risk
 
 | # | Optimization | Est. Gain | Complexity | Approach |
 |---|-------------|-----------|------------|----------|
-| 5 | **MTP speculative decoding** | +1.5-2× TG | High | Infrastructure complete, latent bugs. Predicts 1 future token from MTP head, main model verifies. 50% acceptance → 2× effective TG. |
-| 6 | **ICB (Indirect Command Buffers)** | -15 ms in CMD3 | High | Metal ICB for K expert dispatches in CMD3. Currently each expert has per-encoder overhead. ICB amortizes encoding cost. |
-| 7 | **Single-kernel multi-expert** | -10 ms in CMD3 | High | Process all K experts in one kernel dispatch. GPU occupancy goes up. Buffer binding complexity. |
-| 8 | **KV cache FP16** | -448 MB RAM | Medium | Currently FP32. Half precision halves KV cache memory, enabling longer context or larger GPU KV. |
+| 5 | **MTP speculative decoding** | +1.5-2× TG | High | ❌ NOT SHIPPABLE (2026-08-14 verdict): forward math verified vs pristine-BF16 numpy reference, but the MTP head is inherently weak (cos 0.3-0.8, ~0% acceptance). See mtp-phase-1. |
+| 6 | **ICB (Indirect Command Buffers)** | -15 ms in CMD3 | High | Open. NOTE: the -15 ms estimate is stale — S4/S6 cut CMD3 encode to ~0.01-0.26 ms/CB (batched encoders, CBLAT probe); the remaining CMD3 cost is GPU exec + wake tax, which ICB does not address. |
+| 7 | **Single-kernel multi-expert** | -10 ms in CMD3 | High | Open, same staleness caveat as #6. Native CMD3 already uses 4 batched encoders for K experts; a single fused kernel would mainly save GPU dispatch, not the dominant expert I/O. |
+| 8 | **KV cache FP16** | -448 MB RAM | Medium | ✅ DONE 2026-08-14: `--kv-fp16` (cos 0.999999), plus `--kv-turbo` (K int8 + V 4-bit, cos 0.999793). |
 
 ### 6.3 Low-Impact or High-Risk
 

@@ -171,9 +171,12 @@ Remaining wall: expert pread I/O (~6.2 ms/layer) + GPU matvec time.
 See [finchmoe/OPTIMIZATION_PLAN.md](finchmoe/OPTIMIZATION_PLAN.md). In order:
 1. Requant from pristine `Qwen3.6-35B-A3B-bf16` (edge-prompt quality) — DONE 2026-08-13.
 2. Batched GPU prefill — DONE 2026-08-13 (1.66-1.7×, bitwise parity); 5-10×
-   tier needs prefill speculative expert prediction.
-3. Server multi-turn session fix.
-4. MTP speculative decoding (α-gated; forward-math verification first).
+   tier needs prefill speculative expert prediction (OPEN).
+3. Server multi-turn session fix — DONE 2026-08-16 (continuation re-enabled,
+   3-turn battery passes; GGUF+server verified 2026-08-18).
+4. MTP speculative decoding — CLOSED 2026-08-14: forward math verified vs a
+   pristine-BF16 numpy reference, but the MTP head is inherently weak
+   (cos 0.3-0.8, ~0% acceptance) — not shippable.
 
 ## 11. Hardware Targets
 
