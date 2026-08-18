@@ -2232,6 +2232,10 @@ typedef struct {
     id<MTLComputePipelineState> fused_gdn_batched_qk;  // Phase C S5: GGUF Q4_K in_proj variant (env-gated)
     // Phase C S4.1: M-batched CMD3 kernels (GGUF group dispatch)
     id<MTLComputePipelineState> fused_gate_up_swiglu_qk_pool_pipe;
+    id<MTLComputePipelineState> fused_gate_up_swiglu_qk_pool_gateonly_pipe;  // perf probe
+    id<MTLComputePipelineState> fused_gate_up_swiglu_qk_pool_barrier_pipe;   // perf probe
+    id<MTLComputePipelineState> fused_gate_up_swiglu_qk_pool_xstage_pipe;    // perf probe
+    id<MTLComputePipelineState> fused_gate_up_swiglu_qk_pool_nox_pipe;       // perf probe
     id<MTLComputePipelineState> matvec_qk_pool_prefill_pipe;
     id<MTLComputePipelineState> swiglu_prefill_batch_pipe;
     id<MTLComputePipelineState> rms_norm_sum_sq_prefill_batch_pipe;
@@ -2386,6 +2390,10 @@ static MetalCtx *metal_setup(void) {
     ctx->fused_gdn_batched = makePipe(@"fused_gdn_batched");
     ctx->fused_gdn_batched_qk = makePipe(@"fused_gdn_batched_qk");
     ctx->fused_gate_up_swiglu_qk_pool_pipe = makePipe(@"fused_gate_up_swiglu_qk_pool_prefill");
+    ctx->fused_gate_up_swiglu_qk_pool_gateonly_pipe = makePipe(@"fused_gate_up_swiglu_qk_pool_gateonly");
+    ctx->fused_gate_up_swiglu_qk_pool_barrier_pipe = makePipe(@"fused_gate_up_swiglu_qk_pool_barrier");
+    ctx->fused_gate_up_swiglu_qk_pool_xstage_pipe = makePipe(@"fused_gate_up_swiglu_qk_pool_xstage");
+    ctx->fused_gate_up_swiglu_qk_pool_nox_pipe = makePipe(@"fused_gate_up_swiglu_qk_pool_nox");
     ctx->matvec_qk_pool_prefill_pipe       = makePipe(@"dequant_matvec_qk_pool_prefill");
     ctx->swiglu_prefill_batch_pipe         = makePipe(@"swiglu_prefill_batch");
     ctx->rms_norm_sum_sq_prefill_batch_pipe = makePipe(@"rms_norm_sum_sq_prefill_batch");
@@ -10470,9 +10478,27 @@ static int prefill_chunk_cmd3_batch(MetalCtx *ctx, id<MTLCommandBuffer> cmd,
 
     // fused gate+up per expert (all group positions in ONE dispatch)
     if (c3skip >= 1) goto batch_shared;
-    for (int k = 0; k < actual_K; k++) {
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-        [enc setComputePipelineState:ctx->fused_gate_up_swiglu_qk_pool_pipe];
+
+    {
+        static int fused_probe = -1;  // 0=default 1=gateonly 2=barrier 3=xstage 4=nox
+        if (fused_probe < 0) {
+            if (getenv("FINCHMOE_PF_GATEONLY")) fused_probe = 1;
+            else if (getenv("FINCHMOE_PF_BARRIER")) fused_probe = 2;
+            else if (getenv("FINCHMOE_PF_XSTAGE")) fused_probe = 3;
+            else if (getenv("FINCHMOE_PF_NOX")) fused_probe = 4;
+            else fused_probe = 0;
+            if (fused_probe == 1) fprintf(stderr, "[probe] fused gate-only (up reads disabled, timing-only)\n");
+            if (fused_probe == 2) fprintf(stderr, "[probe] fused barrier-lockstep (timing-only)\n");
+            if (fused_probe == 3) fprintf(stderr, "[probe] fused x-staged in threadgroup (bitwise-safe candidate)\n");
+            if (fused_probe == 4) fprintf(stderr, "[probe] fused no-x-reads (timing-only)\n");
+        }
+        for (int k = 0; k < actual_K; k++) {
+            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+            [enc setComputePipelineState:(fused_probe == 1 ? ctx->fused_gate_up_swiglu_qk_pool_gateonly_pipe
+                                   : fused_probe == 2 ? ctx->fused_gate_up_swiglu_qk_pool_barrier_pipe
+                                   : fused_probe == 3 ? ctx->fused_gate_up_swiglu_qk_pool_xstage_pipe
+                                   : fused_probe == 4 ? ctx->fused_gate_up_swiglu_qk_pool_nox_pipe
+                                                      : ctx->fused_gate_up_swiglu_qk_pool_pipe)];
         [enc setBuffer:ctx->buf_pool_expert_data_gguf offset:0 atIndex:0];
         [enc setBuffer:ctx->buf_pool_expert_data_gguf offset:0 atIndex:1];
         [enc setBuffer:ctx->buf_pf_expert_input offset:0 atIndex:2];
@@ -10486,6 +10512,7 @@ static int prefill_chunk_cmd3_batch(MetalCtx *ctx, id<MTLCommandBuffer> cmd,
         [enc dispatchThreadgroups:MTLSizeMake((uint64_t)gM * fused_row_tiles, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         [enc endEncoding];
+        }
     }
     // expert downs (all group positions in ONE dispatch per expert)
     if (c3skip >= 2) goto batch_shared;
@@ -11587,7 +11614,6 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
         int actual_K = (K > MAX_K) ? MAX_K : K;
         GgufExpertInfo *ge = &gguf_experts[layer_idx];
         NSUInteger exp_alloc = g_gguf_exp_alloc;
-        char *pool_base = (char *)[ctx->buf_pool_expert_data_gguf contents];
         int G = g_pf_pool_slots_gguf / MAX_K;
         if (G < 1) G = 1;
         if (G > (int)M) G = (int)M;
@@ -11595,6 +11621,7 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
 
         for (uint32_t gbase = 0; gbase < M; gbase += (uint32_t)G) {
             int gM = ((gbase + (uint32_t)G) <= M) ? G : (int)(M - gbase);
+            char *pool_base = (char *)[ctx->buf_pool_expert_data_gguf contents];
 
             // Pass 1: routing + staging for this group's positions
             for (int gm = 0; gm < gM; gm++) {
@@ -11662,21 +11689,48 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
                             owner = n_seen++;
                             pf_seen_e[owner] = e;
                             size_t slot = (size_t)owner * exp_alloc;
-                            fds[n_read] = g_gguf_fd;
-                            offs[n_read] = (off_t)(ge->gate_off + (size_t)e * ge->gate_slab);
-                            dsts[n_read] = pool_base + slot;
-                            sizes[n_read] = ge->gate_slab;
-                            n_read++;
-                            fds[n_read] = g_gguf_fd;
-                            offs[n_read] = (off_t)(ge->up_off + (size_t)e * ge->up_slab);
-                            dsts[n_read] = pool_base + slot + ge->gate_slab;
-                            sizes[n_read] = ge->up_slab;
-                            n_read++;
-                            fds[n_read] = g_gguf_fd;
-                            offs[n_read] = (off_t)(ge->down_off + (size_t)e * ge->down_slab);
-                            dsts[n_read] = pool_base + slot + ge->gate_slab + ge->up_slab;
-                            sizes[n_read] = ge->down_slab;
-                            n_read++;
+                            // PERF PROBE (FINCHMOE_PF_DOWNFIRST): write the
+                            // down slab FIRST so the SLC tail holds gate+up
+                            // instead (tests whether the down kernel's
+                            // SLC hits are a write-order artifact).
+                            static int downfirst = -1;
+                            if (downfirst < 0) downfirst = getenv("FINCHMOE_PF_DOWNFIRST") ? 1 : 0;
+                            const off_t slab_gate = (off_t)(ge->gate_off + (size_t)e * ge->gate_slab);
+                            const off_t slab_up   = (off_t)(ge->up_off + (size_t)e * ge->up_slab);
+                            const off_t slab_down = (off_t)(ge->down_off + (size_t)e * ge->down_slab);
+                            if (!downfirst) {
+                                fds[n_read] = g_gguf_fd;
+                                offs[n_read] = slab_gate;
+                                dsts[n_read] = pool_base + slot;
+                                sizes[n_read] = ge->gate_slab;
+                                n_read++;
+                                fds[n_read] = g_gguf_fd;
+                                offs[n_read] = slab_up;
+                                dsts[n_read] = pool_base + slot + ge->gate_slab;
+                                sizes[n_read] = ge->up_slab;
+                                n_read++;
+                                fds[n_read] = g_gguf_fd;
+                                offs[n_read] = slab_down;
+                                dsts[n_read] = pool_base + slot + ge->gate_slab + ge->up_slab;
+                                sizes[n_read] = ge->down_slab;
+                                n_read++;
+                            } else {
+                                fds[n_read] = g_gguf_fd;
+                                offs[n_read] = slab_down;
+                                dsts[n_read] = pool_base + slot + ge->gate_slab + ge->up_slab;
+                                sizes[n_read] = ge->down_slab;
+                                n_read++;
+                                fds[n_read] = g_gguf_fd;
+                                offs[n_read] = slab_up;
+                                dsts[n_read] = pool_base + slot + ge->gate_slab;
+                                sizes[n_read] = ge->up_slab;
+                                n_read++;
+                                fds[n_read] = g_gguf_fd;
+                                offs[n_read] = slab_gate;
+                                dsts[n_read] = pool_base + slot;
+                                sizes[n_read] = ge->gate_slab;
+                                n_read++;
+                            }
                         }
                         pf_data_bufs[(size_t)m * MAX_K + k] = ctx->buf_pool_expert_data_gguf;
                         pf_data_offs[(size_t)m * MAX_K + k] = (NSUInteger)owner * exp_alloc;

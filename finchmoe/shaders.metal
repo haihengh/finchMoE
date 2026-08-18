@@ -3516,6 +3516,124 @@ kernel void fused_gate_up_swiglu_qk_pool_prefill(
         out[(size_t)m * out_dim + row] = (rg / (1.0f + exp(-rg))) * ru;
 }
 
+// PERF PROBE (FINCHMOE_PF_GATEONLY): identical to the fused pool kernel but
+// reads ONLY the gate slab (up output written as 0) — isolates whether the
+// dual gate+up streams interact in the memory path vs cost being linear in
+// bytes read. Timing-only: outputs are invalid.
+kernel void fused_gate_up_swiglu_qk_pool_gateonly(
+    device const uchar* gate_W  [[buffer(0)]],
+    device const uchar* up_W    [[buffer(1)]],
+    device const float*  x      [[buffer(2)]],
+    device float*        out    [[buffer(3)]],
+    constant uint&       out_dim [[buffer(4)]],
+    constant uint&       in_dim  [[buffer(5)]],
+    device const uint*   gate_offs [[buffer(6)]],
+    device const uint*   up_offs   [[buffer(7)]],
+    constant uint&       m_base    [[buffer(8)]],
+    uint tgid      [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint num_row_tiles = (out_dim + ROWS_PER_TG_QK - 1) / ROWS_PER_TG_QK;
+    uint gm = tgid / num_row_tiles;
+    uint row_tile = tgid % num_row_tiles;
+    uint row = row_tile * ROWS_PER_TG_QK + simd_group;
+    if (row >= out_dim) return;
+    uint m = m_base + gm;
+    uint words = in_dim / 8;
+    uint row_bytes = (in_dim / 256) * 144u;
+    device const uchar* gr = gate_W + (ulong)gate_offs[gm] + (ulong)row * row_bytes;
+    device const float* xm = x + (size_t)m * in_dim;
+    float ga = 0.0f;
+    for (uint w = simd_lane; w < words; w += 32) {
+        uint block = w >> 5;
+        uint wb = w & 31;
+        uint j    = (wb >> 3) * 2 + ((wb >> 2) & 1);
+        uint nhalf = (wb >> 2) & 1;
+        device const uchar* gb = gr + (ulong)block * 144u;
+        float dg    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(gb + 0)));
+        float mgmin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(gb + 2)));
+        uchar2 smg = get_scale_min_k4(j, gb + 4);
+        float gdsc = dg * (float)smg.x;
+        float gmm  = mgmin * (float)smg.y;
+        ulong gq = *(device ulong*)(gb + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+        uint xb = w * 8;
+        for (uint i = 0; i < 8; i++) {
+            uint gnib = (uint)((gq >> (8 * i + 4 * nhalf)) & 0xF);
+            float xv = xm[xb + i];
+            ga += ((float)gnib * gdsc - gmm) * xv;
+        }
+    }
+    float rg = simd_sum(ga);
+    if (simd_lane == 0)
+        out[(size_t)m * out_dim + row] = rg;  // timing-only: math is invalid
+}
+
+// PERF PROBE (FINCHMOE_PF_BARRIER): the fused pool kernel + one
+// threadgroup_barrier before the weight loop — locks the 8 simdgroups'
+// row-block reads into lockstep (down kernel's structure). Tests whether
+// simdgroup drift is what caps pool reads at ~26GB/s. Timing-only probe.
+// Valid only when out_dim % 8 == 0 (MOE_INTERMEDIATE = 512 ✓).
+kernel void fused_gate_up_swiglu_qk_pool_barrier(
+    device const uchar* gate_W  [[buffer(0)]],
+    device const uchar* up_W    [[buffer(1)]],
+    device const float*  x      [[buffer(2)]],
+    device float*        out    [[buffer(3)]],
+    constant uint&       out_dim [[buffer(4)]],
+    constant uint&       in_dim  [[buffer(5)]],
+    device const uint*   gate_offs [[buffer(6)]],
+    device const uint*   up_offs   [[buffer(7)]],
+    constant uint&       m_base    [[buffer(8)]],
+    uint tgid      [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint num_row_tiles = (out_dim + ROWS_PER_TG_QK - 1) / ROWS_PER_TG_QK;
+    uint gm = tgid / num_row_tiles;
+    uint row_tile = tgid % num_row_tiles;
+    uint row = row_tile * ROWS_PER_TG_QK + simd_group;
+    if (row >= out_dim) return;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint m = m_base + gm;
+    uint words = in_dim / 8;
+    uint row_bytes = (in_dim / 256) * 144u;
+    device const uchar* gr = gate_W + (ulong)gate_offs[gm] + (ulong)row * row_bytes;
+    device const uchar* ur = up_W   + (ulong)up_offs[gm]   + (ulong)row * row_bytes;
+    device const float* xm = x + (size_t)m * in_dim;
+    float ga = 0.0f, ua = 0.0f;
+    for (uint w = simd_lane; w < words; w += 32) {
+        uint block = w >> 5;
+        uint wb = w & 31;
+        uint j    = (wb >> 3) * 2 + ((wb >> 2) & 1);
+        uint nhalf = (wb >> 2) & 1;
+        device const uchar* gb = gr + (ulong)block * 144u;
+        device const uchar* ub = ur + (ulong)block * 144u;
+        float dg    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(gb + 0)));
+        float mgmin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(gb + 2)));
+        float dug    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(ub + 0)));
+        float mumin  = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(ub + 2)));
+        uchar2 smg = get_scale_min_k4(j, gb + 4);
+        uchar2 smu = get_scale_min_k4(j, ub + 4);
+        float gdsc = dg * (float)smg.x;
+        float gmm  = mgmin * (float)smg.y;
+        float udsc = dug * (float)smu.x;
+        float umm  = mumin * (float)smu.y;
+        ulong gq = *(device ulong*)(gb + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+        ulong uq = *(device ulong*)(ub + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+        uint xb = w * 8;
+        for (uint i = 0; i < 8; i++) {
+            uint gnib = (uint)((gq >> (8 * i + 4 * nhalf)) & 0xF);
+            uint unib = (uint)((uq >> (8 * i + 4 * nhalf)) & 0xF);
+            float xv = xm[xb + i];
+            ga += ((float)gnib * gdsc - gmm) * xv;
+            ua += ((float)unib * udsc - umm) * xv;
+        }
+    }
+    float rg = simd_sum(ga), ru = simd_sum(ua);
+    if (simd_lane == 0)
+        out[(size_t)m * out_dim + row] = (rg / (1.0f + exp(-rg))) * ru;
+}
+
 // Q4_K/Q6_K dequant-matvec for expert down slabs, M positions of a group.
 // Clone of dequant_matvec_qk_prefill with per-m pool-slot weight offsets
 // (the S3 kernel's arithmetic is verbatim — same lane-strided order as the
