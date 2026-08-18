@@ -54,8 +54,8 @@ Metal wraps; Q4_K/Q6_K dequant on GPU). Targets the Q4_K_M tier of the model
 | Metric | Value |
 |--------|-------|
 | Prefill (chunked, default) | 13-token prompt **~0.9-1.2 s** TTFT vs ~2.9 s per-token (2×); 90 tokens **~5.5 s** vs ~29 s (5×). Chunked GGUF prefill is the default. |
-| Decode | **~1.06 tok/s** (dequant-bound; the native 3-bit path is 16-22 tok/s) |
-| Correctness | Bitwise vs the pool-path reference at 13 tokens (cos 1.000000); 90-token chunked vs per-token cos 1.000000 (after the sl≥32 attention fix below); llama.cpp cross-validation cos 0.9998 / 0.9962 (1/13 tokens) |
+| Decode | **~5.5 tok/s warm / ~1.7-2.3 cold** (S7 parallel slab preads, 3.2×, bitwise; the native 3-bit path is 16-22 tok/s) |
+| Correctness | Bitwise vs the pool-path reference at 13 tokens (cos 1.000000); 90-token chunked vs per-token cos 1.000000 (after the sl≥32 attention fix below); llama.cpp cross-validation cos 0.9998 / 0.9962 (1/13 tokens) and **90-token cos 0.9982, argmax MATCH, top10 10/10 (2026-08-18) — GGUF path closed for correctness** |
 | RAM | weights stream from the 21.7 GB GGUF mmap; 256 MB expert pool + per-layer wraps |
 
 **Phase C S6 findings (2026-08-18)** — the per-wait cost is fully decomposed

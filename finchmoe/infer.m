@@ -3059,6 +3059,21 @@ static int gpu_gguf_dequant_matvec(MetalCtx *ctx, const void *W,
     return 1;
 }
 
+// S7: slab pread task + pool dispatch, used by the GGUF expert path before
+// their natural definitions in the I/O section below.
+typedef struct InferPreadTask {
+    int fd;
+    void *dst;
+    off_t offset;
+    size_t size;
+    ssize_t result;
+    const void *mmap_base;  // if non-NULL, memcpy from mmap instead of pread
+    // LZ4 compression fields (set by caller when reading compressed experts)
+    void *lz4_comp_buf;     // if non-NULL: pread into this, then LZ4 decompress into dst
+    uint32_t lz4_comp_size; // compressed size to read from disk
+} InferPreadTask;
+static void io_pool_dispatch(InferPreadTask *tasks, int num_tasks);
+
 // Phase C S2: GGUF routed experts on GPU. One command buffer per layer:
 // per expert, a fused gate+up+SwiGLU (Q4_K slabs read from per-tensor wraps,
 // no pread/copies) into buf_expert_act, then the down matvec (dequant_matvec_qk
@@ -3080,16 +3095,87 @@ static int gpu_gguf_experts_forward(MetalCtx *ctx, WeightFile *wf, int layer_idx
     // down @ gate_slab + up_slab (all 32-byte aligned).
     size_t slab_total = ge->gate_slab + ge->up_slab + ge->down_slab;
     if (slab_total > EXPERT_SIZE_MAX) return 0;
-    for (int k = 0; k < K; k++) {
-        int eidx = expert_indices[k];
-        uint8_t *dst = (uint8_t *)[ctx->buf_multi_expert_data[k] contents];
-        memcpy(dst,                          (const uint8_t *)wf->data + ge->gate_off + (size_t)eidx * ge->gate_slab, ge->gate_slab);
-        memcpy(dst + ge->gate_slab,          (const uint8_t *)wf->data + ge->up_off   + (size_t)eidx * ge->up_slab,   ge->up_slab);
-        memcpy(dst + ge->gate_slab + ge->up_slab,
-                                              (const uint8_t *)wf->data + ge->down_off + (size_t)eidx * ge->down_slab, ge->down_slab);
+    // Phase C S7: component-split probe (FINCHMOE_EXPTIME=2) — where the
+    // per-layer expert time goes: slab copies vs encode vs sync wait vs combine.
+    static int probe = -1;
+    static double pmc = 0, penc = 0, pw = 0, pco = 0; static int pn = 0;
+    if (probe < 0) { const char *e = getenv("FINCHMOE_EXPTIME"); probe = (e && atoi(e) >= 2); }
+    double t_mc0 = 0, t_enc0 = 0, t_w0 = 0, t_co0 = 0;
+    if (probe) t_mc0 = now_ms();
+    // Phase C S7: parallel slab preads. The serial memcpy was latency-bound on
+    // cold pages (one thread, one page at a time); io_pool preads (8 threads)
+    // overlap the reads. Short reads fall back to inline memcpy.
+    // Kill switch: FINCHMOE_GGUF_NOSLABCACHE=1 (original serial memcpy).
+    // NOTE: no residency cache here — buf_multi_expert_data has only MAX_K
+    // buffers shared by ALL layers, so a later layer always clobbers a
+    // slot before the same layer reuses it next token. Cross-token reuse
+    // needs a per-(layer,slot) pool (S7 follow-up).
+    static int no_cache = -1;
+    if (no_cache < 0) no_cache = getenv("FINCHMOE_GGUF_NOSLABCACHE") != NULL;
+    if (no_cache) {
+        for (int k = 0; k < K; k++) {
+            int eidx = expert_indices[k];
+            uint8_t *dst = (uint8_t *)[ctx->buf_multi_expert_data[k] contents];
+            memcpy(dst,                          (const uint8_t *)wf->data + ge->gate_off + (size_t)eidx * ge->gate_slab, ge->gate_slab);
+            memcpy(dst + ge->gate_slab,          (const uint8_t *)wf->data + ge->up_off   + (size_t)eidx * ge->up_slab,   ge->up_slab);
+            memcpy(dst + ge->gate_slab + ge->up_slab,
+                                                  (const uint8_t *)wf->data + ge->down_off + (size_t)eidx * ge->down_slab, ge->down_slab);
+        }
+    } else {
+        InferPreadTask tasks[MAX_K * 3];
+        int n_tasks = 0;
+        int k_of_task[MAX_K * 3];
+        for (int k = 0; k < K; k++) {
+            int eidx = expert_indices[k];
+            uint8_t *dst = (uint8_t *)[ctx->buf_multi_expert_data[k] contents];
+            tasks[n_tasks].fd = g_gguf_fd;
+            tasks[n_tasks].dst = dst;
+            tasks[n_tasks].offset = (off_t)(ge->gate_off + (size_t)eidx * ge->gate_slab);
+            tasks[n_tasks].size = ge->gate_slab;
+            tasks[n_tasks].result = 0;
+            tasks[n_tasks].mmap_base = NULL;
+            tasks[n_tasks].lz4_comp_buf = NULL;
+            tasks[n_tasks].lz4_comp_size = 0;
+            k_of_task[n_tasks++] = k;
+            tasks[n_tasks].fd = g_gguf_fd;
+            tasks[n_tasks].dst = dst + ge->gate_slab;
+            tasks[n_tasks].offset = (off_t)(ge->up_off + (size_t)eidx * ge->up_slab);
+            tasks[n_tasks].size = ge->up_slab;
+            tasks[n_tasks].result = 0;
+            tasks[n_tasks].mmap_base = NULL;
+            tasks[n_tasks].lz4_comp_buf = NULL;
+            tasks[n_tasks].lz4_comp_size = 0;
+            k_of_task[n_tasks++] = k;
+            tasks[n_tasks].fd = g_gguf_fd;
+            tasks[n_tasks].dst = dst + ge->gate_slab + ge->up_slab;
+            tasks[n_tasks].offset = (off_t)(ge->down_off + (size_t)eidx * ge->down_slab);
+            tasks[n_tasks].size = ge->down_slab;
+            tasks[n_tasks].result = 0;
+            tasks[n_tasks].mmap_base = NULL;
+            tasks[n_tasks].lz4_comp_buf = NULL;
+            tasks[n_tasks].lz4_comp_size = 0;
+            k_of_task[n_tasks++] = k;
+        }
+        io_pool_dispatch(tasks, n_tasks);
+        // Verify reads; any short read for expert k re-copies all 3 sections
+        // inline from the mmap (original semantics).
+        int bad[MAX_K] = {0};
+        for (int t = 0; t < n_tasks; t++) {
+            if (tasks[t].result != (ssize_t)tasks[t].size) bad[k_of_task[t]] = 1;
+        }
+        for (int k = 0; k < K; k++) {
+            if (!bad[k]) continue;
+            int eidx = expert_indices[k];
+            uint8_t *dst = (uint8_t *)[ctx->buf_multi_expert_data[k] contents];
+            memcpy(dst,                          (const uint8_t *)wf->data + ge->gate_off + (size_t)eidx * ge->gate_slab, ge->gate_slab);
+            memcpy(dst + ge->gate_slab,          (const uint8_t *)wf->data + ge->up_off   + (size_t)eidx * ge->up_slab,   ge->up_slab);
+            memcpy(dst + ge->gate_slab + ge->up_slab,
+                                                  (const uint8_t *)wf->data + ge->down_off + (size_t)eidx * ge->down_slab, ge->down_slab);
+        }
     }
 
     memcpy([ctx->buf_multi_expert_input contents], h_post, HIDDEN_DIM * sizeof(float));
+    if (probe) t_enc0 = now_ms();
     id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
     for (int k = 0; k < K; k++) {
         uint32_t od = MOE_INTERMEDIATE, id_ = HIDDEN_DIM;
@@ -3124,7 +3210,9 @@ static int gpu_gguf_experts_forward(MetalCtx *ctx, WeightFile *wf, int layer_idx
         }
     }
     [cb commit];
+    if (probe) t_w0 = now_ms();
     [cb waitUntilCompleted];
+    if (probe) t_co0 = now_ms();
 
     // CPU combine — mirrors the CPU fallback (weighted madd + finite guard
     // + total-weight renormalization).
@@ -3141,6 +3229,12 @@ static int gpu_gguf_experts_forward(MetalCtx *ctx, WeightFile *wf, int layer_idx
     if (total_weight > 0.0f && total_weight < 0.99f) {
         float inv_tw = 1.0f / total_weight;
         for (int i = 0; i < HIDDEN_DIM; i++) moe_out[i] *= inv_tw;
+    }
+    if (probe) {
+        pmc += t_enc0 - t_mc0; penc += t_w0 - t_enc0; pw += t_co0 - t_w0; pco += now_ms() - t_co0;
+        if (++pn % NUM_LAYERS == 0)
+            fprintf(stderr, "[expsplit] copy %.3f encode %.3f wait %.3f combine %.3f ms/layer (n=%d)\n",
+                    pmc/pn, penc/pn, pw/pn, pco/pn, pn);
     }
     return 1;
 }
@@ -5599,17 +5693,8 @@ static void lm_head_forward(WeightFile *wf, const float *hidden, float *logits) 
 
 #define NUM_IO_THREADS 8  // 8 threads for K=8 experts (one per expert)
 
-typedef struct {
-    int fd;
-    void *dst;
-    off_t offset;
-    size_t size;
-    ssize_t result;
-    const void *mmap_base;  // if non-NULL, memcpy from mmap instead of pread
-    // LZ4 compression fields (set by caller when reading compressed experts)
-    void *lz4_comp_buf;     // if non-NULL: pread into this, then LZ4 decompress into dst
-    uint32_t lz4_comp_size; // compressed size to read from disk
-} InferPreadTask;
+// (InferPreadTask + io_pool_dispatch prototype moved above — see S7 note
+// before the GGUF expert path.)
 
 typedef struct {
     InferPreadTask *tasks;
