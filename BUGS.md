@@ -363,7 +363,10 @@ Each expert (1,769,472 bytes):
 
 ## Bug 7: switch_mlp Weights Excluded from Extraction (2026-08-07)
 
-### Status: **FOUND, NOT YET FIXED**
+### Status: **CORRECTED (2026-08-08)** — `switch_mlp` IS the routed experts (3D
+expert tensors), not a missing dense FFN. The degenerate output had other
+causes (see Bug 12 tokenizer merges, Bug 13 think tag, k-head mapping, A_log
+BF16). This entry is kept for the forensic record only.
 
 ### Symptom
 Model produces degenerate output regardless of sampling settings or chat template fixes:
