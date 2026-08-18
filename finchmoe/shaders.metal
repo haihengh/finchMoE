@@ -3839,3 +3839,13 @@ kernel void moe_combine_residual_prefill_batch(
 
     hidden_out[base + i] = h_mid[base + i] + moe + shared_gate * shared_out[base + i];
 }
+
+// Phase C S6: keep-alive no-op kernel — the GPU downclocks after ~1ms idle
+// and the next real submission pays a wake tax (~1.55ms@1ms gap, ~4.4ms@3ms
+// gap — FINCHMOE_CBLAT). A ticker thread dispatches this 1-thread no-op
+// every ~300us during CPU gaps so the GPU stays clocked. Touches only its
+// own 4-byte buffer; queue order is unaffected.
+kernel void ka_nop(device float *dummy [[buffer(0)]],
+                   uint tid [[thread_position_in_threadgroup]]) {
+    if (tid == 0) dummy[0] = 1.0f;
+}
