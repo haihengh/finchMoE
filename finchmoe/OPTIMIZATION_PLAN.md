@@ -37,6 +37,29 @@
   (top-32 hot set covers only 26% of unique experts / 39.5% of per-token
   requests; pread_wait 6.2 → 6.3 ms) — auto-gate stays.
 
+### Phase C: GGUF mode (llama.cpp files) — 2026-08-15 → 08-18
+
+- S1/S2 — GPU Q4_K/Q6_K dequant kernels (bit-correct vs llama.cpp: parity
+  1.0 / cos 0.9998); GGUF decode 0.45 → 1.06 tok/s.
+- C3 (`86f2527`) — chunked GGUF prefill default ON: TTFT 1507 vs 2943 ms
+  (13 tokens, 2×); logits cos 0.99943 (sole divergence: a 0-ULP gate-score
+  tie flip).
+- S4 — expert pread dedup (`bbd9533`), batched CMD3: one CB + 21 dispatches
+  per layer (`104bd9f`), fused-pool bandwidth probes (`e961007` — fused
+  kernel confirmed optimal for its access shape).
+- S5 (`968f5a5`) — fused GPU GDN chain (opt-in): conv+in_proj+decay+delta+
+  gated norm in one kernel; perf neutral on M4.
+- S6 (`1f5b8a4`) — wake-tax/dispatch decomposition: kernel-CB dispatch
+  ~0.26 ms regardless of work; queue-drain wake tax scales with idle gap
+  (0.07@0.1ms → 1.4@3ms); file-backed weight reads pay per-16KB DART page
+  walks (the preads are IOMMU priming). Probes: CBLAT, per-commit gap
+  buckets, S6a merged CB (bitwise), ping-pong pools (neutral), stage2
+  aligned copies (probe), no-pread (dead end). Default path unchanged.
+- `08bf875` — FIX: GGUF per-token GPU attention was never encoded at sl ≥ 32
+  (dispatches live in the `!g_gguf_stage`-gated fused CMD2) → stale
+  buf_attn_out from token 32 on. 90-token soak now bitwise (cos 1.000000).
+- `bab9154` — analysis/debug scripts consolidated under finchTool/tools/.
+
 ### OPEN ISSUES (priority order)
 
 1. ~~**Model quality on edge prompts**~~ — **RESOLVED 2026-08-13**: single-stage
