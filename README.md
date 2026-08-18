@@ -272,8 +272,13 @@ baseline) — a GGUF importer or a higher-precision expert pack is the real
 long-form fix. Short and interactive queries are unaffected.
 
 Quality figures are weight-level CosSim from the requant validation plus spot
-checks. End-to-end loss (e.g. HumanEval pass@1 per tier) is not yet published —
-the `humaneval_m1/` harness exists to measure it.
+checks, plus one end-to-end number: **HumanEval pass@1 = 49/164 (29.9%)** on the
+M4 native 3-bit tier (2026-08-18, T=0 greedy, raw completions without the chat
+template, `--no-think`, 512-token cap; harness: `humaneval_m1/`, results in
+`humaneval_m1/he_results.jsonl`). Caveat: the raw-prompt config is pessimistic
+for an instruct-tuned model — the dominant failure modes are missing imports
+(`re`, `hashlib`) and mid-solution truncation, not wrong algorithms. The same
+harness runs on the M1 mini deploy for a second data point.
 
 ## Architecture
 
