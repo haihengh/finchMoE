@@ -13615,7 +13615,19 @@ static int sse_send_delta(int fd, const char *request_id, const char *token_text
             case '\n': *w++ = '\\'; *w++ = 'n';  break;
             case '\r': *w++ = '\\'; *w++ = 'r';  break;
             case '\t': *w++ = '\\'; *w++ = 't';  break;
-            default:   *w++ = *r; break;
+            default:
+                // Raw byte-fallback bytes (>= 0x80) are invalid UTF-8 in the
+                // JSON stream — clients (and the eval harness) drop the whole
+                // delta when json parsing fails. Escape as \u00XX.
+                if ((unsigned char)*r >= 0x80) {
+                    static const char hexd[] = "0123456789abcdef";
+                    unsigned char b = (unsigned char)*r;
+                    *w++ = '\\'; *w++ = 'u'; *w++ = '0'; *w++ = '0';
+                    *w++ = hexd[b >> 4]; *w++ = hexd[b & 0xF];
+                } else {
+                    *w++ = *r;
+                }
+                break;
         }
     }
     *w = '\0';
@@ -13657,7 +13669,19 @@ static int sse_send_delta_completion(int fd, const char *request_id, const char 
             case '\n': *w++ = '\\'; *w++ = 'n';  break;
             case '\r': *w++ = '\\'; *w++ = 'r';  break;
             case '\t': *w++ = '\\'; *w++ = 't';  break;
-            default:   *w++ = *r; break;
+            default:
+                // Raw byte-fallback bytes (>= 0x80) are invalid UTF-8 in the
+                // JSON stream — json parsers drop the whole delta (the eval
+                // harness silently skips them). Escape as \u00XX.
+                if ((unsigned char)*r >= 0x80) {
+                    static const char hexd[] = "0123456789abcdef";
+                    unsigned char b = (unsigned char)*r;
+                    *w++ = '\\'; *w++ = 'u'; *w++ = '0'; *w++ = '0';
+                    *w++ = hexd[b >> 4]; *w++ = hexd[b & 0xF];
+                } else {
+                    *w++ = *r;
+                }
+                break;
         }
     }
     *w = '\0';

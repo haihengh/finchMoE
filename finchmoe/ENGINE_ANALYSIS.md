@@ -537,7 +537,7 @@ The random-read nature of expert access (different experts per layer per token) 
 |---|-------------|-----------|------------|----------|
 | 5 | **MTP speculative decoding** | +1.5-2× TG | High | ❌ NOT SHIPPABLE (2026-08-14 verdict): forward math verified vs pristine-BF16 numpy reference, but the MTP head is inherently weak (cos 0.3-0.8, ~0% acceptance). See mtp-phase-1. |
 | 6 | **ICB (Indirect Command Buffers)** | -15 ms in CMD3 | High | Open. NOTE: the -15 ms estimate is stale — S4/S6 cut CMD3 encode to ~0.01-0.26 ms/CB (batched encoders, CBLAT probe); the remaining CMD3 cost is GPU exec + wake tax, which ICB does not address. |
-| 7 | **Single-kernel multi-expert** | -10 ms in CMD3 | High | Open, same staleness caveat as #6. Native CMD3 already uses 4 batched encoders for K experts; a single fused kernel would mainly save GPU dispatch, not the dominant expert I/O. |
+| 7 | **Single-kernel multi-expert** | -10 ms in CMD3 | High | ✅ EVALUATED 2026-08-18: native decode encode costs are 0.02-0.03 ms/layer (S4's batched encoders already consolidated the dispatches); cmd2_wait 1.14 ms = GPU exec + wake, and the path is I/O-bound (expert_io 1.23 ms > wait). A fused kernel could shave maybe 0.2-0.5 ms/layer at best — not the critical path. Estimate stale. |
 | 8 | **KV cache FP16** | -448 MB RAM | Medium | ✅ DONE 2026-08-14: `--kv-fp16` (cos 0.999999), plus `--kv-turbo` (K int8 + V 4-bit, cos 0.999793). |
 
 ### 6.3 Low-Impact or High-Risk
