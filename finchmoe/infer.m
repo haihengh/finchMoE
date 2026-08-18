@@ -2230,6 +2230,13 @@ typedef struct {
     id<MTLComputePipelineState> fused_gdn_full;  // conv1d+qk-norm+GDN+gated_norm, single kernel
     id<MTLComputePipelineState> fused_gdn_batched;  // fused_gdn_full with in-kernel M loop (chunked prefill)
     id<MTLComputePipelineState> fused_gdn_batched_qk;  // Phase C S5: GGUF Q4_K in_proj variant (env-gated)
+    // Phase C S4.1: M-batched CMD3 kernels (GGUF group dispatch)
+    id<MTLComputePipelineState> fused_gate_up_swiglu_qk_pool_pipe;
+    id<MTLComputePipelineState> matvec_qk_pool_prefill_pipe;
+    id<MTLComputePipelineState> swiglu_prefill_batch_pipe;
+    id<MTLComputePipelineState> rms_norm_sum_sq_prefill_batch_pipe;
+    id<MTLComputePipelineState> rms_norm_apply_bf16_prefill_batch_pipe;
+    id<MTLComputePipelineState> moe_combine_residual_prefill_batch_pipe;
     // Persistent GPU state buffers for linear attention layers
     #define NUM_LINEAR_LAYERS 30
     id<MTLBuffer> buf_delta_state[NUM_LINEAR_LAYERS];   // [32*128*128] float per layer
@@ -2378,6 +2385,12 @@ static MetalCtx *metal_setup(void) {
     ctx->fused_gdn_full    = makePipe(@"fused_gdn_full");
     ctx->fused_gdn_batched = makePipe(@"fused_gdn_batched");
     ctx->fused_gdn_batched_qk = makePipe(@"fused_gdn_batched_qk");
+    ctx->fused_gate_up_swiglu_qk_pool_pipe = makePipe(@"fused_gate_up_swiglu_qk_pool_prefill");
+    ctx->matvec_qk_pool_prefill_pipe       = makePipe(@"dequant_matvec_qk_pool_prefill");
+    ctx->swiglu_prefill_batch_pipe         = makePipe(@"swiglu_prefill_batch");
+    ctx->rms_norm_sum_sq_prefill_batch_pipe = makePipe(@"rms_norm_sum_sq_prefill_batch");
+    ctx->rms_norm_apply_bf16_prefill_batch_pipe = makePipe(@"rms_norm_apply_bf16_prefill_batch");
+    ctx->moe_combine_residual_prefill_batch_pipe = makePipe(@"moe_combine_residual_prefill_batch");
     ctx->matvec_prefill_4bit  = makePipe(@"dequant_matvec_4bit_prefill");
     ctx->matvec_prefill_8bit  = makePipe(@"dequant_matvec_8bit_prefill");
     ctx->gemv_bf16_prefill    = makePipe(@"gemv_bf16_prefill");
@@ -10072,17 +10085,92 @@ static void prefill_chunk_chain_gguf(MetalCtx *ctx, LayerWeightCache *lc,
     }
 }
 
-static id<MTLCommandBuffer> prefill_chunk_cmd3(int layer_idx, uint32_t m,
-                                                int actual_K, const int *valid,
-                                                float shared_gate_score,
-                                                int pool_mode,
-                                                id<MTLBuffer> __unsafe_unretained *data_bufs,  // pool mode: per-expert weight buffers
-                                                const NSUInteger *data_offs)  // pool mode: per-expert base offsets
+// Phase C S4 perf: CMD3 component dumps for position m (FINCHMOE_PF_DUMP
+// debug-only) — moved out of the per-position encode so the merged group CB
+// can dump after its single wait.
+static void pf_dump_cmd3_debug(id<MTLCommandBuffer> cmd, int layer_idx, uint32_t m,
+                               id<MTLBuffer> sh_gate, id<MTLBuffer> sh_up,
+                               id<MTLBuffer> sh_act, NSUInteger mid_off,
+                               id<MTLBuffer> __unsafe_unretained *data_bufs,
+                               const NSUInteger *data_offs) {
+    MetalCtx *ctx = g_metal;
+    LayerWeightCache *lc = &layer_cache[layer_idx];
+    [cmd waitUntilCompleted];
+    static FILE *pf_c3 = NULL;
+    if (!pf_c3) pf_c3 = fopen("/tmp/cmd3_components.bin", "wb");
+    if (pf_c3) {
+        for (int k = 0; k < MAX_K; k++)
+            fwrite((const float *)[ctx->buf_multi_expert_out[k] contents] + (size_t)m * HIDDEN_DIM,
+                   sizeof(float), HIDDEN_DIM, pf_c3);
+        fwrite((const float *)[ctx->buf_shared_out contents] + (size_t)m * HIDDEN_DIM,
+               sizeof(float), HIDDEN_DIM, pf_c3);
+        fwrite((const float *)[ctx->buf_pf_combine_params contents] + (size_t)m * 10,
+               sizeof(float), 10, pf_c3);
+        fwrite((const float *)[ctx->buf_pf_h_mid contents] + (size_t)m * HIDDEN_DIM,
+               sizeof(float), HIDDEN_DIM, pf_c3);
+        fwrite((const float *)[sh_gate contents] + mid_off / sizeof(float), sizeof(float), SHARED_INTERMEDIATE, pf_c3);
+        fwrite((const float *)[sh_up contents] + mid_off / sizeof(float), sizeof(float), SHARED_INTERMEDIATE, pf_c3);
+        fwrite((const float *)[sh_act contents] + mid_off / sizeof(float), sizeof(float), SHARED_INTERMEDIATE, pf_c3);
+        fflush(pf_c3);
+    }
+    // TEMP DEBUG: pool slot bytes AFTER the CMD3 completes (race check)
+    if (getenv("FINCHMOE_GGUF_DBG") && g_gguf_stage && data_bufs) {
+        static FILE *sl2 = NULL;
+        if (!sl2) sl2 = fopen("/tmp/slot_after.bin", "wb");
+        if (sl2) {
+            GgufExpertInfo *gx = &gguf_experts[layer_idx];
+            int32_t hdr = (int32_t)layer_idx;
+            fwrite(&hdr, 4, 1, sl2);
+            // CPU full expert chain from the slot bytes as they are NOW
+            static float g_out[MOE_INTERMEDIATE], u_out[MOE_INTERMEDIATE], act[MOE_INTERMEDIATE], eo[HIDDEN_DIM];
+            const float *x = (const float *)[ctx->buf_pf_expert_input contents];
+            const char *slot0 = (const char *)[data_bufs[0] contents] + data_offs[0];
+            gguf_cpu_matvec(slot0, x, g_out, MOE_INTERMEDIATE, HIDDEN_DIM, gx->gate_type);
+            gguf_cpu_matvec(slot0 + gx->gate_slab, x, u_out, MOE_INTERMEDIATE, HIDDEN_DIM, gx->up_type);
+            cpu_swiglu(g_out, u_out, act, MOE_INTERMEDIATE);
+            gguf_cpu_matvec(slot0 + gx->gate_slab + gx->up_slab, act, eo, HIDDEN_DIM, MOE_INTERMEDIATE, gx->down_type);
+            fwrite(eo, sizeof(float), HIDDEN_DIM, sl2);
+            fwrite(x, sizeof(float), HIDDEN_DIM, sl2);   // the input as seen at CMD3 time
+            fflush(sl2);
+        }
+    }
+
+    // TEMP DEBUG: CPU reference for the shared down (same act)
+    if (getenv("FINCHMOE_GGUF_DBG") && g_gguf_stage && lc->sd_w) {
+        static FILE *sdbg = NULL;
+        if (!sdbg) sdbg = fopen("/tmp/shared_cpu.bin", "wb");
+        if (sdbg) {
+            const float *act = (const float *)[sh_act contents] + mid_off / sizeof(float);
+            static float cpu_so[HIDDEN_DIM];
+            gguf_cpu_matvec(lc->sd_w, act, cpu_so, HIDDEN_DIM, SHARED_INTERMEDIATE,
+                            lc->sd_bits == 10 ? 12 : 14);
+            fwrite(cpu_so, sizeof(float), HIDDEN_DIM, sdbg);                     // CPU down
+            fwrite((const float *)[ctx->buf_shared_out contents] + (size_t)m * HIDDEN_DIM,
+                   sizeof(float), HIDDEN_DIM, sdbg);                             // GPU down
+            fwrite(act, sizeof(float), SHARED_INTERMEDIATE, sdbg);               // act
+            fflush(sdbg);
+        }
+    }
+}
+
+// Phase C S4 perf: encodes position m's CMD3 work into *cmd_p (the caller
+// owns the CB and commits it once per group — all kernels bind per-position
+// offsets, so a whole group's positions append into ONE CB; the per-position
+// CBs were ~7 extra scheduling boundaries per layer). The caller has already
+// placed the expert_sync_event wait on the CB; the wrap-failure fallback
+// paths below commit the partial CB, run the CPU fallback, and swap in a
+// fresh CB (re-adding the event wait) — queue order keeps every recorded
+// wait valid.
+static void prefill_chunk_cmd3_encode(id<MTLCommandBuffer> *cmd_p,
+                                       int layer_idx, uint32_t m,
+                                       int actual_K, const int *valid,
+                                       float shared_gate_score,
+                                       int pool_mode,
+                                       id<MTLBuffer> __unsafe_unretained *data_bufs,  // pool mode: per-expert weight buffers
+                                       const NSUInteger *data_offs)  // pool mode: per-expert base offsets
 {
     MetalCtx *ctx = g_metal;
     LayerWeightCache *lc = &layer_cache[layer_idx];
-    double t_cmd3 = 0;
-    if (g_chunk_timing_enabled) t_cmd3 = now_ms();
 
     NSUInteger out_off = (NSUInteger)m * HIDDEN_DIM * sizeof(float);
     NSUInteger mid_off = pool_mode ? (NSUInteger)m * MOE_INTERMEDIATE * sizeof(float) : 0;
@@ -10090,8 +10178,7 @@ static id<MTLCommandBuffer> prefill_chunk_cmd3(int layer_idx, uint32_t m,
     id<MTLBuffer> sh_up   = pool_mode ? ctx->buf_pf_shared_up   : ctx->buf_shared_up;
     id<MTLBuffer> sh_act  = pool_mode ? ctx->buf_pf_shared_act  : ctx->buf_shared_act;
 
-    id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-    [cmd encodeWaitForEvent:ctx->expert_sync_event value:ctx->expert_sync_value];
+    id<MTLCommandBuffer> cmd = *cmd_p;
 
     if (g_gguf_stage) {
         // Phase C S4: GGUF expert encode — the S2 kernels reading the
@@ -10185,6 +10272,7 @@ static id<MTLCommandBuffer> prefill_chunk_cmd3(int layer_idx, uint32_t m,
                 gguf_cpu_matvec(lc->sd_w, act, out, HIDDEN_DIM, SHARED_INTERMEDIATE,
                                 lc->sd_bits == 10 ? 12 : 14);
                 cmd = [ctx->queue commandBuffer];
+                [cmd encodeWaitForEvent:ctx->expert_sync_event value:ctx->expert_sync_value];
             }
         } else if (lc->sd_s && lc->sd_b) {
             gpu_encode_dequant_matvec_with_io_bufs(
@@ -10200,6 +10288,7 @@ static id<MTLCommandBuffer> prefill_chunk_cmd3(int layer_idx, uint32_t m,
             cpu_dequant_matvec(lc->sd_w, NULL, NULL, act, out,
                                HIDDEN_DIM, SHARED_INTERMEDIATE, GROUP_SIZE, 0);
             cmd = [ctx->queue commandBuffer];
+            [cmd encodeWaitForEvent:ctx->expert_sync_event value:ctx->expert_sync_value];
         }
     }
 
@@ -10287,76 +10376,240 @@ static id<MTLCommandBuffer> prefill_chunk_cmd3(int layer_idx, uint32_t m,
         }
     }
 
-    // DEFERRED commit — submit async, don't wait.
+    // The caller owns the CB: commits it once per group (deferred, as
+    // before) and times the encode.
+    *cmd_p = cmd;
+    (void)shared_gate_score;  // already encoded in buf_pf_combine_params by the caller
+}
+
+// Single-position wrapper (the packed fallback path's old contract):
+// create + encode + commit, return the CB (deferred, as before).
+static id<MTLCommandBuffer> prefill_chunk_cmd3(int layer_idx, uint32_t m,
+                                                int actual_K, const int *valid,
+                                                float shared_gate_score,
+                                                int pool_mode,
+                                                id<MTLBuffer> __unsafe_unretained *data_bufs,
+                                                const NSUInteger *data_offs) {
+    MetalCtx *ctx = g_metal;
+    double t_c3 = 0;
+    if (g_chunk_timing_enabled) t_c3 = now_ms();
+    id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+    [cmd encodeWaitForEvent:ctx->expert_sync_event value:ctx->expert_sync_value];
+    prefill_chunk_cmd3_encode(&cmd, layer_idx, m, actual_K, valid,
+                              shared_gate_score, pool_mode, data_bufs, data_offs);
     [cmd commit];
     if (g_chunk_timing_enabled) {
-        double d = now_ms() - t_cmd3;
+        double d = now_ms() - t_c3;
         g_chunk_timing.cmd3_encode += d;
         pf_per_layer_add(layer_idx, 8, d);
     }
+    return cmd;
+}
 
-    // Debug: dump CMD3 components AFTER completion (debug-only wait)
-    if (getenv("FINCHMOE_PF_DUMP") && (layer_idx == 0 || layer_idx == 1) && m == 0) {
-        [cmd waitUntilCompleted];
-        static FILE *pf_c3 = NULL;
-        if (!pf_c3) pf_c3 = fopen("/tmp/cmd3_components.bin", "wb");
-        if (pf_c3) {
-            for (int k = 0; k < MAX_K; k++)
-                fwrite((const float *)[ctx->buf_multi_expert_out[k] contents] + (size_t)m * HIDDEN_DIM,
-                       sizeof(float), HIDDEN_DIM, pf_c3);
-            fwrite((const float *)[ctx->buf_shared_out contents] + (size_t)m * HIDDEN_DIM,
-                   sizeof(float), HIDDEN_DIM, pf_c3);
-            fwrite((const float *)[ctx->buf_pf_combine_params contents] + (size_t)m * 10,
-                   sizeof(float), 10, pf_c3);
-            fwrite((const float *)[ctx->buf_pf_h_mid contents] + (size_t)m * HIDDEN_DIM,
-                   sizeof(float), HIDDEN_DIM, pf_c3);
-            fwrite((const float *)[sh_gate contents] + mid_off / sizeof(float), sizeof(float), SHARED_INTERMEDIATE, pf_c3);
-            fwrite((const float *)[sh_up contents] + mid_off / sizeof(float), sizeof(float), SHARED_INTERMEDIATE, pf_c3);
-            fwrite((const float *)[sh_act contents] + mid_off / sizeof(float), sizeof(float), SHARED_INTERMEDIATE, pf_c3);
-            fflush(pf_c3);
-        }
-        // TEMP DEBUG: pool slot bytes AFTER the CMD3 completes (race check)
-        if (getenv("FINCHMOE_GGUF_DBG") && g_gguf_stage && data_bufs) {
-            static FILE *sl2 = NULL;
-            if (!sl2) sl2 = fopen("/tmp/slot_after.bin", "wb");
-            if (sl2) {
-                GgufExpertInfo *gx = &gguf_experts[layer_idx];
-                int32_t hdr = (int32_t)layer_idx;
-                fwrite(&hdr, 4, 1, sl2);
-                // CPU full expert chain from the slot bytes as they are NOW
-                static float g_out[MOE_INTERMEDIATE], u_out[MOE_INTERMEDIATE], act[MOE_INTERMEDIATE], eo[HIDDEN_DIM];
-                const float *x = (const float *)[ctx->buf_pf_expert_input contents];
-                const char *slot0 = (const char *)[data_bufs[0] contents] + data_offs[0];
-                gguf_cpu_matvec(slot0, x, g_out, MOE_INTERMEDIATE, HIDDEN_DIM, gx->gate_type);
-                gguf_cpu_matvec(slot0 + gx->gate_slab, x, u_out, MOE_INTERMEDIATE, HIDDEN_DIM, gx->up_type);
-                cpu_swiglu(g_out, u_out, act, MOE_INTERMEDIATE);
-                gguf_cpu_matvec(slot0 + gx->gate_slab + gx->up_slab, act, eo, HIDDEN_DIM, MOE_INTERMEDIATE, gx->down_type);
-                fwrite(eo, sizeof(float), HIDDEN_DIM, sl2);
-                fwrite(x, sizeof(float), HIDDEN_DIM, sl2);   // the input as seen at CMD3 time
-                fflush(sl2);
-            }
-        }
-
-        // TEMP DEBUG: CPU reference for the shared down (same act)
-        if (getenv("FINCHMOE_GGUF_DBG") && g_gguf_stage && lc->sd_w) {
-            static FILE *sdbg = NULL;
-            if (!sdbg) sdbg = fopen("/tmp/shared_cpu.bin", "wb");
-            if (sdbg) {
-                const float *act = (const float *)[sh_act contents] + mid_off / sizeof(float);
-                static float cpu_so[HIDDEN_DIM];
-                gguf_cpu_matvec(lc->sd_w, act, cpu_so, HIDDEN_DIM, SHARED_INTERMEDIATE,
-                                lc->sd_bits == 10 ? 12 : 14);
-                fwrite(cpu_so, sizeof(float), HIDDEN_DIM, sdbg);                     // CPU down
-                fwrite((const float *)[ctx->buf_shared_out contents] + (size_t)m * HIDDEN_DIM,
-                       sizeof(float), HIDDEN_DIM, sdbg);                             // GPU down
-                fwrite(act, sizeof(float), SHARED_INTERMEDIATE, sdbg);               // act
-                fflush(sdbg);
-            }
+// Phase C S4.1: batched CMD3 for a whole GGUF group — folds the
+// per-position dispatches (21/position) into 16 + 5 = 21 TOTAL dispatches
+// (fused×K + down×K + shared swiglu + shared down + combine + sum_sq +
+// apply), eliminating ~147 GPU launch overheads per layer (~14-18us each
+// — the ~2ms CMD3 fixed cost). All arithmetic is verbatim from the
+// per-position kernels (bitwise parity target). Requires ALL (m,k) valid,
+// the QK shared-down wrap, and gpu_combine; returns -1 → the caller falls
+// back to the per-position encodes. Deduped pool slots arrive as per-gm
+// byte-offset arrays (setBytes); buffer slots stay absolute-position.
+static int prefill_chunk_cmd3_batch(MetalCtx *ctx, id<MTLCommandBuffer> cmd,
+                                    int layer_idx, uint32_t gbase, uint32_t gM,
+                                    int actual_K, const int *valid_all,
+                                    id<MTLBuffer> __unsafe_unretained *data_bufs,
+                                    const NSUInteger *data_offs) {
+    if (!ctx->fused_gate_up_swiglu_qk_pool_pipe || !ctx->matvec_qk_pool_prefill_pipe ||
+        !ctx->swiglu_prefill_batch_pipe || !ctx->rms_norm_sum_sq_prefill_batch_pipe ||
+        !ctx->rms_norm_apply_bf16_prefill_batch_pipe ||
+        !ctx->moe_combine_residual_prefill_batch_pipe)
+        return -1;
+    LayerWeightCache *lc = &layer_cache[layer_idx];
+    int gpu_combine = (ctx->moe_combine_residual_prefill &&
+                       ctx->rms_norm_sum_sq_prefill &&
+                       ctx->rms_norm_apply_bf16_prefill &&
+                       layer_idx < NUM_LAYERS - 1 &&
+                       layer_cache[layer_idx + 1].input_norm_w != NULL);
+    if (!gpu_combine || !lc->sd_w || (lc->sd_bits != 10 && lc->sd_bits != 11))
+        return -1;
+    for (uint32_t gm = 0; gm < gM; gm++) {
+        for (int k = 0; k < actual_K; k++) {
+            if (!valid_all[((size_t)(gbase + gm)) * MAX_K + k]) return -1;
         }
     }
+    // shared-down QK wrap (per-tensor, cached in gguf_tbufs)
+    size_t row_bytes = (size_t)(SHARED_INTERMEDIATE / 256) * (lc->sd_bits == 10 ? 144 : 210);
+    uint32_t sd_delta = 0;
+    id<MTLBuffer> sd_buf = gguf_tbuf_get(ctx, lc->sd_w, row_bytes * HIDDEN_DIM, &sd_delta);
+    if (!sd_buf) return -1;
 
-    (void)shared_gate_score;  // already encoded in buf_pf_combine_params by the caller
-    return cmd;
+    GgufExpertInfo *ge = &gguf_experts[layer_idx];
+    static uint32_t g_arr[MAX_K][PREFILL_CHUNK_MAX];  // [k][gm] fused gate offsets
+    static uint32_t u_arr[MAX_K][PREFILL_CHUNK_MAX];  // [k][gm] fused up offsets
+    static uint32_t d_arr[MAX_K][PREFILL_CHUNK_MAX];  // [k][gm] down offsets
+    for (uint32_t gm = 0; gm < gM; gm++) {
+        for (int k = 0; k < actual_K; k++) {
+            uint32_t base = (uint32_t)data_offs[((size_t)(gbase + gm)) * MAX_K + k];
+            g_arr[k][gm] = base;
+            u_arr[k][gm] = base + (uint32_t)ge->gate_slab;
+            d_arr[k][gm] = base + (uint32_t)ge->gate_slab + (uint32_t)ge->up_slab;
+        }
+    }
+    uint32_t od = MOE_INTERMEDIATE, id_ = HIDDEN_DIM;
+    uint32_t dod = HIDDEN_DIM, did = MOE_INTERMEDIATE, dgt = (uint32_t)ge->down_type;
+    uint32_t mb = gbase;
+    // Phase C S4.1 perf probe: FINCHMOE_PF_C3SKIP=1 skips the expert fused
+    // dispatches, =2 skips fused+down (timing-only — outputs go stale).
+    static int c3skip = -1;
+    if (c3skip < 0) {
+        const char *se = getenv("FINCHMOE_PF_C3SKIP");
+        c3skip = se ? atoi(se) : 0;
+        if (c3skip < 0) c3skip = 0;
+    }
+
+    // fused gate+up per expert (all group positions in ONE dispatch)
+    if (c3skip >= 1) goto batch_shared;
+    for (int k = 0; k < actual_K; k++) {
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:ctx->fused_gate_up_swiglu_qk_pool_pipe];
+        [enc setBuffer:ctx->buf_pool_expert_data_gguf offset:0 atIndex:0];
+        [enc setBuffer:ctx->buf_pool_expert_data_gguf offset:0 atIndex:1];
+        [enc setBuffer:ctx->buf_pf_expert_input offset:0 atIndex:2];
+        [enc setBuffer:ctx->buf_pf_expert_act[k] offset:0 atIndex:3];
+        [enc setBytes:&od length:4 atIndex:4];
+        [enc setBytes:&id_ length:4 atIndex:5];
+        [enc setBytes:g_arr[k] length:(NSUInteger)gM * 4 atIndex:6];
+        [enc setBytes:u_arr[k] length:(NSUInteger)gM * 4 atIndex:7];
+        [enc setBytes:&mb length:4 atIndex:8];
+        uint32_t fused_row_tiles = (MOE_INTERMEDIATE + 7) / 8;
+        [enc dispatchThreadgroups:MTLSizeMake((uint64_t)gM * fused_row_tiles, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc endEncoding];
+    }
+    // expert downs (all group positions in ONE dispatch per expert)
+    if (c3skip >= 2) goto batch_shared;
+    for (int k = 0; k < actual_K; k++) {
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:ctx->matvec_qk_pool_prefill_pipe];
+        [enc setBuffer:ctx->buf_pool_expert_data_gguf offset:0 atIndex:0];
+        [enc setBuffer:ctx->buf_pf_expert_act[k] offset:0 atIndex:3];
+        [enc setBuffer:ctx->buf_multi_expert_out[k] offset:0 atIndex:4];
+        [enc setBytes:&dod length:4 atIndex:5];
+        [enc setBytes:&did length:4 atIndex:6];
+        [enc setBytes:&dgt length:4 atIndex:7];
+        [enc setBytes:d_arr[k] length:(NSUInteger)gM * 4 atIndex:8];
+        [enc setBytes:&mb length:4 atIndex:9];
+        uint32_t num_row_tiles = (HIDDEN_DIM + 7) / 8;
+        [enc dispatchThreadgroups:MTLSizeMake((uint64_t)gM * num_row_tiles, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc endEncoding];
+    }
+
+    // shared SwiGLU (all group positions in ONE dispatch)
+batch_shared:
+    {
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:ctx->swiglu_prefill_batch_pipe];
+        [enc setBuffer:ctx->buf_pf_shared_gate offset:0 atIndex:0];
+        [enc setBuffer:ctx->buf_pf_shared_up offset:0 atIndex:1];
+        [enc setBuffer:ctx->buf_pf_shared_act offset:0 atIndex:2];
+        uint32_t dim = SHARED_INTERMEDIATE;
+        [enc setBytes:&dim length:4 atIndex:3];
+        [enc setBytes:&mb length:4 atIndex:4];
+        uint32_t tgs = (dim + 255) / 256;
+        [enc dispatchThreadgroups:MTLSizeMake(tgs, gM, 1)
+            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc endEncoding];
+    }
+    // shared down via the S3 prefill kernel (uniform weights — buffer base
+    // offsets map the kernel's m=0..gM-1 onto the absolute slots)
+    {
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        uint32_t sod = HIDDEN_DIM, sid = SHARED_INTERMEDIATE;
+        uint32_t sgt = (uint32_t)(lc->sd_bits == 10 ? 12 : 14);
+        [enc setComputePipelineState:ctx->matvec_qk_prefill];
+        [enc setBuffer:sd_buf offset:sd_delta atIndex:0];
+        [enc setBuffer:ctx->buf_pf_shared_act offset:(NSUInteger)gbase * SHARED_INTERMEDIATE * sizeof(float) atIndex:3];
+        [enc setBuffer:ctx->buf_shared_out offset:(NSUInteger)gbase * HIDDEN_DIM * sizeof(float) atIndex:4];
+        [enc setBytes:&sod length:4 atIndex:5];
+        [enc setBytes:&sid length:4 atIndex:6];
+        [enc setBytes:&sgt length:4 atIndex:7];
+        uint32_t num_row_tiles = (HIDDEN_DIM + 7) / 8;
+        [enc dispatchThreadgroups:MTLSizeMake((uint64_t)gM * num_row_tiles, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc endEncoding];
+    }
+
+    // combine + residual (all group positions in ONE dispatch)
+    {
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc waitForFence:ctx->expert_fence];
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        [enc setComputePipelineState:ctx->moe_combine_residual_prefill_batch_pipe];
+        [enc setBuffer:ctx->buf_pf_h_mid        offset:0 atIndex:0];
+        [enc setBuffer:ctx->buf_shared_out      offset:0 atIndex:1];
+        [enc setBuffer:ctx->buf_pf_moe_hidden   offset:0 atIndex:2];
+        for (int k = 0; k < MAX_K; k++) {
+            [enc setBuffer:ctx->buf_multi_expert_out[k] offset:0 atIndex:(3 + k)];
+        }
+        [enc setBuffer:ctx->buf_pf_combine_params offset:0 atIndex:11];
+        uint32_t dim = HIDDEN_DIM;
+        uint32_t k_val = (uint32_t)actual_K;
+        uint32_t tgs = (dim + 255) / 256;
+        [enc setBytes:&dim   length:4 atIndex:12];
+        [enc setBytes:&k_val length:4 atIndex:13];
+        [enc setBytes:&mb    length:4 atIndex:14];
+        [enc setBytes:&tgs   length:4 atIndex:15];
+        [enc dispatchThreadgroups:MTLSizeMake((uint64_t)tgs * gM, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc endEncoding];
+    }
+    // sum_sq (all group positions in ONE dispatch)
+    {
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        uint32_t dim = HIDDEN_DIM;
+        [enc setComputePipelineState:ctx->rms_norm_sum_sq_prefill_batch_pipe];
+        [enc setBuffer:ctx->buf_pf_moe_hidden offset:0 atIndex:0];
+        [enc setBuffer:ctx->buf_pf_sum_sq      offset:0 atIndex:1];
+        [enc setBytes:&dim length:4 atIndex:2];
+        [enc setBytes:&mb length:4 atIndex:3];
+        [enc dispatchThreadgroups:MTLSizeMake(gM, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc endEncoding];
+    }
+    // apply norm (all group positions in ONE dispatch)
+    {
+        uint16_t *next_norm_w = layer_cache[layer_idx + 1].input_norm_w;
+        NSUInteger norm_off;
+        id<MTLBuffer> norm_buf;
+        if (g_gguf_stage) {
+            norm_buf = ctx->gguf_stage_gpu;
+            norm_off = (NSUInteger)((const char *)next_norm_w -
+                                    (const char *)g_gguf_stage);
+        } else {
+            norm_buf = ctx->wf_buf;
+            norm_off = (NSUInteger)((const char *)next_norm_w -
+                                    (const char *)[ctx->wf_buf contents]);
+        }
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        uint32_t dim = HIDDEN_DIM;
+        float eps = RMS_NORM_EPS;
+        [enc setComputePipelineState:ctx->rms_norm_apply_bf16_prefill_batch_pipe];
+        [enc setBuffer:ctx->buf_pf_moe_hidden offset:0       atIndex:0];
+        [enc setBuffer:norm_buf               offset:norm_off atIndex:1];
+        [enc setBuffer:ctx->buf_pf_sum_sq     offset:0       atIndex:2];
+        [enc setBuffer:ctx->buf_pf_input      offset:0       atIndex:3];
+        uint32_t tgs = (dim + 255) / 256;
+        [enc setBytes:&dim length:4 atIndex:4];
+        [enc setBytes:&eps length:4 atIndex:5];
+        [enc setBytes:&mb  length:4 atIndex:6];
+        [enc setBytes:&tgs length:4 atIndex:7];
+        [enc dispatchThreadgroups:MTLSizeMake((uint64_t)tgs * gM, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc endEncoding];
+    }
+    return 0;
 }
 
 // Per-position expert path (fallback and M > pool/8): routing → pread →
@@ -11580,17 +11833,76 @@ static void prefill_chunk_layer(WeightFile *wf, int layer_idx,
                 l1calls++;
             }
 
-            // Pass 2: CMD3s for the group (deferred commits)
-            for (int gm = 0; gm < gM; gm++) {
-                uint32_t m = gbase + (uint32_t)gm;
-                int valid[MAX_K];
-                for (int k = 0; k < actual_K; k++) {
-                    valid[k] = pf_valid_all[(size_t)m * MAX_K + k];
-                }
-                pf_cmd3_slots[m] = prefill_chunk_cmd3(layer_idx, m, actual_K, valid,
+            // Pass 2: ONE command buffer for the whole group (Phase C S4
+            // perf): the per-position CBs cost ~7 extra scheduling
+            // boundaries per layer — the ~2ms CMD3 fixed cost (dedup's
+            // marginal pool bandwidth ~140GB/s proved the kernels are not
+            // the bottleneck). All kernels bind per-position offsets on
+            // disjoint slots, so the group's positions append into one CB;
+            // the wrap-failure fallbacks inside the encode commit the
+            // partial CB and swap in a fresh one (pf_cmd3_slots records
+            // whichever CB holds each position's tail — queue order keeps
+            // every recorded wait valid). Deferred commit, as before.
+            {
+                double t_c3e = 0;
+                if (g_chunk_timing_enabled) t_c3e = now_ms();
+                id<MTLCommandBuffer> group_cb = [ctx->queue commandBuffer];
+                [group_cb encodeWaitForEvent:ctx->expert_sync_event value:ctx->expert_sync_value];
+                // Phase C S4.1: batched CMD3 (21 dispatches for the group)
+                // with a per-position fallback (invalid experts / missing
+                // wraps — rare). FINCHMOE_PF_C3LOOP=N repeats the batch N
+                // times (timing-only — outputs overwritten each pass).
+                {
+                    static int c3loop = 0, c3parsed = 0;
+                    if (!c3parsed) {
+                        const char *ke = getenv("FINCHMOE_PF_C3LOOP");
+                        c3loop = ke ? atoi(ke) : 1;
+                        if (c3loop < 1) c3loop = 1;
+                        c3parsed = 1;
+                        if (c3loop > 1) fprintf(stderr, "[c3loop] batched CMD3 iteration x%d (timing-only)\n", c3loop);
+                    }
+                    int b_ok = 1;
+                    for (int ci = 0; ci < c3loop; ci++) {
+                        if (prefill_chunk_cmd3_batch(ctx, group_cb, layer_idx, gbase, (uint32_t)gM,
+                                                     actual_K, pf_valid_all,
+                                                     pf_data_bufs, pf_data_offs) != 0) {
+                            b_ok = 0;
+                            break;
+                        }
+                    }
+                    if (b_ok) {
+                        for (int gm = 0; gm < gM; gm++) {
+                            pf_cmd3_slots[gbase + (uint32_t)gm] = group_cb;
+                        }
+                    } else {
+                        for (int gm = 0; gm < gM; gm++) {
+                            uint32_t m = gbase + (uint32_t)gm;
+                            int valid[MAX_K];
+                            for (int k = 0; k < actual_K; k++) {
+                                valid[k] = pf_valid_all[(size_t)m * MAX_K + k];
+                            }
+                            prefill_chunk_cmd3_encode(&group_cb, layer_idx, m, actual_K, valid,
                                                       seg_batch[m], 1,
                                                       &pf_data_bufs[(size_t)m * MAX_K],
                                                       &pf_data_offs[(size_t)m * MAX_K]);
+                            pf_cmd3_slots[m] = group_cb;
+                        }
+                    }
+                }
+                [group_cb commit];
+                if (g_chunk_timing_enabled) {
+                    double d = now_ms() - t_c3e;
+                    g_chunk_timing.cmd3_encode += d;
+                    pf_per_layer_add(layer_idx, 8, d);
+                }
+                // Debug dumps read the CMD3 outputs — wait the group CB
+                // (debug-only; the deferral is not needed for parity runs).
+                if (getenv("FINCHMOE_PF_DUMP") && (layer_idx == 0 || layer_idx == 1)) {
+                    pf_dump_cmd3_debug(group_cb, layer_idx, 0,
+                                       ctx->buf_pf_shared_gate, ctx->buf_pf_shared_up,
+                                       ctx->buf_pf_shared_act, 0,
+                                       &pf_data_bufs[0], &pf_data_offs[0]);
+                }
             }
             // Group backpressure: wait for the group's last CMD3 before the
             // next group's preads overwrite the pool slots. The final group
