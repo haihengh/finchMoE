@@ -280,3 +280,39 @@ The vision is that `infer.m` eventually delegates all diagnostic checks to `finc
 - **RoPE rotation test**: Compare half-split vs interleaved implementations
 - **Gated DeltaNet test**: Validate the GDN recurrence kernel against CPU reference
 - **CI integration**: `make test` as a pre-commit hook to catch regressions before they reach production
+
+## tools/ — Python & Shell Diagnostics
+
+Standalone analysis and debug scripts (consolidated from the engine's root
+directory 2026-08-18). Run from anywhere; they read `/tmp` dumps produced by
+the engine's env-gated debug flags and model files by absolute path.
+
+**Logits / trace comparison**
+- `compare_gguf_logits.py ref.bin new.bin` — cos/argmax/max-diff of `-I`
+  logit dumps (used by `../bench_gguf.sh`)
+- `compare_pb_traces.py pb_ref.bin pb_new.bin` — first-diverging
+  (token, layer) on the Phase-B traces (`FINCHMOE_DUMP_PHASEB`)
+- `analyze_s4_dumps.py` — Phase C S4 kernel-parity dumps
+
+**Long-generation health**
+- `analyze_longgen.py logfile` — n-gram repetition, EOS, think-tag
+  balance, topical drift (Bug 15 toolkit)
+
+**Session debug one-offs** (kept for provenance; each reads its own
+`FINCHMOE_*_DBG` dumps): `debug_2token_gdn.py`, `debug_bf16_vs_4bit.py`,
+`debug_compare.py`, `debug_e2e_logits.py`, `debug_full_attn_moe.py`,
+`debug_full_forward.py`, `debug_gdn_compare.py`, `debug_gdn_reference.py`,
+`debug_layer_compare.py`, `debug_layer_diff.py`, `debug_mlx_inference.py`
+
+**MTP / rebuild / wobble**
+- `extract_mtp_experts.py`, `mtp_reference.py` — MTP head extraction +
+  numpy reference
+- `verify_clean_rebuild.py` — single-stage rebuild verification
+- `wobble_hunt.sh`, `wobble_trace_hunt.sh` — run-to-run wobble hunting
+
+The build/quant pipeline scripts (`extract_weights.py`,
+`generate_expert_index.py`, `repack_experts.py`, `compress_experts.py`,
+`export_tokenizer.py`, `quantize_model.py`, `quantize_non_experts.py`,
+`build_hot_sets.py`) and the bench runners (`bench_*.sh`,
+`run_logit_dump_safe.sh`) stay in the engine root — the Makefile targets
+and the bench scripts' relative paths depend on that location.

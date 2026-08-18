@@ -51,5 +51,5 @@ watch $! || exit 1
 grep -E "Tokens:|Generation" /tmp/bench_gpu.log | tail -2
 
 echo "=== comparisons ==="
-python3 compare_gguf_logits.py $REF $CPUOUT | grep -E "cos_sim|argmax"
-python3 compare_gguf_logits.py $CPUOUT $GPUOUT | grep -E "cos_sim|argmax"
+python3 finchTool/tools/compare_gguf_logits.py $REF $CPUOUT | grep -E "cos_sim|argmax"
+python3 finchTool/tools/compare_gguf_logits.py $CPUOUT $GPUOUT | grep -E "cos_sim|argmax"
