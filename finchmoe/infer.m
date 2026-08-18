@@ -1532,6 +1532,23 @@ static PromptTokens *encode_prompt_text_to_tokens(const char *text) {
     pt->ids = ids;
     pt->count = n;
 
+    // Cross-reference helper: dump the prompt token IDs in the same format
+    // as prompt_tokens_gguf.bin ([n u32][n × u32]) so llama.cpp logit_dump
+    // can decode the identical prompt (FINCHMOE_DUMP_PROMPT_TOKENS=file).
+    {
+        const char *dp = getenv("FINCHMOE_DUMP_PROMPT_TOKENS");
+        if (dp) {
+            FILE *f = fopen(dp, "wb");
+            if (f) {
+                uint32_t n32 = (uint32_t)n;
+                fwrite(&n32, sizeof(uint32_t), 1, f);
+                fwrite(ids, sizeof(uint32_t), (size_t)n, f);
+                fclose(f);
+                fprintf(stderr, "[tokens] prompt token IDs dumped to %s (%d tokens)\n", dp, n);
+            }
+        }
+    }
+
     fprintf(stderr, "Tokens (%d): [", n);
     for (int i = 0; i < n && i < 20; i++) {
         if (i > 0) fprintf(stderr, ", ");
