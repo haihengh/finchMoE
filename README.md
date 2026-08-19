@@ -117,6 +117,41 @@ expert I/O dominates completely there). The M1 win is memory, not speed:
 `--kv-turbo` shrinks the KV cache ~5×, which matters when the 3 GB bootstrap
 memory gate is the binding constraint on an 8 GB machine.
 
+### Native quant vs GGUF (`--gguf`) — 2026-08-18
+
+Head-to-head of the two model-loading paths on the **same** M1 mini (8 GB):
+the native 3-bit expert pack (`quant_clean/`, the `bench.sh` path) versus the
+cross-validated **GGUF Q4_K_M** tier (`--gguf models/Qwen3.6-35B-A3B-Q4_K_M.gguf`).
+Same binary, same K=8 / 40 layers, same prompts. (The `finchmoe-m1/` deploy
+copy is git-ignored; this run used the 2026-08-18 build with the GGUF path.)
+
+| Metric | Native quant | GGUF Q4_K_M | Ratio |
+|--------|--------------|-------------|-------|
+| Decode 50 tok (n=2) | **4.29-4.33 tok/s** | 2.35-2.43 tok/s | native **1.8×** |
+| Decode 200 tok (attn-heavy) | **4.31 tok/s** | 2.55 tok/s | native **1.7×** |
+| Prefill 53 tok, per-token (chunk 0) | **12.7 s** | 21.2 s | native **1.7×** |
+| Prefill 53 tok, chunked (chunk 8) | 15.2 s | **11.3 s** | GGUF **1.3×** |
+| Quick 30 tok, e2e | **6.8 s** (4.28 tok/s) | 9.9 s (2.51 tok/s) | native **1.7×** |
+
+**Decode is the headline: native quant wins ~1.7-1.8×** and holds it across
+short and long generation. The per-token gap is mostly `lm_head`: native does
+the 3-bit→logit matvec in ~15 ms, the GGUF path ~266 ms (~17× — Q4_K_M must be
+dequantized before the final projection). That fixed per-token cost is what a
+token-streaming workload pays every step.
+
+**Prefill is mixed.** GGUF's *chunked* path was faster (11.3 s vs 15.2 s), but
+its *per-token* path was much slower (21.2 s vs 12.7 s). Both modes emitted the
+same non-fatal `fused_gate_up_swiglu_qk_pool_*` shader warnings and fell back to
+the same path, so the comparison is fair — the difference is real, not a
+fallback artifact.
+
+Caveats: the 8 GB machine ran under constant memory pressure (4.4 GB available,
+"may trigger SIGKILL" banner); a few longer runs were jetsam-killed when the
+whole suite ran back-to-back and succeeded when re-run individually. This is a
+throughput/latency comparison on one machine — it does **not** measure
+perplexity or quality, where the GGUF tier is the cross-validated one
+(cos 0.9982 vs llama.cpp).
+
 ### SSD wear: streaming weights is read-only — no meaningful impact
 
 The engine streams ~420 MB of expert weights from disk per generated token
