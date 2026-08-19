@@ -341,6 +341,23 @@ degrades under 3-bit quantization, while raw continuation rides the base-model
 weights — so the raw number is the tier's published protocol, not a pessimism
 artifact. The same harness runs on the M1 mini deploy for a second data point.
 
+Four-way comparison on the same M4, same raw harness (2026-08-19):
+| engine + model | tier | decode | pass@1 |
+|---|---|---|---|
+| finchMoE + Qwen 3.6 35B | 4-bit native experts (`--4bit`, `4bit-dense` pack) | ~5.5 tok/s | **53/164 = 32.3%** |
+| finchMoE + Qwen 3.6 35B | 3-bit native experts (default) | 10-16 tok/s | 49/164 = 29.9% |
+| finchMoE + Qwen 3.6 35B | GGUF Q4_K_M | 3.4-5.5 tok/s | 36/164 = 22.0% |
+| turbo-fieldfare + Gemma 4 26B-A4B | their 4-bit repack | ~3.5 tok/s (their M4-mini number) | **142/164 = 86.6%** (chat protocol) |
+
+Read the turbo-fieldfare row carefully: it is a *different model* (Gemma 4 26B,
+chat protocol — its only API) and a different quantization pipeline. The
+comparison splits into two findings: (1) our custom quant pipeline beats
+llama.cpp's Q4_K_M on the same model (+10 points at 3-bit, +13 at 4-bit), but
+loses ~30 points vs the FP16 reference (61.6%) — the quantization gap is the
+dominant quality cost, not the engine; (2) Gemma 4 26B's chat-mode score sits
+near its FP16 expectation, i.e. turbo-fieldfare's 4-bit repack loses far less
+than our 3-bit — its quantization is the reference to study.
+
 ## Architecture
 
 ```
