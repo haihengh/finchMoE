@@ -38,12 +38,21 @@ def build_code(task, completion):
     # Chat-templated models often restate the WHOLE function (imports +
     # signature + docstring). Concatenating that onto the prompt duplicates
     # the header and breaks the parse. If the completion is a complete
-    # program whose first function is the entry point, use it alone;
-    # otherwise concatenate prompt + truncated completion (raw mode).
+    # program whose first function is the entry point, use it alone — but
+    # keep the prompt's imports (the model may omit them) and only apply the
+    # cut markers AFTER the entry function's own header.
     entry = re.escape(task["entry_point"])
     if re.match(rf'(?s)\s*(?:(?:from\s+\S+\s+import\s+[^\n]+|import\s+[^\n]+)\n)*\s*def\s+{entry}\s*\(',
                 completion):
-        return truncate_completion(completion)
+        imports = "\n".join(l for l in task["prompt"].splitlines()
+                             if l.startswith(("from ", "import ")))
+        defpos = completion.find(f"def {task['entry_point']}(")
+        head, tail = completion[:defpos], completion[defpos:]
+        for m in ["\nclass ", "\nif __name__", "\nprint("]:
+            i = tail.find(m)
+            if i != -1:
+                tail = tail[:i]
+        return ((imports + "\n") if imports else "") + head + tail.rstrip()
     return task["prompt"] + truncate_completion(completion)
 
 
