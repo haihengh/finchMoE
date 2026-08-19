@@ -24,6 +24,11 @@
 - `a913e25` — MTP harness unblocked (layer-40 experts, path fix); α=0%.
 - `0f102bb` — MTP logit-cosine diagnostic (0.59-0.74 → forward-math bug).
 - `156cddb` — Server: disabled broken incremental session continuation.
+- Chat client (finchmoe-chat, 2026-08-15): native SwiftUI macOS app —
+  sessions (server-side multi-turn), streaming, collapsible think blocks,
+  tok/s inspector, icon; `./package_app.sh` builds the .app.
+- KV cache quantization (--kv-fp16 / --kv-turbo) + min_p sampling
+  (--min-p) + think budget default 200.
 - `8c9b496` — Static per-layer hot-set expert prefetch (memory-adaptive).
 - `1e476ab` — Post-restart retest (2026-08-14): decode **10.3 tok/s** warm
   cache (8.8 cold); chunk-8 prefill **6.8-7.0s** for 90 tokens (1.5× vs
@@ -31,6 +36,29 @@
   pread_wait 6.2 (SSD) + ~0.7. **Hot-set prefetch measured: does not pay**
   (top-32 hot set covers only 26% of unique experts / 39.5% of per-token
   requests; pread_wait 6.2 → 6.3 ms) — auto-gate stays.
+
+### Phase C: GGUF mode (llama.cpp files) — 2026-08-15 → 08-18
+
+- S1/S2 — GPU Q4_K/Q6_K dequant kernels (bit-correct vs llama.cpp: parity
+  1.0 / cos 0.9998); GGUF decode 0.45 → 1.06 tok/s.
+- C3 (`86f2527`) — chunked GGUF prefill default ON: TTFT 1507 vs 2943 ms
+  (13 tokens, 2×); logits cos 0.99943 (sole divergence: a 0-ULP gate-score
+  tie flip).
+- S4 — expert pread dedup (`bbd9533`), batched CMD3: one CB + 21 dispatches
+  per layer (`104bd9f`), fused-pool bandwidth probes (`e961007` — fused
+  kernel confirmed optimal for its access shape).
+- S5 (`968f5a5`) — fused GPU GDN chain (opt-in): conv+in_proj+decay+delta+
+  gated norm in one kernel; perf neutral on M4.
+- S6 (`1f5b8a4`) — wake-tax/dispatch decomposition: kernel-CB dispatch
+  ~0.26 ms regardless of work; queue-drain wake tax scales with idle gap
+  (0.07@0.1ms → 1.4@3ms); file-backed weight reads pay per-16KB DART page
+  walks (the preads are IOMMU priming). Probes: CBLAT, per-commit gap
+  buckets, S6a merged CB (bitwise), ping-pong pools (neutral), stage2
+  aligned copies (probe), no-pread (dead end). Default path unchanged.
+- `08bf875` — FIX: GGUF per-token GPU attention was never encoded at sl ≥ 32
+  (dispatches live in the `!g_gguf_stage`-gated fused CMD2) → stale
+  buf_attn_out from token 32 on. 90-token soak now bitwise (cos 1.000000).
+- `bab9154` — analysis/debug scripts consolidated under finchTool/tools/.
 
 ### OPEN ISSUES (priority order)
 
@@ -67,6 +95,12 @@
    MTP head is inherently weak (cos 0.3-0.8, ~0% T=0 acceptance) — per the
    calibration gate, speculative decoding stays disabled. The harness +
    reference tooling remain for any future MTP variant.
+5. **Long-form generation drift** — the 3-bit/4-bit quant drifts into
+   meta-planning/synonym loops at ~100-250 tokens on essay prompts (all
+   samplers tested; 8-bit GDN tier drifts later; llama.cpp Q4_K_M stays
+   clean at 400). The target use case (students, low-budget machines,
+   essays) needs: a GGUF importer (run Q4_K_M directly — also opens the
+   community GGUF ecosystem) or a higher-precision expert repack.
 
 **Reference target**: turbo-fieldfare achieves 5.1-6.3 tok/s at ~2 GB on **M2 8GB** with Gemma 4 26B. M4 is ~1.4× faster than M2 — we now exceed that reference (11.4 tok/s on M4).
 

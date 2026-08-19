@@ -104,7 +104,7 @@ CPU KV is not budgeted (known gap).
 | `gated_delta_net_step`, `conv1d_step`, `rms_norm_qk` | fallback chain pieces | |
 
 All kernels verified against CPU references (CosSim 1.0); the layer-0
-chain verified end-to-end by `debug_gdn_reference.py`.
+chain verified end-to-end by `finchTool/tools/debug_gdn_reference.py`.
 
 ## 7. Per-Layer Timing (3-bit experts + 4-bit GDN, K=8, M4)
 

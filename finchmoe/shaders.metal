@@ -1638,7 +1638,7 @@ kernel void gated_delta_net_step(
     uint head_id [[threadgroup_position_in_grid]],
     uint vi [[thread_position_in_threadgroup]]
 ) {
-    uint kh = head_id / k_heads_per_v;
+    uint kh = head_id % 16;  // torch .repeat() block mapping: v-heads 16..31 reuse k-heads 0..15 (LINEAR_NUM_K_HEADS)
     float g = g_decay[head_id];
     float beta = beta_gate[head_id];
 
@@ -1964,7 +1964,7 @@ kernel void fused_gdn_core(
     uint head [[threadgroup_position_in_grid]],
     uint tid  [[thread_position_in_threadgroup]]
 ) {
-    uint kh = head / k_heads_per_v;
+    uint kh = head % 16;  // torch .repeat() block mapping (LINEAR_NUM_K_HEADS)
     uint state_base = head * value_dim * key_dim;
     uint k_base = kh * key_dim;
     uint v_base = head * value_dim;
@@ -2054,7 +2054,7 @@ kernel void fused_gdn_full(
     uint head [[threadgroup_position_in_grid]],
     uint tid  [[thread_position_in_threadgroup]]
 ) {
-    uint kh = head / k_heads_per_v;
+    uint kh = head % 16;  // torch .repeat() block mapping (LINEAR_NUM_K_HEADS)
     uint total_key = conv_dim / 4;  // 2048 = LINEAR_TOTAL_KEY
 
     // ---- Step 1: conv1d for the 3 elements this thread owns ----
@@ -2830,7 +2830,7 @@ kernel void fused_gdn_batched(
     uint head [[threadgroup_position_in_grid]],
     uint tid  [[thread_position_in_threadgroup]]
 ) {
-    uint kh = head / k_heads_per_v;
+    uint kh = head % 16;  // torch .repeat() block mapping (LINEAR_NUM_K_HEADS)
     uint total_key = conv_dim / 4;  // 2048 = LINEAR_TOTAL_KEY
     uint num_v_heads = k_heads_per_v * (total_key / key_dim);  // matches caller
 
@@ -2961,4 +2961,891 @@ kernel void fused_gdn_batched(
         out_m[base + tid] = normed * gate * w;
 
     }
+}
+
+
+// ============================================================================
+// Phase C: GGUF Q4_K / Q6_K block dequant-matvec (the GGUF-path GPU kernels).
+// Structural clone of dequant_matvec_4bit_v3: ROWS_PER_TG 8, 256 threads,
+// one row per simdgroup, cooperative x_shared load, lane-strided words,
+// FMA-folded dequant. The per-word decode replaces the nibble decode with
+// ggml's block_q4_K / block_q6_K layouts (matches gguf_dequant_row in
+// infer.m bit-for-bit for fp16 and scale unpacking).
+// ============================================================================
+
+// ggml_compute_fp16_to_fp32: the h<<16 pattern is only the first step — the
+// exponent must be re-normalized and denormals handled. Bit-exact replica of
+// fp16_to_f32 in infer.m (must match: Q4_K's d/dmin and Q6_K's d are fp16).
+static float m_fp16_to_f32(uint h) {
+    uint w = h << 16;
+    uint sign = w & 0x80000000u;
+    uint two_w = w + w;
+    uint exp_offset = 0xE0u << 23;
+    float exp_scale = 0x1.0p-112f;
+    float normalized = as_type<float>((two_w >> 4) + exp_offset) * exp_scale;
+    uint magic_mask = 126u << 23;
+    float magic_bias = 0.5f;
+    float denorm = as_type<float>((two_w >> 17) | magic_mask) - magic_bias;
+    uint denorm_cutoff = 1u << 27;
+    uint result = sign | (two_w < denorm_cutoff ? as_type<uint>(denorm)
+                                                : as_type<uint>(normalized));
+    return as_type<float>(result);
+}
+
+// get_scale_min_k4 (llama.cpp dequantize_row_q4_K) — 6-bit scale/min pairs.
+static uchar2 get_scale_min_k4(uint j, device const uchar* scales) {
+    uchar sc, m;
+    if (j < 4) {
+        sc = scales[j + 0] & 63;
+        m  = scales[j + 4] & 63;
+    } else {
+        sc = (scales[j + 4] & 0xF) | ((scales[j - 4] >> 6) << 4);
+        m  = (scales[j + 4] >> 4) | ((scales[j - 0] >> 6) << 4);
+    }
+    return uchar2(sc, m);
+}
+
+#define ROWS_PER_TG_QK 8
+
+// ============================================================================
+// Phase C S5: fused_gdn_batched_qk — the GGUF Q4_K variant of the fused
+// batched GDN chain. Same structure as fused_gdn_batched (verbatim conv /
+// recurrence / gated-norm math, in-kernel M-position loop, per-thread q/k
+// histories, GPU conv_state for the v channels) with two GGUF deltas:
+//   1. in_proj a/b run IN-KERNEL: Q4_K block-decode matvec per head-TG,
+//      thread 0 only, sequential word order (mirrors gguf_cpu_matvec's
+//      dequant-then-MAC form; the per-element expression matches
+//      dequant_matvec_qk so the dequant arithmetic is identical).
+//   2. A_val = -A_log (GGUF stores ssm_a negated+exponentiated — see
+//      linear_attn_chain_cpu's ternary).
+// b_w/a_w are Q4_K [32, in_dim] rows (144B/256 row bytes); x is the layer
+// input [M, in_dim] (buf_pf_input, written by the previous layer's CMD3 —
+// cross-CB read, coherent). qkv_in/z are written by cmdA in the PREVIOUS
+// command buffer (the packed 2-CB structure — same-CB device reads hit the
+// stale-L2 hazard, so this kernel runs in its own CB after a wait).
+// ============================================================================
+kernel void fused_gdn_batched_qk(
+    device float       *conv_state,      // [3 * conv_dim] persistent, v channels only
+    device const float *qkv_in,          // [M * conv_dim]
+    device const uint16_t *conv_w,       // [conv_dim * 4] bf16
+    device const float *z,               // [M * num_v_heads * value_dim]
+    device const uchar *b_w,             // Q4_K [num_v_heads, in_dim] beta weights
+    device const uchar *a_w,             // Q4_K [num_v_heads, in_dim] alpha weights
+    device const float *x,               // [M * in_dim] layer input
+    device const float *A_log,           // [num_v_heads] F32
+    device const uint16_t *dt_bias,      // [num_v_heads] bf16
+    device const uint16_t *norm_weight,  // [value_dim] bf16
+    device float       *state,           // [num_v_heads * value_dim * key_dim] persistent
+    device float       *output,          // [M * num_v_heads * value_dim] gated output
+    device float       *qk_hist,         // [3 * (2*total_key)] per-thread q/k conv history
+    constant uint &conv_dim,             // 8192
+    constant uint &in_dim,               // 2048
+    constant uint &k_heads_per_v,        // 2
+    constant uint &key_dim,              // 128
+    constant uint &value_dim,            // 128
+    constant uint &M,                    // positions per chunk
+    constant float &eps,                 // 1e-6
+    uint head [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]]
+) {
+    uint kh = head % 16;  // torch .repeat() block mapping (LINEAR_NUM_K_HEADS)
+    uint total_key = conv_dim / 4;  // 2048 = LINEAR_TOTAL_KEY
+    uint num_v_heads = k_heads_per_v * (total_key / key_dim);  // matches caller
+    uint words = in_dim / 8;
+    uint row_bytes = (in_dim / 256) * 144u;  // Q4_K
+
+    threadgroup float conv_q[128];
+    threadgroup float conv_k[128];
+    threadgroup float conv_v[128];
+    threadgroup float g_decay, beta_gate;
+    threadgroup float part_q[128];
+    threadgroup float part_k[128];
+    threadgroup float partial[128];
+
+    for (uint m = 0; m < M; m++) {
+        device const float *qkv_m = qkv_in + (size_t)m * conv_dim;
+        device const float *z_m   = z + (size_t)m * num_v_heads * value_dim;
+        device float *out_m = output + (size_t)m * num_v_heads * value_dim;
+
+        uint q_c = kh * key_dim + tid;
+        uint k_c = total_key + kh * key_dim + tid;
+        uint v_c = 2 * total_key + head * value_dim + tid;
+
+        {
+            uint c = q_c;
+            uint wb = c * 4;
+            // Per-thread device history (see fused_gdn_full): the q/k conv
+            // channels are shared between head pairs — concurrent TGs
+            // shifting shared conv_state channels tore each other's reads.
+            device float *qh = qk_hist + head * 3 * key_dim + tid;
+            float acc = qh[0 * key_dim] * bf16_to_f32(conv_w[wb + 0])
+                      + qh[1 * key_dim] * bf16_to_f32(conv_w[wb + 1])
+                      + qh[2 * key_dim] * bf16_to_f32(conv_w[wb + 2])
+                      + qkv_m[c] * bf16_to_f32(conv_w[wb + 3]);
+            conv_q[tid] = acc / (1.0f + exp(-acc));  // SiLU
+            qh[0 * key_dim] = qh[1 * key_dim];
+            qh[1 * key_dim] = qh[2 * key_dim];
+            qh[2 * key_dim] = qkv_m[c];
+        }
+        {
+            uint c = k_c;
+            uint wb = c * 4;
+            device float *kh_hist = qk_hist + 32 * 3 * key_dim + head * 3 * key_dim + tid;
+            float acc = kh_hist[0 * key_dim] * bf16_to_f32(conv_w[wb + 0])
+                      + kh_hist[1 * key_dim] * bf16_to_f32(conv_w[wb + 1])
+                      + kh_hist[2 * key_dim] * bf16_to_f32(conv_w[wb + 2])
+                      + qkv_m[c] * bf16_to_f32(conv_w[wb + 3]);
+            conv_k[tid] = acc / (1.0f + exp(-acc));
+            kh_hist[0 * key_dim] = kh_hist[1 * key_dim];
+            kh_hist[1 * key_dim] = kh_hist[2 * key_dim];
+            kh_hist[2 * key_dim] = qkv_m[c];
+        }
+        {
+            uint c = v_c;
+            uint wb = c * 4;
+            float acc = conv_state[0 * conv_dim + c] * bf16_to_f32(conv_w[wb + 0])
+                      + conv_state[1 * conv_dim + c] * bf16_to_f32(conv_w[wb + 1])
+                      + conv_state[2 * conv_dim + c] * bf16_to_f32(conv_w[wb + 2])
+                      + qkv_m[c] * bf16_to_f32(conv_w[wb + 3]);
+            conv_v[tid] = acc / (1.0f + exp(-acc));
+            conv_state[0 * conv_dim + c] = conv_state[1 * conv_dim + c];
+            conv_state[1 * conv_dim + c] = conv_state[2 * conv_dim + c];
+            conv_state[2 * conv_dim + c] = qkv_m[c];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // ---- Step 2: rms_norm_qk (q gets inv^2, k gets inv) ----
+        part_q[tid] = conv_q[tid] * conv_q[tid];
+        part_k[tid] = conv_k[tid] * conv_k[tid];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0) {
+            float sq = 0, sk = 0;
+            for (uint i = 0; i < key_dim; i++) { sq += part_q[i]; sk += part_k[i]; }
+            part_q[0] = sq;
+            part_k[0] = sk;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float inv_scale = rsqrt(float(key_dim));
+        float inv_q = rsqrt(part_q[0] / float(key_dim) + 1e-6f);
+        float inv_k = rsqrt(part_k[0] / float(key_dim) + 1e-6f);
+        conv_q[tid] = conv_q[tid] * inv_q * inv_scale * inv_scale;
+        conv_k[tid] = conv_k[tid] * inv_k * inv_scale;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // ---- Step 3: in_proj a/b (in-kernel Q4_K matvec, thread 0) + decay ----
+        if (tid == 0) {
+            device const uchar* br = b_w + (ulong)head * row_bytes;
+            device const uchar* ar = a_w + (ulong)head * row_bytes;
+            device const float *x_m = x + (size_t)m * in_dim;
+            float bacc = 0.0f, aacc = 0.0f;
+            // Sequential word order mirrors gguf_cpu_matvec's dequant-then-
+            // MAC loop; per-element expression matches dequant_matvec_qk.
+            for (uint w = 0; w < words; w++) {
+                uint block = w >> 5;
+                uint wb = w & 31;
+                device const uchar* bb = br + (ulong)block * 144u;
+                device const uchar* ab = ar + (ulong)block * 144u;
+                uint j    = (wb >> 3) * 2 + ((wb >> 2) & 1);
+                uint nhalf = (wb >> 2) & 1;
+                float db    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(bb + 0)));
+                float mbmin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(bb + 2)));
+                float da    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(ab + 0)));
+                float mamin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(ab + 2)));
+                uchar2 smb = get_scale_min_k4(j, bb + 4);
+                uchar2 sma = get_scale_min_k4(j, ab + 4);
+                float bdsc = db * (float)smb.x;
+                float bmm  = mbmin * (float)smb.y;
+                float adsc = da * (float)sma.x;
+                float amm  = mamin * (float)sma.y;
+                ulong bq = *(device ulong*)(bb + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+                ulong aq = *(device ulong*)(ab + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+                for (uint i = 0; i < 8; i++) {
+                    uint bnb = (uint)((bq >> (8 * i + 4 * nhalf)) & 0xF);
+                    uint anb = (uint)((aq >> (8 * i + 4 * nhalf)) & 0xF);
+                    float xv = x_m[w * 8 + i];
+                    bacc += ((float)bnb * bdsc - bmm) * xv;
+                    aacc += ((float)anb * adsc - amm) * xv;
+                }
+            }
+            float dt_b  = bf16_to_f32(dt_bias[head]);
+            float A_val = -A_log[head];   // GGUF: ssm_a stored negated+exp'd
+            float softplus_val = log(1.0f + exp(aacc + dt_b));
+            g_decay   = exp(-A_val * softplus_val);
+            beta_gate = 1.0f / (1.0f + exp(-bacc));
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // ---- Step 4: GDN recurrence (each thread owns one state row) ----
+        uint state_base = head * value_dim * key_dim;
+        float kv_mem = 0.0f;
+        for (uint ki = 0; ki < key_dim; ki++) {
+            float s = state[state_base + tid * key_dim + ki] * g_decay;
+            state[state_base + tid * key_dim + ki] = s;
+            kv_mem += s * conv_k[ki];
+        }
+        float delta = (conv_v[tid] - kv_mem) * beta_gate;
+        for (uint ki = 0; ki < key_dim; ki++) {
+            state[state_base + tid * key_dim + ki] += conv_k[ki] * delta;
+        }
+        float out_val = 0.0f;
+        for (uint ki = 0; ki < key_dim; ki++) {
+            out_val += state[state_base + tid * key_dim + ki] * conv_q[ki];
+        }
+
+        // ---- Step 5: gated rms norm ----
+        uint base = head * value_dim;
+        partial[tid] = out_val * out_val;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0) {
+            float s = 0;
+            for (uint i = 0; i < value_dim; i++) s += partial[i];
+            partial[0] = s;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float inv_rms = rsqrt(partial[0] / float(value_dim) + eps);
+
+        float normed = out_val * inv_rms;
+        float zval = z_m[base + tid];
+        float gate = zval / (1.0f + exp(-zval));  // SiLU
+        float w = bf16_to_f32(norm_weight[tid]);
+        out_m[base + tid] = normed * gate * w;
+
+    }
+}
+
+kernel void dequant_matvec_qk(
+    device const uchar*  W          [[buffer(0)]],  // tensor base (per-tensor wrapped buffer)
+    device const float*  x          [[buffer(3)]],  // [in_dim]
+    device float*        out        [[buffer(4)]],  // [out_dim]
+    constant uint&       out_dim    [[buffer(5)]],
+    constant uint&       in_dim     [[buffer(6)]],
+    constant uint&       ggml_type  [[buffer(7)]],  // 12 = Q4_K, 14 = Q6_K
+    uint tgid      [[threadgroup_position_in_grid]],
+    uint lid       [[thread_position_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = tgid * ROWS_PER_TG_QK + simd_group;
+    uint words = in_dim / 8;   // 8 values per word
+    uint blocks = in_dim / 256;
+    uint row_bytes = blocks * (ggml_type == 12 ? 144u : 210u);
+
+    threadgroup float x_shared[4096];
+    for (uint i = lid; i < in_dim; i += 256) x_shared[i] = x[i];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (row >= out_dim) return;
+
+    device const uchar* w_row = W + (ulong)row * row_bytes;
+    float acc = 0.0f;
+
+    for (uint w = simd_lane; w < words; w += 32) {
+        uint block = w >> 5;
+        uint wb = w & 31;
+        device const uchar* b = w_row + (ulong)block * (ggml_type == 12 ? 144u : 210u);
+        uint xb = w * 8;
+
+        if (ggml_type == 12) {
+            // ---- Q4_K: 144B/256. d(+0) mmin(+2) fp16, scales(+4, 12B),
+            // q(+16, 128B). 4 sub-blocks of 64: 32B each, low nibbles then
+            // high nibbles of the SAME bytes; (sc,m) change every 32 values.
+            float d    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 0)));
+            float mmin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 2)));
+            uint j    = (wb >> 3) * 2 + ((wb >> 2) & 1);   // scale-pair index
+            uint nhalf = (wb >> 2) & 1;                    // 0 = low nibbles
+            uchar2 sm = get_scale_min_k4(j, b + 4);
+            float dsc = d * (float)sm.x;
+            float mm  = mmin * (float)sm.y;
+            // 8 consecutive q bytes (8-byte aligned within the 32B sub-block)
+            ulong qbytes = *(device ulong*)(b + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+            for (uint i = 0; i < 8; i++) {
+                // 8 bits per byte: byte i's nibble lives at shift 8*i (+4 high)
+                uint nib = (uint)((qbytes >> (8 * i + 4 * nhalf)) & 0xF);
+                float xv = x_shared[xb + i];
+                // NOTE: the fma(a, dsc*xv, -mm*xv) form miscompiled to 0 on
+                // the M4 Metal compiler (verified in isolation 2026-08-17) —
+                // use the direct form: (nib*dsc - mm)*xv.
+                acc += ((float)nib * dsc - mm) * xv;
+            }
+        } else {
+            // ---- Q6_K: 210B/256. ql(+0, 128B), qh(+128, 64B),
+            // int8 scales(+192, 16B), d fp16 at +208. 6-bit values:
+            // (ql nibble | (qh 2-bit << 4)) - 32; scale index = (vi>>4)&7
+            // per 128-chunk. 210*block ≡ 2 mod 4 — BYTE loads only.
+            uint chunk = wb >> 4;
+            uint wbp   = wb & 15;
+            float d    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 208)));
+            int sc = (int)b[192 + chunk * 8 + (wbp >> 1)];
+            if (sc >= 128) sc -= 256;                       // int8 sign-extend
+            float dsc = d * (float)sc;
+            uint vb = wbp * 8;
+            for (uint i = 0; i < 8; i++) {
+                uint vi = vb + i;
+                uint qb = chunk * 64 + (vi & 63);
+                uint hb = chunk * 32 + (vi & 31);
+                uint sh = 2 * ((vi >> 5) & 3);
+                // ql byte = vi&63 serves q1+q2 (low nibble, vi<64) and
+                // q3+q4 (high nibble, vi>=64) — the split is at vi>>6, NOT
+                // at the 64-byte ql window edge.
+                uint nib = (b[qb] >> (4 * ((vi >> 6) & 1))) & 0xF;
+                uint qraw = nib | (((b[128 + hb] >> sh) & 3) << 4);
+                float xv = x_shared[xb + i];
+                acc += dsc * ((float)qraw - 32.0f) * xv;
+            }
+        }
+    }
+
+    float sum = simd_sum(acc);
+    if (simd_lane == 0) out[row] = sum;
+}
+
+// ============================================================================
+// Phase C S2: fused gate+up+SwiGLU for GGUF Q4_K expert slabs.
+// Clone of fused_gate_up_swiglu (1 TG per output row, threadgroup sg/su[32]
+// reduction) with the Q4_K block decode. Both gate and up share the same
+// x and the same block geometry (both Q4_K in this model's export).
+// ============================================================================
+kernel void fused_gate_up_swiglu_qk(
+    device const uchar* gate_W  [[buffer(0)]],  // Q4_K [out_dim, in_dim]
+    device const uchar* up_W    [[buffer(1)]],  // Q4_K [out_dim, in_dim]
+    device const float*  x      [[buffer(2)]],  // [in_dim]
+    device float*        out    [[buffer(3)]],  // [out_dim] SwiGLU result
+    constant uint&       out_dim [[buffer(4)]],
+    constant uint&       in_dim  [[buffer(5)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint lid  [[thread_position_in_threadgroup]],
+    uint tg_size [[threads_per_threadgroup]]
+) {
+    if (tgid >= out_dim) return;
+    uint words = in_dim / 8;
+    uint row_bytes = (in_dim / 256) * 144u;
+    device const uchar* gr = gate_W + (ulong)tgid * row_bytes;
+    device const uchar* ur = up_W   + (ulong)tgid * row_bytes;
+    float ga = 0.0f, ua = 0.0f;
+    // group-strided over words (like the original's group-strided loop)
+    for (uint w = lid; w < words; w += tg_size) {
+        uint block = w >> 5;
+        uint wb = w & 31;
+        uint j    = (wb >> 3) * 2 + ((wb >> 2) & 1);
+        uint nhalf = (wb >> 2) & 1;
+        device const uchar* gb = gr + (ulong)block * 144u;
+        device const uchar* ub = ur + (ulong)block * 144u;
+        float dg    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(gb + 0)));
+        float mgmin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(gb + 2)));
+        float dug    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(ub + 0)));
+        float mumin  = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(ub + 2)));
+        uchar2 smg = get_scale_min_k4(j, gb + 4);
+        uchar2 smu = get_scale_min_k4(j, ub + 4);
+        float gdsc = dg * (float)smg.x;
+        float gmm  = mgmin * (float)smg.y;
+        float udsc = dug * (float)smu.x;
+        float umm  = mumin * (float)smu.y;
+        ulong gq = *(device ulong*)(gb + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+        ulong uq = *(device ulong*)(ub + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+        uint xb = w * 8;
+        for (uint i = 0; i < 8; i++) {
+            uint gnib = (uint)((gq >> (8 * i + 4 * nhalf)) & 0xF);
+            uint unib = (uint)((uq >> (8 * i + 4 * nhalf)) & 0xF);
+            float xv = x[xb + i];
+            ga += ((float)gnib * gdsc - gmm) * xv;
+            ua += ((float)unib * udsc - umm) * xv;
+        }
+    }
+    // identical reduction to fused_gate_up_swiglu (select-based simd_sum —
+    // divergent simd_sum is UB on Apple GPUs)
+    threadgroup float sg[32] = {0}, su[32] = {0};
+    float rg = simd_sum(ga), ru = simd_sum(ua);
+    uint sl = lid % 32, si = lid / 32, ns = (tg_size + 31) / 32;
+    if (sl == 0) { sg[si] = rg; su[si] = ru; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float part_g = (si == 0 && sl < ns) ? sg[sl] : 0.0f;
+    float part_u = (si == 0 && sl < ns) ? su[sl] : 0.0f;
+    float vg = simd_sum(part_g);
+    float vu = simd_sum(part_u);
+    if (si == 0 && sl == 0) out[tgid] = (vg / (1.0f + exp(-vg))) * vu;
+}
+
+// ============================================================================
+// Phase C S3: M-position batched Q4_K/Q6_K dequant-matvec for chunked prefill.
+// Linearized grid m * num_row_tiles + row_tile (the dequant_matvec_4bit_prefill
+// shape); decode identical to dequant_matvec_qk.
+// ============================================================================
+kernel void dequant_matvec_qk_prefill(
+    device const uchar*  W          [[buffer(0)]],
+    device const float*  x_inputs   [[buffer(3)]],  // [M, in_dim]
+    device float*        out        [[buffer(4)]],  // [M, out_dim]
+    constant uint&       out_dim    [[buffer(5)]],
+    constant uint&       in_dim     [[buffer(6)]],
+    constant uint&       ggml_type  [[buffer(7)]],
+    uint tgid      [[threadgroup_position_in_grid]],
+    uint lid       [[thread_position_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint num_row_tiles = (out_dim + ROWS_PER_TG_QK - 1) / ROWS_PER_TG_QK;
+    uint m = tgid / num_row_tiles;
+    uint row_tile = tgid % num_row_tiles;
+    uint row = row_tile * ROWS_PER_TG_QK + simd_group;
+    uint words = in_dim / 8;
+    uint row_bytes = (in_dim / 256) * (ggml_type == 12 ? 144u : 210u);
+
+    threadgroup float x_shared[4096];
+    const device float* x = x_inputs + (size_t)m * in_dim;
+    for (uint i = lid; i < in_dim; i += 256) x_shared[i] = x[i];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (row >= out_dim) return;
+
+    device const uchar* w_row = W + (ulong)row * row_bytes;
+    float acc = 0.0f;
+    for (uint w = simd_lane; w < words; w += 32) {
+        uint block = w >> 5;
+        uint wb = w & 31;
+        device const uchar* b = w_row + (ulong)block * (ggml_type == 12 ? 144u : 210u);
+        uint xb = w * 8;
+        if (ggml_type == 12) {
+            float d    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 0)));
+            float mmin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 2)));
+            uint j    = (wb >> 3) * 2 + ((wb >> 2) & 1);
+            uint nhalf = (wb >> 2) & 1;
+            uchar2 sm = get_scale_min_k4(j, b + 4);
+            float dsc = d * (float)sm.x;
+            float mm  = mmin * (float)sm.y;
+            ulong qbytes = *(device ulong*)(b + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+            for (uint i = 0; i < 8; i++) {
+                uint nib = (uint)((qbytes >> (8 * i + 4 * nhalf)) & 0xF);
+                float xv = x_shared[xb + i];
+                acc += ((float)nib * dsc - mm) * xv;
+            }
+        } else {
+            uint chunk = wb >> 4;
+            uint wbp   = wb & 15;
+            float d    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 208)));
+            int sc = (int)b[192 + chunk * 8 + (wbp >> 1)];
+            if (sc >= 128) sc -= 256;
+            float dsc = d * (float)sc;
+            uint vb = wbp * 8;
+            for (uint i = 0; i < 8; i++) {
+                uint vi = vb + i;
+                uint qb = chunk * 64 + (vi & 63);
+                uint hb = chunk * 32 + (vi & 31);
+                uint sh = 2 * ((vi >> 5) & 3);
+                uint nib = (b[qb] >> (4 * ((vi >> 6) & 1))) & 0xF;
+                uint qraw = nib | (((b[128 + hb] >> sh) & 3) << 4);
+                float xv = x_shared[xb + i];
+                acc += dsc * ((float)qraw - 32.0f) * xv;
+            }
+        }
+    }
+    float sum = simd_sum(acc);
+    if (simd_lane == 0) out[(size_t)m * out_dim + row] = sum;
+}
+
+// ============================================================================
+// Phase C S4.1: M-batched CMD3 kernels — the per-position dispatches cost
+// ~14-18us of GPU launch overhead each (168 per layer); these fold the M
+// positions of a group into ONE dispatch per kernel. All arithmetic is
+// verbatim from the per-position kernels (bitwise parity target); the pool
+// slot offsets (deduped per (m,k)) arrive as per-m byte-offset arrays.
+// ============================================================================
+
+// Fused gate+up+SwiGLU for Q4_K expert slabs, M positions of a group.
+// S3-layout: 8 rows per TG (one row per simdgroup), lane-strided words,
+// simd_sum reduction, NO barriers — the per-row 256-thread TG shape cost
+// ~1.86ms/layer in barrier + launch overhead (C3SKIP decomposition).
+// Per-element decode arithmetic is verbatim fused_gate_up_swiglu_qk; only
+// the summation order changes (32-lane tree) — G5-class divergence vs the
+// per-position fallback (observed bitwise on this GPU anyway).
+// NOTE: each (position, k) slot holds a DIFFERENT routed expert's weights,
+// so the weights are bound per gm (gate_offs[gm]) — the pool re-reads are
+// the real unique weight traffic.
+kernel void fused_gate_up_swiglu_qk_pool_prefill(
+    device const uchar* gate_W  [[buffer(0)]],  // pool buffer base
+    device const uchar* up_W    [[buffer(1)]],  // pool buffer base
+    device const float*  x      [[buffer(2)]],  // [M, in_dim]
+    device float*        out    [[buffer(3)]],  // [M, out_dim]
+    constant uint&       out_dim [[buffer(4)]],
+    constant uint&       in_dim  [[buffer(5)]],
+    device const uint*   gate_offs [[buffer(6)]],  // [gM] byte offsets (slot)
+    device const uint*   up_offs   [[buffer(7)]],  // [gM] byte offsets (slot + gate_slab)
+    constant uint&       m_base    [[buffer(8)]],
+    uint tgid      [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint num_row_tiles = (out_dim + ROWS_PER_TG_QK - 1) / ROWS_PER_TG_QK;
+    uint gm = tgid / num_row_tiles;
+    uint row_tile = tgid % num_row_tiles;
+    uint row = row_tile * ROWS_PER_TG_QK + simd_group;
+    if (row >= out_dim) return;
+    uint m = m_base + gm;
+    uint words = in_dim / 8;
+    uint row_bytes = (in_dim / 256) * 144u;
+    device const uchar* gr = gate_W + (ulong)gate_offs[gm] + (ulong)row * row_bytes;
+    device const uchar* ur = up_W   + (ulong)up_offs[gm]   + (ulong)row * row_bytes;
+    device const float* xm = x + (size_t)m * in_dim;
+    float ga = 0.0f, ua = 0.0f;
+    for (uint w = simd_lane; w < words; w += 32) {
+        uint block = w >> 5;
+        uint wb = w & 31;
+        uint j    = (wb >> 3) * 2 + ((wb >> 2) & 1);
+        uint nhalf = (wb >> 2) & 1;
+        device const uchar* gb = gr + (ulong)block * 144u;
+        device const uchar* ub = ur + (ulong)block * 144u;
+        float dg    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(gb + 0)));
+        float mgmin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(gb + 2)));
+        float dug    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(ub + 0)));
+        float mumin  = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(ub + 2)));
+        uchar2 smg = get_scale_min_k4(j, gb + 4);
+        uchar2 smu = get_scale_min_k4(j, ub + 4);
+        float gdsc = dg * (float)smg.x;
+        float gmm  = mgmin * (float)smg.y;
+        float udsc = dug * (float)smu.x;
+        float umm  = mumin * (float)smu.y;
+        ulong gq = *(device ulong*)(gb + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+        ulong uq = *(device ulong*)(ub + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+        uint xb = w * 8;
+        for (uint i = 0; i < 8; i++) {
+            uint gnib = (uint)((gq >> (8 * i + 4 * nhalf)) & 0xF);
+            uint unib = (uint)((uq >> (8 * i + 4 * nhalf)) & 0xF);
+            float xv = xm[xb + i];
+            ga += ((float)gnib * gdsc - gmm) * xv;
+            ua += ((float)unib * udsc - umm) * xv;
+        }
+    }
+    float rg = simd_sum(ga), ru = simd_sum(ua);
+    if (simd_lane == 0)
+        out[(size_t)m * out_dim + row] = (rg / (1.0f + exp(-rg))) * ru;
+}
+
+// PERF PROBE (FINCHMOE_PF_GATEONLY): identical to the fused pool kernel but
+// reads ONLY the gate slab (up output written as 0) — isolates whether the
+// dual gate+up streams interact in the memory path vs cost being linear in
+// bytes read. Timing-only: outputs are invalid.
+kernel void fused_gate_up_swiglu_qk_pool_gateonly(
+    device const uchar* gate_W  [[buffer(0)]],
+    device const uchar* up_W    [[buffer(1)]],
+    device const float*  x      [[buffer(2)]],
+    device float*        out    [[buffer(3)]],
+    constant uint&       out_dim [[buffer(4)]],
+    constant uint&       in_dim  [[buffer(5)]],
+    device const uint*   gate_offs [[buffer(6)]],
+    device const uint*   up_offs   [[buffer(7)]],
+    constant uint&       m_base    [[buffer(8)]],
+    uint tgid      [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint num_row_tiles = (out_dim + ROWS_PER_TG_QK - 1) / ROWS_PER_TG_QK;
+    uint gm = tgid / num_row_tiles;
+    uint row_tile = tgid % num_row_tiles;
+    uint row = row_tile * ROWS_PER_TG_QK + simd_group;
+    if (row >= out_dim) return;
+    uint m = m_base + gm;
+    uint words = in_dim / 8;
+    uint row_bytes = (in_dim / 256) * 144u;
+    device const uchar* gr = gate_W + (ulong)gate_offs[gm] + (ulong)row * row_bytes;
+    device const float* xm = x + (size_t)m * in_dim;
+    float ga = 0.0f;
+    for (uint w = simd_lane; w < words; w += 32) {
+        uint block = w >> 5;
+        uint wb = w & 31;
+        uint j    = (wb >> 3) * 2 + ((wb >> 2) & 1);
+        uint nhalf = (wb >> 2) & 1;
+        device const uchar* gb = gr + (ulong)block * 144u;
+        float dg    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(gb + 0)));
+        float mgmin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(gb + 2)));
+        uchar2 smg = get_scale_min_k4(j, gb + 4);
+        float gdsc = dg * (float)smg.x;
+        float gmm  = mgmin * (float)smg.y;
+        ulong gq = *(device ulong*)(gb + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+        uint xb = w * 8;
+        for (uint i = 0; i < 8; i++) {
+            uint gnib = (uint)((gq >> (8 * i + 4 * nhalf)) & 0xF);
+            float xv = xm[xb + i];
+            ga += ((float)gnib * gdsc - gmm) * xv;
+        }
+    }
+    float rg = simd_sum(ga);
+    if (simd_lane == 0)
+        out[(size_t)m * out_dim + row] = rg;  // timing-only: math is invalid
+}
+
+// PERF PROBE (FINCHMOE_PF_BARRIER): the fused pool kernel + one
+// threadgroup_barrier before the weight loop — locks the 8 simdgroups'
+// row-block reads into lockstep (down kernel's structure). Tests whether
+// simdgroup drift is what caps pool reads at ~26GB/s. Timing-only probe.
+// Valid only when out_dim % 8 == 0 (MOE_INTERMEDIATE = 512 ✓).
+kernel void fused_gate_up_swiglu_qk_pool_barrier(
+    device const uchar* gate_W  [[buffer(0)]],
+    device const uchar* up_W    [[buffer(1)]],
+    device const float*  x      [[buffer(2)]],
+    device float*        out    [[buffer(3)]],
+    constant uint&       out_dim [[buffer(4)]],
+    constant uint&       in_dim  [[buffer(5)]],
+    device const uint*   gate_offs [[buffer(6)]],
+    device const uint*   up_offs   [[buffer(7)]],
+    constant uint&       m_base    [[buffer(8)]],
+    uint tgid      [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint num_row_tiles = (out_dim + ROWS_PER_TG_QK - 1) / ROWS_PER_TG_QK;
+    uint gm = tgid / num_row_tiles;
+    uint row_tile = tgid % num_row_tiles;
+    uint row = row_tile * ROWS_PER_TG_QK + simd_group;
+    if (row >= out_dim) return;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint m = m_base + gm;
+    uint words = in_dim / 8;
+    uint row_bytes = (in_dim / 256) * 144u;
+    device const uchar* gr = gate_W + (ulong)gate_offs[gm] + (ulong)row * row_bytes;
+    device const uchar* ur = up_W   + (ulong)up_offs[gm]   + (ulong)row * row_bytes;
+    device const float* xm = x + (size_t)m * in_dim;
+    float ga = 0.0f, ua = 0.0f;
+    for (uint w = simd_lane; w < words; w += 32) {
+        uint block = w >> 5;
+        uint wb = w & 31;
+        uint j    = (wb >> 3) * 2 + ((wb >> 2) & 1);
+        uint nhalf = (wb >> 2) & 1;
+        device const uchar* gb = gr + (ulong)block * 144u;
+        device const uchar* ub = ur + (ulong)block * 144u;
+        float dg    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(gb + 0)));
+        float mgmin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(gb + 2)));
+        float dug    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(ub + 0)));
+        float mumin  = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(ub + 2)));
+        uchar2 smg = get_scale_min_k4(j, gb + 4);
+        uchar2 smu = get_scale_min_k4(j, ub + 4);
+        float gdsc = dg * (float)smg.x;
+        float gmm  = mgmin * (float)smg.y;
+        float udsc = dug * (float)smu.x;
+        float umm  = mumin * (float)smu.y;
+        ulong gq = *(device ulong*)(gb + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+        ulong uq = *(device ulong*)(ub + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+        uint xb = w * 8;
+        for (uint i = 0; i < 8; i++) {
+            uint gnib = (uint)((gq >> (8 * i + 4 * nhalf)) & 0xF);
+            uint unib = (uint)((uq >> (8 * i + 4 * nhalf)) & 0xF);
+            float xv = xm[xb + i];
+            ga += ((float)gnib * gdsc - gmm) * xv;
+            ua += ((float)unib * udsc - umm) * xv;
+        }
+    }
+    float rg = simd_sum(ga), ru = simd_sum(ua);
+    if (simd_lane == 0)
+        out[(size_t)m * out_dim + row] = (rg / (1.0f + exp(-rg))) * ru;
+}
+
+// Q4_K/Q6_K dequant-matvec for expert down slabs, M positions of a group.
+// Clone of dequant_matvec_qk_prefill with per-m pool-slot weight offsets
+// (the S3 kernel's arithmetic is verbatim — same lane-strided order as the
+// per-position matvec_qk, so the down output is bitwise identical).
+kernel void dequant_matvec_qk_pool_prefill(
+    device const uchar*  W          [[buffer(0)]],
+    device const float*  x_inputs   [[buffer(3)]],  // [M, in_dim]
+    device float*        out        [[buffer(4)]],  // [M, out_dim]
+    constant uint&       out_dim    [[buffer(5)]],
+    constant uint&       in_dim     [[buffer(6)]],
+    constant uint&       ggml_type  [[buffer(7)]],
+    device const uint*   w_offs     [[buffer(8)]],  // [gM] byte offsets (slot + down delta)
+    constant uint&       m_base     [[buffer(9)]],
+    uint tgid      [[threadgroup_position_in_grid]],
+    uint lid       [[thread_position_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint num_row_tiles = (out_dim + ROWS_PER_TG_QK - 1) / ROWS_PER_TG_QK;
+    uint gm = tgid / num_row_tiles;
+    uint row_tile = tgid % num_row_tiles;
+    uint m = m_base + gm;
+    uint row = row_tile * ROWS_PER_TG_QK + simd_group;
+    uint words = in_dim / 8;
+    uint row_bytes = (in_dim / 256) * (ggml_type == 12 ? 144u : 210u);
+
+    threadgroup float x_shared[4096];
+    const device float* x = x_inputs + (size_t)m * in_dim;
+    for (uint i = lid; i < in_dim; i += 256) x_shared[i] = x[i];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (row >= out_dim) return;
+
+    device const uchar* w_row = W + (ulong)w_offs[gm] + (ulong)row * row_bytes;
+    float acc = 0.0f;
+    for (uint w = simd_lane; w < words; w += 32) {
+        uint block = w >> 5;
+        uint wb = w & 31;
+        device const uchar* b = w_row + (ulong)block * (ggml_type == 12 ? 144u : 210u);
+        uint xb = w * 8;
+        if (ggml_type == 12) {
+            float d    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 0)));
+            float mmin = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 2)));
+            uint j    = (wb >> 3) * 2 + ((wb >> 2) & 1);
+            uint nhalf = (wb >> 2) & 1;
+            uchar2 sm = get_scale_min_k4(j, b + 4);
+            float dsc = d * (float)sm.x;
+            float mm  = mmin * (float)sm.y;
+            ulong qbytes = *(device ulong*)(b + 16 + 32 * (wb >> 3) + 8 * (wb & 3));
+            for (uint i = 0; i < 8; i++) {
+                uint nib = (uint)((qbytes >> (8 * i + 4 * nhalf)) & 0xF);
+                float xv = x_shared[xb + i];
+                acc += ((float)nib * dsc - mm) * xv;
+            }
+        } else {
+            uint chunk = wb >> 4;
+            uint wbp   = wb & 15;
+            float d    = m_fp16_to_f32(as_type<ushort>(*(device ushort*)(b + 208)));
+            int sc = (int)b[192 + chunk * 8 + (wbp >> 1)];
+            if (sc >= 128) sc -= 256;
+            float dsc = d * (float)sc;
+            uint vb = wbp * 8;
+            for (uint i = 0; i < 8; i++) {
+                uint vi = vb + i;
+                uint qb = chunk * 64 + (vi & 63);
+                uint hb = chunk * 32 + (vi & 31);
+                uint sh = 2 * ((vi >> 5) & 3);
+                uint nib = (b[qb] >> (4 * ((vi >> 6) & 1))) & 0xF;
+                uint qraw = nib | (((b[128 + hb] >> sh) & 3) << 4);
+                float xv = x_shared[xb + i];
+                acc += dsc * ((float)qraw - 32.0f) * xv;
+            }
+        }
+    }
+    float sum = simd_sum(acc);
+    if (simd_lane == 0) out[(size_t)m * out_dim + row] = sum;
+}
+
+// Shared-expert SwiGLU, M positions of a group. Grid: (tgs, gM), 256 threads.
+// Verbatim swiglu_fused per element.
+kernel void swiglu_prefill_batch(
+    device const float* gate [[buffer(0)]],  // [M, dim]
+    device const float* up   [[buffer(1)]],  // [M, dim]
+    device float*       out  [[buffer(2)]],  // [M, dim]
+    constant uint&      dim  [[buffer(3)]],
+    constant uint&      m_base [[buffer(4)]],
+    uint2 tpos [[thread_position_in_grid]]
+) {
+    uint i = tpos.x;
+    if (i >= dim) return;
+    uint m = m_base + tpos.y;
+    size_t base = (size_t)m * dim;
+    float g = gate[base + i];
+    float silu_g = g / (1.0f + exp(-g));
+    out[base + i] = silu_g * up[base + i];
+}
+
+// RMS norm sum-of-squares, M positions of a group (clone of
+// rms_norm_sum_sq_prefill with m from the grid). Grid: (gM, 1), 256 threads.
+kernel void rms_norm_sum_sq_prefill_batch(
+    device const float* x       [[buffer(0)]],  // [M, dim]
+    device float*       sum_sq  [[buffer(1)]],  // [M]
+    constant uint&      dim     [[buffer(2)]],
+    constant uint&      m_base  [[buffer(3)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint lid [[thread_position_in_threadgroup]],
+    uint tg_size [[threads_per_threadgroup]]
+) {
+    threadgroup float shared[32];
+    uint m = m_base + tgid;
+
+    size_t base = (size_t)m * dim;
+    float acc = 0.0f;
+    for (uint i = lid; i < dim; i += tg_size) {
+        float val = x[base + i];
+        acc += val * val;
+    }
+
+    float simd_val = simd_sum(acc);
+    uint simd_lane = lid % 32;
+    uint simd_group = lid / 32;
+
+    if (simd_lane == 0) {
+        shared[simd_group] = simd_val;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group == 0) {
+        float val = (simd_lane < (tg_size + 31) / 32) ? shared[simd_lane] : 0.0f;
+        val = simd_sum(val);
+        if (simd_lane == 0) {
+            sum_sq[m] = val;
+        }
+    }
+}
+
+// RMS norm apply (bf16 weights), M positions of a group (clone of
+// rms_norm_apply_bf16_prefill with m from the flat grid). Grid: (tgs*gM, 1).
+kernel void rms_norm_apply_bf16_prefill_batch(
+    device const float*    x       [[buffer(0)]],  // [M, dim]
+    device const uint16_t* weight  [[buffer(1)]],  // [dim] bf16
+    device const float*    sum_sq  [[buffer(2)]],  // [M]
+    device float*          out     [[buffer(3)]],  // [M, dim]
+    constant uint&         dim     [[buffer(4)]],
+    constant float&        eps     [[buffer(5)]],
+    constant uint&         m_base  [[buffer(6)]],
+    constant uint&         tiles_x [[buffer(7)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]]
+) {
+    uint xt = tgid % tiles_x;
+    uint gm = tgid / tiles_x;
+    uint i = xt * 256 + tid;
+    if (i >= dim) return;
+    uint m = m_base + gm;
+
+    float rms = rsqrt(sum_sq[m] / float(dim) + eps);
+    float w = bf16_to_f32(weight[i]);
+    out[(size_t)m * dim + i] = x[(size_t)m * dim + i] * rms * w;
+}
+
+// MoE combine + residual, M positions of a group (clone of
+// moe_combine_residual_prefill with m from the flat grid). Grid: (tgs*gM, 1).
+kernel void moe_combine_residual_prefill_batch(
+    device const float* h_mid       [[buffer(0)]],   // [M, dim]
+    device const float* shared_out  [[buffer(1)]],   // [M, dim]
+    device float*       hidden_out  [[buffer(2)]],   // [M, dim]
+    device const float* expert_out0 [[buffer(3)]],   // [M, dim]
+    device const float* expert_out1 [[buffer(4)]],
+    device const float* expert_out2 [[buffer(5)]],
+    device const float* expert_out3 [[buffer(6)]],
+    device const float* expert_out4 [[buffer(7)]],
+    device const float* expert_out5 [[buffer(8)]],
+    device const float* expert_out6 [[buffer(9)]],
+    device const float* expert_out7 [[buffer(10)]],
+    device const float* params      [[buffer(11)]],  // [M, 10]
+    constant uint&      dim         [[buffer(12)]],
+    constant uint&      K           [[buffer(13)]],
+    constant uint&      m_base      [[buffer(14)]],
+    constant uint&      tiles_x     [[buffer(15)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]]
+) {
+    uint xt = tgid % tiles_x;
+    uint gm = tgid / tiles_x;
+    uint i = xt * 256 + tid;
+    if (i >= dim) return;
+    uint m = m_base + gm;
+
+    size_t base = (size_t)m * dim;
+    const device float* p = params + (size_t)m * 10;
+
+    float shared_gate = 1.0f / (1.0f + exp(-p[8]));
+
+    float moe = 0.0f;
+    if (K > 0) moe += p[0] * expert_out0[base + i];
+    if (K > 1) moe += p[1] * expert_out1[base + i];
+    if (K > 2) moe += p[2] * expert_out2[base + i];
+    if (K > 3) moe += p[3] * expert_out3[base + i];
+    if (K > 4) moe += p[4] * expert_out4[base + i];
+    if (K > 5) moe += p[5] * expert_out5[base + i];
+    if (K > 6) moe += p[6] * expert_out6[base + i];
+    if (K > 7) moe += p[7] * expert_out7[base + i];
+
+    hidden_out[base + i] = h_mid[base + i] + moe + shared_gate * shared_out[base + i];
+}
+
+// Phase C S6: keep-alive no-op kernel — the GPU downclocks after ~1ms idle
+// and the next real submission pays a wake tax (~1.55ms@1ms gap, ~4.4ms@3ms
+// gap — FINCHMOE_CBLAT). A ticker thread dispatches this 1-thread no-op
+// every ~300us during CPU gaps so the GPU stays clocked. Touches only its
+// own 4-byte buffer; queue order is unaffected.
+kernel void ka_nop(device float *dummy [[buffer(0)]],
+                   uint tid [[thread_position_in_threadgroup]]) {
+    if (tid == 0) dummy[0] = 1.0f;
 }

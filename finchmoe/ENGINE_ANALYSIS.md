@@ -1,18 +1,18 @@
 # FinchMoE Inference Engine — Comprehensive Analysis
 
-> **CURRENT STATUS (2026-08-14)** — this document's architecture analysis
+> **CURRENT STATUS (2026-08-18)** — this document's architecture analysis
 > remains accurate; the state below reflects the latest commits.
 >
 > | Item | State |
 > |---|---|
 > | Weights | 1.95 GB: 4-bit GDN tier (qkv/z/out_proj), Q/K/V/O 4-bit, embed/lm_head 8-bit, beta/alpha BF16, **3-bit experts (default)** |
-> | Speed | ~9-10.3 tok/s decode (M4, K=8; 8.8 cold / 10.3 warm, post-restart 2026-08-14 — 11.4+ was the quant_self-era peak); chunked batched prefill: 90-token 6.2-7.0s, 883-token 51s (2.1× vs per-token). M1 mini 8 GB: ~4.1 tok/s, per-token prefill ~22.6s — see README "M1 mini benchmark" |
+> | Speed | 16-22 tok/s decode (M4, K=8, warm cache — 2026-08-14 reruns); chunked batched prefill: 90-token 6.2-7.0s, 883-token 51s (2.1× vs per-token). M1 mini 8 GB: ~4.1 tok/s. **GGUF mode: chunked prefill default ON (13-token TTFT ~1.0-1.2s, 90-token ~5.5s), decode ~1.06 tok/s** |
 > | RAM | 2.9 GB peak GPU + 0.34 GB CPU KV @ 8k; 256k context = 10.7 GB CPU KV (does not fit 16 GB) |
-> | Correctness | Engine bit-exact vs numpy GDN reference (CosSim 1.000000/stage); kernels 1.0 vs CPU |
-> | Command pipeline | CMD1+CMD2 fused (one round trip/layer); GDN fully fused (conv+qk-norm+decay+delta+gated in one kernel); residual+norm fused; routing batch fused |
-> | Expert formats | `-3` default / `-4` / `-2` / `-8`; packed_experts dirs per format |
-> | Server | OpenAI-compatible SSE on `-R PORT`; `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`; chat TUI client (`make chat`) |
-> | Known issues | (1) intermittent ~1e-4…1e-2 run-to-run logit wobble under page-cache starvation; (2) prefill GPU+IO co-bound (pread_wait 6.2 ms/layer; static hot-set prefetch measured and does not pay — 26% coverage); (3) server multi-turn session corruption after turn 1 (stateless fallback active); (4) MTP draft math wrong (α=0%) |
+> | Correctness | Engine bit-exact vs numpy GDN reference (CosSim 1.000000/stage); kernels 1.0 vs CPU; GGUF 90-token chunked vs per-token bitwise (cos 1.000000 after the sl≥32 attention fix) |
+> | Command pipeline | CMD1+CMD2 fused (one round trip/layer); GDN fully fused (conv+qk-norm+decay+delta+gated in one kernel); residual+norm fused; routing batch fused; GGUF: batched CMD3 (one CB + 21 dispatches/layer), expert pread dedup, deferred CMD3 overlap |
+> | Expert formats | `-3` default / `-4` / `-2` / `-8`; packed_experts dirs per format; GGUF Q4_K/Q6_K via `--gguf FILE` |
+> | Server | OpenAI-compatible SSE on `-R PORT`; `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`; chat TUI client (`make chat`); multi-turn sessions re-enabled (rollback + think ban, 2026-08-16) |
+> | Known issues | (1) prefill GPU+IO co-bound — S6 decomposition: kernel-CB dispatch ~0.26 ms each + queue-drain wake tax (0.07@0.1ms gap → 1.4@3ms) + per-16KB page-walk cost on file-backed reads; the expert preads are IOMMU priming; (2) long-form essay drift ~100-250 tokens (quant stability limit; 8-bit GDN tier drifts later); (3) MTP head inherently weak (cos 0.3-0.8, 0% acceptance) — not shippable |
 
 ## 1. Model Architecture
 

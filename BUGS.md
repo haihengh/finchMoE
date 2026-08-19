@@ -739,3 +739,44 @@ not the trigger.
 **Next step**: reproduce on a healthy machine (or after freeing RAM); if the wobble
 persists there, bisect with the FINCHMOE_PF_DUMP hidden-state dumps to find the
 first divergent layer.
+
+## 2026-08-14/15 — post-restart era
+
+- **Wobble (prefill logit nondeterminism)** — FIXED. Root cause: shared conv-state
+  q/k channels (head-pair read-modify-write races in concurrent threadgroups) plus
+  same-CB L2 staleness (barriers/synchronizeResource don't flush device reads on
+  this GPU). Fix: fused_gdn_batched (in-kernel M-loop) + per-head device histories
+  + CB splits + CPU bridges. 30/30 bitwise hunt, all chunk sizes bitwise.
+- **Serve multi-turn "empty turn-2"** — FIXED. Not a state leak: the model imitates
+  a truncated turn's ending shape (unclosed `<think>`). Fix: pre-turn snapshot +
+  rollback, think re-entry ban, EOS think-close. (Differential: a stateless
+  reference with the identical token stream reproduced the continuation logits.)
+- **Long-generation repetition (bug 15)** — RESOLVED. Fresh-prefill differential
+  (cos 0.99942) proved no engine drift; the loop is the model's low-temperature
+  behavior. Default T 0.3 → 0.7.
+- **Long-form essay drift** — KNOWN LIMITATION (documented in README). The quant
+  drifts into meta-planning/synonym loops at ~100-250 tokens on essay prompts
+  regardless of sampler (T/rep/min_p/n-gram all tested). 8-bit GDN tier drifts
+  later; llama.cpp Q4_K_M stays clean at 400 — a GGUF importer is the real fix.
+- **MTP speculative decoding** — DIAGNOSED, not shippable. Engine math verified
+  against a pristine-BF16 numpy reference (identical draft argmaxes); the model's
+  MTP head is inherently weak (cos 0.3-0.8, 0% acceptance). MTP weights optional.
+- **Corrupt MTP expert pack** — FIXED. layer_40.bin regenerated (gate CosSim
+  0.908 → 0.9957).
+- **GGUF per-token GPU attention (sl ≥ 32)** — FIXED 2026-08-18. The 90-token
+  multi-chunk soak (per-token vs chunked, `--dump-logits`) diverged at cos
+  0.818, deterministic and identical on the pre-S6 binary. PB-trace keyed
+  scan: first big divergence at token 31 layer 3 — the first position with
+  sl ≥ 32 (the first GPU-attention position). Root cause: in GGUF mode the
+  per-token path set attn_out_for_oproj = NULL (GPU-attention signal), but
+  the attention dispatches live inside the fully-fused CMD2 which is gated
+  `!g_gguf_stage` — never encoded — so o_proj silently read stale
+  buf_attn_out from token 32 onward. GGUF decode past sl 32 was equally
+  broken and never caught (GGUF decode quality was only tested below 32
+  tokens). Fix: `!g_gguf_stage` on the per-token gpu_attn_ready gate —
+  GGUF per-token/decode use CPU attention at sl ≥ 32 (native path
+  unchanged). Verified: 90-token per-token vs chunked cos 1.000000,
+  13-token regression cos 1.000000. Also added the S4.1 sync pattern
+  (synchronizeResource + barriers) to the per-position attention encoder
+  chains in both paths. The 90-token capitals-prompt soak is now the
+  standard cross-path regression.

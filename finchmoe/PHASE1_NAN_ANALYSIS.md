@@ -110,4 +110,4 @@ ln -sf quant_test/model_weights.json model_weights.json
 - `FINCHMOE_DUMP_STAGES=1` — layer-0 token-0 stage dump to /tmp/stage_dump.bin
 - `-X` adds ATTN-DBG/FAST-DBG/OPROJ-DBG/LC-DBG prints (layers 0-2)
 - `-I` now dumps logits for EVERY decode step (append; step 0 truncates)
-- `debug_gdn_reference.py` — numpy GDN reference for stage cross-validation
+- `finchTool/tools/debug_gdn_reference.py` — numpy GDN reference for stage cross-validation
