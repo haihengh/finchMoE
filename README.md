@@ -15,12 +15,13 @@ model with proven capability, at a size the SSD can feed.
 
 **Phase 1 targets MET (2026-08-13)**: ~9-10 tok/s decode on M4 (3-bit experts, page-cache dependent), 1.95 GB weights — see [finchmoe/OPTIMIZATION_PLAN.md](finchmoe/OPTIMIZATION_PLAN.md) for the full progress log. Quantized weights: [huggingface.co/haihengh/Qwen3.6-35B-A3B-finchmoe-3bit](https://huggingface.co/haihengh/Qwen3.6-35B-A3B-finchmoe-3bit).
 
-## Current Status (2026-08-18)
+## Current Status (2026-08-19)
 
 | Metric | Value |
 |--------|-------|
 | Decode speed (M4, K=8) | **16-22 tok/s warm cache** (n=6, 2026-08-14 reruns; 10.3 cold-restart, 8.8 first-run) — 3-bit experts, page-cache dependent |
 | Decode speed (M1 mini, 8 GB) | **~4.1 tok/s**; chunk-8 prefill ~25 s is *slower* than per-token ~22.6 s on 8 GB (IO-bound) — full table in [M1 mini benchmark](#m1-mini-benchmark-2026-08-14) |
+| Decode speed (M4 Pro, 24 GB) | **38.4-42.4 tok/s** (n=3, 2026-08-19; 200-tok 38.6-39.8); prefill 90-tok 1.21-1.23 s (chunk 8) / 2.2-2.3 s (per-token) — ~2× the M4 baseline, always warm — see [M4 Pro benchmark](#m4-pro-benchmark-2026-08-19) |
 | Prefill speed | **Chunked batched GPU prefill** (default `--prefill-chunk 8`): 90-token prompt 6.2-7.0s, 883-token 51s (**2.1×** vs per-token, 3-bit experts); logits bitwise-identical to the per-token path. Hot-set expert prefetch (build_hot_sets.py) is memory-adaptive — measured 2026-08-14, **does not pay** (26% unique-expert coverage, pread_wait 6.2→6.3 ms), auto-gate stays |
 | Weight file | **1.95 GB** (4-bit GDN tier + 3-bit experts, both default) |
 | RAM (8k context) | ~3.3 GB total (2.9 GB GPU peak + 0.34 GB CPU KV; +0.27 GB when the hot-set prefetch is active) |
@@ -91,6 +92,27 @@ the `finchmoe-m1/` deploy copy (prebuilt binary + quant_clean weights +
 | Prefill 90 tok, per-token (chunk 0) | **~22.6 s** (22.4/22.7, n=2) | 4.9-5.1 s (n=2, warm; 10.6 cold) | 4.4-4.6× slower |
 | Prefill 90 tok, chunked (chunk 8) | **~25 s** (24.9/25.2, n=2) | **1.9 s** (n=2, warm; 6.9 cold) | 12.9× slower |
 | Expert `pread_wait` (chunked) | 33.0 ms/layer | 0.019 ms/layer (warm; 6.2 cold) | ~1700× |
+
+### M4 Pro benchmark (2026-08-19)
+
+Measured on an M4 Pro (Mac16,7, 24 GB unified memory, 926 GB SSD), running the
+`finchmoe/` tree directly (prebuilt binary + `quant_clean` weights, same
+`bench_suite.sh`). All runs warm — the 14 GB expert working set plus the
+engine's ~3.3 GB footprint fit the 24 GB machine, so every expert read hits
+the page cache (`pread_wait` 0.024 ms/layer; no cold-cache regime to
+benchmark):
+
+| Metric | M4 Pro (24 GB) | M4 baseline (README) | Ratio |
+|--------|----------------|----------------------|-------|
+| Decode (K=8, 50 tokens, n=3) | **38.4-42.4 tok/s** (fp32) | 16-22 tok/s (n=6, warm) | ~2× |
+| Decode 200-tok (attn-heavy) | **38.6-39.8 tok/s** | 17.4-19.1 tok/s | ~2× |
+| Prefill 90 tok, chunked (chunk 8) | **1.21-1.23 s** | 1.9-2.4 s (warm) | 1.6-2× |
+| Prefill 90 tok, per-token (chunk 0) | **2.2-2.3 s** | 5.0-5.5 s (warm) | ~2.3× |
+| Expert `pread_wait` (chunked) | 0.024 ms/layer | 0.019 ms/layer (warm) | same |
+| KV modes (`--kv-fp16` / `--kv-turbo`) | 39.9-40.9 tok/s decode; 1.23-1.23 s prefill — within noise of fp32 | within noise | same |
+
+Consistent with M4 Pro vs M4: ~2× decode/prefill, I/O-bound signature
+unchanged. Full log: `/tmp/finchmoe_bench_m4pro_2026-08-19.log`.
 
 ### KV cache quantization (`--kv-fp16` / `--kv-turbo`) — 2026-08-14
 
