@@ -90,6 +90,10 @@ def extract_code(text):
 
 def complete(port, prompt, max_tokens=512, timeout=1200, chat=False):
     if chat:
+        # Chat mode generates a think block before the code — the token
+        # budget must cover both (512 left think ~350 + code ~160, cutting
+        # completions mid-body).
+        max_tokens = max(max_tokens, 1536)
         body = json.dumps({
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,

@@ -48,4 +48,4 @@ finchmoe/397b/
 /finchmoe-m1/
 
 # HumanEval run artifacts (generated results, resumable)
-humaneval_m1/he_results.jsonl
+humaneval_m1/he_results*.jsonl

@@ -5,7 +5,7 @@ top-level def/class/if __name__/print after the prompt, then exec + check().
 Usage:
     python3 evaluate.py [--verbose]
 """
-import gzip, json, os, sys, argparse, traceback
+import gzip, json, os, sys, argparse, traceback, re
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATASET = f"{BASE}/HumanEval.jsonl.gz"
@@ -16,10 +16,10 @@ CUT_MARKERS = ["\nclass ", "\ndef ", "\nif __name__", "\nprint("]
 def load_dataset():
     return {json.loads(l)["task_id"]: json.loads(l) for l in gzip.open(DATASET, "rt")}
 
-def load_results():
+def load_results(results_path):
     out = {}
     try:
-        for l in open(RESULTS):
+        for l in open(results_path):
             r = json.loads(l)
             out[r["task_id"]] = r
     except FileNotFoundError:
@@ -34,8 +34,21 @@ def truncate_completion(completion):
             pos = min(pos, i)
     return completion[:pos].rstrip()
 
+def build_code(task, completion):
+    # Chat-templated models often restate the WHOLE function (imports +
+    # signature + docstring). Concatenating that onto the prompt duplicates
+    # the header and breaks the parse. If the completion is a complete
+    # program whose first function is the entry point, use it alone;
+    # otherwise concatenate prompt + truncated completion (raw mode).
+    entry = re.escape(task["entry_point"])
+    if re.match(rf'(?s)\s*(?:(?:from\s+\S+\s+import\s+[^\n]+|import\s+[^\n]+)\n)*\s*def\s+{entry}\s*\(',
+                completion):
+        return truncate_completion(completion)
+    return task["prompt"] + truncate_completion(completion)
+
+
 def run_check(task, completion, timeout_sec=10):
-    code = task["prompt"] + truncate_completion(completion)
+    code = build_code(task, completion)
     ns = {}
     try:
         exec(compile(code, f"<{task['task_id']}>", "exec"), ns)
@@ -51,12 +64,10 @@ def main():
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--results", default=RESULTS, help="results file")
     args = ap.parse_args()
-
-    global RESULTS
-    RESULTS = args.results
+    results_path = args.results
 
     tasks = load_dataset()
-    results = load_results()
+    results = load_results(results_path)
     n_pass = n_run = 0
     failures = []
     for task_id, task in tasks.items():
