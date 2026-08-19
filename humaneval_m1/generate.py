@@ -88,8 +88,18 @@ def extract_code(text):
     return text
 
 
-def complete(port, prompt, max_tokens=512, timeout=1200, chat=False):
-    if chat:
+def complete(port, prompt, max_tokens=512, timeout=1200, chat=False, tf=False):
+    if tf:
+        # turbo-fieldfare: OpenAI-style chat endpoint, Gemma 4 26B-A4B.
+        body = json.dumps({
+            "model": "gemma-4-26b-a4b-it",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_completion_tokens": max(max_tokens, 1536),
+            "temperature": 0,
+        }).encode()
+        url = f"http://127.0.0.1:{port}/v1/chat/completions"
+        field = "content"
+    elif chat:
         # Chat mode generates a think block before the code — the token
         # budget must cover both (512 left think ~350 + code ~160, cutting
         # completions mid-body).
@@ -110,8 +120,13 @@ def complete(port, prompt, max_tokens=512, timeout=1200, chat=False):
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read().decode("utf-8", "replace")
-    text = sse_collect(raw, field)
-    if chat:
+    if tf and '"object":"chat.completion"' in raw:
+        # turbo-fieldfare answers with a single non-streaming JSON object.
+        d = json.loads(raw)
+        text = ((d.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    else:
+        text = sse_collect(raw, field)
+    if chat or tf:
         text = strip_think(text)
         text = extract_code(text)
     return text
@@ -123,6 +138,8 @@ def main():
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--chat", action="store_true",
                     help="chat-templated mode (template + think, stripped)")
+    ap.add_argument("--tf", action="store_true",
+                    help="turbo-fieldfare mode (Gemma chat endpoint)")
     ap.add_argument("--results", default=RESULTS, help="results file")
     args = ap.parse_args()
     results_path = args.results
@@ -133,15 +150,16 @@ def main():
     if args.limit:
         todo = todo[:args.limit]
 
+    mode = "tf" if args.tf else ("chat" if args.chat else "raw")
     print(f"[generate] {len(todo)} problems to run ({len(done)} already done) "
-          f"mode={'chat' if args.chat else 'raw'}", flush=True)
+          f"mode={mode}", flush=True)
     out = open(results_path, "a")
     for i, task_id in enumerate(todo):
         t0 = time.time()
         rec = {"task_id": task_id}
         try:
             rec["completion"] = complete(args.port, tasks[task_id]["prompt"],
-                                         chat=args.chat)
+                                         chat=args.chat, tf=args.tf)
         except Exception as e:
             rec["error"] = str(e)
         rec["seconds"] = round(time.time() - t0, 1)
