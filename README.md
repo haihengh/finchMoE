@@ -310,10 +310,14 @@ Quality figures are weight-level CosSim from the requant validation plus spot
 checks, plus one end-to-end number: **HumanEval pass@1 = 49/164 (29.9%)** on the
 M4 native 3-bit tier (2026-08-18, T=0 greedy, raw completions without the chat
 template, `--no-think`, 512-token cap; harness: `humaneval_m1/`, results in
-`humaneval_m1/he_results.jsonl`). Caveat: the raw-prompt config is pessimistic
-for an instruct-tuned model — the dominant failure modes are missing imports
-(`re`, `hashlib`) and mid-solution truncation, not wrong algorithms. The same
-harness runs on the M1 mini deploy for a second data point.
+`humaneval_m1/he_results.jsonl`). Full protocol matrix measured on the same
+engine (all T=0 greedy, `rep-penalty 1.0`): raw+no-think **29.9%** (49/164);
+chat-template+think **11.0%** (18/164, 1536-token cap — the model restates the
+function then EOS's mid-body); chat-template+no-think **0/10** on a probe. The
+chat-template protocols are *worse* on this quant — instruct-template adherence
+degrades under 3-bit quantization, while raw continuation rides the base-model
+weights — so the raw number is the tier's published protocol, not a pessimism
+artifact. The same harness runs on the M1 mini deploy for a second data point.
 
 ## Architecture
 
