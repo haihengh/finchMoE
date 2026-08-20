@@ -152,8 +152,13 @@ Three experiments; each gated by a 20-task probe before any full 164 run:
 
 ### Runbook (2026-08-20 state)
 
-- E1 build: `FINCHMOE_GDN8=1 python3 quantize_non_experts.py --input
-  ../models/Qwen3.6-35B-A3B-bf16 --output quant_clean_gdn8 --verify`
+- E1 build: `FINCHMOE_GDN8=1 FINCHMOE_NORM_PLUS1=1 python3
+  quantize_non_experts.py --input ../models/Qwen3.6-35B-A3B-bf16 --output
+  quant_clean_gdn8 --verify` — **FINCHMOE_NORM_PLUS1=1 is REQUIRED**: the
+  engine consumes (1 + w)-folded layer norms; a raw-HF build passes its own
+  --verify (it checks vs raw source) but soups the engine (2026-08-20
+  lesson: the first E1 build lost a 20-task probe this way). probe_tier.sh
+  now refuses raw-convention bins.
 - E2 build: `python3 repack_experts.py --index
   ../models/Qwen3.6-35B-A3B-bf16/expert_index.json --bits 8` (writes
   `models/Qwen3.6-35B-A3B-bf16/packed_experts_8bit/`; symlinked from
