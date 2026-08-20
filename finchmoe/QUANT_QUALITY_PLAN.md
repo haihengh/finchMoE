@@ -24,6 +24,7 @@ and computes CosSim vs the pristine BF16 reference. 259 non-expert tensors,
 | router gates, norms, GDN a/b/A_log/dt_bias | BF16 | 1.0000 | — |
 | experts, 3-bit pack (40 × 256) | 3-bit | **0.9815** | **0.9536** |
 | experts, 4-bit pack (40 × 256) | 4-bit | 0.9959 | 0.9891 |
+| experts, 8-bit pack (E2, 40 × 256) | 8-bit | **0.99996** | **0.99988** |
 
 ### Verdict
 
@@ -161,10 +162,17 @@ Three experiments; each gated by a 20-task probe before any full 164 run:
   2026-08-20 (pre-reboot, 09:36); smoke verification (sample=64) reads
   cos ≥0.999; the FULL sweep was interrupted by the 2026-08-20 kernel
   panic and is pending.
-- Full sweep (resume): `python3 finchTool/tools/quant_audit.py
-  --experts-only` — audits all three packs (~75 min); guardrails make it
-  crash-safe (job lock + memory guards, peak ~1.7 GB verified). 8-bit pack
-  only: point `--pack3`/`--pack4` at missing paths.
+- Full sweep: `python3 finchTool/tools/quant_audit.py --experts-only`
+  — DONE 2026-08-20 (guardrails held: peak ~2 GB, exit 0). 30,720 tensors
+  per pack: 3-bit mean 0.9815 (min down 0.9536); 4-bit 0.9959 (0.9891);
+  **8-bit 0.99996 (min 0.99988)** — the E2 baseline is near-lossless.
+  The worst-10 experts are the SAME across all three packs (L0e25, L36e2,
+  L32e123, …) — per-expert difficulty is intrinsic to the weights, so any
+  mixed-bit allocation should target exactly those experts.
+- GOTCHA found 2026-08-20: the E1 build wrote the 2.4 GB bin but NOT the
+  manifest (`model_weights_quant.json` missing — the 09:47 reboot cut the
+  build between the bin and json writes). Restarted the runbook E1 command
+  (deterministic — same bin, adds the json + verify).
 - E1 probe server: `./finchmoe-infer -R 9000 -m . -w
   quant_clean_gdn8/model_weights_quant.bin -j
   quant_clean_gdn8/model_weights_quant.json -e 0 --top-k 1 --no-think
