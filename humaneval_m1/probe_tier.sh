@@ -15,6 +15,32 @@ INFER_ARGS="$@"
 RESULTS="he_results_${NAME}.jsonl"
 rm -f "$RESULTS" /tmp/probe_server.log
 
+# Engine-contract check: layer norms must carry the Qwen3.5 (1 + w) fold.
+# A raw-HF build (rms << 1) passes quantize_non_experts.py --verify but
+# soups the engine — the 2026-08-20 E1 build lost a full probe this way.
+if [ -n "$EXTRA_WEIGHTS" ]; then
+( cd ../finchmoe && python3 - "$EXTRA_WEIGHTS" <<'EOF'
+import json, sys
+paths = dict(zip(sys.argv[1].split()[::2], sys.argv[1].split()[1::2]))
+manifest = paths.get('--manifest')
+if manifest:
+    m = json.load(open(manifest))['tensors']
+    t = m.get('model.layers.0.input_layernorm.weight')
+    if t and t.get('dtype') == 'BF16':
+        import numpy as np
+        wf = paths.get('--weights') or manifest.replace('.json', '.bin')
+        raw = open(wf, 'rb').read()
+        d = raw[t['offset']:t['offset'] + t['size']]
+        v = (np.frombuffer(d, np.uint16).astype(np.uint32) << 16).view(np.float32)
+        rms = float(np.sqrt(np.mean(v**2)))
+        print(f"[norm-check] input_layernorm rms={rms:.4f} (expect ~1.0)")
+        if rms < 0.5:
+            sys.exit('ABORT: layer norms are raw (no +1 fold) — '
+                     'rebuild with FINCHMOE_NORM_PLUS1=1')
+EOF
+)
+fi
+
 # start server from finchmoe/ — the engine resolves shaders.metal, vocab.bin,
 # and {model_path}/packed_experts_* against the PROCESS CWD (not -m), and all
 # of those live in finchmoe/ (packs are symlinks there). Run from
