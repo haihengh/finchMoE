@@ -3,7 +3,7 @@
 # Usage: probe_tier.sh <name> [extra infer args...]
 #   name: short label (used in the results filename)
 #   extra args: passed to finchmoe-infer (e.g. --int8-experts)
-#   env: EXTRA_WEIGHTS="-w PATH -j PATH" for a non-default bin/manifest
+#   env: EXTRA_WEIGHTS="--weights PATH --manifest PATH" for a non-default bin/manifest
 set -e
 cd "$(dirname "$0")"
 NAME="$1"; shift || true
@@ -15,7 +15,9 @@ RESULTS="he_results_${NAME}.jsonl"
 rm -f "$RESULTS" /tmp/probe_server.log
 
 # start server (default tier unless INFER_ARGS given)
-../finchmoe/finchmoe-infer -R "$PORT" -m . -e 0 --top-k 1 --no-think --rep-penalty 1.0 \
+# -m ../finchmoe: expert packs resolve as {model_path}/packed_experts_*/
+# and live in finchmoe/ (symlinks) — not in humaneval_m1/
+../finchmoe/finchmoe-infer -R "$PORT" -m ../finchmoe -e 0 --top-k 1 --no-think --rep-penalty 1.0 \
     $EXTRA_WEIGHTS $INFER_ARGS > /tmp/probe_server.log 2>&1 &
 SRV=$!
 for i in $(seq 1 60); do
