@@ -3,7 +3,8 @@
 # Usage: probe_tier.sh <name> [extra infer args...]
 #   name: short label (used in the results filename)
 #   extra args: passed to finchmoe-infer (e.g. --int8-experts)
-#   env: EXTRA_WEIGHTS="--weights PATH --manifest PATH" for a non-default bin/manifest
+#   env: EXTRA_WEIGHTS="--weights PATH --manifest PATH" for a non-default
+#        bin/manifest — paths resolve against finchmoe/ (the server's cwd)
 set -e
 cd "$(dirname "$0")"
 NAME="$1"; shift || true
@@ -14,11 +15,12 @@ INFER_ARGS="$@"
 RESULTS="he_results_${NAME}.jsonl"
 rm -f "$RESULTS" /tmp/probe_server.log
 
-# start server (default tier unless INFER_ARGS given)
-# -m ../finchmoe: expert packs resolve as {model_path}/packed_experts_*/
-# and live in finchmoe/ (symlinks) — not in humaneval_m1/
-../finchmoe/finchmoe-infer -R "$PORT" -m ../finchmoe -e 0 --top-k 1 --no-think --rep-penalty 1.0 \
-    $EXTRA_WEIGHTS $INFER_ARGS > /tmp/probe_server.log 2>&1 &
+# start server from finchmoe/ — the engine resolves shaders.metal, vocab.bin,
+# and {model_path}/packed_experts_* against the PROCESS CWD (not -m), and all
+# of those live in finchmoe/ (packs are symlinks there). Run from
+# humaneval_m1 and the server boots GPU-less and dies on vocab.bin.
+( cd ../finchmoe && exec ./finchmoe-infer -R "$PORT" -m . -e 0 --top-k 1 --no-think --rep-penalty 1.0 \
+    $EXTRA_WEIGHTS $INFER_ARGS > /tmp/probe_server.log 2>&1 ) &
 SRV=$!
 for i in $(seq 1 60); do
     curl -s -o /dev/null "http://127.0.0.1:$PORT/" && break
