@@ -42,6 +42,9 @@ pre-turn snapshot + think re-entry ban (sessions accumulate history).
 (4) MTP speculative decoding: forward math verified correct against a
 pristine-BF16 numpy reference, but the model's MTP head is inherently weak
 (cos 0.3-0.8, ~0% acceptance) — not shippable (see finchTool/tools/mtp_reference.py).
+(5) Machine safety: two kernel panics from memory-heavy quant jobs (2026-08-15
+logit_dump; 2026-08-20 two concurrent audits at 36 GB) — now enforced by the
+heavy-job lock + memory guards, see [Machine safety](#machine-safety-2026-08-20).
 The MTP weight files (`model_weights_mtp.bin` 4.96 GB + `packed_experts/layer_40.bin`
 453 MB) are OPTIONAL — the engine skips them unless `--mtp` is passed, so they
 can be deleted to reclaim ~5.4 GB of disk.
@@ -487,6 +490,7 @@ replacement, CREATE TABLE → IF-TABLE migration, 20-file TF repo:
 | [finchmoe/OPTIMIZATION_PLAN.md](finchmoe/OPTIMIZATION_PLAN.md) | Roadmap + progress log (Phase 1 targets, prefill levers) |
 | [finchmoe/ENGINE_ANALYSIS.md](finchmoe/ENGINE_ANALYSIS.md) | Comprehensive engine analysis (current-status header) |
 | [finchmoe/PHASE1_NAN_ANALYSIS.md](finchmoe/PHASE1_NAN_ANALYSIS.md) | Phase 1 NaN root causes + resolution |
+| [finchmoe/QUANT_QUALITY_PLAN.md](finchmoe/QUANT_QUALITY_PLAN.md) | Quantization quality plan — Phase 0 audit results, E1/E2/E3' experiments, runbook |
 | [finchmoe/BUG_REPORT.md](finchmoe/BUG_REPORT.md) | Original degenerate-output bug report (historical) |
 | [finchmoe/BUGS_DEEPSEEK.md](finchmoe/BUGS_DEEPSEEK.md) | DeepSeek-V4-Flash engine bug log (sibling project) |
 | [finchmoe/design_deepseek.md](finchmoe/design_deepseek.md) | DeepSeek-V4-Flash engine design (sibling project) |
@@ -530,10 +534,27 @@ replacement, CREATE TABLE → IF-TABLE migration, 20-file TF repo:
 | `debug_full_attn_moe.py` / `debug_2token_gdn.py` | Attention/MoE and GDN targeted references |
 | `debug_bf16_vs_4bit.py` / `debug_mlx_inference.py` | Format and MLX-loader verification |
 | `verify_clean_rebuild.py` | CosSim verification of the clean-rebuild weights (3-bit experts, non-experts) |
+| `quant_audit.py` | Per-tensor quantization audit vs pristine BF16 (259 non-experts + 3/4/8-bit expert packs); heavy-job lock + memory guards (see Machine safety) |
 | `extract_mtp_experts.py` / `mtp_reference.py` | MTP head extraction + numpy reference |
 | `wobble_hunt.sh` / `wobble_trace_hunt.sh` | Run-to-run wobble hunting |
 | `finchTool/` | Standalone Metal kernel verification suite (matvec/attention kernels) |
 | `test_engine_path.m` | Engine-path standalone test (finchmoe/) |
+
+### Machine safety (2026-08-20)
+
+Two kernel panics were caused by memory-heavy quant jobs exhausting the 16 GB
+mini: **2026-08-15** `logit_dump` at 10.5 GB RSS, and **2026-08-20** two
+concurrent audit runs at 21.1 + 15.3 GB RSS — compressor 100% of segments,
+~14 MB free, watchdogd starved 92 s. The operating rule — **one heavy job at
+a time, never into swap** — is now enforced by the tools:
+
+- **Shared job lock** (`/tmp/finchmoe_heavy_job.lock`) in `quant_audit.py`
+  and `repack_experts.py` — a second heavy job exits with the holder's pid.
+- **Memory guards** — abort at <6 GB available at startup, <4 GB per expert
+  layer, <3 GB per big tensor (free+inactive+speculative+purgeable).
+- **Streamed expert refs** in `quant_audit.py` (per-expert instead of all
+  256 materialized) — peak 4.5 GB → **1.7 GB**, verified: 3-pack sweep at
+  1.69 GB max RSS, 0 swaps.
 
 ### Runtime diagnostics (engine flags & env vars)
 

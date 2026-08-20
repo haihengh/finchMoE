@@ -2,6 +2,10 @@
 
 **Status**: Phase 0 COMPLETE 2026-08-20. Phase 1 = E1 (GDN8) → E2 (near-lossless)
 → E3' (protocol probes). E3 (pristine 4-bit) dropped — see why below.
+E1/E2 builds DONE 2026-08-20; the post-reboot verification session hit the
+2026-08-20 kernel panic (two concurrent audit runs at 36 GB on the 16 GB
+mini). Guardrails are now in the tools (job lock + memory guards + streamed
+refs) — resume with the full sweep below.
 
 ## Phase 0 — COMPLETE 2026-08-20: per-tensor audit
 
@@ -153,8 +157,14 @@ Three experiments; each gated by a 20-task probe before any full 164 run:
   ../models/Qwen3.6-35B-A3B-bf16/expert_index.json --bits 8` (writes
   `models/Qwen3.6-35B-A3B-bf16/packed_experts_8bit/`; symlinked from
   `finchmoe/packed_experts_8bit`). NOTE: 8-bit requires the dequant→requant
-  path (bits in (3,8) routing + verify accepting BF16-byte sizes) — done
-  2026-08-20, pack verified cos ≥0.999.
+  path (bits in (3,8) routing + verify accepting BF16-byte sizes). DONE
+  2026-08-20 (pre-reboot, 09:36); smoke verification (sample=64) reads
+  cos ≥0.999; the FULL sweep was interrupted by the 2026-08-20 kernel
+  panic and is pending.
+- Full sweep (resume): `python3 finchTool/tools/quant_audit.py
+  --experts-only` — audits all three packs (~75 min); guardrails make it
+  crash-safe (job lock + memory guards, peak ~1.7 GB verified). 8-bit pack
+  only: point `--pack3`/`--pack4` at missing paths.
 - E1 probe server: `./finchmoe-infer -R 9000 -m . -w
   quant_clean_gdn8/model_weights_quant.bin -j
   quant_clean_gdn8/model_weights_quant.json -e 0 --top-k 1 --no-think
