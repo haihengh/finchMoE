@@ -1,7 +1,50 @@
 # Quantization Quality Plan — closing the HumanEval gap
 
-**Status**: PLANNED 2026-08-19. Data-driven; nothing here is speculative.
-Resume by starting Phase 0.
+**Status**: Phase 0 COMPLETE 2026-08-20. Phase 1 = E1 (GDN8) → E2 (near-lossless)
+→ E3' (protocol probes). E3 (pristine 4-bit) dropped — see why below.
+
+## Phase 0 — COMPLETE 2026-08-20: per-tensor audit
+
+Tool: `finchTool/tools/quant_audit.py` — dequantizes every tensor from the
+LIVE pack (quant_clean_pi bin + packed_experts_3bit, plus the old 4-bit pack)
+and computes CosSim vs the pristine BF16 reference. 259 non-expert tensors,
+0 errors. Full per-tensor table: `/tmp/quant_audit_final.txt`.
+
+| role | bit | mean cos | min cos |
+|---|---|---|---|
+| embed / lm_head | 8-bit | 0.99978 | — |
+| linear_attn qkv / z / out (30 layers × 3) | 4-bit | 0.9949–0.9955 | 0.9949 |
+| full_attn q/k/v/o (10 layers × 4) | 4-bit | 0.9920–0.9955 | 0.9920 |
+| shared_expert gate/up/down (40 × 3) | 4-bit | 0.9924–0.9950 | 0.9924 |
+| mtp head | 4-bit | 0.9947–0.9953 | 0.9947 |
+| router gates, norms, GDN a/b/A_log/dt_bias | BF16 | 1.0000 | — |
+| experts, 3-bit pack (40 × 256) | 3-bit | **0.9815** | **0.9536** |
+| experts, 4-bit pack (40 × 256) | 4-bit | 0.9959 | 0.9891 |
+
+### Verdict
+
+1. **No role carries the gap at weight level.** The only sub-0.99 role is the
+   3-bit experts (mean 0.9815). Every non-expert role ≥0.992.
+2. **Quantization buys small, roughly linear deltas**: 3-bit → 4-bit experts
+   (+0.014 cos) bought +2.4 HumanEval pts. Extrapolating, FP16-everything over
+   the 4-bit tier buys only ~+4-6 pts → ~36-38%, not 61.6%.
+3. **The 32.3 → 61.6 residual is a protocol cliff, not a weight cliff.** E2
+   below pins our harness's FP16-adjacent ceiling; if it lands ~35%, the lever
+   is prompt/sampling/think protocol (E3'), not quantization.
+4. **Layout-contract finding (corrects 2026-08-18 note)**: the LIVE
+   `model_weights.bin` (→ quant_clean_pi) carries the engine-contract head-pair
+   interleave — v-heads de-interleaved evens-then-odds, audit unpermutes with
+   PINV[j] = 16j mod 31. `quant_clean/` is the faithful HF layout. GGUF is a
+   third (converter) order. All three are correct for their consumers; the
+   earlier "BF16 dir is rotated" attribution was wrong — the rotation is in the
+   LIVE pi file's v-blocks.
+5. **The 32.3% (4-bit) run reused the LIVE non-expert bin + the OLD
+   2bit-dense-v2-lineage 4-bit pack**, which measures cos 0.9959 (near-pristine)
+   vs the BF16 reference. A fresh "pristine 4-bit" requant (old E3) has no
+   expected gain → **E3 dropped**.
+6. Phase 0's gate ("explains ≥80% of the gap by role") is NOT met — the plan's
+   fallback triggers: *experts are uniform and healthy → the gap is in scale
+   calibration and protocol*, tested empirically by E1/E2 and Phase 2.
 
 ## Background: what the measurements say
 
@@ -79,32 +122,64 @@ Implementation:
    before Phase 1 starts. If experts look uniform and healthy, the gap is
    in scale calibration (→ skip to Phase 2).
 
-## Phase 1 — Mixed-bit allocation (1-2 days, requant-only)
+## Phase 1 — Requant experiments (requant-only, no engine work)
 
-Target the roles Phase 0 flags. Expected candidates (confirm with data):
-- Router gate (`ffn_gate`, 256×2048) → 8-bit or FP16 (tiny; routing
-  fidelity drives expert selection — highest leverage per byte).
-- Attention q/k/v and GDN gated_norm + beta/alpha → 8-bit if degraded.
-- Shared expert (already 4-bit?) → 8-bit if flagged.
-- Experts stay 3-bit/4-bit per the I/O budget; consider gate+up 4-bit /
-  down 3-bit asymmetric packs only if the audit shows gate/up degradation.
+Three experiments; each gated by a 20-task probe before any full 164 run:
 
-Implementation:
-1. Re-run the requant for the flagged tensors at the chosen bits:
-   `quantize_non_experts.py` (supports per-tensor bit selection — extend if
-   needed), regenerate `model_weights_quant.bin` + manifest.
-2. Expert-side changes (if any): `quantize_model.py` + `repack_experts.py`
-   with the asymmetric plan; keep the slab layout constants
-   (`GATE_W_OFF_*` etc. in `infer.m`) in sync — or reuse the existing
-   `--4bit`/`--3bit` flag machinery per pack.
-3. Verification gates (all must pass before default):
-   - Per-tensor CosSim vs BF16 (target: ≥0.98 for flagged tensors).
-   - Typo-prompt quality check (the clean-rebuild protocol).
-   - 20-task HumanEval probe, raw protocol: expect a measurable gain over
-     29.9% (3-bit) / 32.3% (4-bit).
-   - Decode-speed check: non-expert changes must not move the 10-16 tok/s
-     (3-bit tier).
-4. Success gate: 3-bit ≥ 35%, 4-bit ≥ 40%.
+- **E1 — GDN8 tier**: requant non-experts with `FINCHMOE_GDN8=1` (GDN
+  qkv/z/out → 8-bit; embed/lm_head already 8-bit; everything else unchanged).
+  Isolates whether the 4-bit GDN channel (cos ~0.995) costs anything through
+  the 40-layer recurrence. Bin ~1.96 → ~3.2 GB (safe: <5 GB transient rule).
+  Decode if adopted: ~11.4 → ~9.1 tok/s. ~30 min rebuild.
+- **E2 — near-lossless baseline (the decisive experiment)**: E1's bin + 8-bit
+  expert pack (`repack_experts.py --bits 8`, ~38 GB on the SATA drive, 1-2 h).
+  Calibrates OUR harness's FP16-adjacent ceiling against fraQtl's 61.6%.
+  Decode ~2.5-3 tok/s → full 164 run ~3.5 h (background, alone on the machine
+  per the crash-history rule). Splits the hypothesis: "quantization is the
+  ceiling" vs "protocol is the ceiling".
+- **E3 — DROPPED**: the old 4-bit pack already measures cos 0.9959 vs
+  pristine; a fresh pristine-4-bit rebuild has no expected gain.
+- **E3' — protocol probes (no requant)**: on the best tier, chat template and
+  think-allowed variants + T>0 sampling. The raw-protocol ceiling may sit well
+  below 61.6% purely from prompt/sampling differences; Qwen 3.6 is a thinking
+  model and `--no-think` is our raw protocol's ban — removing it is a free
+  lever to test.
+
+### Runbook (2026-08-20 state)
+
+- E1 build: `FINCHMOE_GDN8=1 python3 quantize_non_experts.py --input
+  ../models/Qwen3.6-35B-A3B-bf16 --output quant_clean_gdn8 --verify`
+- E2 build: `python3 repack_experts.py --index
+  ../models/Qwen3.6-35B-A3B-bf16/expert_index.json --bits 8` (writes
+  `models/Qwen3.6-35B-A3B-bf16/packed_experts_8bit/`; symlinked from
+  `finchmoe/packed_experts_8bit`). NOTE: 8-bit requires the dequant→requant
+  path (bits in (3,8) routing + verify accepting BF16-byte sizes) — done
+  2026-08-20, pack verified cos ≥0.999.
+- E1 probe server: `./finchmoe-infer -R 9000 -m . -w
+  quant_clean_gdn8/model_weights_quant.bin -j
+  quant_clean_gdn8/model_weights_quant.json -e 0 --top-k 1 --no-think
+  --rep-penalty 1.0` (3-bit experts, GDN8 bin).
+- E2 full run: same + `--int8-experts` (8-bit experts ≈ 3.2-4 tok/s; full 164
+  ≈ 3-4 h, background, alone on the machine). Probe first: `--limit 20`.
+- Harness: `cd ../humaneval_m1 && python3 generate.py --limit 20 --port 9000
+  --results he_results_probe.jsonl && python3 evaluate.py --results
+  he_results_probe.jsonl` — or `./probe_tier.sh <name> [extra args]` with
+  `EXTRA_WEIGHTS` env for the bin/manifest pair.
+- E3' variants: drop `--no-think` (think allowed), `--chat` on generate.py
+  (chat template), `-e 0.3`/`0.7` (sampling).
+
+Verification gates (every experiment, before defaulting anything):
+- Per-tensor CosSim vs BF16 (target: ≥0.99 for any raised-bit tensor).
+- Typo-prompt quality check (clean-rebuild protocol).
+- 20-task HumanEval probe, raw protocol (regression battery below).
+- Decode-speed check: 3-bit tier must stay 10-16 tok/s unless the tier is
+  intentionally slower (E1/E2 by design).
+
+Success gate (renegotiated after Phase 0): if E2 lands ≥50%, 8-bit experts
+become the quality default (I/O cost accepted or mitigated by deferred
+overlap); if E2 lands ~33-38%, quantization is near-maxed under the raw
+protocol and the mission pivots to E3' (protocol) with Phase 2 as the quant
+lever. 3-bit ≥35% / 4-bit ≥40% remain the gates for adopting E1's bin.
 
 ## Phase 2 — Activation-aware per-group scales (AWQ-lite, 2-3 days, scripts only)
 
