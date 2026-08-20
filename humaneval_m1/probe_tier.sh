@@ -5,12 +5,17 @@
 #   extra args: passed to finchmoe-infer (e.g. --int8-experts)
 #   env: EXTRA_WEIGHTS="--weights PATH --manifest PATH" for a non-default
 #        bin/manifest — paths resolve against finchmoe/ (the server's cwd)
+#   env: THINK_ALLOWED=1 drops --no-think (E3' protocol probe)
+#   env: TEMP=0.3 overrides the default -e 0 (E3' sampling probe)
 set -e
 cd "$(dirname "$0")"
 NAME="$1"; shift || true
 PORT="${PORT:-9000}"
 LIMIT="${LIMIT:-20}"
 INFER_ARGS="$@"
+THINK_ARGS="--no-think"
+[ "${THINK_ALLOWED:-0}" = "1" ] && THINK_ARGS=""
+TEMP_E="${TEMP:-0}"
 
 RESULTS="he_results_${NAME}.jsonl"
 rm -f "$RESULTS" /tmp/probe_server.log
@@ -45,7 +50,7 @@ fi
 # and {model_path}/packed_experts_* against the PROCESS CWD (not -m), and all
 # of those live in finchmoe/ (packs are symlinks there). Run from
 # humaneval_m1 and the server boots GPU-less and dies on vocab.bin.
-( cd ../finchmoe && exec ./finchmoe-infer -R "$PORT" -m . -e 0 --top-k 1 --no-think --rep-penalty 1.0 \
+( cd ../finchmoe && exec ./finchmoe-infer -R "$PORT" -m . -e "$TEMP_E" --top-k 1 $THINK_ARGS --rep-penalty 1.0 \
     $EXTRA_WEIGHTS $INFER_ARGS > /tmp/probe_server.log 2>&1 ) &
 SRV=$!
 for i in $(seq 1 60); do

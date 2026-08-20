@@ -158,14 +158,17 @@ easy-biased: both default tiers score 13/20 = 65% on it vs 32.3% full-164):
 | tier | probe subset | same-subset baseline |
 |---|---|---|
 | E1 GDN8 + 3-bit experts | 10/20 = 50% | 65% (both default tiers) |
-| E2 GDN8 + 8-bit experts | running | — |
+| E2 GDN8 + 8-bit experts | **12/20 = 60%** | 65% / GGUF 40% |
 
 E1 verdict: within binomial noise of default at n=20 (3-task gap, ±11 pts),
 certainly no gain — 8-bit GDN projections don't move the needle. The E1 bin
 is engine-correct (all 136 norms bit-match pi; coherent CLI output; the
 first probe's soup was the missing FINCHMOE_NORM_PLUS1 fold, not weights).
-E2 remains the decisive run — near-lossless experts isolate the
-quantization ceiling from the protocol cliff.
+**E2 verdict: near-lossless weights (cos 0.99996) score 60% — statistically
+tied with the default tiers (65%) on the same subset. The quantization
+ceiling is REACHED: the 32.3 → 61.6 gap is a protocol cliff, not a weight
+cliff.** Pivot to E3' (think-allowed, chat template, T>0 sampling) on the
+default tier; probe_tier.sh now takes THINK_ALLOWED=1 / TEMP=0.3.
 
 - E1 build: `FINCHMOE_GDN8=1 FINCHMOE_NORM_PLUS1=1 python3
   quantize_non_experts.py --input ../models/Qwen3.6-35B-A3B-bf16 --output
