@@ -298,6 +298,13 @@ the engine's env-gated debug flags and model files by absolute path.
 - `analyze_longgen.py logfile` — n-gram repetition, EOS, think-tag
   balance, topical drift (Bug 15 toolkit)
 
+**Quantization quality**
+- `quant_audit.py` — per-tensor CosSim audit vs pristine BF16 (259
+  non-expert tensors + 3/4/8-bit expert packs, per-role aggregates).
+  Ships crash guardrails from the 2026-08-20 kernel panic: shared
+  heavy-job lock with `repack_experts.py`, memory guards, streamed
+  expert refs (peak ~1.7 GB).
+
 **Session debug one-offs** (kept for provenance; each reads its own
 `FINCHMOE_*_DBG` dumps): `debug_2token_gdn.py`, `debug_bf16_vs_4bit.py`,
 `debug_compare.py`, `debug_e2e_logits.py`, `debug_full_attn_moe.py`,

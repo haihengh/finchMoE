@@ -783,3 +783,15 @@ first divergent layer.
   (synchronizeResource + barriers) to the per-position attention encoder
   chains in both paths. The 90-token capitals-prompt soak is now the
   standard cross-path regression.
+- **Kernel panic 2026-08-20 (machine crash #3)** — GUARDRAILS ADDED. Watchdog
+  timeout: two concurrent `quant_audit.py` runs held 21.1 + 15.3 GB RSS on
+  the 16 GB mini (compressor 100% of segments, ~14 MB free) — same mechanism
+  as the 2026-08-15 logit_dump panic. The post-reboot session had resumed the
+  E2 verification in two parallel shells; the tool had no concurrency guard
+  and materialized all 256 experts/layer in float32 (~4.5 GB) with allocator
+  creep over 30K block cycles. Fix: shared heavy-job flock
+  (`/tmp/finchmoe_heavy_job.lock`) in `quant_audit.py` + `repack_experts.py`
+  (second job exits with holder pid), memory guards (abort <6 GB free at
+  startup / <4 GB per layer / <3 GB per tensor), and per-expert streaming of
+  BF16 refs — peak 4.5 GB → 1.7 GB (verified: 3-pack sweep 1.69 GB max RSS,
+  0 swaps).
