@@ -250,8 +250,11 @@ def main():
     print(f"Quantization plan: {stats_4bit} tensors @ 4-bit, {stats_8bit} @ 8-bit, "
           f"{stats_bf16} keep BF16 (total {len(all_tensors)})")
 
-    # Write binary file
+    # Write binary file — atomically: write to a temp name, rename at the
+    # end. Two builds were cut short on 2026-08-20 (a reboot and a kill),
+    # each leaving a truncated model_weights_quant.bin behind.
     bin_path = os.path.join(args.output, 'model_weights_quant.bin')
+    bin_tmp = bin_path + '.tmp'
     manifest = {
         "model": input_dir,
         "num_tensors": 0,  # updated as we write
@@ -296,7 +299,7 @@ def main():
     # Verification data
     verify_data = []  # list of (name, cpu_out) for verification
 
-    with open(bin_path, 'wb') as out_f:
+    with open(bin_tmp, 'wb') as out_f:
         for i, (nn, orig_name, filename) in enumerate(all_tensors):
             filepath, data_start, header = header_cache[filename]
             if orig_name not in header:
@@ -445,11 +448,14 @@ def main():
 
     manifest["num_tensors"] = tensor_count
 
-    # Write manifest
+    # Write manifest (temp + rename too — same interruption argument)
     json_path = os.path.join(args.output, 'model_weights_quant.json')
-    with open(json_path, 'w') as f:
+    json_tmp = json_path + '.tmp'
+    with open(json_tmp, 'w') as f:
         json.dump(manifest, f, indent=2)
+    os.replace(json_tmp, json_path)
 
+    os.replace(bin_tmp, bin_path)
     print(f"\nDone: {total_bytes/1e9:.2f} GB in {bin_path}")
     print(f"Manifest: {json_path} ({tensor_count} tensors)")
     print(f"Size breakdown: original BF16 would be ~9.9 GB → quantized {total_bytes/1e9:.2f} GB")
