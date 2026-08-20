@@ -135,6 +135,9 @@ def complete(port, prompt, max_tokens=512, timeout=1200, chat=False, tf=False):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0, help="max problems (0 = all)")
+    ap.add_argument("--start", type=int, default=0,
+                    help="skip the first N problems (hard-tail probes: "
+                         "the 0-19 subset is saturated ~65% for every tier)")
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--chat", action="store_true",
                     help="chat-templated mode (template + think, stripped)")
@@ -147,6 +150,7 @@ def main():
     tasks = load_dataset()
     done = done_tasks(results_path)
     todo = [t for t in tasks if t not in done]
+    todo = todo[args.start:]
     if args.limit:
         todo = todo[:args.limit]
 

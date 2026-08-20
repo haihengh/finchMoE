@@ -7,11 +7,13 @@
 #        bin/manifest — paths resolve against finchmoe/ (the server's cwd)
 #   env: THINK_ALLOWED=1 drops --no-think (E3' protocol probe)
 #   env: TEMP=0.3 overrides the default -e 0 (E3' sampling probe)
+#   env: TASK_START=20 skips the first N problems (hard-tail probes)
 set -e
 cd "$(dirname "$0")"
 NAME="$1"; shift || true
 PORT="${PORT:-9000}"
 LIMIT="${LIMIT:-20}"
+TASK_START="${TASK_START:-0}"
 INFER_ARGS="$@"
 THINK_ARGS="--no-think"
 [ "${THINK_ALLOWED:-0}" = "1" ] && THINK_ARGS=""
@@ -58,7 +60,7 @@ for i in $(seq 1 60); do
     sleep 1
 done
 
-python3 generate.py --limit "$LIMIT" --port "$PORT" --results "$RESULTS"
+python3 generate.py --limit "$LIMIT" --start "$TASK_START" --port "$PORT" --results "$RESULTS"
 python3 evaluate.py --results "$RESULTS"
 kill $SRV 2>/dev/null || true
 wait $SRV 2>/dev/null || true
