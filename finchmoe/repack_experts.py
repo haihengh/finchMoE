@@ -19,11 +19,59 @@ Usage:
 """
 
 import argparse
+import fcntl
 import json
 import os
+import re
+import subprocess
 import time
 import sys
 import numpy as np
+
+# ── Crash guardrails (2026-08-20 kernel panic lesson) ──────────────────────
+# Two concurrent Python jobs held 21.1 + 15.3 GB RSS on the 16 GB machine:
+# compressor hit 100% of segments, swap ran low, watchdogd starved 92 s,
+# kernel panic. Shared lock with quant_audit.py — one heavy job at a time.
+
+HEAVY_JOB_LOCK = '/tmp/finchmoe_heavy_job.lock'
+
+
+def acquire_heavy_job_lock():
+    """flock a shared lockfile; exit if another heavy finchmoe job runs."""
+    fd = os.open(HEAVY_JOB_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        holder = 'unknown'
+        try:
+            holder = os.read(fd, 64).decode().strip()
+        except Exception:
+            pass
+        os.close(fd)
+        print(f'ABORT: another finchmoe heavy job is running '
+              f'(lock held by: {holder}). One job at a time — '
+              f'crash history 2026-08-15 / 2026-08-20.', file=sys.stderr)
+        sys.exit(1)
+    os.ftruncate(fd, 0)
+    os.write(fd, f'pid {os.getpid()} {sys.argv[0]}'.encode())
+    return fd  # keep open: released when the process exits
+
+
+def _check_memory(need_mb, ctx):
+    """Abort if available RAM drops below need_mb."""
+    vm = subprocess.check_output(['vm_stat']).decode()
+    page = int(re.search(r'page size of (\d+) bytes', vm).group(1))
+    total = 0
+    for key in ('Pages free', 'Pages inactive',
+                'Pages speculative', 'Pages purgeable'):
+        m = re.search(key + r':\s+(\d+)\.', vm)
+        total += int(m.group(1))
+    free = total * page // (1024 * 1024)
+    if free < need_mb:
+        raise MemoryError(
+            f'ABORT ({ctx}): only {free} MB available, need {need_mb} MB. '
+            f'Refusing to push the machine into swap — crash history '
+            f'2026-08-15 / 2026-08-20.')
 
 # Component order and expected sizes (Qwen3.6-35B-A3B 4-bit)
 COMPONENTS_4BIT = [
@@ -138,17 +186,25 @@ def load_index(index_path):
     return idx['expert_reads'], idx['model_path']
 
 
-def verify_component_sizes(expert_reads, components):
-    """Verify that component sizes in the index match expected sizes."""
+def verify_component_sizes(expert_reads, components, bits):
+    """Verify that component sizes in the index match expected sizes.
+
+    Accepts both index conventions: packed bytes (self-quantized source,
+    e.g. 4-bit models store the U32-packed weights) and BF16 bytes (pristine
+    source: values * 2 bytes = packed * 16/bits).
+    """
     expected = {c['name']: c['size'] for c in components}
     for layer_key, comps in expert_reads.items():
         for comp_name, info in comps.items():
             if comp_name not in expected:
                 print(f"WARNING: unknown component {comp_name} in layer {layer_key}")
                 continue
-            if info['expert_size'] != expected[comp_name]:
+            packed = expected[comp_name]
+            bf16 = packed * 16 // bits  # values = packed*8/bits; *2 for BF16 bytes
+            if info['expert_size'] not in (packed, bf16):
                 print(f"MISMATCH: layer {layer_key}, {comp_name}: "
-                      f"index says {info['expert_size']}, expected {expected[comp_name]}")
+                      f"index says {info['expert_size']}, expected {packed} (packed) "
+                      f"or {bf16} (BF16)")
                 return False
     print("Component sizes verified: all match expected layout")
     return True
@@ -515,6 +571,10 @@ def main():
                         help='Verify a specific layer against originals')
     args = parser.parse_args()
 
+    # One heavy job at a time, and leave headroom (see guardrails above).
+    acquire_heavy_job_lock()
+    _check_memory(6144, 'startup')
+
     # Select component layout based on bits
     if args.bits == 8:
         components = COMPONENTS_8BIT
@@ -548,7 +608,7 @@ def main():
     # Verify component sizes — auto-detect large model (397B) vs standard (35B)
     # (skipped for 3-bit: the source experts are 4-bit/BF16 and get
     # dequant->requantized, so sizes differ by design)
-    if args.bits != 3 and not verify_component_sizes(expert_reads, components):
+    if not verify_component_sizes(expert_reads, components, args.bits):
         # Try large-model variants
         if args.bits == 4:
             components = COMPONENTS_4BIT_LARGE; expert_size = EXPERT_SIZE_4BIT_LARGE
@@ -575,10 +635,11 @@ def main():
 
     print(f"Layers to process: {layers[0]}-{layers[-1]} ({len(layers)} layers)")
 
-    if args.bits == 3:
-        # 3-bit requires dequant->requant (source experts are 4-bit or BF16).
-        # Bypasses the raw-copy repack below and the component-size check.
-        repack_all_3bit(expert_reads, model_path, output_dir, layers)
+    if args.bits in (3, 8):
+        # 3-bit and 8-bit require dequant->requant (source experts are 4-bit
+        # packed or pristine BF16). Bypasses the raw-copy repack below.
+        repack_all_requant(expert_reads, model_path, output_dir, layers,
+                           args.bits, components, expert_size)
         return
 
     layer_total_size = NUM_EXPERTS * expert_size
