@@ -173,10 +173,13 @@ Three experiments; each gated by a 20-task probe before any full 164 run:
   manifest (`model_weights_quant.json` missing — the 09:47 reboot cut the
   build between the bin and json writes). Restarted the runbook E1 command
   (deterministic — same bin, adds the json + verify).
-- E1 probe server: `./finchmoe-infer -R 9000 -m . -w
-  quant_clean_gdn8/model_weights_quant.bin -j
+- E1 probe server: `./finchmoe-infer -R 9000 -m . --weights
+  quant_clean_gdn8/model_weights_quant.bin --manifest
   quant_clean_gdn8/model_weights_quant.json -e 0 --top-k 1 --no-think
-  --rep-penalty 1.0` (3-bit experts, GDN8 bin).
+  --rep-penalty 1.0` (3-bit experts, GDN8 bin). Or from humaneval_m1:
+  `EXTRA_WEIGHTS="--weights ../finchmoe/quant_clean_gdn8/model_weights_quant.bin
+  --manifest ../finchmoe/quant_clean_gdn8/model_weights_quant.json"
+  ./probe_tier.sh e1_gdn8`.
 - E2 full run: same + `--int8-experts` (8-bit experts ≈ 3.2-4 tok/s; full 164
   ≈ 3-4 h, background, alone on the machine). Probe first: `--limit 20`.
 - Harness: `cd ../humaneval_m1 && python3 generate.py --limit 20 --port 9000
