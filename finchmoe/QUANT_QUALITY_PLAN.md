@@ -160,6 +160,19 @@ easy-biased: both default tiers score 13/20 = 65% on it vs 32.3% full-164):
 | E1 GDN8 + 3-bit experts | 10/20 = 50% | 65% (both default tiers) |
 | E2 GDN8 + 8-bit experts | **12/20 = 60%** | 65% / GGUF 40% |
 
+**Protocol probes (2026-08-20, hard slice tasks 20-79 where tiers separate):**
+
+| variant | 4-bit tier | baseline (4-bit no-think) |
+|---|---|---|
+| think-allowed | 28/60 = 46.7% | 28/60 = 46.7% (exact tie) |
+| T=0.3 | ties on easy subset too | — |
+| chat template + think | running | — |
+
+Think-allowed and T=0.3 are **no-ops by construction**: 0/60 raw-protocol
+completions emit `<think>`, and `--top-k 1` makes temperature unable to move
+the argmax. The chat template (with think, stripped) is the only remaining
+protocol cell.
+
 E1 verdict: within binomial noise of default at n=20 (3-task gap, ±11 pts),
 certainly no gain — 8-bit GDN projections don't move the needle. The E1 bin
 is engine-correct (all 136 norms bit-match pi; coherent CLI output; the
