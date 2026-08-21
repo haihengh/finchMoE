@@ -361,6 +361,15 @@ dominant quality cost, not the engine; (2) Gemma 4 26B's chat-mode score sits
 near its FP16 expectation, i.e. turbo-fieldfare's 4-bit repack loses far less
 than our 3-bit — its quantization is the reference to study.
 
+**Quant-plan closure (2026-08-20)** — both hypotheses tested and closed
+(details in [QUANT_QUALITY_PLAN.md](finchmoe/QUANT_QUALITY_PLAN.md)): (a)
+near-lossless weights (8-bit experts cos 0.99996 + 8-bit GDN) tie the default
+tier — quantization is not the lever; (b) protocol variants tie or lose to
+raw+no-think (think-allowed is a no-op — raw prompts never emit `<think>`;
+chat template 16.7% vs raw 46.7% on the hard slice). Verdict: **32.3% is the
+capability ceiling of Qwen 3.6 35B A3B through our harness**; the fraQtl
+number is a different model, not reachable by weight or protocol changes.
+
 ## Architecture
 
 ```
