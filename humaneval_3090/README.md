@@ -1,6 +1,6 @@
-# HumanEval on RTX 3090: Qwen3.8-27B vs Qwen3.6-35B-A3B vs ternary Bonsai variants
+# HumanEval on RTX 3090: Qwen3.8-27B vs Qwen3.6-35B-A3B vs ternary Bonsai variants vs Ornith
 
-Benchmark of four models served locally with llama.cpp on a single NVIDIA RTX 3090 (24 GB).
+Benchmark of five models served locally with llama.cpp on a single NVIDIA RTX 3090 (24 GB).
 Results generated 2026-08-20 / 2026-08-21.
 
 ## Hardware and software
@@ -21,8 +21,9 @@ Results generated 2026-08-20 / 2026-08-21.
 | Qwen3.6-35B-A3B | `Qwen3.6-35B-A3B-Q4_K_M.gguf` (19.71 GB) | Q4_K_M | `qwen35moe` MoE: 256 experts / 8 active, 40 layers = 30 delta-net + 10 full attention; native ctx 262144 |
 | Bonsai-27B | `Bonsai-27B-Q1_0.gguf` (3.54 GB) | Q1_0 ternary | `qwen35` hybrid, 64 layers (same shape as Qwen3.8-27B, no MTP); Prism ternary training |
 | Ternary-Bonsai-27B | `Ternary-Bonsai-27B-Q2_g64.gguf` (7.06 GB) | Q2_0 (g64 packing) | same `qwen35` shape; ternary weights packed at 2.125 bits with group-64 scales |
+| Ornith-1.5-35B-A3B | `Ornith-1.5-35B-Q4_K_M.gguf` (20.22 GB) | Q4_K_M | 35B-A3B MoE (same class as Qwen3.6-35B-A3B) |
 
-Qwen models from `lmstudio-community`; Bonsai models from `lmstudio-community` and `prism-ml` on the local LM Studio models dir. See the compatibility note about the Q2_0 packings below.
+Qwen models from `lmstudio-community`; Bonsai models from `lmstudio-community` and `prism-ml`; Ornith from `ornith-ai` on the local LM Studio models dir. See the compatibility note about the Q2_0 packings below.
 
 ## Protocol
 
@@ -44,6 +45,7 @@ Qwen models from `lmstudio-community`; Bonsai models from `lmstudio-community` a
 | **Qwen3.6-35B-A3B** (MoE) | **91.5%** | **89.0%** | 150 / 147 of 164 |
 | **Ternary-Bonsai-27B** (Q2_g64) | **91.5%** | **89.0%** | 150 / 146 of 164 |
 | **Bonsai-27B** (Q1_0 ternary) | **87.2%** | **83.5%** | 143 / 137 of 164 |
+| **Ornith-1.5-35B-A3B** (MoE) | **92.1%** | **88.4%** | 151 / 145 of 164 |
 
 Measured generation speed during the run (average over all 164 requests):
 
@@ -51,6 +53,7 @@ Measured generation speed during the run (average over all 164 requests):
 |---|---|---|
 | Qwen3.8-27B | 478 t/s | 38 t/s |
 | Qwen3.6-35B-A3B | 946 t/s | 136 t/s |
+| Ornith-1.5-35B-A3B | 939 t/s | 138.5 t/s |
 | Ternary-Bonsai-27B (Q2_g64) | 552 t/s | 65 t/s |
 | Bonsai-27B (Q1_0) | 580 t/s | 74 t/s |
 
@@ -67,6 +70,9 @@ Measured generation speed during the run (average over all 164 requests):
   baseline, consistent with Prism's "Q2_0 is essentially lossless for ternary weights".
   The full-ternary Q1_0 gives up ~4.5 more points but is the size/speed king
   (3.5 GB, 74 t/s).
+- Ornith-1.5-35B-A3B and Qwen3.6-35B-A3B are a statistical tie (Ornith +0.6 base,
+  Qwen +0.6 plus, within single-sample noise) with identical throughput; the two 35B-A3B
+  MoEs are interchangeable on this benchmark.
 - Trade: quality-critical coding/agents -> 27B dense; throughput/long-context serving -> 35B-A3B;
   near-baseline quality at fractional size with big VRAM headroom -> Ternary-Bonsai Q2_g64.
 
@@ -123,6 +129,9 @@ humaneval_3090/
     ternary-bonsai-27b-q2g64_openai_temp_0.0.jsonl
     ternary-bonsai-27b-q2g64_openai_temp_0.0.raw.jsonl
     ternary-bonsai-27b-q2g64_openai_temp_0.0_eval_results.json
+    ornith-1.5-35b-a3b_openai_temp_0.0.jsonl
+    ornith-1.5-35b-a3b_openai_temp_0.0.raw.jsonl
+    ornith-1.5-35b-a3b_openai_temp_0.0_eval_results.json
 ```
 
 `eval_results.json` schema: `eval[task_id]` is a list of samples, each with fields
