@@ -8,6 +8,7 @@
 #   env: THINK_ALLOWED=1 drops --no-think (E3' protocol probe)
 #   env: TEMP=0.3 overrides the default -e 0 (E3' sampling probe)
 #   env: TASK_START=20 skips the first N problems (hard-tail probes)
+#   env: GEN_CHAT=1 runs generate.py --chat (chat template + think, stripped)
 set -e
 cd "$(dirname "$0")"
 NAME="$1"; shift || true
@@ -69,7 +70,8 @@ for i in $(seq 1 60); do
     sleep 1
 done
 
-python3 generate.py --limit "$LIMIT" --start "$TASK_START" --port "$PORT" --results "$RESULTS"
+python3 generate.py --limit "$LIMIT" --start "$TASK_START" --port "$PORT" --results "$RESULTS" \
+    $([ "${GEN_CHAT:-0}" = "1" ] && echo "--chat")
 python3 evaluate.py --results "$RESULTS"
 kill $SRV 2>/dev/null || true
 wait $SRV 2>/dev/null || true
