@@ -433,6 +433,9 @@ static int g_use_1bit = 0;       // enabled by --1bit flag: use packed_experts_1
 static int g_use_2bit = 0;       // enabled by --2bit flag: use packed_experts_2bit/ + 2-bit kernel
 static int g_use_3bit = 1;       // DEFAULT: 3-bit experts (9.1 tok/s, near-4bit quality); --2bit/--4bit/--8bit override
 static int g_use_int8 = 0;       // enabled by --int8-experts flag: use 8-bit packed experts
+static int g_use_4bit = 0;       // enabled by --4bit (all other pack flags zeroed — must
+                                 // suppress the auto-detect below, which would
+                                 // otherwise override --4bit with any pack it finds)
 static int g_cache_telemetry_enabled = 0;  // enabled by --cache-telemetry flag
 static int g_think_budget = 200;  // max thinking tokens before force-emitting </think> — the model otherwise loops inside the think phase on long-form prompts (2048 was effectively unlimited)
 static float g_temperature = 0.7f;  // sampling temperature (0 = greedy argmax); 0.7 ends long gens naturally (bug 15)
@@ -14975,10 +14978,10 @@ int main(int argc, char **argv) {
                 case 'T': g_timing_enabled = 1; break;
                 case 'F': g_freq_tracking = 1; break;
                 case 'E': g_cache_telemetry_enabled = 1; break;
-                case '2': g_use_2bit = 1; g_use_3bit = 0; g_use_int8 = 0; g_use_1bit = 0; break;
-                case '3': g_use_3bit = 1; g_use_2bit = 0; g_use_int8 = 0; g_use_1bit = 0; break;
-                case '4': g_use_3bit = 0; g_use_2bit = 0; g_use_int8 = 0; g_use_1bit = 0; break;
-                case '8': g_use_int8 = 1; g_use_3bit = 0; g_use_2bit = 0; g_use_1bit = 0; break;
+                case '2': g_use_2bit = 1; g_use_3bit = 0; g_use_int8 = 0; g_use_1bit = 0; g_use_4bit = 0; break;
+                case '3': g_use_3bit = 1; g_use_2bit = 0; g_use_int8 = 0; g_use_1bit = 0; g_use_4bit = 0; break;
+                case '4': g_use_3bit = 0; g_use_2bit = 0; g_use_int8 = 0; g_use_1bit = 0; g_use_4bit = 1; break;
+                case '8': g_use_int8 = 1; g_use_3bit = 0; g_use_2bit = 0; g_use_1bit = 0; g_use_4bit = 0; break;
                 case 'G': gpu_linear_attn_enabled = 1; break;
                 case 'D': g_pred_enabled = 1; break;
                 case 'J': g_use_mtp = 1; break;
@@ -15315,14 +15318,14 @@ int main(int argc, char **argv) {
         }
 
         // ---- Auto-detect expert format (only when no explicit flag; 3-bit is the default) ----
-        if (!g_use_1bit && !g_use_2bit && !g_use_3bit && !g_use_int8) {
+        if (!g_use_1bit && !g_use_2bit && !g_use_3bit && !g_use_int8 && !g_use_4bit) {
             char probe[1024];
             // Check 1-bit first (smallest, fastest)
             snprintf(probe, sizeof(probe), "%s/packed_experts_1bit/layer_00.bin", model_path);
             int pfd1 = open(probe, O_RDONLY);
             if (pfd1 >= 0) { close(pfd1); g_use_1bit = 1; printf("[auto] Using 1-bit experts\n"); }
         }
-        if (!g_use_1bit && !g_use_2bit && !g_use_3bit && !g_use_int8) {
+        if (!g_use_1bit && !g_use_2bit && !g_use_3bit && !g_use_int8 && !g_use_4bit) {
             char probe[1024];
             // Check 8-bit
             snprintf(probe, sizeof(probe), "%s/packed_experts_8bit/layer_00.bin", model_path);

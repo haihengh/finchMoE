@@ -22,6 +22,15 @@ TEMP_E="${TEMP:-0}"
 RESULTS="he_results_${NAME}.jsonl"
 rm -f "$RESULTS" /tmp/probe_server.log
 
+# Never overlap probes: a second server on the same port dies on bind
+# while its generate.py quietly talks to the FIRST probe's server —
+# 14/60 tasks got the wrong tier and 46 got connection-refused this way
+# (2026-08-20 think-tail probe).
+if lsof -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "ABORT: port $PORT already in use — another probe/server is running" >&2
+    exit 1
+fi
+
 # Engine-contract check: layer norms must carry the Qwen3.5 (1 + w) fold.
 # A raw-HF build (rms << 1) passes quantize_non_experts.py --verify but
 # soups the engine — the 2026-08-20 E1 build lost a full probe this way.
