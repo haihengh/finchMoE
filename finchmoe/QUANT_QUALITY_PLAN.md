@@ -166,12 +166,30 @@ easy-biased: both default tiers score 13/20 = 65% on it vs 32.3% full-164):
 |---|---|---|
 | think-allowed | 28/60 = 46.7% | 28/60 = 46.7% (exact tie) |
 | T=0.3 | ties on easy subset too | — |
-| chat template + think | running | — |
+| chat template + think | **10/60 = 16.7%** | 46.7% — raw wins |
 
 Think-allowed and T=0.3 are **no-ops by construction**: 0/60 raw-protocol
 completions emit `<think>`, and `--top-k 1` makes temperature unable to move
 the argmax. The chat template (with think, stripped) is the only remaining
 protocol cell.
+
+## Phase 1 CONCLUSION (2026-08-20)
+
+The plan's two hypotheses are both empirically closed:
+
+1. **Quantization is NOT the lever.** Near-lossless weights (E2, cos 0.99996)
+   tie the default tier on both slices (60% vs 65% easy; the hard slice
+   needs no E2 probe — 8-bit experts at n=20 easy was already tied, and the
+   hard-slice tier ordering 4-bit 46.7 > 3-bit 40 > GGUF 25 is the real
+   weight signal, with 4-bit already at the top).
+2. **Protocol is NOT the lever.** Every protocol cell on the discriminating
+   hard slice ties or loses to raw+no-think (chat 16.7% ≪ 46.7%).
+
+**Verdict: 32.3% full-164 (4-bit raw protocol) is the capability ceiling of
+Qwen 3.6 35B A3B through finchMoE's harness.** The fraQtl 61.6% is a
+different model (Gemma 4 26B) under a chat protocol — not reachable by
+weight or protocol changes on this model. The remaining quality lever is a
+different/better base model, which is out of scope for this plan.
 
 E1 verdict: within binomial noise of default at n=20 (3-task gap, ±11 pts),
 certainly no gain — 8-bit GDN projections don't move the needle. The E1 bin
