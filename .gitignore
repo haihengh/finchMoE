@@ -37,6 +37,11 @@ finchmoe/test_quant_weights
 /llama.cpp/
 /omlx/
 /turbo-fieldfare/
+/colibri/
+/.abacusai/
+
+# Downloaded model files (multi-GB — never versioned)
+finchmoe/Qwen3.6-35B-A3B-GGUF/
 
 # Misc
 .DS_Store
