@@ -1,5 +1,28 @@
 # Quantization Quality Plan — closing the HumanEval gap
 
+> ## ⚠️ REFUTED 2026-08-21 — this plan's premise was wrong
+>
+> The EvalPlus 3090 harness (`humaneval_evalplus/`, byte-identical protocol to
+> the 3090's published 91.5% run) was executed against FinchMoE on this Mac:
+>
+> | weights through FinchMoE | HumanEval base |
+> |---|---|
+> | 3-bit native | 13.4% |
+> | 4-bit native | 12.8% |
+> | our Q4_K_M GGUF | 12.8% |
+> | **the 3090's exact GGUF** (scores 91.5% under llama.cpp) | **11.6%** |
+>
+> All four weight formats converge to ~13%. The exact file that scores 91.5%
+> through llama.cpp scores 11.6% through FinchMoE. **The deficit is in the
+> engine / tokenizer / chat-template path, not the quantization.** The
+> "32.3% is the ceiling" conclusion below is an artifact of our harness AND
+> our engine. Scoring parity is proven (our EvalPlus install reproduces
+> 0.915/0.890 on the 3090's own samples). Full record: `humaneval_evalplus/README.md`.
+> Next step: diff our chat-template construction (`tokenize_chat_message`,
+> infer.m) token-for-token against llama.cpp's Qwen3 template with
+> `--reasoning off` — the chat path was never cross-validated, only raw
+> completions were.
+
 **Status**: Phase 0 COMPLETE 2026-08-20. Phase 1 = E1 (GDN8) → E2 (near-lossless)
 → E3' (protocol probes). E3 (pristine 4-bit) dropped — see why below.
 E1/E2 builds DONE 2026-08-20; the post-reboot verification session hit the

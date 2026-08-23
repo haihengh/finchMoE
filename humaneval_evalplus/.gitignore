@@ -1,0 +1,3 @@
+# The EvalPlus venv is large and reproducible via setup.sh
+.venv/
+__pycache__/
