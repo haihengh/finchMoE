@@ -1,0 +1,13 @@
+{
+  "": {
+    "dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareCLI.build/QwenFieldfareCLI.d",
+    "object": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareCLI.build/QwenFieldfareCLI.o",
+    "swift-dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareCLI.build/primary.swiftdeps"
+  },
+  "/Volumes/samsung 2t/code/flash-qwen/Sources/QwenFieldfareCLI/main.swift": {
+    "object": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareCLI.build/main.swift.o",
+    "swiftmodule": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareCLI.build/main~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareCLI.build/main.swiftdeps",
+    "diagnostics": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareCLI.build/main.dia"
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "": {
+    "dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/QwenFieldfareRuntime.d",
+    "object": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/QwenFieldfareRuntime.o",
+    "swift-dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/primary.swiftdeps"
+  },
+  "/Volumes/samsung 2t/code/flash-qwen/Sources/QwenFieldfareRuntime/Inference/ForwardRunner.swift": {
+    "object": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/ForwardRunner.swift.o",
+    "swiftmodule": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/ForwardRunner~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/ForwardRunner.swiftdeps",
+    "diagnostics": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/ForwardRunner.dia"
+  },
+  "/Volumes/samsung 2t/code/flash-qwen/Sources/QwenFieldfareRuntime/Inference/InferenceEngine.swift": {
+    "object": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/InferenceEngine.swift.o",
+    "swiftmodule": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/InferenceEngine~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/InferenceEngine.swiftdeps",
+    "diagnostics": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/InferenceEngine.dia"
+  },
+  "/Volumes/samsung 2t/code/flash-qwen/Sources/QwenFieldfareRuntime/Inference/Model.swift": {
+    "object": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/Model.swift.o",
+    "swiftmodule": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/Model~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/Model.swiftdeps",
+    "diagnostics": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/Model.dia"
+  },
+  "/Volumes/samsung 2t/code/flash-qwen/Sources/QwenFieldfareRuntime/Inference/Sampler.swift": {
+    "object": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/Sampler.swift.o",
+    "swiftmodule": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/Sampler~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/Sampler.swiftdeps",
+    "diagnostics": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/Sampler.dia"
+  },
+  "/Volumes/samsung 2t/code/flash-qwen/Sources/QwenFieldfareRuntime/Inference/Tokenizer.swift": {
+    "object": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/Tokenizer.swift.o",
+    "swiftmodule": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/Tokenizer~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/Tokenizer.swiftdeps",
+    "diagnostics": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/Tokenizer.dia"
+  },
+  "/Volumes/samsung 2t/code/flash-qwen/Sources/QwenFieldfareRuntime/KVCache/KVCacheManager.swift": {
+    "object": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/KVCacheManager.swift.o",
+    "swiftmodule": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/KVCacheManager~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/KVCacheManager.swiftdeps",
+    "diagnostics": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/KVCacheManager.dia"
+  },
+  "/Volumes/samsung 2t/code/flash-qwen/Sources/QwenFieldfareRuntime/Metal/KernelPipelines.swift": {
+    "object": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/KernelPipelines.swift.o",
+    "swiftmodule": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/KernelPipelines~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/KernelPipelines.swiftdeps",
+    "diagnostics": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/KernelPipelines.dia"
+  },
+  "/Volumes/samsung 2t/code/flash-qwen/Sources/QwenFieldfareRuntime/Metal/MetalContext.swift": {
+    "object": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/MetalContext.swift.o",
+    "swiftmodule": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/MetalContext~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/MetalContext.swiftdeps",
+    "diagnostics": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/MetalContext.dia"
+  },
+  "/Volumes/samsung 2t/code/flash-qwen/Sources/QwenFieldfareRuntime/Streaming/PreadExpertStreamer.swift": {
+    "object": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/PreadExpertStreamer.swift.o",
+    "swiftmodule": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/PreadExpertStreamer~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/PreadExpertStreamer.swiftdeps",
+    "diagnostics": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/PreadExpertStreamer.dia"
+  },
+  "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/DerivedSources/resource_bundle_accessor.swift": {
+    "object": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/resource_bundle_accessor.swift.o",
+    "swiftmodule": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/resource_bundle_accessor~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/resource_bundle_accessor.swiftdeps",
+    "diagnostics": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareRuntime.build/resource_bundle_accessor.dia"
+  }
+}

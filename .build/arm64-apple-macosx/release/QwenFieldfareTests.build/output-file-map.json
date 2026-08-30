@@ -1,0 +1,13 @@
+{
+  "": {
+    "dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareTests.build/QwenFieldfareTests.d",
+    "object": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareTests.build/QwenFieldfareTests.o",
+    "swift-dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareTests.build/primary.swiftdeps"
+  },
+  "/Volumes/samsung 2t/code/flash-qwen/Tests/QwenFieldfareTests/FormatTests.swift": {
+    "object": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareTests.build/FormatTests.swift.o",
+    "swiftmodule": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareTests.build/FormatTests~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareTests.build/FormatTests.swiftdeps",
+    "diagnostics": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareTests.build/FormatTests.dia"
+  }
+}

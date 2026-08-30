@@ -1,0 +1,13 @@
+{
+  "": {
+    "dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfarePackageTests.build/QwenFieldfarePackageTests.d",
+    "object": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfarePackageTests.build/QwenFieldfarePackageTests.o",
+    "swift-dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfarePackageTests.build/primary.swiftdeps"
+  },
+  "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfarePackageTests.derived/runner.swift": {
+    "object": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfarePackageTests.build/runner.swift.o",
+    "swiftmodule": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfarePackageTests.build/runner~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfarePackageTests.build/runner.swiftdeps",
+    "diagnostics": "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfarePackageTests.build/runner.dia"
+  }
+}
