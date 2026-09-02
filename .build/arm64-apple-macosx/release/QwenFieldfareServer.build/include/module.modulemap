@@ -1,3 +1,0 @@
-module QwenFieldfareServer {
-    header "/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/QwenFieldfareServer.build/include/QwenFieldfareServer-Swift.h"
-}

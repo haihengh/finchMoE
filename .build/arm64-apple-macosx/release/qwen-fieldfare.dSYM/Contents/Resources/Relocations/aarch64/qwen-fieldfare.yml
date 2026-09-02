@@ -1,5 +1,0 @@
----
-triple:          'arm64-apple-darwin'
-binary-path:     '/Volumes/samsung 2t/code/flash-qwen/.build/arm64-apple-macosx/release/qwen-fieldfare'
-relocations:     []
-...

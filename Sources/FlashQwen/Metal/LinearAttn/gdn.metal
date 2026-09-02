@@ -1,0 +1,190 @@
+#include <metal_stdlib>
+using namespace metal;
+
+// ============================================================================
+// gdn — Gated-DeltaNet (linear attention) decode unit.
+//
+// Math is pinned to `transformers/models/qwen3_5_moe/modeling_qwen3_5_moe.py`:
+//   * torch_causal_conv1d_update  (decode, kernel 4)
+//   * l2norm                       (sum-based, eps 1e-6)
+//   * torch_recurrent_gated_delta_rule (decode recurrence)
+//
+// Recurrent state convention: v-major, `state[(hv*D + v)*D + k]`, so a matvec
+// `sum_k S[v,k]*x[k]` and the rank-1 write `S[v,k] += k[k]*delta[v]` are both
+// contiguous over `k`. The state is fp32 (64 KB per head) and lives in a
+// persistent device buffer — it exceeds the 32 KB threadgroup memory, so it
+// is read/written through a buffer, not staged in threadgroup memory.
+//
+// GQA: value head `hv` uses key head `hv / 2` (repeat_interleave(2)).
+//
+// Dispatch:
+//   gdn_conv_update  — one thread per channel (32-thread groups).
+//   gdn_recurrent    — one 256-thread threadgroup per value head.
+// ============================================================================
+
+static inline float gdn_silu(float x) { return x / (1.0f + exp(-x)); }
+
+// Compile-time bound for the per-head threadgroup scratch (see gdn_recurrent).
+constant constexpr uint kGdnMaxHeadDim = 256;
+
+// ----------------------------------------------------------------------------
+// Causal conv1d decode update (kernel 4):
+//   out[c]    = silu(w0*s0 + w1*s1 + w2*s2 + w3*x)
+//   new_state = [s1, s2, x]
+// One thread per channel; w is [C,4], state/newState [C,3], x/out [C].
+// ----------------------------------------------------------------------------
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void gdn_conv_update(
+    device const half* w          [[buffer(0)]],   // [C, 4]
+    device const half* state      [[buffer(1)]],   // [C, 3]
+    device const half* x          [[buffer(2)]],   // [C]
+    device       half* out        [[buffer(3)]],   // [C]
+    device       half* newState   [[buffer(4)]],   // [C, 3]
+    constant     uint&  C         [[buffer(5)]],
+    uint  lid                     [[thread_position_in_threadgroup]],
+    uint  lsize                   [[threads_per_threadgroup]],
+    uint  tgx                     [[threadgroup_position_in_grid]]
+) {
+    uint c = tgx * lsize + lid;
+    if (c >= C) return;
+
+    float acc = float(w[c*4 + 0]) * float(state[c*3 + 0])
+              + float(w[c*4 + 1]) * float(state[c*3 + 1])
+              + float(w[c*4 + 2]) * float(state[c*3 + 2])
+              + float(w[c*4 + 3]) * float(x[c]);
+    out[c] = half(gdn_silu(acc));
+
+    newState[c*3 + 0] = state[c*3 + 1];
+    newState[c*3 + 1] = state[c*3 + 2];
+    newState[c*3 + 2] = x[c];
+}
+
+// Two-stage SIMD-group block sum of a per-thread `acc` into `partial[0]`.
+static inline void gdn_block_sum(
+    float acc,
+    uint  simd_lane,
+    uint  simd_group,
+    uint  simdgroups,
+    threadgroup float* partial
+) {
+    acc = simd_sum(acc);
+    if (simd_lane == 0) partial[simd_group] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd_group == 0) {
+        float v = (simd_lane < simdgroups) ? partial[simd_lane] : 0.0f;
+        v = simd_sum(v);
+        if (simd_lane == 0) partial[0] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+// ----------------------------------------------------------------------------
+// Recurrent gated-delta-rule decode step for one value head (one threadgroup).
+//
+//   qn    = l2norm(q[hv/2] * scale)
+//   kn    = l2norm(k[hv/2])
+//   decay = exp(g[hv])
+//   S     = S * decay
+//   r[v]  = sum_k S[v,k]*kn[k]
+//   delta = beta[hv] * (v[v] - r[v])
+//   S     = S + outer(kn, delta)          // S[v,k] += kn[k]*delta
+//   o[v]  = sum_k S[v,k]*qn[k]            // read from the UPDATED state
+//
+// State is fp32 in a buffer; q/k/v are fp16; g/beta are per-head fp32 scalars.
+// The only cross-thread reductions are the two l2norm sums (pass 1). Pass 2
+// is a pure per-thread dot product + rank-1 write per `v` (one thread per v).
+// ----------------------------------------------------------------------------
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void gdn_recurrent(
+    device       float* state      [[buffer(0)]],   // [V][D][D] fp32, v-major
+    device const half*  q          [[buffer(1)]],   // [K][D] fp16
+    device const half*  k          [[buffer(2)]],   // [K][D] fp16
+    device const half*  v          [[buffer(3)]],   // [V][D] fp16
+    device const float* g          [[buffer(4)]],   // [V] fp32
+    device const float* beta       [[buffer(5)]],   // [V] fp32
+    device       half*  out        [[buffer(6)]],   // [V][D] fp16
+    constant     uint&  D          [[buffer(7)]],
+    constant     float& scale      [[buffer(8)]],   // 1/sqrt(head_dim)
+    constant     float& l2eps      [[buffer(9)]],
+    uint  hv                       [[threadgroup_position_in_grid]],
+    uint  lid                      [[thread_position_in_threadgroup]],
+    uint  lsize                    [[threads_per_threadgroup]],
+    uint  simd_lane                [[thread_index_in_simdgroup]],
+    uint  simd_group               [[simdgroup_index_in_threadgroup]],
+    uint  simdgroups               [[simdgroups_per_threadgroup]]
+) {
+    const uint K = D * D;                 // per-head state element count
+    const uint kh = hv / 2;              // key head for this value head
+    device const half* qh = q + kh * D;
+    device const half* kh_ = k + kh * D;
+    device const half* vh = v + hv * D;
+    device float* S = state + hv * K;
+    device half* oh = out + hv * D;
+    const float decay = exp(g[hv]);
+    const float betaV = beta[hv];
+
+    // Head dim is a runtime buffer constant; threadgroup arrays need a
+    // compile-time bound. GDN heads are 128; 256 leaves headroom.
+    threadgroup float qn[kGdnMaxHeadDim];
+    threadgroup float kn[kGdnMaxHeadDim];
+    threadgroup float pQ[8];
+    threadgroup float pK[8];
+
+    // Pass 1: l2norm of q (scaled) and k into threadgroup scratch.
+    float accq = 0.0f, acck = 0.0f;
+    for (uint i = lid; i < D; i += lsize) {
+        float qv = float(qh[i]) * scale;
+        float kv = float(kh_[i]);
+        accq = fma(qv, qv, accq);
+        acck = fma(kv, kv, acck);
+    }
+    gdn_block_sum(accq, simd_lane, simd_group, simdgroups, pQ);
+    gdn_block_sum(acck, simd_lane, simd_group, simdgroups, pK);
+    const float qinv = rsqrt(pQ[0] + l2eps);
+    const float kinv = rsqrt(pK[0] + l2eps);
+    for (uint i = lid; i < D; i += lsize) {
+        qn[i] = float(qh[i]) * scale * qinv;
+        kn[i] = float(kh_[i]) * kinv;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // kn·qn is constant across v — compute once for the readout shortcut.
+    float dotknqn = 0.0f;
+    for (uint i = lid; i < D; i += lsize) {
+        dotknqn = fma(kn[i], qn[i], dotknqn);
+    }
+    dotknqn = simd_sum(dotknqn);
+    if (simd_lane == 0) pQ[simd_group] = dotknqn;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd_group == 0) {
+        float t = (simd_lane < simdgroups) ? pQ[simd_lane] : 0.0f;
+        t = simd_sum(t);
+        if (simd_lane == 0) pQ[0] = t;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float knq = pQ[0];
+
+    // Pass 2: per-v decay, residual read, rank-1 write, updated-state readout.
+    for (uint vIdx = lid; vIdx < D; vIdx += lsize) {
+        device float* row = S + vIdx * D;
+
+        // decay the row in place
+        for (uint kk = 0; kk < D; kk++) row[kk] *= decay;
+
+        // r = row · kn   (decayed)
+        float r = 0.0f;
+        float base = 0.0f;              // row · qn (decayed), for the readout
+        for (uint kk = 0; kk < D; kk++) {
+            r    = fma(row[kk], kn[kk], r);
+            base = fma(row[kk], qn[kk], base);
+        }
+
+        const float delta = betaV * (float(vh[vIdx]) - r);
+
+        // rank-1 write
+        for (uint kk = 0; kk < D; kk++) row[kk] += kn[kk] * delta;
+
+        // o = sum_k (row + kn*delta)·qn = base + delta·(kn·qn)
+        oh[vIdx] = half(base + delta * knq);
+    }
+}

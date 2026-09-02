@@ -1,81 +1,155 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 import PackageDescription
 
-// The codebase is written in Swift 5 language mode; tools 6.0 is only needed
-// for the `.macOS(.v15)` platform declaration, so pin the language mode back
-// down to v5 to avoid strict-concurrency errors.
-let swiftV5: [SwiftSetting] = [.swiftLanguageMode(.v5)]
-
 let package = Package(
-    name: "QwenFieldfare",
+    name: "flash-qwen",
     platforms: [
-        .macOS(.v15)
+        .macOS(.v26),
+        .iOS(.v26),
     ],
     products: [
-        .library(name: "QwenFieldfareFormat", targets: ["QwenFieldfareFormat"]),
-        .library(name: "QwenFieldfareRepack", targets: ["QwenFieldfareRepack"]),
-        .library(name: "QwenFieldfareRuntime", targets: ["QwenFieldfareRuntime"]),
-        .library(name: "QwenFieldfareServer", targets: ["QwenFieldfareServer"]),
-        .executable(name: "qwen-fieldfare", targets: ["QwenFieldfareCLI"]),
-        .executable(name: "qwen-fieldfare-server", targets: ["QwenFieldfareServerMain"]),
+        .library(name: "FlashQwen", targets: ["FlashQwen"]),
+        .executable(name: "FlashQwenRepack", targets: ["FlashQwenRepack"]),
+        .executable(name: "FlashQwenCLI", targets: ["FlashQwenCLI"]),
+        .executable(name: "FlashQwenMac", targets: ["FlashQwenMac"]),
+        .executable(name: "FlashQwenDecodeService", targets: ["FlashQwenDecodeService"]),
+        .executable(name: "FlashQwenServer", targets: ["FlashQwenServer"]),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", exact: "2.99.0"),
     ],
     targets: [
-        // MARK: - Format
         .target(
-            name: "QwenFieldfareFormat",
-            path: "Sources/QwenFieldfareFormat",
-            swiftSettings: swiftV5
+            name: "FlashQwenFormat",
+            path: "Sources/FlashQwenFormat"
         ),
-
-        // MARK: - Repack (download + repack tooling)
         .target(
-            name: "QwenFieldfareRepack",
-            dependencies: ["QwenFieldfareFormat"],
-            path: "Sources/QwenFieldfareRepack",
-            swiftSettings: swiftV5
-        ),
-
-        // MARK: - Runtime (inference engine + Metal resources)
-        .target(
-            name: "QwenFieldfareRuntime",
-            dependencies: ["QwenFieldfareFormat"],
-            path: "Sources/QwenFieldfareRuntime",
-            resources: [
-                .process("Metal/Kernels.metal")
+            name: "FlashQwen",
+            dependencies: [
+                "FlashQwenFormat",
+                .product(name: "Tokenizers", package: "swift-transformers"),
             ],
-            swiftSettings: swiftV5
+            path: "Sources/FlashQwen",
+            resources: [
+                .copy("Metal"),
+            ]
         ),
-
-        // MARK: - Server (OpenAI-compatible) — library so the CLI can host it too
         .target(
-            name: "QwenFieldfareServer",
-            dependencies: ["QwenFieldfareRuntime"],
-            path: "Sources/QwenFieldfareServer",
-            swiftSettings: swiftV5
+            name: "FlashQwenRepackCore",
+            dependencies: ["FlashQwenFormat"],
+            path: "Sources/FlashQwenRepack/Core"
         ),
-
-        // MARK: - CLI (repack + run + serve)
         .executableTarget(
-            name: "QwenFieldfareCLI",
-            dependencies: ["QwenFieldfareRuntime", "QwenFieldfareRepack", "QwenFieldfareServer"],
-            path: "Sources/QwenFieldfareCLI",
-            swiftSettings: swiftV5
+            name: "FlashQwenRepack",
+            dependencies: ["FlashQwenRepackCore"],
+            path: "Sources/FlashQwenRepack/Command"
         ),
-
-        // MARK: - Standalone server executable
+        .target(
+            name: "FlashQwenCLICore",
+            dependencies: ["FlashQwen"],
+            path: "Sources/FlashQwenCLI",
+            exclude: ["Command"]
+        ),
         .executableTarget(
-            name: "QwenFieldfareServerMain",
-            dependencies: ["QwenFieldfareServer", "QwenFieldfareRuntime"],
-            path: "Sources/QwenFieldfareServerMain",
-            swiftSettings: swiftV5
+            name: "FlashQwenCLI",
+            dependencies: ["FlashQwenCLICore"],
+            path: "Sources/FlashQwenCLI/Command"
         ),
-
-        // MARK: - Tests
+        .target(
+            name: "FlashQwenAppCore",
+            dependencies: ["FlashQwen", "FlashQwenRepackCore", "FlashQwenDecodeProtocol"],
+            path: "Sources/FlashQwenApp/Core",
+            resources: [
+                .copy("Resources/app-prompts.json"),
+            ]
+        ),
+        .target(
+            name: "FlashQwenMacPresentation",
+            dependencies: ["FlashQwenAppCore"],
+            path: "Sources/FlashQwenApp/MacPresentation"
+        ),
+        .target(
+            name: "FlashQwenDecodeProtocol",
+            path: "Sources/FlashQwenDecodeProtocol"
+        ),
+        .executableTarget(
+            name: "FlashQwenDecodeService",
+            dependencies: ["FlashQwenAppCore", "FlashQwenDecodeProtocol"],
+            path: "Sources/FlashQwenDecodeService"
+        ),
+        .target(
+            name: "FlashQwenServerCore",
+            dependencies: [
+                "FlashQwen",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+            ],
+            path: "Sources/FlashQwenServer/Core"
+        ),
+        .executableTarget(
+            name: "FlashQwenServer",
+            dependencies: ["FlashQwenServerCore"],
+            path: "Sources/FlashQwenServer/Command"
+        ),
+        .executableTarget(
+            name: "FlashQwenMac",
+            dependencies: ["FlashQwenAppCore", "FlashQwenMacPresentation"],
+            path: "Sources/FlashQwenApp/Mac",
+            resources: [
+                .copy("Resources/flashqwen-app-icon.png"),
+            ]
+        ),
+        .target(
+            name: "FlashQwenValidationSupport",
+            dependencies: ["FlashQwen"],
+            path: "Sources/FlashQwenValidation/Support"
+        ),
         .testTarget(
-            name: "QwenFieldfareTests",
-            dependencies: ["QwenFieldfareFormat", "QwenFieldfareRepack"],
-            path: "Tests/QwenFieldfareTests",
-            swiftSettings: swiftV5
+            name: "FlashQwenFormatTests",
+            dependencies: ["FlashQwenFormat"],
+            path: "Tests/FlashQwenFormat"
+        ),
+        .testTarget(
+            name: "FlashQwenFormatCompatibilityTests",
+            dependencies: ["FlashQwenFormat", "FlashQwen", "FlashQwenRepackCore"],
+            path: "Tests/FlashQwenFormatCompatibility",
+            resources: [.copy("Fixtures")]
+        ),
+        .testTarget(
+            name: "FlashQwenTestsCore",
+            dependencies: ["FlashQwen", "FlashQwenValidationSupport", "FlashQwenRepackCore", "FlashQwenCLICore"],
+            path: "Tests/FlashQwen/Core"
+        ),
+        .testTarget(
+            name: "FlashQwenRepackTests",
+            dependencies: ["FlashQwenFormat", "FlashQwenRepackCore"],
+            path: "Tests/FlashQwenRepack/Core"
+        ),
+        .testTarget(
+            name: "FlashQwenAppCoreTests",
+            dependencies: ["FlashQwenAppCore", "FlashQwen", "FlashQwenRepackCore", "FlashQwenDecodeProtocol"],
+            path: "Tests/FlashQwenApp/Core"
+        ),
+        .testTarget(
+            name: "FlashQwenDecodeServiceTests",
+            dependencies: ["FlashQwenDecodeService", "FlashQwenAppCore", "FlashQwenDecodeProtocol"],
+            path: "Tests/FlashQwenDecodeService"
+        ),
+        .testTarget(
+            name: "FlashQwenMacPresentationTests",
+            dependencies: ["FlashQwenAppCore", "FlashQwenMacPresentation"],
+            path: "Tests/FlashQwenApp/MacPresentation"
+        ),
+        .testTarget(
+            name: "FlashQwenServerTests",
+            dependencies: [
+                "FlashQwenServerCore",
+                .product(name: "NIOEmbedded", package: "swift-nio"),
+            ],
+            path: "Tests/FlashQwenServer",
+            resources: [.copy("Fixtures")]
         ),
     ]
 )
