@@ -112,7 +112,7 @@ linear-attention layer.
 
 | #  | Work                                                                                          | Status |
 | -- | --------------------------------------------------------------------------------------------- | ------ |
-| 1  | GDN unit: fp32 CPU reference, `gdn_conv_update` + `gdn_recurrent` Metal kernels, wrapper, tests | done   |
+| 1  | GDN unit: fp32 CPU reference, `gdn_conv_update` + `gdn_gate` + `gdn_recurrent` + `gdn_rmsnorm_gated` Metal kernels, wrapper, tests | done   |
 | 2  | Full-attention path for the 10 `F` layers (partial RoPE, interleaved MRoPE, output gate)      | pending |
 | 3  | MoE: 256-expert routing and streamed execution (top-8, shared expert 512)                     | pending |
 | 4  | Embedding + untied `lm_head` (vocab 248320), sampling, stop on 248044                         | pending |

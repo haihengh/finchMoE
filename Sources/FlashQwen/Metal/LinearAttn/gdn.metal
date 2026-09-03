@@ -27,6 +27,18 @@ static inline float gdn_silu(float x) { return x / (1.0f + exp(-x)); }
 // Compile-time bound for the per-head threadgroup scratch (see gdn_recurrent).
 constant constexpr uint kGdnMaxHeadDim = 256;
 
+// Threadgroup partial slots for a 256-thread group (256 / 32 SIMD-groups).
+constant constexpr uint kGdnMaxSimdGroups = 8;
+
+// Stable softplus: `log(1 + exp(x))` branched so `exp` never overflows.
+// MSL has no `log1p`, so this uses only `log`/`exp` — and is a different
+// op-tree than the CPU reference's `log1p` form, which keeps the comparison
+// meaningful.
+static inline float gdn_softplus(float x) {
+    if (x > 0.0f) return x + log(1.0f + exp(-x));
+    return log(1.0f + exp(x));
+}
+
 // ----------------------------------------------------------------------------
 // Causal conv1d decode update (kernel 4):
 //   out[c]    = silu(w0*s0 + w1*s1 + w2*s2 + w3*x)
@@ -186,5 +198,78 @@ void gdn_recurrent(
 
         // o = sum_k (row + kn*delta)·qn = base + delta·(kn·qn)
         oh[vIdx] = half(base + delta * knq);
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Per-value-head gate: `beta = sigmoid(b)` and
+//   `g = -exp(A_log) * softplus(a + dt_bias)`
+// One thread per value head; a/b/dt_bias/A_log are per-head fp32 vectors,
+// g/beta are per-head fp32 outputs. Pinned to Qwen3_5MoeGatedDeltaNet.forward:
+//   beta = b.sigmoid()
+//   g    = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+// (a/b come from the in_proj_a/in_proj_b GEMVs; fp32 here for a clean,
+// isolated formula check.)
+// ----------------------------------------------------------------------------
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void gdn_gate(
+    device const float* a          [[buffer(0)]],   // [V] fp32
+    device const float* b          [[buffer(1)]],   // [V] fp32
+    device const float* A_log      [[buffer(2)]],   // [V] fp32
+    device const float* dt_bias    [[buffer(3)]],   // [V] fp32
+    device       float* g          [[buffer(4)]],   // [V] fp32 out
+    device       float* beta       [[buffer(5)]],   // [V] fp32 out
+    constant     uint&  V          [[buffer(6)]],
+    uint  lid                      [[thread_position_in_threadgroup]]
+) {
+    if (lid >= V) return;
+    float av   = a[lid];
+    float bv   = b[lid];
+    float dt   = dt_bias[lid];
+    float Alog = A_log[lid];
+    g[lid]    = -exp(Alog) * gdn_softplus(av + dt);
+    beta[lid] = 1.0f / (1.0f + exp(-bv));
+}
+
+// ----------------------------------------------------------------------------
+// Gated RMSNorm over each value head's vector:
+//   y[i] = x[i] * rsqrt(mean(x[i]^2) + eps) * weight[i] * silu(z[i])
+// One 256-thread threadgroup per value head. `weight` is shared across the V
+// heads (Qwen3_5MoeRMSNormGated(head_v_dim)); x/z are [V][D] fp16. Mean-based
+// (not sum), matching `Qwen3_5MoeRMSNormGated.forward`.
+// ----------------------------------------------------------------------------
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void gdn_rmsnorm_gated(
+    device const half*   x          [[buffer(0)]],   // [V][D] fp16
+    device const half*   z          [[buffer(1)]],   // [V][D] fp16
+    device const bfloat* weight     [[buffer(2)]],   // [D] bf16, shared per head
+    device       half*   out        [[buffer(3)]],   // [V][D] fp16
+    constant     uint&   D          [[buffer(4)]],
+    constant     float&  eps        [[buffer(5)]],
+    uint  head                     [[threadgroup_position_in_grid]],
+    uint  lid                      [[thread_position_in_threadgroup]],
+    uint  lsize                    [[threads_per_threadgroup]],
+    uint  simd_lane                [[thread_index_in_simdgroup]],
+    uint  simd_group               [[simdgroup_index_in_threadgroup]],
+    uint  simdgroups               [[simdgroups_per_threadgroup]]
+) {
+    threadgroup float partial[kGdnMaxSimdGroups];
+    device const half* xh = x   + head * D;
+    device const half* zh = z   + head * D;
+    device       half* oh = out + head * D;
+
+    float acc = 0.0f;
+    for (uint i = lid; i < D; i += lsize) {
+        float v = float(xh[i]);
+        acc = fma(v, v, acc);
+    }
+    gdn_block_sum(acc, simd_lane, simd_group, simdgroups, partial);
+    const float inv = rsqrt(partial[0] / float(D) + eps);
+
+    for (uint i = lid; i < D; i += lsize) {
+        float xv = float(xh[i]);
+        float wv = float(weight[i]);
+        float zv = float(zh[i]);
+        oh[i] = half(xv * inv * wv * gdn_silu(zv));
     }
 }

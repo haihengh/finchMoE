@@ -22,7 +22,11 @@ the pristine upstream TurboFieldfare base is archived in `reference/`
 deleted; the bf16 Qwen 3.6 checkpoint is present at
 `models/Qwen3.6-35B-A3B-bf16/`. The Gated-DeltaNet decode unit (the part with
 no Gemma analogue) is implemented and reference-checked against the
-`qwen3_5_moe` transformers source (Phase 1, done).
+`qwen3_5_moe` transformers source (Phase 1, done), and the `qwen3_6_35B_A3B`
+arch preset plus `fullAttentionLayerMask` dispatch are already in place. The
+unit is **not yet wired into the forward pass** — that is the next step. The
+[implementation plan](#implementation-plan) records the verified state and the
+remaining work, in order.
 
 ## Target model
 
@@ -116,23 +120,86 @@ Details that matter for a Metal port:
   prefill cost is length × per-step cost. Bounded chunking keeps the
   activation scratch small as it does for the Gemma path.
 
-## Phase plan
+## Implementation plan
 
-| # | Work | Status |
-| --- | --- | --- |
-| 1 | GDN unit: `Reference/LinearAttn/GDNRef.swift` (fp32 CPU reference), `Metal/LinearAttn/gdn.metal` (`gdn_conv_update` + `gdn_recurrent`), `Kernels/LinearAttn/GDN.swift` (wrapper), register `"gdn"` in `MetalContext`, `Tests/.../LinearAttn/GDNTests.swift` | done 2026-09-01; 5 tests pass within `fp16ChainedReduction`, reference pinned to `qwen3_5_moe` |
-| 2 | Full-attention path for the 10 `F` layers: 16 Q / 2 KV, head_dim 256, partial RoPE 0.25, interleaved MRoPE [11, 11, 10], `attn_output_gate` | pending |
-| 3 | MoE: 256-expert routing and streamed execution (top-8, shared expert 512), expert blobs from the bf16 shards | pending; `ArchInfo` already parses the Qwen fields |
-| 4 | Embedding + untied `lm_head` (vocab 248320), sampling, stop on 248044 | pending |
-| 5 | Repack writer: bf16 shards → `.gturbo` (int4/int8 affine, group 64), manifest with Qwen3.6 architecture, SHA-256s | pending |
-| 6 | `ArchConfig` preset for Qwen3.6-35B-A3B; wire `fullAttentionLayerMask` (bit set on the 10 `F` layers) and the GDN dims into the runtime | pending |
-| 7 | End-to-end: load → prefill → decode → sample; sanity-check outputs against a short reference generation | pending |
+Verified against the working tree on 2026-09-01 (commit `6b1e2ec`). This
+section is the single source of truth for what is done, what is wired in, and
+what remains, in the order that unblocks an end-to-end Qwen 3.6 run.
 
-Phase 1 is the crux and the gate: nothing in the engine exercises a
-linear-attention state today, and the recurrence order (decay → read →
-update → read-out) and the updated-state read are the parts most likely to
-be subtly wrong. Kernels are validated against the Swift fp32 reference
-with the `fp16ChainedReduction` tolerance before any layer is wired in.
+### Done and verified
+
+- **GDN decode unit (Phase 1, complete).** `Metal/LinearAttn/gdn.metal`
+  (`gdn_conv_update`, `gdn_gate`, `gdn_recurrent`, `gdn_rmsnorm_gated`),
+  wrapper `Kernels/LinearAttn/GDN.swift`, fp32 CPU reference
+  `FlashQwenValidation/Support/Reference/LinearAttn/GDNRef.swift`,
+  registered in `MetalContext`, 9 Swift-Testing tests in
+  `Tests/FlashQwen/Core/Kernels/LinearAttn/GDNTests.swift` passing within
+  `fp16ChainedReduction`. Covers the full decode step except the out_proj GEMV
+  (shared with the existing int4 GEMV): causal conv → gate
+  (`beta=sigmoid(b)`, `g=-exp(A_log)·softplus(a+dt_bias)`) → per-value-head
+  recurrent recurrence (v-major `state[(hv*D+v)*D+k]`, fp32, two matvecs as
+  two-stage block reductions) → gated RMSNorm (`x·rsqrt(mean(x²)+eps)·weight·silu(z)`,
+  mean-based, shared bf16 weight). Reference pinned to `qwen3_5_moe`.
+- **Arch preset + dispatch (Phase 6, core).** `ArchConfig.qwen3_6_35B_A3B`
+  (`Infrastructure/ModelIO/ModelTypes.swift:139`): 40 layers, mask
+  `fullAttentionLayerMask` set on the 10 `F` layers (`[L,L,L,F]` × 10), 256
+  experts top-8, 16 Q / 2 KV, `fullHeadDim` 256, GDN 16 key / 32 value heads
+  × 128, partial RoPE 0.25, `attnOutputGate`. The runtime already branches on
+  it: `Model.swift:619` reads `fullAttentionLayerMask[layer]`;
+  `RealForwardRunner.swift` consumes `fullHeadDim`, `partialRotaryFactor`, and
+  `numFullKVHeads`.
+
+### Wired in but not reachable for Qwen
+
+- **GDN is not in the forward pass.** `RealForwardRunner.swift` / `Model.swift`
+  have **no GDN branch** — the 30 `!isFull` layers currently run the standard
+  (Gemma-style) attention path. The GDN unit is only reached from `MetalContext`
+  registration and the tests. Until step 1 below is done, Qwen 3.6 output is
+  wrong.
+- **Preset not selectable.** App, CLI, and server still select
+  `ArchConfig.gemma4_26B_A4B` only
+  (`AppContextLengthOption.swift:18`, `AppModelInstallationProbe.swift:22`).
+- **Manifest/layout is still Gemma-shaped.** `Model.swift:617-669` validates
+  Gemma tensor names (`pre_feedforward_layernorm_1`, `router.scale`,
+  `self_attn.q_norm`, `mlp.gate_proj`, …); the `.fqturbo` schema is not yet
+  re-shaped to `qwen3_5_moe` tensor names.
+- **Repack still pins Gemma.** `Remote/SupportedModelSource.swift:5` points at
+  `mlx-community/gemma-4-26b-a4b-it-4bit`; there is no Qwen bf16 → `.fqturbo`
+  writer yet.
+
+### Remaining work, in order
+
+1. **Wire GDN into the forward pass** (the load-bearing step). All four compute
+   ops are now implemented and validated (see Done/verified); what remains is
+   the wiring in `RealForwardRunner.produceToken`: route the 30 `!isFull`
+   layers through `in_proj_qkv/z/b/a` GEMVs → `gdn_conv_update` → `gdn_gate` →
+   `gdn_recurrent` → `gdn_rmsnorm_gated` → `out_proj`, replacing the
+   standard-attention path (`gQKV`/`gQKVEpilogue`/`gAttention`) for those
+   layers. Prerequisites: expose the GDN weight tensors (in_proj_qkv/z/b/a,
+   `dt_bias`, `A_log`, norm weight, `out_proj`) — absent from the current
+   Gemma-shaped layout (step 3 re-shapes them); and allocate the per-layer fp32
+   recurrent-state buffer (32 value-heads × 128 × 128, ~2 MiB per GDN layer)
+   like the KV cache, kept in device memory across decode steps.
+2. **Full-attention path for the 10 `F` layers** (Phase 2). 16 Q / 2 KV,
+   `head_dim` 256, partial RoPE 0.25 with interleaved MRoPE [11, 11, 10], and
+   the `attn_output_gate`. Config plumbing is partly present (step above); the
+   decode/prefill kernels still need it.
+3. **Re-shape the `.fqturbo` manifest/layout to Qwen tensor names** and **write
+   the bf16 → `.fqturbo` repack** (Phases 3 + 5): 256-expert blobs from the
+   `models/Qwen3.6-35B-A3B-bf16/` shards (int4/int8 affine, group 64), 8-bit
+   router, shared expert 512, manifest with the `qwen3_6` architecture and
+   SHA-256s.
+4. **Embedding + untied `lm_head` (vocab 248320), sampling, stop on 248044**
+   (Phase 4), and make the **Qwen preset selectable** in app / CLI / server
+   (finish Phase 6).
+5. **End-to-end** (Phase 7): load → prefill → decode → sample; check a short
+   reference generation for correctness; then measure and record tok/s so the
+   "At a glance" table in the README gets real Qwen 3.6 numbers.
+
+Each step gates the next: 1 makes the GDN layers produce the right hidden state;
+2 completes the `F` layers; 3+4 make a real Qwen install loadable; 5 proves it.
+Kernels stay validated against the Swift fp32 reference with the
+`fp16ChainedReduction` tolerance before they are wired into a layer.
 
 ## Repository state
 

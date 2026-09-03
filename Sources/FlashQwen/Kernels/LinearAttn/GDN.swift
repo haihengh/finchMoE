@@ -13,10 +13,14 @@ final class GDN {
 
     private let psoConv: MTLComputePipelineState
     private let psoRecurrent: MTLComputePipelineState
+    private let psoGate: MTLComputePipelineState
+    private let psoNormGated: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.psoConv      = try context.pipeline("gdn_conv_update")
         self.psoRecurrent = try context.pipeline("gdn_recurrent")
+        self.psoGate      = try context.pipeline("gdn_gate")
+        self.psoNormGated = try context.pipeline("gdn_rmsnorm_gated")
     }
 
     /// Causal conv1d decode update over `channels` channels (kernel 4).
@@ -79,6 +83,68 @@ final class GDN {
         enc.setBytes(&l2epsVar, length: MemoryLayout<Float>.size,  index: 9)
 
         let width = min(Int(psoRecurrent.maxTotalThreadsPerThreadgroup), 256)
+        enc.dispatchThreadgroups(MTLSize(width: numValueHeads, height: 1, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Per-value-head gate: `beta = sigmoid(b)`,
+    /// `g = -exp(A_log) * softplus(a + dt_bias)`. `a/b/A_log/dt_bias` are
+    /// `[numValueHeads]` fp32; `g`/`beta` are `[numValueHeads]` fp32 outputs.
+    func encodeGate(
+        commandBuffer: MTLCommandBuffer,
+        a: MTLBuffer,      aOffset: Int = 0,
+        b: MTLBuffer,      bOffset: Int = 0,
+        A_log: MTLBuffer,  A_logOffset: Int = 0,
+        dt_bias: MTLBuffer, dt_biasOffset: Int = 0,
+        g: MTLBuffer,      gOffset: Int = 0,
+        beta: MTLBuffer,   betaOffset: Int = 0,
+        numValueHeads: Int
+    ) {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(psoGate)
+        enc.setBuffer(a,       offset: aOffset,       index: 0)
+        enc.setBuffer(b,       offset: bOffset,       index: 1)
+        enc.setBuffer(A_log,   offset: A_logOffset,   index: 2)
+        enc.setBuffer(dt_bias, offset: dt_biasOffset, index: 3)
+        enc.setBuffer(g,       offset: gOffset,       index: 4)
+        enc.setBuffer(beta,    offset: betaOffset,    index: 5)
+        var vVar = UInt32(numValueHeads)
+        enc.setBytes(&vVar, length: MemoryLayout<UInt32>.size, index: 6)
+
+        let width = Int(psoGate.maxTotalThreadsPerThreadgroup)
+        let groups = (numValueHeads + width - 1) / width
+        enc.dispatchThreadgroups(MTLSize(width: groups, height: 1, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Gated RMSNorm over each value head's vector:
+    /// `y = x * rsqrt(mean(x^2) + eps) * weight * silu(z)`. `x`/`z` are
+    /// `[numValueHeads * headDim]` fp16; `weight` is `[headDim]` bf16 shared
+    /// across heads; `out` is `[numValueHeads * headDim]` fp16.
+    func encodeRMSNormGated(
+        commandBuffer: MTLCommandBuffer,
+        x: MTLBuffer,      xOffset: Int = 0,
+        z: MTLBuffer,      zOffset: Int = 0,
+        weight: MTLBuffer, weightOffset: Int = 0,
+        out: MTLBuffer,    outOffset: Int = 0,
+        numValueHeads: Int,
+        headDim: UInt32,
+        eps: Float = 1e-6
+    ) {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(psoNormGated)
+        enc.setBuffer(x,      offset: xOffset,      index: 0)
+        enc.setBuffer(z,      offset: zOffset,      index: 1)
+        enc.setBuffer(weight, offset: weightOffset, index: 2)
+        enc.setBuffer(out,    offset: outOffset,    index: 3)
+        var dVar = headDim
+        var epsVar = eps
+        enc.setBytes(&dVar,   length: MemoryLayout<UInt32>.size, index: 4)
+        enc.setBytes(&epsVar, length: MemoryLayout<Float>.size,  index: 5)
+
+        let width = min(Int(psoNormGated.maxTotalThreadsPerThreadgroup), 256)
         enc.dispatchThreadgroups(MTLSize(width: numValueHeads, height: 1, depth: 1),
                                  threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
         enc.endEncoding()

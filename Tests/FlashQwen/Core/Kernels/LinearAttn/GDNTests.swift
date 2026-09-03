@@ -145,6 +145,111 @@ import FlashQwenValidationSupport
         try Self.runRecurrent(numKeyHeads: 8, numValueHeads: 8, headDim: 64, seed: 0x203)
     }
 
+    // MARK: - Per-value-head gate
+    //
+    //   beta = sigmoid(b)
+    //   g    = -exp(A_log) * softplus(a + dt_bias)
+    //
+    // a/b/A_log/dt_bias are small per-head fp32 vectors; the kernel computes in
+    // fp32, so the reference uses the same fp32 inputs directly.
+
+    private static func runGate(numValueHeads V: Int, seed: UInt64) throws {
+        var rng = SeedTree(seed).key("gdn-gate-V\(V)")
+        let a      = (0..<V).map { _ in rng.uniform(-3.0, 3.0) }
+        let b      = (0..<V).map { _ in rng.uniform(-3.0, 3.0) }
+        let A_log  = (0..<V).map { _ in rng.uniform(-2.0, 2.0) }
+        let dt_bias = (0..<V).map { _ in rng.uniform(-3.0, 3.0) }
+
+        let ctx = try MetalContext()
+        let kernel = try GDN(context: ctx)
+
+        guard let aBuf    = makeFp32Buffer(ctx.device, a),
+              let bBuf    = makeFp32Buffer(ctx.device, b),
+              let AlogBuf = makeFp32Buffer(ctx.device, A_log),
+              let dtBuf   = makeFp32Buffer(ctx.device, dt_bias),
+              let gBuf    = makeFp32Buffer(ctx.device, [Float](repeating: 0, count: V)),
+              let betaBuf = makeFp32Buffer(ctx.device, [Float](repeating: 0, count: V)) else {
+            Issue.record("alloc failed"); return
+        }
+
+        let cb = ctx.queue.makeCommandBuffer()!
+        kernel.encodeGate(
+            commandBuffer: cb,
+            a: aBuf, b: bBuf, A_log: AlogBuf, dt_bias: dtBuf,
+            g: gBuf, beta: betaBuf, numValueHeads: V)
+        cb.commit(); cb.waitUntilCompleted()
+
+        let ref = GDNRef.gate(a: a, b: b, A_log: A_log, dt_bias: dt_bias)
+        let gActual    = readFp32(gBuf, count: V)
+        let betaActual = readFp32(betaBuf, count: V)
+        #expect(RelError.compute(actual: gActual, reference: ref.g) < Tolerance.fp16ChainedReduction,
+                "gate V=\(V): g relErr=\(RelError.compute(actual: gActual, reference: ref.g)) maxAbs=\(RelError.maxAbsDiff(gActual, ref.g))")
+        #expect(RelError.compute(actual: betaActual, reference: ref.beta) < Tolerance.fp16ChainedReduction,
+                "gate V=\(V): beta relErr=\(RelError.compute(actual: betaActual, reference: ref.beta)) maxAbs=\(RelError.maxAbsDiff(betaActual, ref.beta))")
+    }
+
+    @Test func gdn_gate_32heads() throws { try Self.runGate(numValueHeads: 32, seed: 0x301) }
+    @Test func gdn_gate_8heads()  throws { try Self.runGate(numValueHeads: 8,  seed: 0x302) }
+
+    // MARK: - Gated RMSNorm (per value head)
+    //
+    //   y[i] = x[i] * rsqrt(mean(x^2) + eps) * weight[i] * silu(z[i])
+    //
+    // `weight` is a single bf16 vector of length headDim shared across the V
+    // heads (Qwen3_5MoeRMSNormGated(head_v_dim)). The reference is a naive
+    // per-head fp32 loop — a different op-tree than the kernel's block reduce.
+
+    private static func runRMSNormGated(numValueHeads V: Int, headDim D: Int, seed: UInt64) throws {
+        var rng = SeedTree(seed).key("gdn-norm-V\(V)-D\(D)")
+        let xF32 = (0..<(V*D)).map { _ in rng.uniform(-2.0, 2.0) }
+        let zF32 = (0..<(V*D)).map { _ in rng.uniform(-2.0, 2.0) }
+        let wF32 = (0..<D).map   { _ in rng.uniform(0.5, 1.5) }
+
+        // Kernel reads fp16 x/z and bf16 weight, so the reference uses those
+        // exact rounded inputs.
+        let x16 = xF32.map { Float16($0) }; let xRef = x16.map { Float($0) }
+        let z16 = zF32.map { Float16($0) }; let zRef = z16.map { Float($0) }
+        let wBits = wF32.map { Quantization.bf16Bits($0) }
+        let wRef = wBits.map { Float(Quantization.bf16ToFloat($0)) }
+
+        let ctx = try MetalContext()
+        let kernel = try GDN(context: ctx)
+
+        guard let xBuf  = Fp16Buffer.make(ctx.device, halves: x16),
+              let zBuf  = Fp16Buffer.make(ctx.device, halves: z16),
+              let wBuf  = makeBF16Buffer(ctx.device, wF32),
+              let oBuf  = Fp16Buffer.make(ctx.device, count: V*D) else {
+            Issue.record("alloc failed"); return
+        }
+
+        let cb = ctx.queue.makeCommandBuffer()!
+        kernel.encodeRMSNormGated(
+            commandBuffer: cb,
+            x: xBuf, z: zBuf, weight: wBuf, out: oBuf,
+            numValueHeads: V, headDim: UInt32(D))
+        cb.commit(); cb.waitUntilCompleted()
+
+        var ref = [Float](repeating: 0, count: V*D)
+        for h in 0..<V {
+            let xs = Array(xRef[(h*D)..<(h*D+D)])
+            let zs = Array(zRef[(h*D)..<(h*D+D)])
+            let y = GDNRef.rmsNormGated(xs, weight: wRef, z: zs)
+            ref.replaceSubrange((h*D)..<(h*D+D), with: y)
+        }
+
+        let outActual = Fp16Buffer.read(oBuf, count: V*D)
+        let rel = RelError.compute(actual: outActual, reference: ref)
+        #expect(rel < Tolerance.fp16ChainedReduction,
+                "norm-gated V=\(V) D=\(D): relErr=\(rel) maxAbs=\(RelError.maxAbsDiff(outActual, ref))")
+    }
+
+    @Test func gdn_rmsnorm_gated_fullShape() throws {
+        try Self.runRMSNormGated(numValueHeads: 32, headDim: 128, seed: 0x401)
+    }
+    @Test func gdn_rmsnorm_gated_smallShape() throws {
+        try Self.runRMSNormGated(numValueHeads: 8, headDim: 32, seed: 0x402)
+    }
+
     // MARK: - fp32 buffer helpers (state, g, beta are fp32)
     private static func makeFp32Buffer(_ device: MTLDevice, _ values: [Float]) -> MTLBuffer? {
         let buf = device.makeBuffer(length: values.count * MemoryLayout<Float>.size,
@@ -158,5 +263,16 @@ import FlashQwenValidationSupport
     private static func readFp32(_ buf: MTLBuffer, count: Int) -> [Float] {
         let ptr = buf.contents().bindMemory(to: Float.self, capacity: count)
         return (0..<count).map { ptr[$0] }
+    }
+
+    // bf16 weight buffer (shared per-head norm weight is a bf16 vector).
+    private static func makeBF16Buffer(_ device: MTLDevice, _ values: [Float]) -> MTLBuffer? {
+        let bits = values.map { Quantization.bf16Bits($0) }
+        let buf = device.makeBuffer(length: bits.count * MemoryLayout<UInt16>.size,
+                                    options: .storageModeShared)
+        guard let buf else { return nil }
+        let ptr = buf.contents().bindMemory(to: UInt16.self, capacity: bits.count)
+        for (i, v) in bits.enumerated() { ptr[i] = v }
+        return buf
     }
 }

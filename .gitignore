@@ -1,5 +1,5 @@
 models/*
-reference/
+/reference/
 scratch/
 .build/*
 .claude/*
