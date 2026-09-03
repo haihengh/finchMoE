@@ -232,6 +232,76 @@ void gdn_gate(
 }
 
 // ----------------------------------------------------------------------------
+// Fused in_proj_a/in_proj_b GEMVs + per-head gate. One 256-thread threadgroup
+// computes all 2V rows (V a-rows then V b-rows, V <= 32) as int4-affine GEMV
+// rows — 8 SIMD groups, 8 sequential passes — staging the fp32 accs in
+// threadgroup memory, then the gate formula from
+// Qwen3_5MoeGatedDeltaNet.forward:
+//   beta = sigmoid(b)
+//   g    = -exp(A_log) * softplus(a + dt_bias)
+// W is [2V, N/2] nibbles with BF16 [2V, N/64] scales/biases (MLX affine
+// layout, same as dequant_int4.metal); x is [N] fp16; A_log/dt_bias [V] fp32;
+// g/beta [V] fp32 outputs. The GEMV loop mirrors
+// dequant_int4_gemv_simd_body's group-64 scalar path (that body sinks into
+// device halves, so the loop is restated with a threadgroup fp32 sink).
+// ----------------------------------------------------------------------------
+constant constexpr uint kGdnGroupSize = 64;
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void gdn_gate_gemv(
+    device const uint8_t* W        [[buffer(0)]],   // [2V, N/2] nibbles
+    device const bfloat*  scales  [[buffer(1)]],   // [2V, N/64]
+    device const bfloat*  biases  [[buffer(2)]],   // [2V, N/64]
+    device const half*    x       [[buffer(3)]],   // [N] fp16
+    device const float*   A_log   [[buffer(4)]],   // [V] fp32
+    device const float*   dt_bias [[buffer(5)]],   // [V] fp32
+    device       float*   g       [[buffer(6)]],   // [V] fp32 out
+    device       float*   beta    [[buffer(7)]],   // [V] fp32 out
+    constant     uint&    V       [[buffer(8)]],
+    constant     uint&    N       [[buffer(9)]],
+    uint  sg_idx [[simdgroup_index_in_threadgroup]],
+    uint  lane   [[thread_index_in_simdgroup]]
+) {
+    const uint n_groups = N / kGdnGroupSize;
+    const uint rowBytes = N / 2u;
+    threadgroup float ab[64]; // 2V accs, V <= 32 → at most 64 rows
+
+    // 8 SIMD groups x 8 passes cover the 2V (<= 64) rows.
+    for (uint pass = 0; pass < 8u; ++pass) {
+        const uint row = pass * 8u + sg_idx;
+        if (row >= 2u * V) break;
+        device const uint8_t* W_row = W      + row * rowBytes;
+        device const bfloat*  s_row = scales + row * n_groups;
+        device const bfloat*  b_row = biases + row * n_groups;
+        float acc = 0.0f;
+        for (uint gidx = 0; gidx < n_groups; ++gidx) {
+            const float s = float(s_row[gidx]);
+            const float b = float(b_row[gidx]);
+            const uint8_t byte = W_row[gidx * (kGdnGroupSize / 2u) + lane];
+            const float x0 = float(x[gidx * kGdnGroupSize + lane * 2u]);
+            const float x1 = float(x[gidx * kGdnGroupSize + lane * 2u + 1u]);
+            float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
+            dot = fma(float(uint(byte >> 4)), x1, dot);
+            const float sum = x0 + x1;
+            acc = fma(s, dot, acc);
+            acc = fma(b, sum, acc);
+        }
+        acc = simd_sum(acc);
+        if (lane == 0) ab[row] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (lane < V) {
+        const float av   = ab[lane];
+        const float bv   = ab[V + lane];
+        const float dt   = dt_bias[lane];
+        const float Alog = A_log[lane];
+        g[lane]    = -exp(Alog) * gdn_softplus(av + dt);
+        beta[lane] = 1.0f / (1.0f + exp(-bv));
+    }
+}
+
+// ----------------------------------------------------------------------------
 // Gated RMSNorm over each value head's vector:
 //   y[i] = x[i] * rsqrt(mean(x[i]^2) + eps) * weight[i] * silu(z[i])
 // One 256-thread threadgroup per value head. `weight` is shared across the V

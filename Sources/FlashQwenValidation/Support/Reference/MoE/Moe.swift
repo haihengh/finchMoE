@@ -28,15 +28,23 @@ public enum MoeRef {
         return y
     }
 
-    /// Runs one FFN block: `down(gelu(gate(x)) * up(x))`.
+    /// Per-element `silu(x) = x / (1 + exp(-x))` — the Qwen 3.6 routed-expert
+    /// activation.
+    public static func silu(_ x: [Float]) -> [Float] {
+        return x.map { $0 / (1.0 + Foundation.exp(-$0)) }
+    }
+
+    /// Runs one FFN block: `down(act(gate(x)) * up(x))`.
     /// `gateRows` / `upRows` are F-by-D affine INT4. `downRows` is D-by-F.
+    /// `activation` picks gelu_pytorch_tanh (Gemma) or silu (Qwen 3.6).
     public static func runFFN(
         gateRows: [Quantization.Int4AffineRow],
         upRows:   [Quantization.Int4AffineRow],
         downRows: [Quantization.Int4AffineRow],
         x: [Float],
         d: Int,
-        f: Int
+        f: Int,
+        activation: SharedExpertActivation = .gelu
     ) -> [Float] {
         precondition(gateRows.count == f, "gateRows must be F=\(f)")
         precondition(upRows.count == f, "upRows must be F=\(f)")
@@ -45,7 +53,11 @@ public enum MoeRef {
 
         let gateOut = DequantInt4GemvRef.apply(weightRows: gateRows, x: x, n: d)
         let upOut   = DequantInt4GemvRef.apply(weightRows: upRows,   x: x, n: d)
-        let gated   = geluTanh(gateOut)
+        let gated: [Float]
+        switch activation {
+        case .gelu: gated = geluTanh(gateOut)
+        case .silu: gated = silu(gateOut)
+        }
         var act = [Float](repeating: 0, count: f)
         vDSP_vmul(gated, 1, upOut, 1, &act, 1, vDSP_Length(f))
         return DequantInt4GemvRef.apply(weightRows: downRows, x: act, n: f)
@@ -64,7 +76,8 @@ public enum MoeRef {
         indices: [Int],
         routingWeights: [Float],
         d: Int,
-        f: Int
+        f: Int,
+        activation: SharedExpertActivation = .gelu
     ) -> [Float] {
         precondition(indices.count == routingWeights.count)
         precondition(residual.count == d)
@@ -77,7 +90,8 @@ public enum MoeRef {
                 gateRows: routedGate[e],
                 upRows:   routedUp[e],
                 downRows: routedDown[e],
-                x: x, d: d, f: f
+                x: x, d: d, f: f,
+                activation: activation
             )
             var scale = w
             var scaled = [Float](repeating: 0, count: d)

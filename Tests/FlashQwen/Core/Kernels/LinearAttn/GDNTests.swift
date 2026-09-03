@@ -191,6 +191,75 @@ import FlashQwenValidationSupport
     @Test func gdn_gate_32heads() throws { try Self.runGate(numValueHeads: 32, seed: 0x301) }
     @Test func gdn_gate_8heads()  throws { try Self.runGate(numValueHeads: 8,  seed: 0x302) }
 
+    // MARK: - Fused in_proj_a/in_proj_b GEMV + gate (`gdn_gate_gemv`)
+    //
+    // The production path runs the two [V, N] int4-affine GEMVs and the gate
+    // formula in one 256-thread threadgroup (8 SIMD groups, 8 sequential
+    // row passes into threadgroup fp32 staging). The reference GEMVs go
+    // through `DequantInt4GemvRef` (bulk-dequant + vDSP_dotpr) and
+    // `GDNRef.gate` — different op-trees on both stages.
+
+    private static func runGateGEMV(numValueHeads V: Int, n: Int, seed: UInt64) throws {
+        var rng = SeedTree(seed).key("gdn-gate-gemv-V\(V)-n\(n)")
+        let aW = (0..<V).map { _ in (0..<n).map { _ in rng.uniform(-0.2, 0.2) } }
+        let bW = (0..<V).map { _ in (0..<n).map { _ in rng.uniform(-0.2, 0.2) } }
+        let xF32 = (0..<n).map { _ in rng.uniform(-0.4, 0.4) }
+        let A_log  = (0..<V).map { _ in rng.uniform(-2.0, 2.0) }
+        let dt_bias = (0..<V).map { _ in rng.uniform(-3.0, 3.0) }
+
+        let x16 = xF32.map { Float16($0) }
+        let xRef = x16.map { Float($0) }
+        let aRows = aW.map(Quantization.quantizeInt4Affine)
+        let bRows = bW.map(Quantization.quantizeInt4Affine)
+        let allRows = aRows + bRows
+        let packed = allRows.flatMap(\.packed)
+        let scales = allRows.flatMap(\.scales)
+        let biases = allRows.flatMap(\.biases)
+
+        let ctx = try MetalContext()
+        let kernel = try GDN(context: ctx)
+
+        guard let xBuf = Fp16Buffer.make(ctx.device, halves: x16),
+              let wBuf = ctx.device.makeBuffer(bytes: packed,
+                                               length: packed.count,
+                                               options: .storageModeShared),
+              let sBuf = ctx.device.makeBuffer(bytes: scales,
+                                               length: scales.count * 2,
+                                               options: .storageModeShared),
+              let bBuf = ctx.device.makeBuffer(bytes: biases,
+                                               length: biases.count * 2,
+                                               options: .storageModeShared),
+              let AlogBuf = makeFp32Buffer(ctx.device, A_log),
+              let dtBuf   = makeFp32Buffer(ctx.device, dt_bias),
+              let gBuf    = makeFp32Buffer(ctx.device, [Float](repeating: 0, count: V)),
+              let betaBuf = makeFp32Buffer(ctx.device, [Float](repeating: 0, count: V)) else {
+            Issue.record("alloc failed"); return
+        }
+
+        let cb = ctx.queue.makeCommandBuffer()!
+        kernel.encodeGateGEMV(
+            commandBuffer: cb,
+            weights: wBuf, scales: sBuf, biases: bBuf, x: xBuf,
+            A_log: AlogBuf, dt_bias: dtBuf,
+            g: gBuf, beta: betaBuf,
+            numValueHeads: V, n: UInt32(n))
+        cb.commit(); cb.waitUntilCompleted()
+
+        let ref = GDNRef.gateGEMV(aRows: aRows, bRows: bRows,
+                                  x: xRef, A_log: A_log, dt_bias: dt_bias)
+        let gActual    = readFp32(gBuf, count: V)
+        let betaActual = readFp32(betaBuf, count: V)
+        let gRel    = RelError.compute(actual: gActual, reference: ref.g)
+        let betaRel = RelError.compute(actual: betaActual, reference: ref.beta)
+        #expect(gRel < Tolerance.fp16ChainedReduction,
+                "gate-gemv V=\(V) n=\(n): g relErr=\(gRel) maxAbs=\(RelError.maxAbsDiff(gActual, ref.g))")
+        #expect(betaRel < Tolerance.fp16ChainedReduction,
+                "gate-gemv V=\(V) n=\(n): beta relErr=\(betaRel) maxAbs=\(RelError.maxAbsDiff(betaActual, ref.beta))")
+    }
+
+    @Test func gdn_gate_gemv_fullShape() throws { try Self.runGateGEMV(numValueHeads: 32, n: 2048, seed: 0x303) }
+    @Test func gdn_gate_gemv_smallShape() throws { try Self.runGateGEMV(numValueHeads: 8, n: 256, seed: 0x304) }
+
     // MARK: - Gated RMSNorm (per value head)
     //
     //   y[i] = x[i] * rsqrt(mean(x^2) + eps) * weight[i] * silu(z[i])

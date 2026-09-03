@@ -135,7 +135,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let gate: SharedExpertInt8Proj
         let up: SharedExpertInt8Proj
         let down: SharedExpertInt8Proj
-        let postF1: TensorView
+        /// Gemma-only post-FFN norm; nil on Qwen 3.6 (no sandwich).
+        let postF1: TensorView?
     }
 
     private let model: Model
@@ -155,6 +156,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let fusedQKVEpilogue: FusedQKVEpilogue
     private let fusedPostAttentionSetup: FusedPostAttentionSetup
     private let fusedTail: FusedLayerTail
+    // Qwen 3.6 kernels (pipelines are in the shared library for both families).
+    private let gdn: GDN
+    private let qwenFusions: QwenDecodeFusions
 
     // Prefill kernels. These are initialized once per runner so the chunk path
     // cannot accidentally rebuild PSOs inside a per-layer loop.
@@ -196,6 +200,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let moeHitActiveSlots: MTLBuffer // [topK] UInt32
     private let moeMissActiveSlots: MTLBuffer // [topK] UInt32
     private let greedyTokenBuf: MTLBuffer // 4 B UInt32 fused-head output
+    // Qwen 3.6 GDN state + scratch (all empty/1-element for Gemma installs).
+    /// Per-GDN-layer recurrent state, fp32 [V][headDim][headDim], v-major —
+    /// 2 MiB per layer, zeroed in `reset()`. Indexed via `gdnStateIndexByLayer`.
+    private let gdnRecurrentState: [MTLBuffer]
+    /// Per-GDN-layer causal-conv state, fp16 [qkvDim, 3], updated in place.
+    private let gdnConvState: [MTLBuffer]
+    /// Fused in_proj_a|in_proj_b int4-affine weights assembled at init
+    /// (a-rows then b-rows) + scales/biases — the kernel reads one block.
+    private let gdnGateWeights: [(weights: MTLBuffer, scales: MTLBuffer, biases: MTLBuffer)]
+    /// Layer → index into the three arrays above.
+    private let gdnStateIndexByLayer: [Int]
+    private let qkvConv: MTLBuffer              // [qkvDim] fp16 conv in/out
+    private let zBuf: MTLBuffer                 // [V*headDim] fp16 in_proj_z out
+    private let gBeta: MTLBuffer                // [2V] fp32 g | beta
+    private let qGateBuf: MTLBuffer             // [2*Q*fullHeadDim] fp16 q|gate
+    private let gateBuf: MTLBuffer              // [Q*fullHeadDim] fp16 gate half
+    /// BF16 ones buffers: Qwen's router has no router.scale / per_expert_scale.
+    private let qwenOnesEffectiveScale: MTLBuffer?
+    private let qwenOnesPerExpertScale: MTLBuffer?
     private var prefillChunkState = PrefillChunkCommitState()
     private var prefillScratch: PrefillChunkScratchBuffers?
 
@@ -263,6 +286,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.fusedQKVEpilogue = try FusedQKVEpilogue(context: context)
         self.fusedPostAttentionSetup = try FusedPostAttentionSetup(context: context)
         self.fusedTail = try FusedLayerTail(context: context)
+        self.gdn = try GDN(context: context)
+        self.qwenFusions = try QwenDecodeFusions(context: context)
         self.prefillEmbed = try PrefillEmbedLookupInt4(context: context)
         self.prefillRMS = try PrefillRMSNorm(context: context)
         self.prefillQMM = try PrefillInt4QMM(context: context)
@@ -335,6 +360,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  rows: rows,
                                  cols: cols)
         }
+        let isQwen = cfg.modelFamily == "qwen3_6"
         var sharedViews: [LayerSharedExpertProjections] = []
         sharedViews.reserveCapacity(cfg.numLayers)
         for L in 0..<cfg.numLayers {
@@ -345,39 +371,158 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 gate: sharedProj(gate, rows: UInt32(F), cols: UInt32(D)),
                 up: sharedProj(up, rows: UInt32(F), cols: UInt32(D)),
                 down: sharedProj(down, rows: UInt32(D), cols: UInt32(F)),
-                postF1: try model.postFFN1(layer: L)))
+                postF1: isQwen ? nil : try model.postFFN1(layer: L)))
         }
         self.sharedExpertProjections = sharedViews
 
         // Pre-fold 1/sqrt(D) into router.scale per layer. Each layer gets its
         // own BF16 [D] buffer — the kernel reads `effective_scale[i]` and we
         // pay for the multiply once per generation, not per token.
+        // Qwen's router applies no input scale (plain softmax): every layer
+        // shares one BF16-ones buffer.
         var perLayer: [MTLBuffer] = []
         perLayer.reserveCapacity(cfg.numLayers)
         let invSqrtD = Float(1.0) / Float(D).squareRoot()
         let dInts = D
         for L in 0..<cfg.numLayers {
-            let scaleView = try model.routerScale(layer: L)
             guard let buf = device.makeBuffer(length: dInts * MemoryLayout<UInt16>.size,
                                               options: .storageModeShared) else {
                 throw ModelError.residentBufferWrapFailed
             }
-            let src = scaleView.buffer.contents()
-                .advanced(by: Int(scaleView.offset))
-                .assumingMemoryBound(to: UInt16.self)
             let dst = buf.contents().assumingMemoryBound(to: UInt16.self)
-            for i in 0..<dInts {
-                let v = Quantization.bf16ToFloat(src[i]) * invSqrtD
-                dst[i] = Quantization.bf16Bits(v)
+            if isQwen {
+                for i in 0..<dInts { dst[i] = Quantization.bf16Bits(1.0) }
+            } else {
+                let scaleView = try model.routerScale(layer: L)
+                let src = scaleView.buffer.contents()
+                    .advanced(by: Int(scaleView.offset))
+                    .assumingMemoryBound(to: UInt16.self)
+                for i in 0..<dInts {
+                    let v = Quantization.bf16ToFloat(src[i]) * invSqrtD
+                    dst[i] = Quantization.bf16Bits(v)
+                }
             }
             buf.label = "effective_scale.L\(L)"
             perLayer.append(buf)
         }
         self.effectiveScaleBuffers = perLayer
+
+        // MARK: Qwen 3.6 state + scratch (all Gemma paths leave these empty).
+        if isQwen {
+            let v = cfg.linearNumValueHeads
+            let headDim = cfg.linearValueHeadDim
+            let qkvDim = cfg.linearNumKeyHeads * cfg.linearKeyHeadDim * 2
+                + v * headDim
+            let fullQ = cfg.numHeads * cfg.fullHeadDim
+            let groupCount = Quantization.groupSize
+
+            func zeros(_ count: Int, _ stride: Int, label: String) throws -> MTLBuffer {
+                guard let b = device.makeBuffer(length: max(count, 1) * stride,
+                                                options: .storageModeShared) else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                memset(b.contents(), 0, b.length)
+                b.label = label
+                return b
+            }
+            self.qkvConv  = try buf(max(qkvDim, 1))
+            self.zBuf     = try buf(max(v * headDim, 1))
+            self.qGateBuf = try buf(max(2 * fullQ, 1))
+            self.gateBuf  = try buf(max(fullQ, 1))
+            self.gBeta    = try zeros(2 * v, MemoryLayout<Float>.size,
+                                      label: "qwen.g_beta")
+
+            var recState: [MTLBuffer] = []
+            var convState: [MTLBuffer] = []
+            var gateWeights: [(MTLBuffer, MTLBuffer, MTLBuffer)] = []
+            var stateIndex: [Int] = Array(repeating: -1, count: cfg.numLayers)
+            for L in 0..<cfg.numLayers where cfg.fullAttentionLayerMask[L] == 0 {
+                stateIndex[L] = recState.count
+                recState.append(try zeros(
+                    v * headDim * headDim, MemoryLayout<Float>.size,
+                    label: "gdn_recurrent_state.L\(L)"))
+                convState.append(try zeros(
+                    qkvDim * 3, MemoryLayout<Float16>.size,
+                    label: "gdn_conv_state.L\(L)"))
+
+                // Assemble the fused in_proj_a|in_proj_b int4-affine block
+                // (a-rows then b-rows) the gate kernel reads. TensorView
+                // offsets are buffer-relative; copy the ranges once at init.
+                let aView = try model.gdnInProjA(layer: L)
+                let bView = try model.gdnInProjB(layer: L)
+                let rowBytes = D / 2
+                let groups = D / groupCount
+                let auxBytes = v * groups * MemoryLayout<UInt16>.size
+                guard let wBuf = device.makeBuffer(
+                        length: 2 * v * rowBytes,
+                        options: .storageModeShared),
+                      let sBuf = device.makeBuffer(
+                        length: 2 * auxBytes,
+                        options: .storageModeShared),
+                      let bBuf = device.makeBuffer(
+                        length: 2 * auxBytes,
+                        options: .storageModeShared) else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                func residentBytes(_ view: TensorView, _ offset: UInt64) -> UnsafeMutableRawPointer {
+                    view.buffer.contents().advanced(by: Int(offset))
+                }
+                func copy(_ view: TensorView, _ offset: UInt64, to dst: UnsafeMutableRawPointer, len: Int) {
+                    memcpy(dst, residentBytes(view, offset), len)
+                }
+                let wDst = wBuf.contents()
+                copy(aView, aView.offset, to: wDst, len: v * rowBytes)
+                copy(bView, bView.offset,
+                     to: wDst.advanced(by: v * rowBytes), len: v * rowBytes)
+                let sDst = sBuf.contents()
+                copy(aView, aView.scaleOffset, to: sDst, len: auxBytes)
+                copy(bView, bView.scaleOffset,
+                     to: sDst.advanced(by: auxBytes), len: auxBytes)
+                let bDst = bBuf.contents()
+                copy(aView, aView.biasOffset, to: bDst, len: auxBytes)
+                copy(bView, bView.biasOffset,
+                     to: bDst.advanced(by: auxBytes), len: auxBytes)
+                gateWeights.append((wBuf, sBuf, bBuf))
+            }
+            self.gdnRecurrentState = recState
+            self.gdnConvState = convState
+            self.gdnGateWeights = gateWeights
+            self.gdnStateIndexByLayer = stateIndex
+
+            func ones(_ count: Int, label: String) throws -> MTLBuffer {
+                guard let b = device.makeBuffer(length: count * MemoryLayout<UInt16>.size,
+                                                options: .storageModeShared) else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                let ptr = b.contents().assumingMemoryBound(to: UInt16.self)
+                for i in 0..<count { ptr[i] = Quantization.bf16Bits(1.0) }
+                b.label = label
+                return b
+            }
+            self.qwenOnesEffectiveScale = try ones(D, label: "qwen.ones_effective_scale")
+            self.qwenOnesPerExpertScale = try ones(cfg.numExperts, label: "qwen.ones_per_expert_scale")
+        } else {
+            self.qkvConv  = try buf(1)
+            self.zBuf     = try buf(1)
+            self.qGateBuf = try buf(1)
+            self.gateBuf  = try buf(1)
+            self.gBeta    = try buf(1, MemoryLayout<Float>.size)
+            self.gdnRecurrentState = []
+            self.gdnConvState = []
+            self.gdnGateWeights = []
+            self.gdnStateIndexByLayer = []
+            self.qwenOnesEffectiveScale = nil
+            self.qwenOnesPerExpertScale = nil
+        }
     }
 
     public func reset() {
         kv?.reset()
+        // The GDN recurrent/conv states are part of the KV-cache-style
+        // persistent state — zeroed here, NOT in resetTransientState(), which
+        // also runs on continuation and must keep the state intact.
+        for s in gdnRecurrentState { memset(s.contents(), 0, s.length) }
+        for c in gdnConvState { memset(c.contents(), 0, c.length) }
         resetTransientState()
     }
 
@@ -491,6 +636,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                into logits: MTLBuffer,
                                onProgress: (Int) -> Void) async throws -> PrefillResult {
         try prefillChunkState.requireClean(operation: "prefillChunked")
+        guard cfg.modelFamily != "qwen3_6" else {
+            throw PrefillError.chunkedUnsupported(
+                "qwen3_6 prefill is not wired yet — decode-only for this family")
+        }
         guard config.mode == .chunked else {
             throw PrefillError.chunkedUnsupported(
                 "prefillChunked requires PrefillRuntimeConfig.mode == .chunked")
@@ -999,10 +1148,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                         intermediate: cfg.intermediateSize,
                                                         xStrideElements: D,
                                                         yStrideElements: D)
+                    // Gemma-only prefill path: postF1 always present here.
+                    let postF1 = sharedProj.postF1!
                     prefillRMS.encodeBF16W(commandBuffer: sharedCB,
                                            x: scratch.h1,
-                                           weight: sharedProj.postF1.buffer,
-                                           weightOffset: Int(sharedProj.postF1.offset),
+                                           weight: postF1.buffer,
+                                           weightOffset: Int(postF1.offset),
                                            out: scratch.h1,
                                            t: UInt32(t),
                                            d: UInt32(D),
@@ -1252,6 +1403,567 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         prefillChunkState.markCommitted()
     }
 
+    /// One layer's deferred routed command-buffer bundle: the routed CB itself,
+    /// the early-committed shared-expert CB it depends on, and the optional
+    /// phase-1-hit-split CB. The next layer drains it before queueing its own.
+    private struct PendingRoutedCommand {
+        let cb: MTLCommandBuffer
+        let sharedCB: MTLCommandBuffer?
+        let phase1HitCB: MTLCommandBuffer?
+        let encodeAndCommitNanos: UInt64
+    }
+
+    private func finishPendingRoutedCommand(_ pending: PendingRoutedCommand,
+                                            waitIfNeeded: Bool) {
+        if waitIfNeeded {
+            func wait(_ cb: MTLCommandBuffer) {
+                waitForCompletion(cb)
+            }
+            if let sharedCB = pending.sharedCB {
+                wait(sharedCB)
+            }
+            if let phase1HitCB = pending.phase1HitCB {
+                wait(phase1HitCB)
+            }
+            wait(pending.cb)
+        } else if let err = pending.cb.error {
+            print("CB error: \(err)")
+        }
+        if let sharedCB = pending.sharedCB {
+            if let err = sharedCB.error {
+                print("CB error: \(err)")
+            }
+        }
+        if let phase1HitCB = pending.phase1HitCB,
+           let err = phase1HitCB.error {
+            print("CB error: \(err)")
+        }
+        totalCb2Nanos &+= pending.encodeAndCommitNanos
+    }
+
+    private func writeActiveSlots(_ slots: [UInt32], into buffer: MTLBuffer) {
+        let ptr = buffer.contents().assumingMemoryBound(to: UInt32.self)
+        for i in 0..<slots.count { ptr[i] = slots[i] }
+    }
+
+    /// The routed-expert tail shared by both model families: CPU readback of
+    /// router indices → plan/fetch/advise the expert blobs → phase-1 (with the
+    /// family activation) → phase-2 reduce into `routedResidual` (Gemma's
+    /// `zeroResidual`, or Qwen's `h1Buf` so the combine adds the shared
+    /// expert) → family tail (`fused_layer_tail` / `vec_add`). The shared
+    /// expert runs on an early-committed CB overlapping the expert pread;
+    /// `sharedPostEncoder` is the family-specific post stage after the FFN
+    /// (Gemma post-FFN norm / Qwen sigmoid gate).
+    private func encodeRoutedTail(
+        layer L: Int,
+        position: Int,
+        routedX: MTLBuffer,
+        denseX: MTLBuffer,
+        sharedProj: LayerSharedExpertProjections,
+        activation: SharedExpertActivation,
+        routedResidual: MTLBuffer,
+        sharedPostEncoder: (MTLCommandBuffer) -> Void,
+        tailEncoder: (MTLCommandBuffer) -> Void,
+        pending: inout PendingRoutedCommand?
+    ) async throws {
+        let D = UInt32(cfg.hiddenSize)
+        let FmoE = UInt32(cfg.moeIntermediateSize)
+
+        // CPU readback to fetch routed-expert blobs from disk.
+        let idxPtr = outIndices.contents().bindMemory(to: UInt32.self,
+                                                      capacity: cfg.topKExperts)
+        var experts = [Int](repeating: 0, count: cfg.topKExperts)
+        for i in 0..<cfg.topKExperts {
+            experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
+        }
+
+        let routedOffsets = model.routedExpertOffsets(layer: L)
+        let topK = UInt32(cfg.topKExperts)
+        let canPlanPhase1HitSplit =
+            cfg.topKExperts <= MoE.maxStreamedExperts
+        let plannedFetch = canPlanPhase1HitSplit
+            ? try model.planRoutedExperts(layer: L, experts: experts)
+            : nil
+        var phase1HitCB: MTLCommandBuffer?
+        var phase1HitSplitArgBuf: MTLBuffer?
+        var phase1HitSplitRoutedBufs: [MTLBuffer] = []
+        var phase1HitSlots: [UInt32] = []
+        var phase1MissSlots: [UInt32] = []
+
+        if let plan = plannedFetch {
+            let missSet = Set(plan.misses)
+            phase1HitSlots = (0..<cfg.topKExperts)
+                .filter { !missSet.contains($0) }
+                .map { UInt32($0) }
+            phase1MissSlots = plan.misses.map { UInt32($0) }
+        }
+        func encodeRoutedPhase1Full(
+            _ cb: MTLCommandBuffer,
+            argBuf: MTLBuffer,
+            routedBufs: [MTLBuffer]
+        ) {
+            moe.encodeRoutedPersistentPhase1U16Load(commandBuffer: cb,
+                                                    routedArgBuffer: argBuf,
+                                                    routedBlobs: routedBufs,
+                                                    routedOffsets: routedOffsets,
+                                                    x: routedX,
+                                                    acts: moeActs,
+                                                    d: D,
+                                                    f: FmoE,
+                                                    topK: topK,
+                                                    activation: activation)
+        }
+
+        func encodeRoutedPhase1Subset(
+            _ cb: MTLCommandBuffer,
+            argBuf: MTLBuffer,
+            routedBufs: [MTLBuffer],
+            activeSlots: MTLBuffer,
+            activeSlotIndices: [UInt32],
+            activeCount: UInt32
+        ) {
+            moe.encodeRoutedPersistentPhase1SubsetU16Load(
+                commandBuffer: cb,
+                routedArgBuffer: argBuf,
+                routedBlobs: routedBufs,
+                routedOffsets: routedOffsets,
+                x: routedX,
+                acts: moeActs,
+                activeSlots: activeSlots,
+                activeSlotIndices: activeSlotIndices,
+                activeCount: activeCount,
+                d: D,
+                f: FmoE,
+                topK: topK,
+                activation: activation)
+        }
+
+        if let plan = plannedFetch,
+           plan.hits > 0,
+           !plan.misses.isEmpty {
+            let plannedBlobs = try model.routedExpertBuffers(for: plan)
+            phase1HitSplitRoutedBufs = plannedBlobs.map { $0.buffer }
+            phase1HitSplitArgBuf = moe.makeRoutedArgumentBuffer(
+                routedBlobs: phase1HitSplitRoutedBufs,
+                topK: topK)
+            if let argBuf = phase1HitSplitArgBuf, plan.hits > 0, !plan.misses.isEmpty {
+                writeActiveSlots(phase1HitSlots, into: moeHitActiveSlots)
+                let cb = ctx.queue.makeCommandBuffer()!
+                encodeRoutedPhase1Subset(
+                    cb,
+                    argBuf: argBuf,
+                    routedBufs: phase1HitSplitRoutedBufs,
+                    activeSlots: moeHitActiveSlots,
+                    activeSlotIndices: phase1HitSlots,
+                    activeCount: UInt32(phase1HitSlots.count))
+                phase1HitCB = cb
+            }
+        }
+
+        // The shared dense MLP depends only on denseX, not on the routed
+        // experts. Commit it without waiting so its GPU work overlaps the
+        // routed-expert pread. The routed CB follows it on the same queue,
+        // so the combine sees h1Buf.
+        let gSharedFFN: (MTLCommandBuffer) -> Void = { [self] cb in
+            try! shared.encode(commandBuffer: cb,
+                               x: denseX,
+                               gate: sharedProj.gate,
+                               up: sharedProj.up,
+                               down: sharedProj.down,
+                               y: h1Buf,
+                               scratchGate: denseScratchGate,
+                               scratchUp: denseScratchUp,
+                               scratchAct: denseScratchAct,
+                               activation: activation)
+        }
+        let sharedCB = ctx.queue.makeCommandBuffer()!
+        gSharedFFN(sharedCB)
+        sharedPostEncoder(sharedCB)
+        sharedCB.commit()
+        if let cb = phase1HitCB {
+            cb.commit()
+        }
+        if rdadviseEnabled && rdadvisePolicyMode != .off {
+            let requestedMisses = plannedFetch?.misses.count ?? experts.count
+            let estimatedAdviceBytes = try model.routedExpertAdviceByteEstimate(
+                layer: L,
+                missCount: requestedMisses)
+            if let skipped = shouldSkipRDAdvice(position: position,
+                                                requestedMisses: requestedMisses,
+                                                estimatedBytes: estimatedAdviceBytes,
+                                                canOverlapUsefulGPUWork: true) {
+                recordRDAdvice(skipped, wallNanos: 0)
+            } else {
+                let tAdvice = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                let result: ExpertIOAdviceResult
+                if let plannedFetch {
+                    result = try model.adviseRoutedExperts(plan: plannedFetch)
+                } else {
+                    result = try model.adviseRoutedExperts(layer: L, experts: experts)
+                }
+                let wallNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tAdvice
+                recordRDAdvice(result, wallNanos: wallNanos)
+                updateRDAdvicePolicy(after: result, position: position)
+            }
+        }
+
+        // Routed-expert pread — overlaps the shared MLP GPU work above.
+        let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let blobs: [TensorView]
+        if let plannedFetch {
+            blobs = try await model.fetchRoutedExperts(plan: plannedFetch)
+        } else {
+            blobs = try await model.fetchRoutedExperts(layer: L, experts: experts)
+        }
+        let layerIo = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
+        totalIoNanos &+= layerIo
+        let routedBufs = blobs.map { $0.buffer }
+        let tCb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+
+        let routedCB = ctx.queue.makeCommandBuffer()!
+        let splitArgBuf = phase1HitCB != nil && !phase1MissSlots.isEmpty
+            ? phase1HitSplitArgBuf
+            : nil
+        let argBuf = splitArgBuf ?? moe.makeReusedRoutedArgumentBuffer(
+            routedBlobs: routedBufs,
+            topK: topK)
+        if splitArgBuf != nil {
+            writeActiveSlots(phase1MissSlots, into: moeMissActiveSlots)
+            encodeRoutedPhase1Subset(
+                routedCB,
+                argBuf: argBuf,
+                routedBufs: routedBufs,
+                activeSlots: moeMissActiveSlots,
+                activeSlotIndices: phase1MissSlots,
+                activeCount: UInt32(phase1MissSlots.count))
+        } else {
+            encodeRoutedPhase1Full(routedCB,
+                                   argBuf: argBuf,
+                                   routedBufs: routedBufs)
+        }
+        moe.encodeRoutedPersistentPhase2Reduce(commandBuffer: routedCB,
+                                               routedArgBuffer: argBuf,
+                                               routedBlobs: routedBufs,
+                                               routedOffsets: routedOffsets,
+                                               acts: moeActs,
+                                               routingWeights: outWeights,
+                                               residual: routedResidual,
+                                               y: h2Buf,
+                                               d: D,
+                                               f: FmoE,
+                                               topK: topK)
+        tailEncoder(routedCB)
+        routedCB.commit()
+        precondition(pending == nil,
+                     "routed command-buffer pipeline drained before queuing the next layer")
+        pending = PendingRoutedCommand(
+            cb: routedCB,
+            sharedCB: sharedCB,
+            phase1HitCB: phase1HitCB,
+            encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
+    }
+
+    /// One Qwen 3.6 decode layer: CB1 runs the token mixer (GDN or full
+    /// attention) + post-attention residual/norm + the router, then the
+    /// shared `encodeRoutedTail` schedules the silu experts, the sigmoid-gated
+    /// shared expert, and the `hidden += h2` combine. Math pinned to
+    /// `qwen3_5_moe` (see `docs/QWEN36_PORT.md`).
+    private func encodeQwenDecodeLayer(
+        _ L: Int,
+        position: Int,
+        pending: inout PendingRoutedCommand?
+    ) async throws {
+        let D = UInt32(cfg.hiddenSize)
+        let eps: Float = 1e-6
+        let isFull = cfg.fullAttentionLayerMask[L] != 0
+        let seqLen = UInt32(position + 1)
+
+        let inNorm = try model.inputNorm(layer: L)
+        let postAttnNorm = try model.postAttnNorm(layer: L)
+        let routerW = try model.router(layer: L)
+        let sharedProj = sharedExpertProjections[L]
+        let sharedGate = try model.sharedExpertGateProj(layer: L)
+        guard let onesEffective = qwenOnesEffectiveScale,
+              let onesExpert = qwenOnesPerExpertScale else {
+            preconditionFailure("Qwen decode layer on a non-Qwen runner")
+        }
+
+        let tCb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let cb = ctx.queue.makeCommandBuffer()!
+
+        let gInputNorm: (MTLCommandBuffer) -> Void = { [self] cb in
+            rms.encodeBF16W(commandBuffer: cb,
+                            x: hidden,
+                            weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
+                            out: normed,
+                            d: D, eps: eps)
+        }
+        let gPostAttn: (MTLCommandBuffer) -> Void = { [self] cb in
+            qwenFusions.encodePostAttn(commandBuffer: cb,
+                                       hidden: hidden,
+                                       attn: oOut,
+                                       out: denseX,
+                                       weight: postAttnNorm.buffer,
+                                       weightOffset: Int(postAttnNorm.offset),
+                                       d: D, eps: eps)
+        }
+
+        if isFull {
+            // Full-attention layer: q_proj is doubled (per-head q|gate pairs),
+            // q/k per-head norms, partial RoPE (rotary dim = 0.25 * head_dim),
+            // attention scale rsqrt(head_dim), then the output gate.
+            let qP = try model.qProj(layer: L)
+            let kP = try model.kProj(layer: L)
+            let vP = try model.vProj(layer: L)
+            let oP = try model.oProj(layer: L)
+            let qN = try model.qNorm(layer: L)
+            let kN = try model.kNorm(layer: L)
+            let kSlot = kv?.kSlot(layer: L, position: position)
+                ?? (buffer: kStage, offset: 0)
+            let vSlot = kv?.vSlot(layer: L, position: position)
+                ?? (buffer: vStage, offset: 0)
+            let headDim = UInt32(cfg.fullHeadDim)
+            let numQ = UInt32(cfg.numHeads)
+            let numKV = UInt32(cfg.numFullKVHeads)
+            let qRows = numQ * headDim
+            let rotaryDim = UInt32(Double(cfg.fullHeadDim) * cfg.partialRotaryFactor)
+
+            let gProj: (MTLCommandBuffer) -> Void = { [self] cb in
+                int4.encode(commandBuffer: cb,
+                            weights: qP.buffer, weightsOffset: Int(qP.offset),
+                            scales: qP.buffer, scalesOffset: Int(qP.scaleOffset),
+                            biases: qP.buffer, biasesOffset: Int(qP.biasOffset),
+                            x: normed,
+                            y: qGateBuf,
+                            m: 2 * qRows, n: D)
+                int4.encode(commandBuffer: cb,
+                            weights: kP.buffer, weightsOffset: Int(kP.offset),
+                            scales: kP.buffer, scalesOffset: Int(kP.scaleOffset),
+                            biases: kP.buffer, biasesOffset: Int(kP.biasOffset),
+                            x: normed,
+                            y: kSlot.buffer, yOffset: kSlot.offset,
+                            m: numKV * headDim, n: D)
+                int4.encode(commandBuffer: cb,
+                            weights: vP.buffer, weightsOffset: Int(vP.offset),
+                            scales: vP.buffer, scalesOffset: Int(vP.scaleOffset),
+                            biases: vP.buffer, biasesOffset: Int(vP.biasOffset),
+                            x: normed,
+                            y: vSlot.buffer, yOffset: vSlot.offset,
+                            m: numKV * headDim, n: D)
+            }
+            let gEpilogue: (MTLCommandBuffer) -> Void = { [self] cb in
+                qwenFusions.encodeFullAttnEpilogue(
+                    commandBuffer: cb,
+                    qProj: qGateBuf,
+                    qOut: qScratch,
+                    gateOut: gateBuf,
+                    k: kSlot.buffer, kOffset: kSlot.offset,
+                    qWeight: qN.buffer, qWeightOffset: Int(qN.offset),
+                    kWeight: kN.buffer, kWeightOffset: Int(kN.offset),
+                    headDim: headDim,
+                    numQHeads: numQ,
+                    numKVHeads: numKV,
+                    position: UInt32(position),
+                    theta: Float(cfg.fullRopeTheta),
+                    rotaryDim: rotaryDim,
+                    eps: eps)
+            }
+            let gAttention: (MTLCommandBuffer) -> Void = { [self] cb in
+                attention.encodeFull(commandBuffer: cb,
+                                     q: qScratch,
+                                     k: kSlot.buffer, kOffset: kSlot.offset,
+                                     v: vSlot.buffer, vOffset: vSlot.offset,
+                                     out: attnOut,
+                                     headDim: headDim,
+                                     numQHeads: numQ,
+                                     numKVHeads: numKV,
+                                     seqLen: seqLen,
+                                     scale: nil)   // rsqrt(head_dim) — Qwen's scaling
+            }
+            let gGate: (MTLCommandBuffer) -> Void = { [self] cb in
+                qwenFusions.encodeAttnOutputGate(commandBuffer: cb,
+                                                 attn: attnOut,
+                                                 gate: gateBuf,
+                                                 n: qRows)
+            }
+            let gOProj: (MTLCommandBuffer) -> Void = { [self] cb in
+                int4.encode(commandBuffer: cb,
+                            weights: oP.buffer, weightsOffset: Int(oP.offset),
+                            scales: oP.buffer, scalesOffset: Int(oP.scaleOffset),
+                            biases: oP.buffer, biasesOffset: Int(oP.biasOffset),
+                            x: attnOut,
+                            y: oOut,
+                            m: D, n: qRows)
+            }
+            gInputNorm(cb)
+            gProj(cb)
+            gEpilogue(cb)
+            gAttention(cb)
+            gGate(cb)
+            gOProj(cb)
+            gPostAttn(cb)
+        } else {
+            // GDN (linear-attention) layer: in_proj_qkv → silu causal conv →
+            // gate (fused a/b GEMV) → recurrent step → gated RMSNorm →
+            // out_proj. q/k/v read from the conv output at byte offsets
+            // 0 / keyDim*2 / keyDim*4 (the conv output IS the [q,k,v] block).
+            let si = gdnStateIndexByLayer[L]
+            precondition(si >= 0, "GDN layer \(L) without state")
+            let qkvP = try model.gdnInProjQKV(layer: L)
+            let zP = try model.gdnInProjZ(layer: L)
+            let outP = try model.gdnOutProj(layer: L)
+            let convW = try model.gdnConv1D(layer: L)
+            let aLog = try model.gdnALog(layer: L)
+            let dt = try model.gdnDtBias(layer: L)
+            let normW = try model.gdnNormWeight(layer: L)
+            let gateW = gdnGateWeights[si]
+            let recState = gdnRecurrentState[si]
+            let convState = gdnConvState[si]
+            let keyDim = UInt32(cfg.linearNumKeyHeads * cfg.linearKeyHeadDim)
+            let valueDim = UInt32(cfg.linearNumValueHeads * cfg.linearValueHeadDim)
+            let qkvDim = 2 * keyDim + valueDim
+            let numV = cfg.linearNumValueHeads
+            let headDim = UInt32(cfg.linearValueHeadDim)
+            let scale = 1.0 / Float(cfg.linearKeyHeadDim).squareRoot()
+            let betaByteOffset = numV * MemoryLayout<Float>.size
+
+            let gProj: (MTLCommandBuffer) -> Void = { [self] cb in
+                int4.encode(commandBuffer: cb,
+                            weights: qkvP.buffer, weightsOffset: Int(qkvP.offset),
+                            scales: qkvP.buffer, scalesOffset: Int(qkvP.scaleOffset),
+                            biases: qkvP.buffer, biasesOffset: Int(qkvP.biasOffset),
+                            x: normed,
+                            y: qkvConv,
+                            m: qkvDim, n: D)
+                int4.encode(commandBuffer: cb,
+                            weights: zP.buffer, weightsOffset: Int(zP.offset),
+                            scales: zP.buffer, scalesOffset: Int(zP.scaleOffset),
+                            biases: zP.buffer, biasesOffset: Int(zP.biasOffset),
+                            x: normed,
+                            y: zBuf,
+                            m: valueDim, n: D)
+            }
+            let gConv: (MTLCommandBuffer) -> Void = { [self] cb in
+                gdn.encodeCausalConvUpdate(commandBuffer: cb,
+                                           w: convW.buffer, wOffset: Int(convW.offset),
+                                           state: convState,
+                                           x: qkvConv,
+                                           out: qkvConv,
+                                           newState: convState,
+                                           channels: Int(qkvDim))
+            }
+            let gGateGEMV: (MTLCommandBuffer) -> Void = { [self] cb in
+                gdn.encodeGateGEMV(commandBuffer: cb,
+                                   weights: gateW.weights,
+                                   scales: gateW.scales,
+                                   biases: gateW.biases,
+                                   x: normed,
+                                   A_log: aLog.buffer, A_logOffset: Int(aLog.offset),
+                                   dt_bias: dt.buffer, dt_biasOffset: Int(dt.offset),
+                                   g: gBeta,
+                                   beta: gBeta, betaOffset: betaByteOffset,
+                                   numValueHeads: numV,
+                                   n: D)
+            }
+            let gRecurrent: (MTLCommandBuffer) -> Void = { [self] cb in
+                gdn.encodeRecurrent(commandBuffer: cb,
+                                    state: recState,
+                                    q: qkvConv,
+                                    k: qkvConv, kOffset: Int(keyDim) * 2,
+                                    v: qkvConv, vOffset: Int(keyDim) * 4,
+                                    g: gBeta,
+                                    beta: gBeta, betaOffset: betaByteOffset,
+                                    out: attnOut,
+                                    numValueHeads: numV,
+                                    headDim: headDim,
+                                    scale: scale,
+                                    l2eps: 1e-6)
+            }
+            let gNormGated: (MTLCommandBuffer) -> Void = { [self] cb in
+                gdn.encodeRMSNormGated(commandBuffer: cb,
+                                       x: attnOut,
+                                       z: zBuf,
+                                       weight: normW.buffer, weightOffset: Int(normW.offset),
+                                       out: attnOut,
+                                       numValueHeads: numV,
+                                       headDim: headDim,
+                                       eps: eps)
+            }
+            let gOProj: (MTLCommandBuffer) -> Void = { [self] cb in
+                int4.encode(commandBuffer: cb,
+                            weights: outP.buffer, weightsOffset: Int(outP.offset),
+                            scales: outP.buffer, scalesOffset: Int(outP.scaleOffset),
+                            biases: outP.buffer, biasesOffset: Int(outP.biasOffset),
+                            x: attnOut,
+                            y: oOut,
+                            m: D, n: valueDim)
+            }
+            gInputNorm(cb)
+            gProj(cb)
+            gConv(cb)
+            gGateGEMV(cb)
+            gRecurrent(cb)
+            gNormGated(cb)
+            gOProj(cb)
+            gPostAttn(cb)
+        }
+
+        // Router (both layer types): plain softmax over all experts, top-8
+        // renormalized — mathematically identical to the kernel's top-8
+        // softmax, so the Gemma kernel is reused with ones-filled scales.
+        moe.encodeRouterGemma4(commandBuffer: cb,
+                               weights: routerW.buffer, weightsOffset: Int(routerW.offset),
+                               scales: routerW.buffer, scalesOffset: Int(routerW.scaleOffset),
+                               biases: routerW.buffer, biasesOffset: Int(routerW.biasOffset),
+                               hidden: denseX,
+                               effectiveScale: onesEffective,
+                               perExpertScale: onesExpert,
+                               outIndices: outIndices, outWeights: outWeights,
+                               numExperts: UInt32(cfg.numExperts), d: D,
+                               topK: UInt32(cfg.topKExperts))
+        cb.commit()
+        let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        waitForCompletion(cb)
+        let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
+        if let previous = pending {
+            finishPendingRoutedCommand(previous, waitIfNeeded: false)
+            pending = nil
+        }
+        totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
+
+        // Shared expert post stage: sigmoid(shared_expert_gate · x) scales h1.
+        let sharedPost: (MTLCommandBuffer) -> Void = { [self] cb in
+            qwenFusions.encodeSharedGate(commandBuffer: cb,
+                                         weights: sharedGate.buffer,
+                                         weightsOffset: Int(sharedGate.offset),
+                                         scales: sharedGate.buffer,
+                                         scalesOffset: Int(sharedGate.scaleOffset),
+                                         biases: sharedGate.buffer,
+                                         biasesOffset: Int(sharedGate.biasOffset),
+                                         x: denseX,
+                                         h1: h1Buf,
+                                         n: D, d: D)
+        }
+        // Qwen tail: phase-2 writes h2 = shared + routed (residual = h1Buf);
+        // the layer closes with hidden += h2. No layer_scalar, no sandwich.
+        let tail: (MTLCommandBuffer) -> Void = { [self] cb in
+            qwenFusions.encodeVecAdd(commandBuffer: cb,
+                                     a: hidden, b: h2Buf,
+                                     d: D)
+        }
+        try await encodeRoutedTail(
+            layer: L,
+            position: position,
+            routedX: denseX,
+            denseX: denseX,
+            sharedProj: sharedProj,
+            activation: .silu,
+            routedResidual: h1Buf,
+            sharedPostEncoder: sharedPost,
+            tailEncoder: tail,
+            pending: &pending)
+    }
+
     private func produceToken(token: Int32,
                               position: Int,
                               into logits: MTLBuffer,
@@ -1267,49 +1979,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 "produce position \(position) exceeds maxContext \(maxContext)")
         }
         let D    = UInt32(cfg.hiddenSize)
-        let FmoE = UInt32(cfg.moeIntermediateSize)
         let eps: Float = 1e-6
         let sqrtHidden = Float(cfg.hiddenSize).squareRoot()
-        struct PendingRoutedCommand {
-            let cb: MTLCommandBuffer
-            let sharedCB: MTLCommandBuffer?
-            let phase1HitCB: MTLCommandBuffer?
-            let encodeAndCommitNanos: UInt64
-        }
         var pendingRoutedCommand: PendingRoutedCommand?
-
-        func finishPendingRoutedCommand(_ pending: PendingRoutedCommand,
-                                        waitIfNeeded: Bool) {
-            if waitIfNeeded {
-                func wait(_ cb: MTLCommandBuffer) {
-                    waitForCompletion(cb)
-                }
-                if let sharedCB = pending.sharedCB {
-                    wait(sharedCB)
-                }
-                if let phase1HitCB = pending.phase1HitCB {
-                    wait(phase1HitCB)
-                }
-                wait(pending.cb)
-            } else if let err = pending.cb.error {
-                print("CB error: \(err)")
-            }
-            if let sharedCB = pending.sharedCB {
-                if let err = sharedCB.error {
-                    print("CB error: \(err)")
-                }
-            }
-            if let phase1HitCB = pending.phase1HitCB,
-               let err = phase1HitCB.error {
-                print("CB error: \(err)")
-            }
-            totalCb2Nanos &+= pending.encodeAndCommitNanos
-        }
-
-        func writeActiveSlots(_ slots: [UInt32], into buffer: MTLBuffer) {
-            let ptr = buffer.contents().assumingMemoryBound(to: UInt32.self)
-            for i in 0..<slots.count { ptr[i] = slots[i] }
-        }
 
         // Embed lookup + sqrt(H) fused.
         let emb = model.embedding
@@ -1327,6 +1999,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         for L in 0..<cfg.numLayers {
+            if cfg.modelFamily == "qwen3_6" {
+                try await encodeQwenDecodeLayer(L, position: position,
+                                                pending: &pendingRoutedCommand)
+                continue
+            }
             let isFull = cfg.fullAttentionLayerMask[L] != 0
             let headDimL = isFull ? cfg.fullHeadDim : cfg.headDim
             let numKVL   = isFull ? cfg.numFullKVHeads : cfg.numKVHeads
@@ -1499,165 +2176,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
 
-            // CPU readback to fetch routed-expert blobs from disk.
-            let idxPtr = outIndices.contents().bindMemory(to: UInt32.self,
-                                                          capacity: cfg.topKExperts)
-            var experts = [Int](repeating: 0, count: cfg.topKExperts)
-            for i in 0..<cfg.topKExperts {
-                experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
-            }
-
-            let routedOffsets = model.routedExpertOffsets(layer: L)
-            let topK = UInt32(cfg.topKExperts)
-            let canPlanPhase1HitSplit =
-                cfg.topKExperts <= MoE.maxStreamedExperts
-            let plannedFetch = canPlanPhase1HitSplit
-                ? try model.planRoutedExperts(layer: L, experts: experts)
-                : nil
-            var phase1HitCB: MTLCommandBuffer?
-            var phase1HitSplitArgBuf: MTLBuffer?
-            var phase1HitSplitRoutedBufs: [MTLBuffer] = []
-            var phase1HitSlots: [UInt32] = []
-            var phase1MissSlots: [UInt32] = []
-
-            if let plan = plannedFetch {
-                let missSet = Set(plan.misses)
-                phase1HitSlots = (0..<cfg.topKExperts)
-                    .filter { !missSet.contains($0) }
-                    .map { UInt32($0) }
-                phase1MissSlots = plan.misses.map { UInt32($0) }
-            }
-            func encodeRoutedPhase1Full(
-                _ cb: MTLCommandBuffer,
-                argBuf: MTLBuffer,
-                routedBufs: [MTLBuffer]
-            ) {
-                moe.encodeRoutedPersistentPhase1U16Load(commandBuffer: cb,
-                                                        routedArgBuffer: argBuf,
-                                                        routedBlobs: routedBufs,
-                                                        routedOffsets: routedOffsets,
-                                                        x: routedX,
-                                                        acts: moeActs,
-                                                        d: D,
-                                                        f: FmoE,
-                                                        topK: topK)
-            }
-
-            func encodeRoutedPhase1Subset(
-                _ cb: MTLCommandBuffer,
-                argBuf: MTLBuffer,
-                routedBufs: [MTLBuffer],
-                activeSlots: MTLBuffer,
-                activeSlotIndices: [UInt32],
-                activeCount: UInt32
-            ) {
-                moe.encodeRoutedPersistentPhase1SubsetU16Load(
-                    commandBuffer: cb,
-                    routedArgBuffer: argBuf,
-                    routedBlobs: routedBufs,
-                    routedOffsets: routedOffsets,
-                    x: routedX,
-                    acts: moeActs,
-                    activeSlots: activeSlots,
-                    activeSlotIndices: activeSlotIndices,
-                    activeCount: activeCount,
-                    d: D,
-                    f: FmoE,
-                    topK: topK)
-            }
-
-            if let plan = plannedFetch,
-               plan.hits > 0,
-               !plan.misses.isEmpty {
-                let plannedBlobs = try model.routedExpertBuffers(for: plan)
-                phase1HitSplitRoutedBufs = plannedBlobs.map { $0.buffer }
-                phase1HitSplitArgBuf = moe.makeRoutedArgumentBuffer(
-                    routedBlobs: phase1HitSplitRoutedBufs,
-                    topK: topK)
-                if let argBuf = phase1HitSplitArgBuf, plan.hits > 0, !plan.misses.isEmpty {
-                    writeActiveSlots(phase1HitSlots, into: moeHitActiveSlots)
-                    let cb = ctx.queue.makeCommandBuffer()!
-                    encodeRoutedPhase1Subset(
-                        cb,
-                        argBuf: argBuf,
-                        routedBufs: phase1HitSplitRoutedBufs,
-                        activeSlots: moeHitActiveSlots,
-                        activeSlotIndices: phase1HitSlots,
-                        activeCount: UInt32(phase1HitSlots.count))
-                    phase1HitCB = cb
-                }
-            }
-
-            // The shared dense MLP depends only on denseX, not on the routed
-            // experts. Commit it without waiting so its GPU work overlaps the
-            // routed-expert pread. The routed CB follows it on the same queue,
-            // so the combine sees h1Buf.
-            let gSharedFFN: (MTLCommandBuffer) -> Void = { [self] cb in
-                try! shared.encode(commandBuffer: cb,
-                                   x: denseX,
-                                   gate: sharedProj.gate,
-                                   up: sharedProj.up,
-                                   down: sharedProj.down,
-                                   y: h1Buf,
-                                   scratchGate: denseScratchGate,
-                                   scratchUp: denseScratchUp,
-                                   scratchAct: denseScratchAct)
-            }
-            let gSharedNorm: (MTLCommandBuffer) -> Void = { [self] cb in
-                rms.encodeBF16W(commandBuffer: cb, x: h1Buf,
-                                weight: sharedProj.postF1.buffer,
-                                weightOffset: Int(sharedProj.postF1.offset),
-                                out: h1Buf, d: D, eps: eps)
-            }
-            let sharedCB = ctx.queue.makeCommandBuffer()!
-            gSharedFFN(sharedCB)
-            gSharedNorm(sharedCB)
-            sharedCB.commit()
-            if let cb = phase1HitCB {
-                cb.commit()
-            }
-            if rdadviseEnabled && rdadvisePolicyMode != .off {
-                let requestedMisses = plannedFetch?.misses.count ?? experts.count
-                let estimatedAdviceBytes = try model.routedExpertAdviceByteEstimate(
-                    layer: L,
-                    missCount: requestedMisses)
-                if let skipped = shouldSkipRDAdvice(position: position,
-                                                    requestedMisses: requestedMisses,
-                                                    estimatedBytes: estimatedAdviceBytes,
-                                                    canOverlapUsefulGPUWork: true) {
-                    recordRDAdvice(skipped, wallNanos: 0)
-                } else {
-                    let tAdvice = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-                    let result: ExpertIOAdviceResult
-                    if let plannedFetch {
-                        result = try model.adviseRoutedExperts(plan: plannedFetch)
-                    } else {
-                        result = try model.adviseRoutedExperts(layer: L, experts: experts)
-                    }
-                    let wallNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tAdvice
-                    recordRDAdvice(result, wallNanos: wallNanos)
-                    updateRDAdvicePolicy(after: result, position: position)
-                }
-            }
-
-            // Routed-expert pread — overlaps the shared MLP GPU work above.
-            let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            let blobs: [TensorView]
-            if let plannedFetch {
-                blobs = try await model.fetchRoutedExperts(plan: plannedFetch)
-            } else {
-                blobs = try await model.fetchRoutedExperts(layer: L, experts: experts)
-            }
-            let layerIo = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
-            totalIoNanos &+= layerIo
-            let routedBufs = blobs.map { $0.buffer }
-            let tCb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let scalarPtr = layerScalarView.buffer.contents()
                 .advanced(by: Int(layerScalarView.offset))
                 .assumingMemoryBound(to: UInt16.self)
             let layerScalar = Quantization.bf16ToFloat(scalarPtr[0])
 
-            let gTail: (MTLCommandBuffer) -> Void = { [self] cb in
+            // Gemma shared-expert post stage: post_feedforward_layernorm_1 on
+            // h1. (Qwen replaces this with the sigmoid shared-expert gate.)
+            let sharedPost: (MTLCommandBuffer) -> Void = { [self] cb in
+                let postF1 = sharedProj.postF1!
+                rms.encodeBF16W(commandBuffer: cb, x: h1Buf,
+                                weight: postF1.buffer,
+                                weightOffset: Int(postF1.offset),
+                                out: h1Buf, d: D, eps: eps)
+            }
+            let tail: (MTLCommandBuffer) -> Void = { [self] cb in
                 fusedTail.encode(commandBuffer: cb,
                                  h2: h2Buf,
                                  h1: h1Buf,
@@ -1670,47 +2203,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  eps: eps,
                                  layerScalar: layerScalar)
             }
-            let routedCB = ctx.queue.makeCommandBuffer()!
-            let splitArgBuf = phase1HitCB != nil && !phase1MissSlots.isEmpty
-                ? phase1HitSplitArgBuf
-                : nil
-            let argBuf = splitArgBuf ?? moe.makeReusedRoutedArgumentBuffer(
-                routedBlobs: routedBufs,
-                topK: topK)
-            if splitArgBuf != nil {
-                writeActiveSlots(phase1MissSlots, into: moeMissActiveSlots)
-                encodeRoutedPhase1Subset(
-                    routedCB,
-                    argBuf: argBuf,
-                    routedBufs: routedBufs,
-                    activeSlots: moeMissActiveSlots,
-                    activeSlotIndices: phase1MissSlots,
-                    activeCount: UInt32(phase1MissSlots.count))
-            } else {
-                encodeRoutedPhase1Full(routedCB,
-                                       argBuf: argBuf,
-                                       routedBufs: routedBufs)
-            }
-            moe.encodeRoutedPersistentPhase2Reduce(commandBuffer: routedCB,
-                                                   routedArgBuffer: argBuf,
-                                                   routedBlobs: routedBufs,
-                                                   routedOffsets: routedOffsets,
-                                                   acts: moeActs,
-                                                   routingWeights: outWeights,
-                                                   residual: zeroResidual,
-                                                   y: h2Buf,
-                                                   d: D,
-                                                   f: FmoE,
-                                                   topK: topK)
-            gTail(routedCB)
-            routedCB.commit()
-            precondition(pendingRoutedCommand == nil,
-                         "routed command-buffer pipeline drained before queuing the next layer")
-            pendingRoutedCommand = PendingRoutedCommand(
-                cb: routedCB,
-                sharedCB: sharedCB,
-                phase1HitCB: phase1HitCB,
-                encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
+            try await encodeRoutedTail(
+                layer: L,
+                position: position,
+                routedX: routedX,
+                denseX: denseX,
+                sharedProj: sharedProj,
+                activation: .gelu,
+                routedResidual: zeroResidual,
+                sharedPostEncoder: sharedPost,
+                tailEncoder: tail,
+                pending: &pendingRoutedCommand)
             continue
         }
         if let pending = pendingRoutedCommand {
@@ -1721,7 +2224,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // The fused head skips the vocab buffer and leaves a greedy token in
         // greedyTokenBuf; the logits path writes the complete vector.
         let fNorm = model.finalNorm
-        let lm    = model.embedding
+        let lm    = model.lmHead   // untied lm_head for Qwen 3.6; tied for Gemma 4
         let gFinalNorm: (MTLCommandBuffer) -> Void = { cb in
             self.rms.encodeBF16W(commandBuffer: cb, x: self.hidden,
                                  weight: fNorm.buffer, weightOffset: Int(fNorm.offset),

@@ -52,6 +52,51 @@ import FlashQwenValidationSupport
         #expect(error < Tolerance.quantInt4 * 4, "shared-expert int4 rel=\(error)")
     }
 
+    /// Same pipeline with `activation: .silu` — the Qwen 3.6 shared-expert
+    /// path (`down(silu(gate·x) · up·x)`). The act stage is compared against
+    /// `SiluMulRef`, everything else against the affine GEMV reference.
+    @Test func sharedExpertInt4SiluMatchesAffineReference() throws {
+        var rng = SeedTree(0x605).key("shared-expert-int4-silu")
+        let x = (0..<Self.d).map { _ in rng.uniform(-0.4, 0.4) }
+        let gate = (0..<Self.f).map { _ in (0..<Self.d).map { _ in rng.uniform(-0.4, 0.4) } }
+        let up = (0..<Self.f).map { _ in (0..<Self.d).map { _ in rng.uniform(-0.4, 0.4) } }
+        let down = (0..<Self.d).map { _ in (0..<Self.f).map { _ in rng.uniform(-0.4, 0.4) } }
+        let gatePack = Self.pack(gate)
+        let upPack = Self.pack(up)
+        let downPack = Self.pack(down)
+        let x16 = x.map { Float(Float16($0)) }
+        let gateOut = DequantInt4GemvRef.apply(weightRows: gatePack.rows, x: x16, n: Self.d)
+        let upOut = DequantInt4GemvRef.apply(weightRows: upPack.rows, x: x16, n: Self.d)
+        let act = SiluMulRef.apply(gate: gateOut, up: upOut)
+            .map { Float(Float16($0)) }
+        let reference = DequantInt4GemvRef.apply(weightRows: downPack.rows, x: act, n: Self.f)
+
+        let context = try MetalContext()
+        let runtime = try SharedExpertInt4(context: context)
+        let xBuffer = try #require(Fp16Buffer.make(context.device, values: x))
+        let yBuffer = try #require(Fp16Buffer.make(context.device, count: Self.d))
+        let gateScratch = try #require(Fp16Buffer.make(context.device, count: Self.f))
+        let upScratch = try #require(Fp16Buffer.make(context.device, count: Self.f))
+        let actScratch = try #require(Fp16Buffer.make(context.device, count: Self.f))
+        let commandBuffer = try #require(context.queue.makeCommandBuffer())
+        try runtime.encode(commandBuffer: commandBuffer,
+                           x: xBuffer,
+                           gate: Self.projection(context, gatePack, rows: Self.f, cols: Self.d),
+                           up: Self.projection(context, upPack, rows: Self.f, cols: Self.d),
+                           down: Self.projection(context, downPack, rows: Self.d, cols: Self.f),
+                           y: yBuffer,
+                           scratchGate: gateScratch,
+                           scratchUp: upScratch,
+                           scratchAct: actScratch,
+                           activation: .silu)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        #expect(commandBuffer.status == .completed)
+        let actual = Fp16Buffer.read(yBuffer, count: Self.d)
+        let error = RelError.compute(actual: actual, reference: reference)
+        #expect(error < Tolerance.quantInt4 * 4, "shared-expert int4 silu rel=\(error)")
+    }
+
     private static func pack(_ values: [[Float]]) ->
         (rows: [Quantization.Int4AffineRow], packed: [UInt8], scales: [UInt16], biases: [UInt16]) {
         let rows = values.map(Quantization.quantizeInt4Affine)

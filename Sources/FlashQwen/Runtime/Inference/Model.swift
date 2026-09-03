@@ -89,9 +89,14 @@ public struct Model {
         try! resident(name: "language_model.model.embed_tokens.weight")
     }
 
-    /// Gemma 4 ties lm_head to the embedding. The transpose for the lm_head
-    /// GEMV path is the kernel's job, not the loader's.
-    public var lmHead: TensorView { embedding }
+    /// Gemma 4 ties lm_head to the embedding (the transpose for the GEMV path
+    /// is the kernel's job). Qwen 3.6 has an untied `lm_head.weight`.
+    public var lmHead: TensorView {
+        switch config.modelFamily {
+        case "qwen3_6": return try! resident(name: "lm_head.weight")
+        default:        return embedding
+        }
+    }
 
     public func qProj(layer L: Int) throws -> TensorView {
         try resident(name: "language_model.model.layers.\(L).self_attn.q_proj.weight")
@@ -105,20 +110,87 @@ public struct Model {
     public func oProj(layer L: Int) throws -> TensorView {
         try resident(name: "language_model.model.layers.\(L).self_attn.o_proj.weight")
     }
-    /// Writer emits `.router.proj.weight` (no `.mlp.` segment).
+    /// Router weight. Gemma writer emits `.router.proj.weight` (no `.mlp.`
+    /// segment); Qwen 3.6 uses `.mlp.gate.weight`.
     public func router(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).router.proj.weight")
+        switch config.modelFamily {
+        case "qwen3_6":
+            return try resident(name: "language_model.model.layers.\(L).mlp.gate.weight")
+        default:
+            return try resident(name: "language_model.model.layers.\(L).router.proj.weight")
+        }
     }
-    /// Writer emits the shared-expert FFN as `.mlp.{gate,up,down}_proj.weight`
-    /// without a `.shared_expert.` segment.
+    /// Shared-expert FFN. Gemma writer emits `.mlp.{gate,up,down}_proj.weight`
+    /// without a `.shared_expert.` segment; Qwen 3.6 keeps the full
+    /// `.mlp.shared_expert.{gate,up,down}_proj.weight` names.
     public func sharedExpertGate(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).mlp.gate_proj.weight")
+        switch config.modelFamily {
+        case "qwen3_6":
+            return try resident(name: "language_model.model.layers.\(L).mlp.shared_expert.gate_proj.weight")
+        default:
+            return try resident(name: "language_model.model.layers.\(L).mlp.gate_proj.weight")
+        }
     }
     public func sharedExpertUp(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).mlp.up_proj.weight")
+        switch config.modelFamily {
+        case "qwen3_6":
+            return try resident(name: "language_model.model.layers.\(L).mlp.shared_expert.up_proj.weight")
+        default:
+            return try resident(name: "language_model.model.layers.\(L).mlp.up_proj.weight")
+        }
     }
     public func sharedExpertDown(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).mlp.down_proj.weight")
+        switch config.modelFamily {
+        case "qwen3_6":
+            return try resident(name: "language_model.model.layers.\(L).mlp.shared_expert.down_proj.weight")
+        default:
+            return try resident(name: "language_model.model.layers.\(L).mlp.down_proj.weight")
+        }
+    }
+
+    // MARK: - Qwen 3.6 GDN (linear-attention) accessors
+    //
+    // GDN layers replace `self_attn.*` with `linear_attn.*`; the shared
+    // expert gate is the sigmoid scalar `mlp.shared_expert_gate.weight` [1, D].
+    // All are Qwen-only — touching them on a Gemma install throws
+    // `tensorNotFound`.
+
+    private func qwenResident(_ suffix: String, layer L: Int) throws -> TensorView {
+        guard config.modelFamily == "qwen3_6" else {
+            throw ModelError.tensorNotFound(name: "language_model.model.layers.\(L).\(suffix) (qwen3_6-only)")
+        }
+        return try resident(name: "language_model.model.layers.\(L).\(suffix)")
+    }
+
+    public func gdnInProjQKV(layer L: Int) throws -> TensorView {
+        try qwenResident("linear_attn.in_proj_qkv.weight", layer: L)
+    }
+    public func gdnInProjZ(layer L: Int) throws -> TensorView {
+        try qwenResident("linear_attn.in_proj_z.weight", layer: L)
+    }
+    public func gdnInProjA(layer L: Int) throws -> TensorView {
+        try qwenResident("linear_attn.in_proj_a.weight", layer: L)
+    }
+    public func gdnInProjB(layer L: Int) throws -> TensorView {
+        try qwenResident("linear_attn.in_proj_b.weight", layer: L)
+    }
+    public func gdnOutProj(layer L: Int) throws -> TensorView {
+        try qwenResident("linear_attn.out_proj.weight", layer: L)
+    }
+    public func gdnALog(layer L: Int) throws -> TensorView {
+        try qwenResident("linear_attn.A_log", layer: L)
+    }
+    public func gdnDtBias(layer L: Int) throws -> TensorView {
+        try qwenResident("linear_attn.dt_bias", layer: L)
+    }
+    public func gdnNormWeight(layer L: Int) throws -> TensorView {
+        try qwenResident("linear_attn.norm.weight", layer: L)
+    }
+    public func gdnConv1D(layer L: Int) throws -> TensorView {
+        try qwenResident("linear_attn.conv1d.weight", layer: L)
+    }
+    public func sharedExpertGateProj(layer L: Int) throws -> TensorView {
+        try qwenResident("mlp.shared_expert_gate.weight", layer: L)
     }
     public func inputNorm(layer L: Int) throws -> TensorView {
         try resident(name: "language_model.model.layers.\(L).input_layernorm.weight")
@@ -558,6 +630,32 @@ extension Model {
             }
         }
 
+        /// Raw (unquantized) 1-D resident tensor of a fixed dtype — used for
+        /// the Qwen GDN scalars (`A_log`/`dt_bias` fp32) and the conv1d weight
+        /// (fp16; the writer converts bf16 → fp16 at emit).
+        func requireRaw(_ name: String, count: Int, dtype: FQTurboFormatV1.DType) throws {
+            precondition(dtype == .fp16 || dtype == .fp32,
+                         "requireRaw supports only fp16/fp32")
+            guard let entry = residentIndex.entries[name] else {
+                throw ModelError.indexCorrupt(detail: "missing required resident tensor \(name)")
+            }
+            guard let logicalCount = UInt32(exactly: count), logicalCount > 0 else {
+                throw ModelError.indexCorrupt(detail: "\(name) has invalid dimensions")
+            }
+            let stride = dtype == .fp32 ? MemoryLayout<Float>.size : MemoryLayout<Float16>.size
+            let expectedBytes = try checkedMultiply(
+                UInt64(logicalCount), UInt64(stride), field: name)
+            guard entry.dtype == dtype.rawValue,
+                  entry.shape.0 == logicalCount,
+                  entry.shape.1 == 0, entry.shape.2 == 0, entry.shape.3 == 0,
+                  entry.sizeBytes == expectedBytes,
+                  entry.scaleOffset == 0, entry.scaleSize == 0,
+                  entry.biasOffset == 0, entry.biasSize == 0,
+                  entry.fileOffset % UInt64(stride) == 0 else {
+                throw ModelError.indexCorrupt(detail: "\(name) does not match the required raw \(dtype) schema")
+            }
+        }
+
         func affineSizes(rows: Int,
                          columns: Int,
                          slot: ManifestQuantSlot,
@@ -614,59 +712,23 @@ extension Model {
             slot: quant.embedding)
         try requireBF16("language_model.model.norm.weight", count: config.hiddenSize)
 
-        for layer in 0..<config.numLayers {
-            let prefix = "language_model.model.layers.\(layer)"
-            let isFull = config.fullAttentionLayerMask[layer] != 0
-            let headDimension = isFull ? config.fullHeadDim : config.headDim
-            let kvHeads = isFull ? config.numFullKVHeads : config.numKVHeads
-            let queryDimension = try checkedIntMultiply(
-                config.numHeads, headDimension, field: "layer \(layer) query")
-            let kvDimension = try checkedIntMultiply(
-                kvHeads, headDimension, field: "layer \(layer) key/value")
-
-            for name in [
-                "input_layernorm.weight",
-                "post_attention_layernorm.weight",
-                "pre_feedforward_layernorm.weight",
-                "pre_feedforward_layernorm_2.weight",
-                "post_feedforward_layernorm_1.weight",
-                "post_feedforward_layernorm_2.weight",
-                "post_feedforward_layernorm.weight",
-                "router.scale",
-            ] {
-                try requireBF16("\(prefix).\(name)", count: config.hiddenSize)
-            }
-            try requireBF16("\(prefix).self_attn.q_norm.weight", count: headDimension)
-            try requireBF16("\(prefix).self_attn.k_norm.weight", count: headDimension)
-            try requireBF16("\(prefix).router.per_expert_scale", count: config.numExperts)
-            try requireBF16("\(prefix).layer_scalar", count: 1)
-
-            try requireAffine("\(prefix).self_attn.q_proj.weight",
-                              rows: queryDimension, columns: config.hiddenSize,
-                              slot: quant.attention)
-            try requireAffine("\(prefix).self_attn.k_proj.weight",
-                              rows: kvDimension, columns: config.hiddenSize,
-                              slot: quant.attention)
-            if !isFull {
-                try requireAffine("\(prefix).self_attn.v_proj.weight",
-                                  rows: kvDimension, columns: config.hiddenSize,
-                                  slot: quant.attention)
-            }
-            try requireAffine("\(prefix).self_attn.o_proj.weight",
-                              rows: config.hiddenSize, columns: queryDimension,
-                              slot: quant.attention)
-            try requireAffine("\(prefix).mlp.gate_proj.weight",
-                              rows: config.intermediateSize, columns: config.hiddenSize,
-                              slot: quant.sharedExpert)
-            try requireAffine("\(prefix).mlp.up_proj.weight",
-                              rows: config.intermediateSize, columns: config.hiddenSize,
-                              slot: quant.sharedExpert)
-            try requireAffine("\(prefix).mlp.down_proj.weight",
-                              rows: config.hiddenSize, columns: config.intermediateSize,
-                              slot: quant.sharedExpert)
-            try requireAffine("\(prefix).router.proj.weight",
-                              rows: config.numExperts, columns: config.hiddenSize,
-                              slot: quant.router)
+        // Per-layer tensor sets diverge by family: Gemma 4 has the
+        // q/k/v sandwich norms + router auxiliaries; Qwen 3.6 has GDN
+        // (linear_attn.*) on the non-full layers, a doubled q_proj + output
+        // gate on the full layers, and a sigmoid-gated shared expert. The
+        // routed-expert packed layout below is family-independent.
+        switch config.modelFamily {
+        case "qwen3_6":
+            try validateQwen36Layers(config: config, quant: quant,
+                                     requireBF16: requireBF16,
+                                     requireAffine: requireAffine,
+                                     requireRaw: requireRaw,
+                                     checkedIntMultiply: checkedIntMultiply)
+        default:
+            try validateGemma4Layers(config: config, quant: quant,
+                                     requireBF16: requireBF16,
+                                     requireAffine: requireAffine,
+                                     checkedIntMultiply: checkedIntMultiply)
         }
 
         let routedShapes: [(String, Int, Int)] = [
@@ -719,6 +781,170 @@ extension Model {
                     }
                 }
             }
+        }
+    }
+
+    // MARK: - Per-layer schema validators (split by model family)
+
+    private static func validateGemma4Layers(
+        config: ArchConfig,
+        quant: ManifestQuant,
+        requireBF16: (String, Int) throws -> Void,
+        requireAffine: (String, Int, Int, ManifestQuantSlot) throws -> Void,
+        checkedIntMultiply: (Int, Int, String) throws -> Int
+    ) throws {
+        for layer in 0..<config.numLayers {
+            let prefix = "language_model.model.layers.\(layer)"
+            let isFull = config.fullAttentionLayerMask[layer] != 0
+            let headDimension = isFull ? config.fullHeadDim : config.headDim
+            let kvHeads = isFull ? config.numFullKVHeads : config.numKVHeads
+            let queryDimension = try checkedIntMultiply(
+                config.numHeads, headDimension, "layer \(layer) query")
+            let kvDimension = try checkedIntMultiply(
+                kvHeads, headDimension, "layer \(layer) key/value")
+
+            for name in [
+                "input_layernorm.weight",
+                "post_attention_layernorm.weight",
+                "pre_feedforward_layernorm.weight",
+                "pre_feedforward_layernorm_2.weight",
+                "post_feedforward_layernorm_1.weight",
+                "post_feedforward_layernorm_2.weight",
+                "post_feedforward_layernorm.weight",
+                "router.scale",
+            ] {
+                try requireBF16("\(prefix).\(name)", config.hiddenSize)
+            }
+            try requireBF16("\(prefix).self_attn.q_norm.weight", headDimension)
+            try requireBF16("\(prefix).self_attn.k_norm.weight", headDimension)
+            try requireBF16("\(prefix).router.per_expert_scale", config.numExperts)
+            try requireBF16("\(prefix).layer_scalar", 1)
+
+            try requireAffine("\(prefix).self_attn.q_proj.weight",
+                              queryDimension, config.hiddenSize,
+                              quant.attention)
+            try requireAffine("\(prefix).self_attn.k_proj.weight",
+                              kvDimension, config.hiddenSize,
+                              quant.attention)
+            if !isFull {
+                try requireAffine("\(prefix).self_attn.v_proj.weight",
+                                  kvDimension, config.hiddenSize,
+                                  quant.attention)
+            }
+            try requireAffine("\(prefix).self_attn.o_proj.weight",
+                              config.hiddenSize, queryDimension,
+                              quant.attention)
+            try requireAffine("\(prefix).mlp.gate_proj.weight",
+                              config.intermediateSize, config.hiddenSize,
+                              quant.sharedExpert)
+            try requireAffine("\(prefix).mlp.up_proj.weight",
+                              config.intermediateSize, config.hiddenSize,
+                              quant.sharedExpert)
+            try requireAffine("\(prefix).mlp.down_proj.weight",
+                              config.hiddenSize, config.intermediateSize,
+                              quant.sharedExpert)
+            try requireAffine("\(prefix).router.proj.weight",
+                              config.numExperts, config.hiddenSize,
+                              quant.router)
+        }
+    }
+
+    private static func validateQwen36Layers(
+        config: ArchConfig,
+        quant: ManifestQuant,
+        requireBF16: (String, Int) throws -> Void,
+        requireAffine: (String, Int, Int, ManifestQuantSlot) throws -> Void,
+        requireRaw: (String, Int, FQTurboFormatV1.DType) throws -> Void,
+        checkedIntMultiply: (Int, Int, String) throws -> Int
+    ) throws {
+        let keyDim = try checkedIntMultiply(
+            config.linearNumKeyHeads, config.linearKeyHeadDim,
+            "GDN key dim")
+        let valueDim = try checkedIntMultiply(
+            config.linearNumValueHeads, config.linearValueHeadDim,
+            "GDN value dim")
+        let qkvDim = try checkedIntMultiply(keyDim, 2, "GDN q+k dim")
+            + valueDim
+        let convCount = try checkedIntMultiply(
+            qkvDim, config.linearConvKernelDim, "GDN conv weight")
+
+        for layer in 0..<config.numLayers {
+            let prefix = "language_model.model.layers.\(layer)"
+            let isFull = config.fullAttentionLayerMask[layer] != 0
+
+            try requireBF16("\(prefix).input_layernorm.weight", config.hiddenSize)
+            try requireBF16("\(prefix).post_attention_layernorm.weight", config.hiddenSize)
+
+            if isFull {
+                // q_proj is doubled for attn_output_gate: [2*Q*head_dim, D].
+                let queryRows = try checkedIntMultiply(
+                    config.numHeads, config.fullHeadDim, "layer \(layer) query")
+                let doubledQuery = try checkedIntMultiply(
+                    queryRows, 2, "layer \(layer) doubled query")
+                let kvRows = try checkedIntMultiply(
+                    config.numFullKVHeads, config.fullHeadDim,
+                    "layer \(layer) key/value")
+
+                try requireAffine("\(prefix).self_attn.q_proj.weight",
+                                  doubledQuery, config.hiddenSize,
+                                  quant.attention)
+                try requireAffine("\(prefix).self_attn.k_proj.weight",
+                                  kvRows, config.hiddenSize,
+                                  quant.attention)
+                try requireAffine("\(prefix).self_attn.v_proj.weight",
+                                  kvRows, config.hiddenSize,
+                                  quant.attention)
+                try requireAffine("\(prefix).self_attn.o_proj.weight",
+                                  config.hiddenSize, queryRows,
+                                  quant.attention)
+                try requireBF16("\(prefix).self_attn.q_norm.weight", config.fullHeadDim)
+                try requireBF16("\(prefix).self_attn.k_norm.weight", config.fullHeadDim)
+            } else {
+                // GDN (linear-attention) layer.
+                try requireAffine("\(prefix).linear_attn.in_proj_qkv.weight",
+                                  qkvDim, config.hiddenSize,
+                                  quant.attention)
+                try requireAffine("\(prefix).linear_attn.in_proj_z.weight",
+                                  valueDim, config.hiddenSize,
+                                  quant.attention)
+                try requireAffine("\(prefix).linear_attn.in_proj_a.weight",
+                                  config.linearNumValueHeads, config.hiddenSize,
+                                  quant.attention)
+                try requireAffine("\(prefix).linear_attn.in_proj_b.weight",
+                                  config.linearNumValueHeads, config.hiddenSize,
+                                  quant.attention)
+                try requireAffine("\(prefix).linear_attn.out_proj.weight",
+                                  config.hiddenSize, valueDim,
+                                  quant.attention)
+                try requireBF16("\(prefix).linear_attn.norm.weight",
+                                config.linearValueHeadDim)
+                try requireRaw("\(prefix).linear_attn.A_log",
+                               config.linearNumValueHeads, .fp32)
+                try requireRaw("\(prefix).linear_attn.dt_bias",
+                               config.linearNumValueHeads, .fp32)
+                // conv1d.weight is [qkvDim, 1, kernel] in the checkpoint; the
+                // writer emits the squeezed [qkvDim, kernel] rows as raw FP16
+                // (bf16 → fp16 conversion at emit).
+                try requireRaw("\(prefix).linear_attn.conv1d.weight",
+                               convCount, .fp16)
+            }
+
+            // Shared expert + sigmoid gate + router (both layer types).
+            try requireAffine("\(prefix).mlp.shared_expert.gate_proj.weight",
+                              config.intermediateSize, config.hiddenSize,
+                              quant.sharedExpert)
+            try requireAffine("\(prefix).mlp.shared_expert.up_proj.weight",
+                              config.intermediateSize, config.hiddenSize,
+                              quant.sharedExpert)
+            try requireAffine("\(prefix).mlp.shared_expert.down_proj.weight",
+                              config.hiddenSize, config.intermediateSize,
+                              quant.sharedExpert)
+            try requireAffine("\(prefix).mlp.shared_expert_gate.weight",
+                              1, config.hiddenSize,
+                              quant.sharedExpert)
+            try requireAffine("\(prefix).mlp.gate.weight",
+                              config.numExperts, config.hiddenSize,
+                              quant.router)
         }
     }
 

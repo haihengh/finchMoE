@@ -1,4 +1,5 @@
 import Foundation
+import FlashQwen
 
 /// fp32 CPU reference for one GDN (gated-delta-net) decode step, grounded in
 /// `transformers/models/qwen3_5_moe/modeling_qwen3_5_moe.py`:
@@ -52,6 +53,23 @@ public enum GDNRef {
             beta[i] = 1.0 / (1.0 + expf(-b[i]))
         }
         return (g, beta)
+    }
+
+    /// FP32 reference for the fused `gdn_gate_gemv` kernel: int4-affine GEMVs
+    /// of in_proj_a/in_proj_b (`aRows` then `bRows`, each [V, N]) followed by
+    /// `gate`. The GEMVs go through `DequantInt4GemvRef` (bulk-dequant +
+    /// `vDSP_dotpr`), a different op-tree than the kernel's per-group scalar
+    /// loop.
+    public static func gateGEMV(
+        aRows: [Quantization.Int4AffineRow],
+        bRows: [Quantization.Int4AffineRow],
+        x: [Float],
+        A_log: [Float],
+        dt_bias: [Float]
+    ) -> (g: [Float], beta: [Float]) {
+        let a = DequantInt4GemvRef.apply(weightRows: aRows, x: x, n: x.count)
+        let b = DequantInt4GemvRef.apply(weightRows: bRows, x: x, n: x.count)
+        return gate(a: a, b: b, A_log: A_log, dt_bias: dt_bias)
     }
 
     /// `softplus(x) = log(1 + exp(x))`, stable for x > 0 via `x + log(1 + exp(-x))`.

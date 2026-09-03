@@ -3,6 +3,7 @@ import Metal
 
 public enum SharedExpertError: Error, CustomStringConvertible {
     case unsupportedWeightBits(Int)
+    case unsupportedActivation(String)
     case dimensionMismatch(String)
     case scratchTooSmall(String)
 
@@ -10,6 +11,8 @@ public enum SharedExpertError: Error, CustomStringConvertible {
         switch self {
         case .unsupportedWeightBits(let bits):
             return "SharedExpert unsupported weight bits: \(bits)"
+        case .unsupportedActivation(let detail):
+            return "SharedExpert unsupported activation: \(detail)"
         case .dimensionMismatch(let detail):
             return "SharedExpert dimension mismatch: \(detail)"
         case .scratchTooSmall(let detail):
@@ -18,13 +21,22 @@ public enum SharedExpertError: Error, CustomStringConvertible {
     }
 }
 
+/// Elementwise FFN activation: `.gelu` is the Gemma `gelu_pytorch_tanh`;
+/// `.silu` is the Qwen 3.6 `silu` hidden act.
+public enum SharedExpertActivation: Sendable {
+    case gelu
+    case silu
+}
+
 public final class SharedExpertInt4 {
     private let int4: DequantInt4GEMV
     private let geluMulPSO: MTLComputePipelineState
+    private let siluMulPSO: MTLComputePipelineState
 
     public init(context: MetalContext) throws {
         self.int4 = try DequantInt4GEMV(context: context)
         self.geluMulPSO = try context.pipeline("gelu_mul_fp16")
+        self.siluMulPSO = try context.pipeline("silu_mul_fp16")
     }
 
     public func encode(commandBuffer cb: MTLCommandBuffer,
@@ -35,7 +47,8 @@ public final class SharedExpertInt4 {
                        y: MTLBuffer, yOffset: Int = 0,
                        scratchGate: MTLBuffer, scratchGateOffset: Int = 0,
                        scratchUp: MTLBuffer, scratchUpOffset: Int = 0,
-                       scratchAct: MTLBuffer, scratchActOffset: Int = 0) throws {
+                       scratchAct: MTLBuffer, scratchActOffset: Int = 0,
+                       activation: SharedExpertActivation = .gelu) throws {
         guard gate.rows == up.rows, gate.cols == up.cols,
               down.rows == gate.cols, down.cols == gate.rows else {
             throw SharedExpertError.dimensionMismatch(
@@ -73,13 +86,18 @@ public final class SharedExpertInt4 {
                     m: up.rows, n: up.cols)
 
         guard let encoder = cb.makeComputeCommandEncoder() else { return }
-        encoder.setComputePipelineState(geluMulPSO)
+        let actPSO: MTLComputePipelineState
+        switch activation {
+        case .gelu: actPSO = geluMulPSO
+        case .silu: actPSO = siluMulPSO
+        }
+        encoder.setComputePipelineState(actPSO)
         encoder.setBuffer(scratchGate, offset: scratchGateOffset, index: 0)
         encoder.setBuffer(scratchUp, offset: scratchUpOffset, index: 1)
         encoder.setBuffer(scratchAct, offset: scratchActOffset, index: 2)
         var count = UInt32(intermediate)
         encoder.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 3)
-        let width = min(geluMulPSO.maxTotalThreadsPerThreadgroup, 256)
+        let width = min(actPSO.maxTotalThreadsPerThreadgroup, 256)
         encoder.dispatchThreads(MTLSize(width: intermediate, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
         encoder.endEncoding()
@@ -120,15 +138,21 @@ public final class SharedExpertRuntime {
                        y: MTLBuffer, yOffset: Int = 0,
                        scratchGate: MTLBuffer, scratchGateOffset: Int = 0,
                        scratchUp: MTLBuffer, scratchUpOffset: Int = 0,
-                       scratchAct: MTLBuffer, scratchActOffset: Int = 0) throws {
+                       scratchAct: MTLBuffer, scratchActOffset: Int = 0,
+                       activation: SharedExpertActivation = .gelu) throws {
         switch implementation {
         case .int4(let runtime):
             try runtime.encode(commandBuffer: commandBuffer, x: x, xOffset: xOffset,
                                gate: gate, up: up, down: down, y: y, yOffset: yOffset,
                                scratchGate: scratchGate, scratchGateOffset: scratchGateOffset,
                                scratchUp: scratchUp, scratchUpOffset: scratchUpOffset,
-                               scratchAct: scratchAct, scratchActOffset: scratchActOffset)
+                               scratchAct: scratchAct, scratchActOffset: scratchActOffset,
+                               activation: activation)
         case .int8(let runtime):
+            guard activation == .gelu else {
+                throw SharedExpertError.unsupportedActivation(
+                    "silu with weightBits 8 (the int8 shared-expert kernel fuses gelu)")
+            }
             try runtime.encode(commandBuffer: commandBuffer, x: x, xOffset: xOffset,
                                gate: gate, up: up, down: down, y: y, yOffset: yOffset,
                                scratchAct: scratchAct, scratchActOffset: scratchActOffset)

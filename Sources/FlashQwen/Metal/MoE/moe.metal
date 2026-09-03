@@ -15,6 +15,10 @@ constant uint FC_MOE_D [[function_constant(0)]];
 constant uint FC_MOE_F [[function_constant(1)]];
 constant uint FC_MOE_TOP_K [[function_constant(2)]];
 constant bool FC_MOE_USE_FC [[function_constant(3)]];
+// Routed-expert activation switch: true = silu (Qwen 3.6), undefined/false =
+// gelu_pytorch_tanh (Gemma 4). Applies to the phase-1 gate*up act sites only;
+// phase 2 is pure down-projection + reduce.
+constant bool FC_MOE_ACT_SILU [[function_constant(4)]];
 
 static inline uint router_fc_num_experts(constant uint& num_experts) {
     return (is_function_constant_defined(FC_ROUTER_USE_FC) &&
@@ -57,6 +61,12 @@ static inline float gelu_pytorch_tanh(float x) {
     // equivalent to the saturated result at FP32 precision.
     inner = clamp(inner, -20.0f, 20.0f);
     return 0.5f * x * (1.0f + tanh(inner));
+}
+
+static inline float moe_silu(float x) { return x / (1.0f + exp(-x)); }
+
+static inline bool moe_fc_act_silu() {
+    return is_function_constant_defined(FC_MOE_ACT_SILU) && FC_MOE_ACT_SILU;
 }
 
 struct ExpertOffsets {
@@ -365,7 +375,10 @@ static inline void moe_phase1_gate_up_act_u16load_body(
 
     const float2 gu = moe_int4_gate_up_rows_simd_dev_vec_u16load(
         gW, gS, gB, uW, uS, uB, x, f, D, lane);
-    if (lane == 0) acts[slot * F + f] = half(gelu_pytorch_tanh(gu.x) * gu.y);
+    if (lane == 0) {
+        const float act = moe_fc_act_silu() ? moe_silu(gu.x) : gelu_pytorch_tanh(gu.x);
+        acts[slot * F + f] = half(act * gu.y);
+    }
 }
 
 static inline void moe_phase1_gate_up_act_subset_u16load_body(
@@ -401,7 +414,10 @@ static inline void moe_phase1_gate_up_act_subset_u16load_body(
 
     const float2 gu = moe_int4_gate_up_rows_simd_dev_vec_u16load(
         gW, gS, gB, uW, uS, uB, x, f, D, lane);
-    if (lane == 0) acts[slot * F + f] = half(gelu_pytorch_tanh(gu.x) * gu.y);
+    if (lane == 0) {
+        const float act = moe_fc_act_silu() ? moe_silu(gu.x) : gelu_pytorch_tanh(gu.x);
+        acts[slot * F + f] = half(act * gu.y);
+    }
 }
 
 kernel void moe_phase1_gate_up_act_u16load(

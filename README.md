@@ -48,8 +48,16 @@ The upstream project ran **Gemma 4 26B-A4B**. The goal of this fork is to run
 - The Gated-DeltaNet (linear-attention) decode unit — the piece with no Gemma
   analogue — is implemented and reference-checked against the
   `qwen3_5_moe` Transformers source (**Phase 1 of the port, done**).
-- The full Qwen 3.6 35B-A3B port is **in progress** (Phases 2–7 pending; see
-  below). Until it completes, the default installer still ships the upstream
+- The **complete Qwen 3.6 decode-layer path is wired into the forward pass**,
+  behind `ArchConfig.modelFamily == "qwen3_6"`: GDN layers (silu causal conv,
+  fused gate, recurrent step, gated RMSNorm), the 10 full-attention layers
+  (partial RoPE, `attn_output_gate`), the Qwen MoE tail (silu experts, plain
+  softmax top-8 router, sigmoid-gated shared expert), per-layer recurrent
+  state, and the untied `lm_head`. The Gemma path is unchanged and the whole
+  suite stays green. Every new kernel is reference-checked before wiring.
+- The port is otherwise **in progress**: Qwen chunked prefill and the
+  bf16 → `.fqturbo` repack writer are the remaining gates (see below). Until
+  they land, the default installer still ships the upstream
   **Gemma 4 26B-A4B** checkpoint, which is the working reference model today.
 - The pristine upstream TurboFieldfare source is archived in `reference/`
   (gitignored, alongside `models/`).
@@ -77,9 +85,9 @@ press **Generate**.
 > **Note:** the default install is currently the upstream Gemma 4 26B-A4B
 > checkpoint (`mlx-community/gemma-4-26b-a4b-it-4bit`), because the Qwen 3.6
 > repack writer is not finished (port Phase 5). The runtime is already
-> Qwen-aware — `ArchConfig` parses the Qwen fields and the GDN unit is in — but
-> the install path for the local `models/Qwen3.6-35B-A3B-bf16` checkpoint
-> lands once Phases 5 and 7 close.
+> Qwen-aware — the full decode path is wired and the Gemma path unchanged —
+> but the install path for the local `models/Qwen3.6-35B-A3B-bf16` checkpoint
+> lands once the writer and Qwen prefill close.
 
 ## At a glance
 
@@ -112,15 +120,15 @@ linear-attention layer.
 
 | #  | Work                                                                                          | Status |
 | -- | --------------------------------------------------------------------------------------------- | ------ |
-| 1  | GDN unit: fp32 CPU reference, `gdn_conv_update` + `gdn_gate` + `gdn_recurrent` + `gdn_rmsnorm_gated` Metal kernels, wrapper, tests | done   |
-| 2  | Full-attention path for the 10 `F` layers (partial RoPE, interleaved MRoPE, output gate)      | pending |
-| 3  | MoE: 256-expert routing and streamed execution (top-8, shared expert 512)                     | pending |
-| 4  | Embedding + untied `lm_head` (vocab 248320), sampling, stop on 248044                         | pending |
-| 5  | Repack writer: bf16 shards → `.fqturbo` (int4/int8 affine, group 64), Qwen manifest, SHA-256s | pending |
-| 6  | `ArchConfig` preset for Qwen3.6-35B-A3B; wire `fullAttentionLayerMask` and the GDN dims        | pending |
+| 1  | GDN unit: fp32 CPU reference, `gdn_conv_update` + `gdn_gate` + `gdn_recurrent` + `gdn_rmsnorm_gated` + `gdn_gate_gemv` Metal kernels, wrapper, tests | done   |
+| 2  | Full-attention path for the 10 `F` layers (partial RoPE, output gate) — decode wired; chunked prefill pending | decode done |
+| 3  | MoE: 256-expert routing and streamed execution (top-8, silu experts, shared expert 512, sigmoid gate) — decode wired; expert storage waits on the writer | decode done |
+| 4  | Embedding + untied `lm_head` (vocab 248320), sampling, stop on 248044 — `lm_head` wired; sampling/stop pending | partial |
+| 5  | Repack writer: bf16 shards → `.fqturbo` (int4 affine + int8 router, group 64), Qwen manifest, SHA-256s | pending |
+| 6  | `ArchConfig` preset for Qwen3.6-35B-A3B; wire `fullAttentionLayerMask` and the GDN dims        | done   |
 | 7  | End-to-end: load → prefill → decode → sample; check against a reference generation            | pending |
 
-Phase 1 is the gate: nothing in the engine exercised a linear-attention state
+Phase 1 was the gate: nothing in the engine exercised a linear-attention state
 before it, and the recurrence order (decay → read → update → read-out) is the
 part most likely to be subtly wrong. Kernels are validated against the Swift
 fp32 reference before any layer is wired in. Full details, the locked GDN
@@ -284,10 +292,12 @@ The installer applies the same bounded-memory rule: it repacks remote ranges
 directly into `.fqturbo` without staging a full shard or tensor.
 
 The Qwen 3.6 GDN layers replace the KV cache on 30 of the 40 layers with a
-per-value-head recurrent state (a small device buffer per layer, updated each
-decode step). That unit — `Sources/FlashQwen/Metal/LinearAttn/gdn.metal` — is
-the new compute for this port and is reference-checked against the
-`qwen3_5_moe` Transformers source.
+per-value-head recurrent state (a 2 MiB device buffer per layer, updated each
+decode step). The decode path for both Qwen layer types —
+`Sources/FlashQwen/Metal/LinearAttn/gdn.metal` plus
+`Sources/FlashQwen/Metal/Qwen/qwen.metal`, dispatched from
+`RealForwardRunner` by `modelFamily` — is wired in and reference-checked
+against the `qwen3_5_moe` Transformers source.
 
 [System design](docs/SYSTEM_DESIGN.md) explains the `.fqturbo` layout, memory
 ownership, prefill, router handoff, the `cb1`/`io`/`cb2` phases, the Metal
@@ -303,8 +313,9 @@ FlashQwen currently includes:
   weights, with an 8-bit router
 - Custom Metal kernels for quantized GEMV, attention, MoE, normalization,
   RoPE, sampling, and production fusions
-- The Qwen 3.6 Gated-DeltaNet decode unit (linear-attention state),
-  reference-checked (port Phase 1)
+- The Qwen 3.6 decode-layer path — Gated-DeltaNet layers, full-attention
+  layers with the output gate, the Qwen MoE tail, and the untied `lm_head` —
+  wired into the forward pass and reference-checked against `qwen3_5_moe`
 - SSD-backed routed-expert streaming with a bounded expert cache
 - A Swift library, streaming installer, command-line interface, loopback
   OpenAI-compatible server, and native SwiftUI/AppKit Mac app with a one-shot
@@ -316,8 +327,8 @@ targets the `text_config` only, consistent with the engine being text-only.
 
 ### Future work
 
-- Complete the Qwen 3.6 35B-A3B port (Phases 2–7) and add its measured
-  benchmark numbers.
+- Finish the Qwen 3.6 35B-A3B port — chunked prefill, the bf16 → `.fqturbo`
+  repack writer, sampling — and add its measured benchmark numbers.
 - Build iPhone and iPad apps, then measure inference speed and memory on
   mobile hardware.
 

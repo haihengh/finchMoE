@@ -77,6 +77,7 @@ public final class MetalContext: @unchecked Sendable {
         "utility",
         "fused",
         "prefill",
+        "qwen",
     ]
 
     /// Bundle locations for runtime shader modules.
@@ -89,6 +90,7 @@ public final class MetalContext: @unchecked Sendable {
         "logit": "Metal/Sampling",
         "moe": "Metal/MoE",
         "prefill": "Metal/Prefill",
+        "qwen": "Metal/Qwen",
         "rmsnorm": "Metal/Primitives",
         "rope": "Metal/Primitives",
         "tensorops": "Metal/TensorCore",

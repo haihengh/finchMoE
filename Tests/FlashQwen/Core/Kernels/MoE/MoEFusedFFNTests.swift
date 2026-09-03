@@ -158,6 +158,110 @@ import FlashQwenValidationSupport
             < Tolerance.fp16ChainedReduction)
     }
 
+    /// Silu-activation variant of the routed pipeline (Qwen 3.6 experts):
+    /// phase1 computes `silu(gate·x) · up·x` via the FC_MOE_ACT_SILU PSO pair;
+    /// phase2 is activation-free. The reference runs `MoeRef.runFFN` with
+    /// `activation: .silu` (silu via Foundation.exp — a different op-tree than
+    /// the kernel's branched `moe_silu`).
+    @Test func routedPipelineSiluMatchesReference() throws {
+        var rng = SeedTree(0x2E4).key("routed-moe-silu")
+        func matrix(rows: Int, columns: Int) -> [[Float]] {
+            (0..<rows).map { _ in
+                (0..<columns).map { _ in rng.uniform(-0.4, 0.4) }
+            }
+        }
+        var gates = [[[Float]]]()
+        var ups = [[[Float]]]()
+        var downs = [[[Float]]]()
+        for _ in 0..<Self.topK {
+            gates.append(matrix(rows: Self.intermediate, columns: Self.dimension))
+            ups.append(matrix(rows: Self.intermediate, columns: Self.dimension))
+            downs.append(matrix(rows: Self.dimension, columns: Self.intermediate))
+        }
+        let x = (0..<Self.dimension).map { _ in
+            Float(Float16(rng.uniform(-0.5, 0.5)))
+        }
+        let residual = (0..<Self.dimension).map { _ in
+            Float(Float16(rng.uniform(-0.5, 0.5)))
+        }
+        let routingWeights = (0..<Self.topK).map {
+            Float(Float16(0.04 + Float($0) * 0.015))
+        }
+        let expected = MoeRef.applyStreamedRouted(
+            x: x,
+            residual: residual,
+            routedGate: gates.map { rows in
+                rows.map { Quantization.quantizeInt4Affine($0) }
+            },
+            routedUp: ups.map { rows in
+                rows.map { Quantization.quantizeInt4Affine($0) }
+            },
+            routedDown: downs.map { rows in
+                rows.map { Quantization.quantizeInt4Affine($0) }
+            },
+            indices: Array(0..<Self.topK),
+            routingWeights: routingWeights,
+            d: Self.dimension,
+            f: Self.intermediate,
+            activation: .silu)
+        let blobs = (0..<Self.topK).map {
+            Self.makeBlob(gate: gates[$0], up: ups[$0], down: downs[$0])
+        }
+
+        let context = try MetalContext()
+        let kernel = try MoE(context: context)
+        let routedBuffers = blobs.compactMap {
+            context.device.makeBuffer(bytes: $0.bytes,
+                                      length: $0.bytes.count,
+                                      options: .storageModeShared)
+        }
+        guard routedBuffers.count == Self.topK,
+              let xBuffer = Fp16Buffer.make(context.device, values: x),
+              let residualBuffer = Fp16Buffer.make(context.device, values: residual),
+              let routingBuffer = Fp16Buffer.make(context.device, values: routingWeights),
+              let acts = Fp16Buffer.make(
+                context.device, count: Self.topK * Self.intermediate),
+              let output = Fp16Buffer.make(context.device, count: Self.dimension),
+              let argumentBuffer = kernel.makeRoutedArgumentBuffer(
+                routedBlobs: routedBuffers,
+                topK: UInt32(Self.topK)) else {
+            Issue.record("buffer allocation failed")
+            return
+        }
+
+        let command = context.queue.makeCommandBuffer()!
+        kernel.encodeRoutedPersistentPhase1U16Load(
+            commandBuffer: command,
+            routedArgBuffer: argumentBuffer,
+            routedBlobs: routedBuffers,
+            routedOffsets: blobs[0].offsets,
+            x: xBuffer,
+            acts: acts,
+            d: UInt32(Self.dimension),
+            f: UInt32(Self.intermediate),
+            topK: UInt32(Self.topK),
+            activation: .silu)
+        kernel.encodeRoutedPersistentPhase2Reduce(
+            commandBuffer: command,
+            routedArgBuffer: argumentBuffer,
+            routedBlobs: routedBuffers,
+            routedOffsets: blobs[0].offsets,
+            acts: acts,
+            routingWeights: routingBuffer,
+            residual: residualBuffer,
+            y: output,
+            d: UInt32(Self.dimension),
+            f: UInt32(Self.intermediate),
+            topK: UInt32(Self.topK))
+        command.commit()
+        command.waitUntilCompleted()
+        #expect(command.error == nil)
+
+        let actual = Fp16Buffer.read(output, count: Self.dimension)
+        #expect(RelError.compute(actual: actual, reference: expected)
+            < Tolerance.fp16ChainedReduction)
+    }
+
     private static func makeBlob(gate: [[Float]],
                                  up: [[Float]],
                                  down: [[Float]]) -> RoutedBlob {

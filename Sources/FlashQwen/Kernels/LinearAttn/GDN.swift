@@ -15,12 +15,51 @@ final class GDN {
     private let psoRecurrent: MTLComputePipelineState
     private let psoGate: MTLComputePipelineState
     private let psoNormGated: MTLComputePipelineState
+    private let psoGateGEMV: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.psoConv      = try context.pipeline("gdn_conv_update")
         self.psoRecurrent = try context.pipeline("gdn_recurrent")
         self.psoGate      = try context.pipeline("gdn_gate")
         self.psoNormGated = try context.pipeline("gdn_rmsnorm_gated")
+        self.psoGateGEMV  = try context.pipeline("gdn_gate_gemv")
+    }
+
+    /// Fused in_proj_a/in_proj_b int4-affine GEMVs + gate formula.
+    /// `weights` is [2V, N/2] nibbles (a-rows first, then b-rows), `scales`/
+    /// `biases` [2V, N/64] BF16, `x` [N] fp16, `A_log`/`dt_bias` [V] fp32,
+    /// `g`/`beta` [V] fp32 outputs. One 256-thread threadgroup.
+    func encodeGateGEMV(
+        commandBuffer: MTLCommandBuffer,
+        weights: MTLBuffer, weightsOffset: Int = 0,
+        scales: MTLBuffer, scalesOffset: Int = 0,
+        biases: MTLBuffer, biasesOffset: Int = 0,
+        x: MTLBuffer, xOffset: Int = 0,
+        A_log: MTLBuffer, A_logOffset: Int = 0,
+        dt_bias: MTLBuffer, dt_biasOffset: Int = 0,
+        g: MTLBuffer, gOffset: Int = 0,
+        beta: MTLBuffer, betaOffset: Int = 0,
+        numValueHeads: Int,
+        n: UInt32
+    ) {
+        precondition(numValueHeads <= 32, "gdn_gate_gemv caps V at 32")
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(psoGateGEMV)
+        enc.setBuffer(weights, offset: weightsOffset, index: 0)
+        enc.setBuffer(scales,  offset: scalesOffset,  index: 1)
+        enc.setBuffer(biases,  offset: biasesOffset,  index: 2)
+        enc.setBuffer(x,       offset: xOffset,       index: 3)
+        enc.setBuffer(A_log,   offset: A_logOffset,   index: 4)
+        enc.setBuffer(dt_bias, offset: dt_biasOffset, index: 5)
+        enc.setBuffer(g,       offset: gOffset,       index: 6)
+        enc.setBuffer(beta,    offset: betaOffset,    index: 7)
+        var vVar = UInt32(numValueHeads)
+        var nVar = n
+        enc.setBytes(&vVar, length: MemoryLayout<UInt32>.size, index: 8)
+        enc.setBytes(&nVar, length: MemoryLayout<UInt32>.size, index: 9)
+        enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc.endEncoding()
     }
 
     /// Causal conv1d decode update over `channels` channels (kernel 4).

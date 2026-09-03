@@ -4,8 +4,10 @@ import Metal
 
 /// Which attention variant a layer runs. Gemma 4 interleaves 25 sliding-window
 /// layers with 5 full-attention layers (the latter carry the K=V shared-tensor
-/// quirk). Sourced from `ArchConfig.fullAttentionLayerMask`.
-public enum LayerKind: Sendable { case swa, full }
+/// quirk). Qwen 3.6 adds `.linear` — gated-delta-net layers keep no KV at all
+/// (their recurrent state lives in the runner). Sourced from
+/// `ArchConfig.fullAttentionLayerMask`.
+public enum LayerKind: Sendable { case swa, full, linear }
 
 /// A read view the attention kernels bind. `offset` stays 0; ring-enabled SWA
 /// layers expose the physical start slot for diagnostics while kernels map
@@ -95,9 +97,12 @@ public final class KVCacheManager {
 
         for layer in 0..<config.numLayers {
             let isFull = config.fullAttentionLayerMask[layer] != 0
-            let stride = isFull ? fullStride : swaStride
-            let capacity = ringEnabled && !isFull ? swaCapacity : maxContext
-            let length = capacity * stride
+            // Qwen 3.6 gated-delta-net layers store no KV: their recurrent
+            // state is runner-side. Skip the (large) allocation entirely.
+            let isLinear = !isFull && config.modelFamily == "qwen3_6"
+            let stride = isLinear ? 0 : (isFull ? fullStride : swaStride)
+            let capacity = isLinear ? 0 : (ringEnabled && !isFull ? swaCapacity : maxContext)
+            let length = max(1, capacity * stride)
 
             guard let kBuf = device.makeBuffer(length: length, options: .storageModeShared) else {
                 throw ModelError.residentBufferWrapFailed
@@ -112,7 +117,7 @@ public final class KVCacheManager {
             vs.append(vBuf)
 
             st.append(stride)
-            kd.append(isFull ? .full : .swa)
+            kd.append(isLinear ? .linear : (isFull ? .full : .swa))
             caps.append(capacity)
         }
 
@@ -237,7 +242,9 @@ public final class KVCacheManager {
     }
 
     private func physicalSlot(layer: Int, position: Int) -> Int {
-        position % capacityTokens[layer]
+        let capacity = capacityTokens[layer]
+        guard capacity > 0 else { return 0 }   // linear-attention layer: no storage
+        return position % capacity
     }
 
     private func ringStartSlot(layer: Int, validTokenCount: Int) -> Int {

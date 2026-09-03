@@ -16,3 +16,23 @@ void gelu_mul_fp16(
     const float u = float(up[tid]);
     out[tid] = half(gelu_pytorch_tanh(g) * u);
 }
+
+// Qwen 3.6 (silu hidden_act) counterpart of gelu_mul_fp16: the shared-expert
+// runtime picks either activation without compiling a private shader module.
+// Module-local copy of silu per the per-module convention (gdn.metal keeps
+// its own `gdn_silu`).
+static inline float utility_silu(float x) { return x / (1.0f + exp(-x)); }
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void silu_mul_fp16(
+    device const half* gate [[buffer(0)]],
+    device const half* up   [[buffer(1)]],
+    device half*       out  [[buffer(2)]],
+    constant uint&     count [[buffer(3)]],
+    uint               tid  [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+    const float g = float(gate[tid]);
+    const float u = float(up[tid]);
+    out[tid] = half(utility_silu(g) * u);
+}
