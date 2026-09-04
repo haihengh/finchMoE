@@ -4,18 +4,24 @@ import FlashQwenRepackCore
 private let usage = """
 Usage:
   FlashQwenRepack --output <model.fqturbo> [--overwrite] [--resume]
+  FlashQwenRepack --input-snapshot <dir> --output <model.fqturbo> [--overwrite]
   FlashQwenRepack --discard-partial --output <model.fqturbo>
   FlashQwenRepack --verify-install --input-fqturbo <model.fqturbo>
   FlashQwenRepack --help
 
-The installer streams the supported Gemma 4 checkpoint from Hugging Face and
-repackages it without materializing the source checkpoint on disk. Set HF_TOKEN
-only if Hugging Face requests authentication. A cancelled or interrupted
-download can be continued with --resume or removed with --discard-partial.
+Without --input-snapshot, the installer streams the supported Gemma 4
+checkpoint from Hugging Face and repackages it without materializing the
+source checkpoint on disk. Set HF_TOKEN only if Hugging Face requests
+authentication. A cancelled or interrupted download can be continued with
+--resume or removed with --discard-partial.
+
+With --input-snapshot, the installer quantizes a LOCAL bf16 Qwen 3.6 35B-A3B
+safetensors snapshot (int4 affine, group 64) into the .fqturbo format.
 """
 
 private struct Arguments {
     var output: String?
+    var inputSnapshot: String?
     var overwrite = false
     var resume = false
     var discardPartial = false
@@ -42,12 +48,14 @@ private struct Arguments {
             case "--verify-install":
                 parsed.verifyInstall = true
                 index += 1
-            case "--output", "--input-fqturbo":
+            case "--output", "--input-fqturbo", "--input-snapshot":
                 guard index + 1 < values.count else {
                     throw ParseError.missingValue(flag)
                 }
                 if flag == "--output" {
                     parsed.output = values[index + 1]
+                } else if flag == "--input-snapshot" {
+                    parsed.inputSnapshot = values[index + 1]
                 } else {
                     parsed.inputFQTurbo = values[index + 1]
                 }
@@ -64,7 +72,8 @@ private struct Arguments {
             guard parsed.output != nil else {
                 throw ParseError.missingRequired("--output")
             }
-            guard parsed.inputFQTurbo == nil, !parsed.overwrite, !parsed.verifyInstall else {
+            guard parsed.inputFQTurbo == nil, !parsed.overwrite, !parsed.verifyInstall,
+                  parsed.inputSnapshot == nil else {
                 throw ParseError.invalidMode("--discard-partial only accepts --output")
             }
             return parsed
@@ -73,7 +82,8 @@ private struct Arguments {
             guard parsed.inputFQTurbo != nil else {
                 throw ParseError.missingRequired("--input-fqturbo")
             }
-            guard parsed.output == nil, !parsed.overwrite, !parsed.resume else {
+            guard parsed.output == nil, !parsed.overwrite, !parsed.resume,
+                  parsed.inputSnapshot == nil else {
                 throw ParseError.invalidMode("verification accepts only --input-fqturbo")
             }
         } else {
@@ -82,6 +92,15 @@ private struct Arguments {
             }
             guard parsed.inputFQTurbo == nil else {
                 throw ParseError.invalidMode("--input-fqturbo requires --verify-install")
+            }
+            if let snapshot = parsed.inputSnapshot {
+                guard !parsed.resume else {
+                    throw ParseError.invalidMode("--resume applies to remote downloads only")
+                }
+                guard try Posix.entryKind((snapshot as NSString)
+                        .appendingPathComponent("model.safetensors.index.json")) == .regular else {
+                    throw ParseError.invalidMode("snapshot directory has no model.safetensors.index.json")
+                }
             }
         }
         return parsed
@@ -147,6 +166,25 @@ private func run(_ values: [String]) async -> Int32 {
     }
 
     guard let output = arguments.output else { return 2 }
+
+    if let snapshot = arguments.inputSnapshot {
+        let options = LocalQwenRepackOptions(
+            snapshotDir: snapshot,
+            outputDir: URL(fileURLWithPath: output).path,
+            overwrite: arguments.overwrite)
+        do {
+            let result = try await LocalQwenRepacker(options: options).run()
+            print("Repacked Qwen 3.6 35B-A3B bf16 snapshot (\(snapshot))")
+            print("Output bytes: \(result.outputBytes)")
+            print("Dropped non-text tensors: \(result.excludedTensorCount)")
+            print("Model: \(result.outputDir)")
+            return 0
+        } catch {
+            printError("install failed: \(error)")
+            return 1
+        }
+    }
+
     let options = SupportedModelSource.installOptions(
         outputDirectory: URL(fileURLWithPath: output),
         overwrite: arguments.overwrite,

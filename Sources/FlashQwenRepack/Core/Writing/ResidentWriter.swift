@@ -63,32 +63,54 @@ enum ResidentWriter {
     }
 
     static func encodeIndex(plan: ResidentFilePlan) throws -> Data {
-        guard plan.indexSize <= UInt64(Int.max),
-              plan.indexSize <= FQTurboFormatV1.residentIndexMaxBytes else {
-            throw RepackError.configurationInvalid(
-                detail: "resident index size \(plan.indexSize) exceeds v1 metadata cap")
+        let records = plan.entries.map {
+            ResidentIndexRecord(
+                name: $0.name, dtype: $0.dtype, logicalShape4: $0.logicalShape4,
+                fileOffset: $0.fileOffset, sizeBytes: $0.sizeBytes,
+                scaleOffset: $0.scaleOffset, scaleSize: $0.scaleSize,
+                biasOffset: $0.biasOffset, biasSize: $0.biasSize)
         }
-        let idxBytes = Int(plan.indexSize)
+        return try encodeIndex(records: records,
+                               stringTable: plan.stringTable,
+                               stringTableOffsets: plan.stringTableOffsets,
+                               indexSize: plan.indexSize,
+                               residentSize: plan.residentSize)
+    }
+
+    /// The index encoder shared by the Gemma byte-copy writer and the Qwen
+    /// quantizing writer. `records` carry only the fields the 72-byte entries
+    /// encode.
+    static func encodeIndex(records: [ResidentIndexRecord],
+                            stringTable: [UInt8],
+                            stringTableOffsets: [UInt32],
+                            indexSize: UInt64,
+                            residentSize: UInt64) throws -> Data {
+        guard indexSize <= UInt64(Int.max),
+              indexSize <= FQTurboFormatV1.residentIndexMaxBytes else {
+            throw RepackError.configurationInvalid(
+                detail: "resident index size \(indexSize) exceeds v1 metadata cap")
+        }
+        let idxBytes = Int(indexSize)
         guard idxBytes <= BoundedScratch.defaultLimitBytes else {
             throw RepackError.scratchExceeded(requested: idxBytes,
                                               limit: BoundedScratch.defaultLimitBytes)
         }
-        guard plan.entries.count == plan.stringTableOffsets.count else {
+        guard records.count == stringTableOffsets.count else {
             throw RepackError.configurationInvalid(
                 detail: "resident index entry/string offset count mismatch")
         }
-        let (entryTableBytes, tableOverflow) = plan.entries.count
+        let (entryTableBytes, tableOverflow) = records.count
             .multipliedReportingOverflow(by: FQTurboBinary.indexEntryBytes)
         let (stringTableBase, baseOverflow) = FQTurboBinary.indexHeaderBytes
             .addingReportingOverflow(entryTableBytes)
         guard !tableOverflow, !baseOverflow,
               stringTableBase <= idxBytes,
-              plan.stringTable.count <= idxBytes - stringTableBase,
+              stringTable.count <= idxBytes - stringTableBase,
               stringTableBase <= Int(UInt32.max) else {
             throw RepackError.configurationInvalid(
                 detail: "resident index table exceeds declared index region")
         }
-        for (index, entry) in plan.entries.enumerated() {
+        for (index, entry) in records.enumerated() {
             guard entry.name.utf8.count <= Int(UInt16.max),
                   entry.logicalShape4.count == 4,
                   FQTurboFormatV1.DType(rawValue: entry.dtype) != nil else {
@@ -96,7 +118,7 @@ enum ResidentWriter {
                     detail: "resident index entry \(index) is not representable")
             }
             let absoluteNameOffset = UInt64(stringTableBase)
-                + UInt64(plan.stringTableOffsets[index])
+                + UInt64(stringTableOffsets[index])
             guard absoluteNameOffset <= UInt64(UInt32.max),
                   absoluteNameOffset + UInt64(entry.name.utf8.count) <= UInt64(idxBytes) else {
                 throw RepackError.configurationInvalid(
@@ -108,16 +130,16 @@ enum ResidentWriter {
         defer { idxBuf.deallocate() }
         idxBuf.initializeMemory(as: UInt8.self, repeating: 0)
         FQTurboBinary.writeIndexHeader(into: idxBuf.baseAddress!,
-                                      indexSize: plan.indexSize,
-                                      residentSize: plan.residentSize,
-                                      entryCount: UInt64(plan.entries.count))
+                                      indexSize: indexSize,
+                                      residentSize: residentSize,
+                                      entryCount: UInt64(records.count))
         let entriesBase = FQTurboBinary.indexHeaderBytes
-        for i in 0..<plan.entries.count {
+        for i in 0..<records.count {
             let dst = idxBuf.baseAddress!.advanced(by: entriesBase + i * FQTurboBinary.indexEntryBytes)
-            let nameOff = UInt32(stringTableBase) + plan.stringTableOffsets[i]
-            FQTurboBinary.writeIndexEntry(into: dst, entry: plan.entries[i], nameOffset: nameOff)
+            let nameOff = UInt32(stringTableBase) + stringTableOffsets[i]
+            FQTurboBinary.writeIndexEntry(into: dst, entry: records[i], nameOffset: nameOff)
         }
-        plan.stringTable.withUnsafeBufferPointer { src in
+        stringTable.withUnsafeBufferPointer { src in
             let dst = idxBuf.baseAddress!.advanced(by: stringTableBase)
             memcpy(dst, src.baseAddress!, src.count)
         }

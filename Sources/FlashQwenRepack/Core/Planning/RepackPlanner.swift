@@ -9,6 +9,21 @@ enum Layout {
 
 // MARK: - Plan data types
 
+/// The subset of a resident entry the 72-byte index record encodes. Shared
+/// by the Gemma byte-copy writer (via `ResidentEntry`) and the Qwen
+/// quantizing writer (via `QwenResidentEntry`).
+struct ResidentIndexRecord: Sendable {
+    let name: String
+    let dtype: UInt8
+    let logicalShape4: [UInt32]
+    let fileOffset: UInt64
+    let sizeBytes: UInt64
+    let scaleOffset: UInt64
+    let scaleSize: UInt64
+    let biasOffset: UInt64
+    let biasSize: UInt64
+}
+
 struct ResidentEntry: Sendable {
     let name: String
     /// dtype byte for IndexEntry: 0 = U32, 1 = BF16, 2 = FP16, 3 = FP32.
@@ -53,6 +68,10 @@ struct PerExpertTensorSlice: Sendable {
     let sizeInExpertBlob: UInt64
     /// For each expert e (0..<expertsPerLayer): source byte offset & size.
     let sourceOffsetPerExpert: UInt64  // stride per expert in source
+    /// Extra offset added to expert 0's source position (the "up" half of
+    /// Qwen's fused gate_up_proj starts f*d*2 bytes into each expert block;
+    /// Gemma slices keep the default 0).
+    var sourceBaseOffset: UInt64 = 0
     let sourceTensor: SourceTensor
     let bitsForWeights: Int?           // 4 for routed expert weight; nil for scales/biases
 }

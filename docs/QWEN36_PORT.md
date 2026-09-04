@@ -20,13 +20,16 @@ the on-disk format are renamed (binary magic `FQTURBO`, extension `.fqturbo`);
 the pristine upstream TurboFieldfare base is archived in `reference/`
 (gitignored, like `models/`). The original `QwenFieldfare*` sources were
 deleted; the bf16 Qwen 3.6 checkpoint is present at
-`models/Qwen3.6-35B-A3B-bf16/`. The Gated-DeltaNet unit (the part with no
-Gemma analogue) is implemented and reference-checked against the
-`qwen3_5_moe` transformers source, and the full Qwen decode-layer path **and**
-the chunked Qwen prefill path are wired into the forward pass (Gemma paths
-untouched). End-to-end runs remain blocked on the repack writer, the last
-missing piece. The [implementation plan](#implementation-plan) records the
-verified state and the remaining work, in order.
+`models/Qwen3.6-35B-A3B-bf16/` and the repacked int4 install at
+`models/Qwen3.6-35B-A3B-4bit.fqturbo/` (19.5 GB, load-validated). The
+Gated-DeltaNet unit is reference-checked against the `qwen3_5_moe`
+transformers source, the full Qwen decode-layer path and the chunked Qwen
+prefill path are wired into the forward pass (Gemma paths untouched), and
+the bf16 → int4 quantizing repack is built and proven against the real
+checkpoint. End-to-end runs remain blocked only on the interface: sampling /
+stop and the Qwen preset selection. The
+[implementation plan](#implementation-plan) records the verified state and
+the remaining work, in order.
 
 ## Target model
 
@@ -123,10 +126,11 @@ Details that matter for a Metal port:
 ## Implementation plan
 
 Verified against the working tree on 2026-09-01 (commit `6b1e2ec`), updated
-2026-09-03 after the decode-path wiring and 2026-09-04 after the Qwen chunked
-prefill wiring. This section is the single source of
-truth for what is done, what is wired in, and what remains, in the order that
-unblocks an end-to-end Qwen 3.6 run.
+2026-09-03 after the decode-path wiring, 2026-09-04 after the Qwen chunked
+prefill wiring, and 2026-09-04 again after the quantizing repack landed
+(real 19.5 GB install built and load-validated). This section is the single
+source of truth for what is done, what is wired in, and what remains, in the
+order that unblocks an end-to-end Qwen 3.6 run.
 
 ### Done and verified
 
@@ -245,61 +249,77 @@ unblocks an end-to-end Qwen 3.6 run.
     (qGate, qkv proj/conv-out, z, a|b, fp32 g|beta, recOut, conv newState)
     and a T·2·qDim q buffer for the doubled `q_proj`; Gemma layouts are
     unchanged.
+- **Qwen quantizing repack (2026-09-04).** A from-scratch LOCAL bf16 → int4
+  quantizing writer path — the Gemma remote byte-copy pipeline is untouched:
+  - `Format/QwenLocalSnapshot.swift` — loads a local bf16 snapshot
+    (index.json weight map + config.json via `ArchInfo` + all shard headers);
+    no `quantization` slot required.
+  - `Planning/QwenRepackPlanner.swift` — remaps checkpoint names to the
+    engine namespace (`model.language_model.layers.{L}.*` →
+    `language_model.model.layers.{L}.*`; `lm_head.weight` passes through),
+    assigns per-tensor transforms (int4 affine / int8 router / `(1+w)` norm
+    baking / bf16→fp16 conv1d / bf16→fp32 A_log+dt_bias), excludes the 352
+    vision + MTP tensors, and plans the expert layers with the fused
+    `gate_up_proj [E, 2F, D]` split into the gate/up role slices
+    (per-expert source base offset f·d·2 for the up half).
+  - `Writing/QwenQuantizedWriter.swift` — row-by-row transforms through the
+    canonical `FQTurboQuantization` with scratch bounded by the widest row
+    (2048 elements); `ResidentWriter.encodeIndex` was refactored to a shared
+    record-based core (Gemma behavior identical; `PerExpertTensorSlice`
+    gained a defaulted `sourceBaseOffset`).
+  - `Workflow/LocalQwenRepacker.swift` — orchestrator: lock → plan → write
+    resident + layer files → layout.json → tokenizer sidecars →
+    manifest.json (qwen3_6 arch, quant slots 4/4/8/4/4, affine group 64) →
+    verified-install receipt → atomic rename. CLI: `--input-snapshot <dir>`
+    selects this path; the Gemma HF download stays the default.
+  - **Validated**: 8 new tests — planner invariants (remap, dtypes, shapes,
+    int8 router sizes, fp16/fp32 raw entries, page-aligned non-overlapping
+    payloads, gate/up split) + full repack runs on a synthetic toy Qwen
+    checkpoint + **the runtime gate**: the toy install passes
+    `Model.load(expecting:)` with a matching toy preset (validateArch +
+    validateRuntimeSchema) and every Qwen accessor resolves, plus byte-level
+    checks that the packed payloads equal the canonical quantizer's output
+    and that norm weights carry the baked `(1+w)`. Full suite: 692 tests
+    green (only the pre-existing environment-driven AppModelTests flake
+    fails).
+  - **Real dry run DONE (2026-09-04):** `FlashQwenRepack --input-snapshot
+    models/Qwen3.6-35B-A3B-bf16 --output models/Qwen3.6-35B-A3B-4bit.fqturbo`
+    → **19.5 GB install** (`model_weights.bin`, 40 packed-expert layer files,
+    layout.json, tokenizer sidecars, manifest, receipt). Three real-shape
+    issues found and fixed by the run: the per-row scratch cap was 2048
+    (widest real row is the 4096-column out_proj); per-row 1 KB pwrites were
+    USB-bound (rows are now quantized in 64-row batches — three contiguous
+    pwrites per batch — plus buffer-based quantizer overloads in
+    `FQTurboQuantization`); and the 16 MB `layout.json` read caps (repack
+    validator + engine `PackedExpertsLayoutReader`) were raised to 64 MB (the
+    256-expert × 40-layer layout is 22.5 MB). The run must use the
+    **release** binary — debug Swift numeric loops are ~50× slower.
+    **Gate passed:** `QwenRealInstallLoadTests.realInstallLoadsWithQwenPreset`
+    loads the real install with `.qwen3_6_35B_A3B` — validateArch +
+    validateRuntimeSchema over all 613 entries + accessor shape checks green.
+    Full suite: 694 tests green (only the pre-existing environment-driven
+    AppModelTests flake fails).
 
 ### Wired in but not reachable for Qwen
 
 - **Preset not selectable.** App, CLI, and server still select
   `ArchConfig.gemma4_26B_A4B` only
   (`AppContextLengthOption.swift:18`, `AppModelInstallationProbe.swift:22`).
-- **Repack still pins Gemma, and can't ingest bf16 at all.**
-  `Remote/SupportedModelSource.swift:5` points at
-  `mlx-community/gemma-4-26b-a4b-it-4bit`. More importantly, the repack is a
-  **byte-copy re-indexer**, not a quantizer: `Writing/WriterCore.swift:15`
-  (`pwriteTensorRegion`) is a straight mmap→pwrite copy with no transform
-  hook; `Format/IndexLoader.swift:53` hard-requires a `quantization` slot in
-  the source `config.json` (the Qwen bf16 config has none); and
-  `Planning/RepackPlanner.swift:346` rejects any routed expert that is not
-  already `u32` with bf16 `.scales`/`.biases` companions, classifying routed
-  experts only by Gemma's `.experts.switch_glu.` name (line 125). So the Qwen
-  path is a **new quantizing code path**, not a config change. (The shared
-  quantizer the new path needs is available — see step 2 — but the
-  writer/planner themselves are still un-built.)
+  (The repack CLI itself takes the Qwen path via `--input-snapshot`; the
+  Gemma remote download remains the default.)
 
 ### Remaining work, in order
 
-1. **Re-shape the `.fqturbo` manifest/layout to Qwen tensor names** and **write
-   the bf16 → int4 group-64 `.fqturbo` repack** (Phases 3 + 5). Confirmed
-   2026-09-02 this is a from-scratch quantizing writer, not a config tweak
-   (see "Repack still pins Gemma"). **Prerequisite — DONE (2026-09-02):** the
-   affine int4/int8 quantizer is now the **shared canonical implementation in
-   `FlashQwenFormat`** (`FQTurboQuantization`), and the engine's `Quantization`
-   enum is a thin forwarding facade over it. **Locked writer decisions from the
-   2026-09-03 wiring:** the router is emitted as **int8 affine** (the existing
-   router GEMV kernel reads one byte per weight and the manifest `router` slot
-   requires weightBits 8 — so this also satisfies the "8-bit router" note);
-   `Qwen3_5MoeRMSNorm` weights (`input_layernorm`, `post_attention_layernorm`,
-   `q_norm`, `k_norm`, final norm) get the **`(1 + w)` form baked in at emit**
-   so the runtime kernels stay weight-direct; `linear_attn.conv1d.weight` is
-   emitted as **raw fp16** (bf16 → fp16 conversion at emit) and
-   `A_log`/`dt_bias` as **raw fp32**; `in_proj_a`/`in_proj_b` stay separate
-   entries (the runner fuses them at init). Source layout is **fused**
-   (`mlp.experts.gate_up_proj [256,1024,2048]`), so the writer must split each
-   expert's gate/up (`.chunk(2, -1)`: gate = first 512 of the feature dim, up =
-   second) into the separate `gate`/`up` role blobs the decode kernel reads
-   (ground truth: transformers `qwen3_5_moe` `modeling_*.py:729,751`). 256
-   experts, top-8, shared expert 512, manifest with the `qwen3_6` architecture
-   and SHA-256s.
-2. **Sampling, stop on 248044** (Phase 4), and make the **Qwen preset
+1. **Sampling, stop on 248044** (Phase 4), and make the **Qwen preset
    selectable** in app / CLI / server (finish Phase 6). (Untied lm_head is
    already wired in the decode head.)
-3. **End-to-end** (Phase 7): load → prefill → decode → sample; check a short
+2. **End-to-end** (Phase 7): load → prefill → decode → sample; check a short
    reference generation for correctness; then measure and record tok/s so the
    "At a glance" table in the README gets real Qwen 3.6 numbers.
 
-Each step gates the next: 1 makes a Qwen install loadable; 2 completes the
-interface; 3 proves it. Kernels stay validated against the Swift fp32
-reference with the `fp16ChainedReduction` tolerance before they are wired
-into a layer.
+Each step gates the next: 1 completes the interface; 2 proves it. Kernels
+stay validated against the Swift fp32 reference with the `fp16ChainedReduction`
+tolerance before they are wired into a layer.
 
 ## Repository state
 

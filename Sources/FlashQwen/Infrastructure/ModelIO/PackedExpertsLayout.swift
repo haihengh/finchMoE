@@ -55,7 +55,9 @@ struct PackedExpertsLayout: Sendable {
 }
 
 enum PackedExpertsLayoutReader {
-    static let defaultMaxBytes: UInt64 = 16 * 1024 * 1024
+    // Qwen 3.6 (256 experts × 40 layers) produces a ~22 MB layout.json; the
+    // cap bounds metadata reads, not the expert payloads.
+    static let defaultMaxBytes: UInt64 = 64 * 1024 * 1024
 
     static func load(directoryURL: URL,
                             maxBytes: UInt64 = defaultMaxBytes) throws -> PackedExpertsLayout {

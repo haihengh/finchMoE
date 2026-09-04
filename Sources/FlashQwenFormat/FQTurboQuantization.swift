@@ -59,11 +59,19 @@ public enum FQTurboQuantization {
     /// Affine 4-bit quantize: `q ∈ [0..15]`, `w ≈ q * scale + bias`.
     /// Scale and bias are computed from per-group min/max, then rounded to BF16.
     public static func quantizeInt4Affine(_ row: [Float]) -> Int4AffineRow {
-        precondition(row.count % groupSize == 0,
-                     "row length \(row.count) is not a multiple of \(groupSize)")
+        quantizeInt4Affine(row, count: row.count)
+    }
 
-        let nGroups = row.count / groupSize
-        var packed = [UInt8](repeating: 0, count: row.count / 2)
+    /// Buffer form: quantizes the first `count` elements of `buffer` (a
+    /// reusable scratch buffer the writer owns), so the repack can stream
+    /// rows without allocating an input array per row.
+    public static func quantizeInt4Affine(_ buffer: UnsafeBufferPointer<Float>,
+                                          count: Int) -> Int4AffineRow {
+        precondition(count % groupSize == 0,
+                     "row length \(count) is not a multiple of \(groupSize)")
+
+        let nGroups = count / groupSize
+        var packed = [UInt8](repeating: 0, count: count / 2)
         var scales = [UInt16](repeating: 0, count: nGroups)
         var biases = [UInt16](repeating: 0, count: nGroups)
 
@@ -71,7 +79,7 @@ public enum FQTurboQuantization {
             var wmin: Float =  .infinity
             var wmax: Float = -.infinity
             for k in 0..<groupSize {
-                let w = row[g * groupSize + k]
+                let w = buffer[g * groupSize + k]
                 if w < wmin { wmin = w }
                 if w > wmax { wmax = w }
             }
@@ -97,7 +105,7 @@ public enum FQTurboQuantization {
             let invScale = scale == 0 ? Float(0) : 1.0 / scale
 
             for k in 0..<groupSize {
-                let w = row[g * groupSize + k]
+                let w = buffer[g * groupSize + k]
                 var q = Int(((w - bias) * invScale).rounded())
                 q = max(0, min(15, q))
                 let nibble = UInt8(q) & 0x0F
@@ -110,6 +118,10 @@ public enum FQTurboQuantization {
             }
         }
         return Int4AffineRow(packed: packed, scales: scales, biases: biases)
+    }
+
+    private static func quantizeInt4Affine(_ row: [Float], count: Int) -> Int4AffineRow {
+        row.withUnsafeBufferPointer { quantizeInt4Affine($0, count: count) }
     }
 
     public static func dequantizeInt4Affine(_ r: Int4AffineRow, n: Int) -> [Float] {
@@ -144,11 +156,17 @@ public enum FQTurboQuantization {
     }
 
     public static func quantizeInt8Affine(_ row: [Float]) -> Int8AffineRow {
-        precondition(row.count % groupSize == 0,
-                     "row length \(row.count) is not a multiple of \(groupSize)")
+        row.withUnsafeBufferPointer { quantizeInt8Affine($0, count: row.count) }
+    }
 
-        let nGroups = row.count / groupSize
-        var packed = [UInt8](repeating: 0, count: row.count)
+    /// Buffer form (see `quantizeInt4Affine(_:count:)`).
+    public static func quantizeInt8Affine(_ buffer: UnsafeBufferPointer<Float>,
+                                          count: Int) -> Int8AffineRow {
+        precondition(count % groupSize == 0,
+                     "row length \(count) is not a multiple of \(groupSize)")
+
+        let nGroups = count / groupSize
+        var packed = [UInt8](repeating: 0, count: count)
         var scales = [UInt16](repeating: 0, count: nGroups)
         var biases = [UInt16](repeating: 0, count: nGroups)
 
@@ -156,7 +174,7 @@ public enum FQTurboQuantization {
             var wmin: Float =  .infinity
             var wmax: Float = -.infinity
             for k in 0..<groupSize {
-                let w = row[g * groupSize + k]
+                let w = buffer[g * groupSize + k]
                 if w < wmin { wmin = w }
                 if w > wmax { wmax = w }
             }
@@ -178,7 +196,7 @@ public enum FQTurboQuantization {
             let invScale = scale == 0 ? Float(0) : 1.0 / scale
 
             for k in 0..<groupSize {
-                let w = row[g * groupSize + k]
+                let w = buffer[g * groupSize + k]
                 var q = Int(((w - bias) * invScale).rounded())
                 q = max(0, min(255, q))
                 packed[g * groupSize + k] = UInt8(q)

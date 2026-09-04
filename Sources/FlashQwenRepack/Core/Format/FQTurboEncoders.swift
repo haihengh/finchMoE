@@ -27,6 +27,19 @@ enum FQTurboBinary {
     static func writeIndexEntry(into dst: UnsafeMutableRawPointer,
                                        entry: ResidentEntry,
                                        nameOffset: UInt32) {
+        writeIndexEntry(
+            into: dst,
+            entry: ResidentIndexRecord(
+                name: entry.name, dtype: entry.dtype, logicalShape4: entry.logicalShape4,
+                fileOffset: entry.fileOffset, sizeBytes: entry.sizeBytes,
+                scaleOffset: entry.scaleOffset, scaleSize: entry.scaleSize,
+                biasOffset: entry.biasOffset, biasSize: entry.biasSize),
+            nameOffset: nameOffset)
+    }
+
+    static func writeIndexEntry(into dst: UnsafeMutableRawPointer,
+                                       entry: ResidentIndexRecord,
+                                       nameOffset: UInt32) {
         FQTurboResidentIndexCodec.writeEntry(
             into: dst,
             entry: FQTurboResidentIndexEntryV1(

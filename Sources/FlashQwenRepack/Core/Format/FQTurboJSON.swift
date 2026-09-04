@@ -31,7 +31,30 @@ enum FQTurboJSON {
                                       numLayers: Int,
                                       expertStride: UInt64,
                                       bitWidths: QuantBitWidths) throws -> Data {
-        let arch = plan.arch
+        try encodeManifest(arch: plan.arch,
+                           baseMode: plan.baseMode,
+                           baseGroupSize: plan.baseGroupSize,
+                           bitsOverrideCount: plan.bitsOverrideCount,
+                           modelID: modelID,
+                           sourceSnapshotHash: sourceSnapshotHash,
+                           files: files,
+                           expertsPerLayer: expertsPerLayer,
+                           numLayers: numLayers,
+                           expertStride: expertStride,
+                           bitWidths: bitWidths)
+    }
+
+    static func encodeManifest(arch: ArchInfo,
+                                      baseMode: String,
+                                      baseGroupSize: Int,
+                                      bitsOverrideCount: Int,
+                                      modelID: String,
+                                      sourceSnapshotHash: String,
+                                      files: [(relativePath: String, info: FileEntry)],
+                                      expertsPerLayer: Int,
+                                      numLayers: Int,
+                                      expertStride: UInt64,
+                                      bitWidths: QuantBitWidths) throws -> Data {
         let bitWidthsByQuantSlot = [
             "embedding": bitWidths.embedding,
             "attention": bitWidths.attention,
@@ -75,10 +98,10 @@ enum FQTurboJSON {
             }
             return FQTurboManifestQuantSlotV1(
                 weightBits: weightBits,
-                scheme: plan.baseMode,
+                scheme: baseMode,
                 scaleType: "BF16",
                 biasType: "BF16",
-                groupSize: plan.baseGroupSize)
+                groupSize: baseGroupSize)
         }
         let quant = FQTurboManifestQuantV1(
             embedding: try slot("embedding"),
@@ -110,15 +133,22 @@ enum FQTurboJSON {
             expertsPerLayer: expertsPerLayer,
             numLayers: numLayers,
             expertStride: expertStride,
-            bitWidthOverridesHonored: plan.bitsOverrideCount))
+            bitWidthOverridesHonored: bitsOverrideCount))
     }
 
     static func encodeLayout(plan: RepackPlan,
                                     expertStride: UInt64) throws -> Data {
-        let arch = plan.arch
-        var layers: [FQTurboLayerV1] = []
-        layers.reserveCapacity(plan.layers.count)
-        for lp in plan.layers {
+        try encodeLayout(layers: plan.layers,
+                         numLayers: plan.arch.numLayers,
+                         expertStride: expertStride)
+    }
+
+    static func encodeLayout(layers: [LayerFilePlan],
+                                    numLayers: Int,
+                                    expertStride: UInt64) throws -> Data {
+        var wireLayers: [FQTurboLayerV1] = []
+        wireLayers.reserveCapacity(layers.count)
+        for lp in layers {
             let layerFile = (lp.path as NSString).lastPathComponent
             var experts: [FQTurboExpertV1] = []
             experts.reserveCapacity(lp.expertsPerLayer)
@@ -164,15 +194,15 @@ enum FQTurboJSON {
                     size: lp.expertStride,
                     tensors: tensors))
             }
-            layers.append(FQTurboLayerV1(layer: lp.layerIndex,
+            wireLayers.append(FQTurboLayerV1(layer: lp.layerIndex,
                                         file: layerFile,
                                         experts: experts))
         }
         return try FQTurboPackedExpertsLayoutCodec.encode(
             FQTurboPackedExpertsLayoutV1(
                 expertStride: expertStride,
-                numLayers: arch.numLayers,
-                expertsPerLayer: plan.layers.first?.expertsPerLayer ?? 0,
-                layers: layers))
+                numLayers: numLayers,
+                expertsPerLayer: layers.first?.expertsPerLayer ?? 0,
+                layers: wireLayers))
     }
 }
