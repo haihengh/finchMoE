@@ -26,7 +26,8 @@ final class PrefillSharedExpert {
                             d: Int,
                             intermediate: Int,
                             xStrideElements: Int,
-                            yStrideElements: Int) throws {
+                            yStrideElements: Int,
+                            activation: SharedExpertActivation = .gelu) throws {
         precondition(queryCount >= 0, "queryCount must be non-negative")
         precondition(d > 0, "d must be positive")
         precondition(intermediate > 0, "intermediate must be positive")
@@ -54,7 +55,8 @@ final class PrefillSharedExpert {
                               scratchUp: scratchUp,
                               scratchUpOffset: scratchUpOffset,
                               scratchAct: scratchAct,
-                              scratchActOffset: scratchActOffset)
+                              scratchActOffset: scratchActOffset,
+                              activation: activation)
         }
     }
 }

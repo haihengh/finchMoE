@@ -5,7 +5,10 @@ import FlashQwenValidationSupport
 @testable import FlashQwen
 
 extension PrefillGroupedRoutedMoETests {
-  @Test func streamedBatchedMatchesReferenceAcrossPartialMicrobatch() throws {
+
+  private static func runStreamedBatched(
+    activation: SharedExpertActivation
+  ) throws -> Int {
     let d = 64
     let f = 64
     let rows = 3
@@ -34,7 +37,8 @@ extension PrefillGroupedRoutedMoETests {
       pool: pool,
       topK: topK,
       d: d,
-      f: f)
+      f: f,
+      activation: activation)
 
     let ctx = try MetalContext()
     let grouped = try PrefillGroupedRoutedMoE(context: ctx)
@@ -55,7 +59,7 @@ extension PrefillGroupedRoutedMoETests {
       let commandBuffer = ctx.queue.makeCommandBuffer()
     else {
       Issue.record("allocation failed")
-      return
+      return 0
     }
 
     let expertIDs = Array(0..<16)
@@ -87,7 +91,8 @@ extension PrefillGroupedRoutedMoETests {
       argumentBuffer: argumentBuffer,
       binding: binding,
       params: params,
-      pairMicrobatchRows: 4)
+      pairMicrobatchRows: 4,
+      activation: activation)
 
     commandBuffer.commit()
     commandBuffer.waitUntilCompleted()
@@ -100,6 +105,17 @@ extension PrefillGroupedRoutedMoETests {
     #expect(microbatches == 2)
     #expect(maxAbsoluteError <= 0.0015, "maxAbsoluteError=\(maxAbsoluteError)")
     #expect(binding.views.allSatisfy { $0.offset > 0 })
+    return microbatches
+  }
+
+  @Test func streamedBatchedMatchesReferenceAcrossPartialMicrobatch() throws {
+    _ = try Self.runStreamedBatched(activation: .gelu)
+  }
+
+  @Test func streamedBatchedSiluMatchesReferenceAcrossPartialMicrobatch() throws {
+    // The Qwen 3.6 routed-expert activation: the silu phase-1 variant built
+    // with FC_PREFILL_MOE_ACT_SILU (index 77).
+    _ = try Self.runStreamedBatched(activation: .silu)
   }
 
 }

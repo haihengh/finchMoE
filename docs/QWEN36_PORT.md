@@ -20,13 +20,13 @@ the on-disk format are renamed (binary magic `FQTURBO`, extension `.fqturbo`);
 the pristine upstream TurboFieldfare base is archived in `reference/`
 (gitignored, like `models/`). The original `QwenFieldfare*` sources were
 deleted; the bf16 Qwen 3.6 checkpoint is present at
-`models/Qwen3.6-35B-A3B-bf16/`. The Gated-DeltaNet decode unit (the part with
-no Gemma analogue) is implemented and reference-checked against the
-`qwen3_5_moe` transformers source (Phase 1, done), and the `qwen3_6_35B_A3B`
-arch preset plus `fullAttentionLayerMask` dispatch are already in place. The
-unit is **not yet wired into the forward pass** — that is the next step. The
-[implementation plan](#implementation-plan) records the verified state and the
-remaining work, in order.
+`models/Qwen3.6-35B-A3B-bf16/`. The Gated-DeltaNet unit (the part with no
+Gemma analogue) is implemented and reference-checked against the
+`qwen3_5_moe` transformers source, and the full Qwen decode-layer path **and**
+the chunked Qwen prefill path are wired into the forward pass (Gemma paths
+untouched). End-to-end runs remain blocked on the repack writer, the last
+missing piece. The [implementation plan](#implementation-plan) records the
+verified state and the remaining work, in order.
 
 ## Target model
 
@@ -115,15 +115,16 @@ Details that matter for a Metal port:
   two-stage block reductions in the style of `Metal/Primitives/rmsnorm.metal`).
 - Conv state is per channel, 3 elements (kernel 4 − 1), on the 8192-dim
   qkv stream, updated each step.
-- Prefill (chunked) must run the same recurrence sequentially over the
-  chunk; there is no associative form for the gated delta rule, so the
-  prefill cost is length × per-step cost. Bounded chunking keeps the
+- Prefill (chunked) runs the same recurrence sequentially over the chunk
+  (wired 2026-09-04); there is no associative form for the gated delta rule,
+  so the prefill cost is length × per-step cost. Bounded chunking keeps the
   activation scratch small as it does for the Gemma path.
 
 ## Implementation plan
 
 Verified against the working tree on 2026-09-01 (commit `6b1e2ec`), updated
-2026-09-03 after the decode-path wiring. This section is the single source of
+2026-09-03 after the decode-path wiring and 2026-09-04 after the Qwen chunked
+prefill wiring. This section is the single source of
 truth for what is done, what is wired in, and what remains, in the order that
 unblocks an end-to-end Qwen 3.6 run.
 
@@ -195,12 +196,58 @@ unblocks an end-to-end Qwen 3.6 run.
     untied `lm_head`) + `validateRuntimeSchema` per-family branches
     (`validateQwen36Layers` / `validateGemma4Layers`) + `requireRaw` for the
     fp32 `A_log`/`dt_bias` and fp16 `conv1d.weight` entries.
+- **Qwen chunked prefill wired (2026-09-04).** `prefillChunked` no longer
+  throws for `qwen3_6`; `executePrefillChunk` branches per layer on
+  `cfg.modelFamily == "qwen3_6"` (the Gemma body is byte-for-byte untouched;
+  the shared `encodeInt4Projection`/`copyPrefillKVToCache` helpers were
+  promoted from nested funcs to private methods, behavior identical). New
+  pieces, each validated against an fp32 reference before wiring:
+  - `Metal/LinearAttn/gdn_prefill.metal` (module `gdn_prefill`):
+    `prefill_gdn_conv_chunk` (batched kernel-4 conv over `[T][C]`; the last
+    token's row commits the post-chunk conv state to a **separate** buffer —
+    the wrapper blit-carries it into the persistent state — handling all T
+    including 1 and 2), `prefill_gdn_recurrent_seq` (one 256-thread
+    threadgroup per value head looping the chunk's T tokens through the exact
+    decode recurrence; q/k/v read from the fused conv block at offsets
+    0 / keyDim / 2·keyDim elements — no split copies), `prefill_gdn_gate`
+    (batched `g`/`beta` from the fp16 a|b QMM output), and
+    `prefill_gdn_rmsnorm_gated` (batched mean-based gated norm). Wrapper
+    `Kernels/LinearAttn/GDNPrefill.swift`; reference `GDNPrefillRef.swift`;
+    17 tests in `Tests/FlashQwen/Core/Kernels/LinearAttn/GDNPrefillTests.swift`,
+    including a composed conv → gate → recurrent → norm chunk with the fp16
+    boundary roundings the production path applies, and a two-chunk
+    conv-state carry test. **The batched conv is not in-place-safe** (row
+    t+3's taps read the raw x[t] while row t writes its output — no
+    cross-threadgroup ordering), so the scratch keeps separate proj/conv-out
+    buffers; the decode single-token conv stays in-place as before.
+  - **GDN layer flow**: input norm → `in_proj_qkv`/`in_proj_z` (MPP/QMM) →
+    fused `in_proj_a|b` `[2V,D]` QMM over the init-assembled decode gate
+    block + batched gate → conv chunk → recurrent seq → gated rmsnorm →
+    `out_proj` → per-token `qwen_post_attn` (decode kernel, per-token
+    offsets).
+  - **Full-attention layer flow**: input norm → doubled `q_proj` (the q
+    scratch is sized T·2·qDim for Qwen) → per-token
+    `qwen_full_attn_epilogue` (q|gate split, q/k norms, partial RoPE; q_out
+    packed into the q scratch, gate into a dedicated buffer) → KV copy →
+    `attention_prefill_causal_tiled` with Qwen's scale
+    `1/sqrt(head_dim)` → per-token `qwen_attn_output_gate` → `o_proj` →
+    per-token `qwen_post_attn`. No v_norm (Qwen has none); no ring (Qwen has
+    no sliding window).
+  - **MoE tail** (both layer types): router (ones-filled scales, as in
+    decode) → silu shared expert (`PrefillSharedExpert.encodeBlock` gained an
+    `activation:` pass-through) + per-token `qwen_shared_gate` → streamed
+    routed tiles with a new silu phase-1 variant (`FC_PREFILL_MOE_ACT_SILU`,
+    index 77, in `prefill.metal`; `encodeStreamedBatched` gained
+    `activation:`) → reduce → `h2 += h1` → `hidden += h2` (per-token
+    `vec_add_fp16`; the decode path's phase-2 residual restated for prefill).
+    No layer_scalar, no sandwich norms.
+  - **Scratch**: `PrefillChunkScratchLayout` gained family-aware Qwen buffers
+    (qGate, qkv proj/conv-out, z, a|b, fp32 g|beta, recOut, conv newState)
+    and a T·2·qDim q buffer for the doubled `q_proj`; Gemma layouts are
+    unchanged.
 
 ### Wired in but not reachable for Qwen
 
-- **Prefill is Gemma-only.** `prefillChunked` throws
-  `PrefillError.chunkedUnsupported` for `qwen3_6` — decode-only until the
-  chunked prefill path (and the chunked GDN recurrence) is built.
 - **Preset not selectable.** App, CLI, and server still select
   `ArchConfig.gemma4_26B_A4B` only
   (`AppContextLengthOption.swift:18`, `AppModelInstallationProbe.swift:22`).
@@ -220,12 +267,7 @@ unblocks an end-to-end Qwen 3.6 run.
 
 ### Remaining work, in order
 
-1. **Qwen prefill (chunked).** The decode path is wired; prefill must run the
-   same GDN recurrence sequentially over each chunk (no associative form) and
-   the full-attention chunk path for the `F` layers, then switch the
-   `prefillChunked` family guard to the Qwen path. Until then end-to-end runs
-   are blocked.
-2. **Re-shape the `.fqturbo` manifest/layout to Qwen tensor names** and **write
+1. **Re-shape the `.fqturbo` manifest/layout to Qwen tensor names** and **write
    the bf16 → int4 group-64 `.fqturbo` repack** (Phases 3 + 5). Confirmed
    2026-09-02 this is a from-scratch quantizing writer, not a config tweak
    (see "Repack still pins Gemma"). **Prerequisite — DONE (2026-09-02):** the
@@ -247,17 +289,17 @@ unblocks an end-to-end Qwen 3.6 run.
    (ground truth: transformers `qwen3_5_moe` `modeling_*.py:729,751`). 256
    experts, top-8, shared expert 512, manifest with the `qwen3_6` architecture
    and SHA-256s.
-3. **Sampling, stop on 248044** (Phase 4), and make the **Qwen preset
+2. **Sampling, stop on 248044** (Phase 4), and make the **Qwen preset
    selectable** in app / CLI / server (finish Phase 6). (Untied lm_head is
    already wired in the decode head.)
-4. **End-to-end** (Phase 7): load → prefill → decode → sample; check a short
+3. **End-to-end** (Phase 7): load → prefill → decode → sample; check a short
    reference generation for correctness; then measure and record tok/s so the
    "At a glance" table in the README gets real Qwen 3.6 numbers.
 
-Each step gates the next: 1 unblocks real runs; 2 makes a Qwen install
-loadable; 3 completes the interface; 4 proves it. Kernels stay validated
-against the Swift fp32 reference with the `fp16ChainedReduction` tolerance
-before they are wired into a layer.
+Each step gates the next: 1 makes a Qwen install loadable; 2 completes the
+interface; 3 proves it. Kernels stay validated against the Swift fp32
+reference with the `fp16ChainedReduction` tolerance before they are wired
+into a layer.
 
 ## Repository state
 

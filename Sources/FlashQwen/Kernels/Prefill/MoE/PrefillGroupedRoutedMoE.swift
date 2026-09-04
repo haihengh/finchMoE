@@ -338,6 +338,7 @@ enum PrefillGroupedRoutedMoEError: Error, Equatable, CustomStringConvertible {
 
 final class PrefillGroupedRoutedMoE {
     private let batchedPhase1PSO: MTLComputePipelineState
+    private let batchedPhase1SiluPSO: MTLComputePipelineState
     private let batchedDownPSO: MTLComputePipelineState
     private let streamedArgEncoder: MTLArgumentEncoder
 
@@ -360,6 +361,9 @@ final class PrefillGroupedRoutedMoE {
 
     init(context: MetalContext) throws {
         self.batchedPhase1PSO = try context.pipeline("prefill_grouped_routed_moe_batched_phase1")
+        self.batchedPhase1SiluPSO = try context.pipeline(
+            "prefill_grouped_routed_moe_batched_phase1",
+            constants: [MetalFunctionConstant(index: 77, value: .bool(true))])
         self.batchedDownPSO = try context.pipeline("prefill_grouped_routed_moe_batched_down")
         guard let streamedFn = context.library.makeFunction(name: "prefill_grouped_routed_moe_batched_phase1") else {
             throw MetalError.missingFunction("prefill_grouped_routed_moe_batched_phase1")
@@ -398,10 +402,12 @@ final class PrefillGroupedRoutedMoE {
                                       argumentBuffer: PrefillStreamedTileArgumentBuffer,
                                       binding: PrefillStreamedTileBinding,
                                       params: PrefillGroupedRoutedMoEStreamedParams,
-                                      pairMicrobatchRows: Int = 32) -> Int {
+                                      pairMicrobatchRows: Int = 32,
+                                      activation: SharedExpertActivation = .gelu) -> Int {
         guard params.pairCount > 0,
               params.liveExpertCount == UInt32(binding.views.count),
               pairMicrobatchRows > 0 else { return 0 }
+        let phase1PSO = activation == .silu ? batchedPhase1SiluPSO : batchedPhase1PSO
         var consumed: UInt32 = 0
         var microbatchCount = 0
         while consumed < params.pairCount {
@@ -410,7 +416,7 @@ final class PrefillGroupedRoutedMoE {
             p.pairCount = min(UInt32(pairMicrobatchRows), params.pairCount - consumed)
 
             if let enc = commandBuffer.makeComputeCommandEncoder() {
-                enc.setComputePipelineState(batchedPhase1PSO)
+                enc.setComputePipelineState(phase1PSO)
                 enc.setBuffer(hidden, offset: hiddenOffset, index: PrefillGroupedRoutedMoEBufferIndex.hidden)
                 enc.setBuffer(sortedPairs, offset: sortedPairsOffset, index: PrefillGroupedRoutedMoEBufferIndex.sortedPairs)
                 enc.setBuffer(gateUpActScratch, offset: gateUpActScratchOffset,

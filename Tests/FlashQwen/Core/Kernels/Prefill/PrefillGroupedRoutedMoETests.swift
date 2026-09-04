@@ -232,7 +232,8 @@ import FlashQwenValidationSupport
                                                   pool: SyntheticExpertPool,
                                                   topK: Int,
                                                   d: Int,
-                                                  f: Int) -> [Float16] {
+                                                  f: Int,
+                                                  activation: SharedExpertActivation = .gelu) -> [Float16] {
         var out = [Float16](repeating: -99, count: routes.queryCount * topK * d)
         for pair in routes.sortedPairs {
             let expertBase = Int(pair.expert) * pool.stride
@@ -256,7 +257,10 @@ import FlashQwenValidationSupport
                                          row: row,
                                          n: d,
                                          x: x)
-                act[row] = Float16(MoeRef.geluTanh([gate])[0] * up)
+                let acted = activation == .silu
+                    ? MoeRef.silu([gate])[0]
+                    : MoeRef.geluTanh([gate])[0]
+                act[row] = Float16(acted * up)
             }
             let actFloat = act.map { Float($0) }
             let outBase = (Int(pair.token) * topK + Int(pair.rank)) * d
