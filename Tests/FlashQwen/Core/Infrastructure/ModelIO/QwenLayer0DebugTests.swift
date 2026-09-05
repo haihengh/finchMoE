@@ -3668,9 +3668,17 @@ extension QwenLayer0DebugTests {
     /// File layout (little-endian): Int32[4] header (magic 0x00A10003, T, D,
     /// numLayers), Int32[T] token ids, f32[T·D] embed, f32[numLayers·T·D]
     /// hidden rows, f32[numLayers·T·D] dense rows, Int32 count + Int32[8·L]
-    /// route ids, f32[8·L] route weights. Gated on FQ_TORCH_DUMP=1 (no-op
-    /// otherwise so the suite stays green in plain runs); path override via
-    /// FQ_ROW_PATH.
+    /// route ids, f32[8·L] route weights, then a trailing GDN-branch block:
+    /// Int32[4] (magic 0x00A20003, numLayers, T, D) + f32[numLayers·T·D]
+    /// pre-residual linear-attn output rows `xa` (zeros on full-attention
+    /// layers), then a per-stage block: Int32[7] (magic 0x00A20005,
+    /// linearCount, T, D, qkvDim, valueDim, numValueHeads) followed per
+    /// linear layer in ascending order by Int32[1] layer + f32[T·D] normed +
+    /// f32[T·qkvDim] post-conv qkv + f32[T·valueDim] o (pre-gated-norm
+    /// recurrent output, captured before the in-place norm) + f32[T·valueDim]
+    /// h (post-gated-norm, pre-out_proj) + f32[T·valueDim] z + f32[T·numV] g
+    /// + f32[T·numV] beta. Gated on FQ_TORCH_DUMP=1 (no-op otherwise so the
+    /// suite stays green in plain runs); path override via FQ_ROW_PATH.
     @Test(.enabled(if: installExists))
     func dumpRowsForTorchProbe() async throws {
         let env = ProcessInfo.processInfo.environment
@@ -3690,16 +3698,24 @@ extension QwenLayer0DebugTests {
         let numLayers = model.config.numLayers
         var hidden: [String: [Float16]] = [:]   // key "\(L).\(t)"
         var dense: [String: [Float16]] = [:]    // post-attn-norm rows
+        var xa: [String: [Float16]] = [:]       // GDN pre-residual branch rows
+        var stages: [String: [Float16]] = [:]   // key "\(L)|\(stage)"
         var routeIDs: [Int: [Float16]] = [:]    // key "\(L)", last token only
         var routeW: [Int: [Float16]] = [:]
         runner.qwenLayerDebugHook = { layer, phase, values in
-            if phase.hasPrefix("prefillHidden.") {
+            if phase.hasPrefix("pfGdn.") {
+                stages["\(layer)|\(phase.dropFirst("pfGdn.".count))"] = values
+            } else if phase.hasPrefix("prefillHidden.") {
                 if let t = Int(phase.dropFirst("prefillHidden.".count)) {
                     hidden["\(layer).\(t)"] = values
                 }
             } else if phase.hasPrefix("prefillDense.") {
                 if let t = Int(phase.dropFirst("prefillDense.".count)) {
                     dense["\(layer).\(t)"] = values
+                }
+            } else if phase.hasPrefix("prefillXA.") {
+                if let t = Int(phase.dropFirst("prefillXA.".count)) {
+                    xa["\(layer).\(t)"] = values
                 }
             } else if phase == "pfRouteIDs" {
                 routeIDs[layer] = values
@@ -3785,8 +3801,65 @@ extension QwenLayer0DebugTests {
         ridHeader.withUnsafeBytes { data.append(contentsOf: $0) }
         routeIds.withUnsafeBytes { data.append(contentsOf: $0) }
         put(wts)
+        // GDN pre-residual branch rows (xa), zeros where a layer did not emit
+        // (full-attention layers / missed snapshots).
+        var xaBlock: [Int32] = [0x00A20003, Int32(numLayers), Int32(T),
+                                Int32(D)]
+        xaBlock.withUnsafeBytes { data.append(contentsOf: $0) }
+        var missingXA = 0
+        let zeros = [Float](repeating: 0, count: D)
+        for L in 0..<numLayers {
+            for t in 0..<T {
+                if let v = xa["\(L).\(t)"] {
+                    put(v.map { Float($0) })
+                } else {
+                    missingXA += 1
+                    put(zeros)
+                }
+            }
+        }
+        // GDN branch per-stage snapshots (whole chunk per stage), one per
+        // linear layer, in ascending layer order: [L] + f32[T·D] normed,
+        // f32[T·qkvDim] post-conv qkv, f32[T·valueDim] o (pre-gated-norm),
+        // f32[T·valueDim] h (post-gated-norm, pre-out_proj), f32[T·valueDim]
+        // z, f32[T·numV] g, f32[T·numV] beta. Header: magic 0x00A20005,
+        // linearCount, T, D, qkvDim, valueDim, numValueHeads.
+        let mask = model.config.fullAttentionLayerMask
+        let linearLayers = (0..<numLayers).filter { mask[$0] == 0 }
+        let keyDim = model.config.linearNumKeyHeads
+            * model.config.linearKeyHeadDim
+        let valueDim = model.config.linearNumValueHeads
+            * model.config.linearValueHeadDim
+        let numV = model.config.linearNumValueHeads
+        let qkvDim = 2 * keyDim + valueDim
+        var stHeader: [Int32] = [0x00A20005, Int32(linearLayers.count),
+                                 Int32(T), Int32(D), Int32(qkvDim),
+                                 Int32(valueDim), Int32(numV)]
+        stHeader.withUnsafeBytes { data.append(contentsOf: $0) }
+        var missingStage = 0
+        func putStage(_ key: String, _ count: Int) {
+            if let v = stages[key] {
+                put(v.map { Float($0) })
+            } else {
+                missingStage += 1
+                put([Float](repeating: 0, count: count))
+            }
+        }
+        for L in linearLayers {
+            var lt: [Int32] = [Int32(L)]
+            lt.withUnsafeBytes { data.append(contentsOf: $0) }
+            putStage("\(L)|normed", T * D)
+            putStage("\(L)|conv", T * qkvDim)
+            putStage("\(L)|o", T * valueDim)
+            putStage("\(L)|h", T * valueDim)
+            putStage("\(L)|z", T * valueDim)
+            putStage("\(L)|g", T * numV)
+            putStage("\(L)|beta", T * numV)
+        }
         try data.write(to: URL(fileURLWithPath: outPath))
         say("wrote \(outPath) bytes=\(data.count) missingRows=\(missing) "
-            + "missingDense=\(missingDense) routeLayers=\(routeIDs.count)")
+            + "missingDense=\(missingDense) missingXA=\(missingXA) "
+            + "missingStage=\(missingStage) linearLayers=\(linearLayers.count) "
+            + "routeLayers=\(routeIDs.count)")
     }
 }

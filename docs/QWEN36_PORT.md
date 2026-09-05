@@ -315,7 +315,7 @@ Nothing. The Qwen preset is auto-detected from the installed manifest
 into the app probe and the app/CLI/server model loads; the Qwen tokenizer
 family, sampling softcap, and stop tokens are wired (see below).
 
-### Done and verified (interface + end-to-end, 2026-09-04, uncommitted)
+### Done and verified (interface + end-to-end; committed bf1f5b0, 8e85605, f10b78b, 8004779)
 
 - **Sampling / stop (Phase 4).** `final_logit_softcapping = 0` (Qwen 3.6
   config) is honored: `softcap_value` in `logit.metal` guards `softcap <= 0`
@@ -443,6 +443,15 @@ family, sampling softcap, and stop tokens are wired (see below).
      holds: bf16 (unquantized) GDN projections (+~1.8 GB), or fp16 → bf16
      hidden activations on the linear path, or exact-reference conv/gate
      fixes uncovered by the xa comparison.
+     **Implemented in the working tree (2026-09-05, uncommitted):**
+     `RealForwardRunner` prefill now emits `prefillXA.<t>` rows plus per-stage
+     `pfGdn.normed / conv / o / h / z / g / beta` snapshots (mixed-precision
+     blits encoded in order, hooked out before the buffers are reused), and
+     `dumpRowsForTorchProbe` writes the extended dump (0x00A20003 xa block +
+     0x00A20005 per-stage block, linear layers only). Builds green. Next
+     action: run the probe against the real install, diff against
+     `torch_layer_probe.py` at L0/L1 per token, and localize the first
+     diverging stage.
 2. **Benchmarks:** once output quality is right, record tok/s and fill in
    the README "At a glance" table.
 
@@ -451,6 +460,35 @@ Known toolchain quirk (this machine, Xcode 26.6 / Swift 6.3.3): `swift test
 but not enumerated); run the suite with `-c debug` (or
 `-c release -Xswiftc -Onone`). The heavy install-gated diagnostics are slow
 in debug — ~5–15 min each.
+
+### Machine: 2026-09-05 kernel panics and the 16 GB operating protocol
+
+Two kernel panics this machine (16 GB Mac mini, Mac16,10), both identical
+`watchdog timeout: no checkins from watchdogd in ~90 seconds` — a system-wide
+hang from memory/IO thrash, not a process crash:
+
+- 2026-09-04 21:46:18 (`panic-full-2026-09-04-214618`), mid-repack era.
+- 2026-09-05 04:08:07 (`panic-full-2026-09-05-040807`) — followed by
+  `apfsd` CPU-resource and `ResetCounter` diagnostics; GUI session restarted.
+
+Unrelated to the panics: 8× `FlashQwenRepack` SIGTRAPs 2026-09-04 23:16–00:00
+were the pre-fix denormal-scale traps (see above); the fix landed in 8004779
+at 00:28:26, after the last trap.
+
+Working-directory model is 19.5 GiB on a 16 GB machine (models live on the
+same external volume, repack peak allocates bf16 source + output side by
+side). Protocol that has kept this box alive since:
+
+- `swift build` / `swift test` at `-j 3` max; incremental builds only.
+- Gate heavy runs on `memory_pressure -Q` ≥ ~60% free, and never run the
+  repack or an install-gated diagnostic while VS Code + Claude + simulators
+  are also up (~3–4 GB of the 16 GB already gone).
+- Watch RSS during install-gated tests (loads the real 19.5 GiB install as
+  mmap/streamed layers + Metal buffers); abort if the test process RSS
+  approaches ~13 GB or the box starts swapping (`sysctl vm.swapusage`).
+- Watchdog panics leave no process-level crash report — the tell is a fresh
+  `panic-full-*.panic` + `ResetCounter` pair in
+  `/Library/Logs/DiagnosticReports/`.
 
 ## Repository state
 

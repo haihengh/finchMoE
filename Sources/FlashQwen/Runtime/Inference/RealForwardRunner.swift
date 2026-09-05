@@ -1492,6 +1492,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let D = cfg.hiddenSize
         let eps: Float = 1e-6
         let isFull = cfg.fullAttentionLayerMask[L] != 0
+        var oSnapBuf: MTLBuffer?    // debug: pre-gated-norm o capture (GDN only)
 
         let inNorm = try model.inputNorm(layer: L)
         let postAttnNorm = try model.postAttnNorm(layer: L)
@@ -1784,6 +1785,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                           tokens: t,
                                           scale: scale,
                                           l2eps: eps)
+            if qwenLayerDebugHook != nil {
+                // Debug: the gated RMSNorm below overwrites qwenRecOut in
+                // place, so capture the pre-norm recurrent output o on this CB
+                // now (blit encode order = execution order).
+                let oBytes = t * valueDim * MemoryLayout<Float16>.stride
+                oSnapBuf = ctx.device.makeBuffer(length: oBytes,
+                                                 options: .storageModeShared)
+                if let blit = cb.makeBlitCommandEncoder() {
+                    blit.copy(from: scratch.qwenRecOut, sourceOffset: 0,
+                              to: oSnapBuf!, destinationOffset: 0,
+                              size: oBytes)
+                    blit.endEncoding()
+                }
+            }
             gdnPrefill.encodeRMSNormGatedBatch(commandBuffer: cb,
                                                x: scratch.qwenRecOut,
                                                z: scratch.qwenZ,
@@ -1844,6 +1859,85 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         waitForCompletion(cb)
         if let error = cb.error {
             throw error
+        }
+
+        if let hook = qwenLayerDebugHook, !isFull {
+            // The mixer CB has completed and nothing has reused h1 yet: for a
+            // GDN layer it holds the pre-residual branch output (xa = the
+            // out_proj result, one contiguous D-wide row per token) — the
+            // shared-expert tail overwrites h1 below, so snapshot now. Torch
+            // side: `layer.linear_attn(layer.input_layernorm(x))`.
+            let bytes = t * D * MemoryLayout<Float16>.stride
+            if let tmp = ctx.device.makeBuffer(length: bytes,
+                                               options: .storageModeShared),
+               let snapCB = ctx.queue.makeCommandBuffer(),
+               let blit = snapCB.makeBlitCommandEncoder() {
+                blit.copy(from: scratch.h1, sourceOffset: 0,
+                          to: tmp, destinationOffset: 0, size: bytes)
+                blit.endEncoding()
+                snapCB.commit()
+                waitForCompletion(snapCB)
+                let ptr = tmp.contents().bindMemory(to: Float16.self,
+                                                    capacity: t * D)
+                for row in 0..<t {
+                    hook(L, "prefillXA.\(row)",
+                         Array(UnsafeBufferPointer(start: ptr.advanced(by: row * D),
+                                                   count: D)))
+                }
+            }
+            // Per-stage snapshots for the branch-fidelity drill: normed (the
+            // mixer input), post-conv qkv, post-gated-rmsnorm h, and z — the
+            // pre-out_proj stage h is the last stage before xa, so the first
+            // stage that diverges against torch localizes the fault.
+            let keyDim = cfg.linearNumKeyHeads * cfg.linearKeyHeadDim
+            let valueDim = cfg.linearNumValueHeads * cfg.linearValueHeadDim
+            let qkvDim = 2 * keyDim + valueDim
+            func stage(_ name: String, _ buf: MTLBuffer, _ elements: Int) {
+                guard let tmp = ctx.device.makeBuffer(
+                        length: elements * MemoryLayout<Float16>.stride,
+                        options: .storageModeShared),
+                      let snapCB = ctx.queue.makeCommandBuffer(),
+                      let blit = snapCB.makeBlitCommandEncoder() else { return }
+                blit.copy(from: buf, sourceOffset: 0, to: tmp,
+                          destinationOffset: 0,
+                          size: elements * MemoryLayout<Float16>.stride)
+                blit.endEncoding()
+                snapCB.commit()
+                waitForCompletion(snapCB)
+                let ptr = tmp.contents().bindMemory(to: Float16.self,
+                                                    capacity: elements)
+                hook(L, name, Array(UnsafeBufferPointer(start: ptr,
+                                                        count: elements)))
+            }
+            stage("pfGdn.normed", scratch.normed, t * D)
+            stage("pfGdn.conv", scratch.qwenQKVConvOut, t * qkvDim)
+            stage("pfGdn.o", oSnapBuf!, t * valueDim)
+            stage("pfGdn.h", scratch.qwenRecOut, t * valueDim)
+            stage("pfGdn.z", scratch.qwenZ, t * valueDim)
+            // g/beta are fp32 [T][V] (g at 0, beta at t*V floats); hook them
+            // fp16-rounded so the stage drill can compare against torch.
+            func gateStage(_ name: String, _ buf: MTLBuffer,
+                           _ offsetBytes: Int, _ elements: Int) {
+                guard let tmp = ctx.device.makeBuffer(
+                        length: elements * MemoryLayout<Float>.stride,
+                        options: .storageModeShared),
+                      let snapCB = ctx.queue.makeCommandBuffer(),
+                      let blit = snapCB.makeBlitCommandEncoder() else { return }
+                blit.copy(from: buf, sourceOffset: offsetBytes, to: tmp,
+                          destinationOffset: 0,
+                          size: elements * MemoryLayout<Float>.stride)
+                blit.endEncoding()
+                snapCB.commit()
+                waitForCompletion(snapCB)
+                let ptr = tmp.contents().bindMemory(to: Float.self,
+                                                    capacity: elements)
+                hook(L, name,
+                     (0..<elements).map { Float16(ptr[$0]) })
+            }
+            let numV2 = cfg.linearNumValueHeads
+            gateStage("pfGdn.g", scratch.qwenGBeta, 0, t * numV2)
+            gateStage("pfGdn.beta", scratch.qwenGBeta,
+                      t * numV2 * MemoryLayout<Float>.size, t * numV2)
         }
 
         // CPU readback of the router indices → expert grouping, as in decode.
