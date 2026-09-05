@@ -135,7 +135,9 @@ Verified against the working tree on 2026-09-01 (commit `6b1e2ec`), updated
 2026-09-03 after the decode-path wiring, 2026-09-04 after the Qwen chunked
 prefill wiring, and 2026-09-04 again after the quantizing repack landed
 (real 19.5 GB install built and load-validated), and 2026-09-05 after the
-int8 linearAttention repack + the denormal-scale trap fix (20.0 GB install).
+int8 linearAttention repack + the denormal-scale trap fix (20.0 GB install),
+and 2026-09-05 again after the GDN readout-scale fix that resolved the
+degenerate generation (item 1 below).
 This section is the single
 source of truth for what is done, what is wired in, and what remains, in the
 order that unblocks an end-to-end Qwen 3.6 run.
@@ -400,58 +402,70 @@ family, sampling softcap, and stop tokens are wired (see below).
   (3, passing). **Repack: exit 0, 20 014 114 816 bytes** (19.5 GiB install,
   `linearAttention` 8). Engine-load tests green on the fresh install
   (`QwenRealInstallLoadTests`, `QwenRepackEngineLoadTests`).
+- **GDN readout-scale fix — degenerate generation RESOLVED (2026-09-05).**
+  The GDN readout `q` was missing its `1/sqrt(head_dim)`: `qn = l2norm(q ·
+  scale)` (in `GDNRef` and both Metal recurrent kernels) cancels the scale
+  inside the norm, leaving the pre-gated-norm `o` √128 ≈ 11.31× too large;
+  the per-head norm hid it on large-RMS heads but heads at the
+  `mean(o²) ≲ eps/128` floor stayed scaled, and `out_proj` smeared the error
+  over every residual. Fixed by applying the scale AFTER the l2norm
+  (`qn[i] = qh[i] * qinv * scale`; ref: `l2Norm(q).map { $0 * scale }`) —
+  the locked math above was already correct. Localized by the stage-fidelity
+  drill (`tools/qwen-probe/stage_drill.py`, committed with this batch):
+  conv/z/g/beta clean at quant noise, `o` a uniform 11.31× off. See item 1
+  below for the full evidence and verification (CLI generation now
+  coherent).
 
 ### Remaining work, in order
 
-1. **End-to-end quality** (Phase 7, in progress): load → prefill → decode →
-   sample runs at ~9.4 tok/s greedy, but the output is still incoherent
-   (" nothingParams the article as did尚liea" for "The capital of France is")
-   after BOTH the embedding-scale fix and the int8 linear-attention fix.
-   The bf16 reference model greedy-completes " Paris, a city renowned for
-   its rich history," so the model is fine and the engine chain diverges.
-   Evidence trail from the 2026-09-05 probes (`torch_layer_probe.py` +
-   `chain_bisect.py` on the engine's `/tmp/fq_rows.bin` dump):
-   - Engine final norm + lm_head on the engine's OWN last hidden row
-     reproduces the engine's logits exactly (top-1 13269 = "yntax") — head,
-     final norm, and layer 39 are not at fault; the error is cumulative.
-   - Torch full-chain bisect: engine leaves the bf16 reference at L0–L1
-     (maxAbs 0.13 → 1.0 on rows of max 0.65–0.89), compounding to 5–9 by
-     L6+; logits flip to garbage around L10.
-   - Full-attention layers are CLEAN on any input (per-token isoMax
-     ≤ 0.05 with dense ≤ 0.5), including L3 fed a polluted input — the
-     full-attn + MoE + shared-expert path is not the diverger.
-   - Linear layers diverge even on clean inputs (L0-only clean comparison:
-     iso 0.06–0.13) with normed-space dense diffs of 1.6–5.2; L1 t0 (zero
-     state, near-clean input) is already 6× worse than L0 t0 (0.74 vs
-     0.12) — the per-token GDN error scales with the layer's activation
-     magnitudes, not with state depth alone.
-   - Embedding int4 quantization error (~70% of row RMS — embed rows are
-     tiny: rms ≈ 0.01) was measured and REFUTED as the driver: torch L0
-     output differs only 0.007 maxAbs between engine-embed and ref-embed
-     (L0 is contractive).
-   - Working hypothesis: the GDN branch's per-token output error (~0.1–1%
-     at the projection outputs, from int8 weights + fp16 activations +
-     fp16-vs-bf16 divergence — the GDN kernels DO accumulate fp32) lands in
-     a residual whose RMS at early layers is small, so the normed
-     post-attn row (router input) diverges O(1) → router boundary flips →
-     different expert mixtures → per-layer output jumps ~0.1–2.5 that
-     compound. Next bisect step: dump the engine's raw GDN branch output
-     (pre-residual `xa`) and compare against torch `linear_attn` per token
-     at L0 and L1, and check the L1-vs-L0 t0 asymmetry (both zero-state)
-     against the qwen3_5_moe source ordering (conv1d zero-padding, gate
-     formula, state update order). Candidate levers if the hypothesis
-     holds: bf16 (unquantized) GDN projections (+~1.8 GB), or fp16 → bf16
-     hidden activations on the linear path, or exact-reference conv/gate
-     fixes uncovered by the xa comparison.
-     **Implemented in the working tree (2026-09-05, uncommitted):**
-     `RealForwardRunner` prefill now emits `prefillXA.<t>` rows plus per-stage
-     `pfGdn.normed / conv / o / h / z / g / beta` snapshots (mixed-precision
-     blits encoded in order, hooked out before the buffers are reused), and
-     `dumpRowsForTorchProbe` writes the extended dump (0x00A20003 xa block +
-     0x00A20005 per-stage block, linear layers only). Builds green. Next
-     action: run the probe against the real install, diff against
-     `torch_layer_probe.py` at L0/L1 per token, and localize the first
-     diverging stage.
+1. **End-to-end quality — RESOLVED (2026-09-05).** The degenerate output
+   (" nothingParams the article as did尚liea") was **not** quantization
+   noise: the GDN readout `q` was missing its `1/sqrt(head_dim)` scale.
+   `GDNRef.recurrentStep` and both Metal kernels (`gdn_recurrent`,
+   `prefill_gdn_recurrent_seq`) computed `qn = l2norm(q * scale)` — scale
+   INSIDE the l2norm, where the constant factors out of the sum and cancels:
+   `l2norm(c·q) = c·q / (c·‖q‖) = q/‖q‖`. The oracle applies it AFTER:
+   `query = l2norm(query, eps=1e-6)` then `query = query * scale`
+   (`torch_recurrent_gated_delta_rule` / `torch_chunk_gated_delta_rule`).
+   The locked math in "GDN decode math" above was right; the code (and the
+   `GDNRef` comment "applied before l2norm") drifted from it.
+   - Consequence: the pre-gated-norm recurrent output `o` was √128 ≈ 11.31×
+     torch's — elementwise-uniform (stage drill: head-RMS ratios 11.25–11.36
+     on all 32 value heads at both L0 and L1). The per-head gated RMSNorm
+     cancels a uniform per-head scale, so most heads looked fine — but heads
+     with `mean(o²) ≲ eps/128 ≈ 1e-8` hit the `÷(mean + 1e-6)` floor
+     asymmetrically (engine variance 128× torch's against the same eps), and
+     those heads' normalized `h` rows stayed 11.31× too large (drill: h
+     head-ratios bimodal ~1.0 vs ~11.3; 3 heads at L0, ~half at L1, whose
+     activations are smaller). `out_proj` mixes every head into every `xa`
+     element, so the error spread over the whole residual and compounded
+     down the 30 linear layers — matching every earlier observation (linear
+     layers diverge, full-attention clean, head/norm blameless).
+   - Why the unit tests never caught it: GDN tests validate the Metal
+     kernels against `GDNRef`/`GDNPrefillRef`, which share the wrong
+     convention — self-consistent. The first oracle-crossed check was the
+     stage-fidelity drill (`tools/qwen-probe/stage_drill.py`, committed with
+     this batch): conv/z/g/beta matched the fp32 torch oracle at quant noise
+     while `o` diverged by the uniform 11.31× — an exact localization to the
+     recurrent readout.
+   - Fix (engine-wide, 4 sites): `GDNRef.swift` →
+     `qn = l2Norm(q).map { $0 * scale }`; `gdn.metal` + `gdn_prefill.metal`
+     pass 1 accumulates the UNScaled q sum and writes
+     `qn[i] = qh[i] * qinv * scale`; `GDNPrefillRef` inherits via
+     `recurrentStep`. 28 GDN/GDNPrefill tests green.
+   - Verification: drill rerun on a fresh engine dump — `o` rmsDiff now
+     0.1–0.2% of ref RMS, `h` 0.1–0.7%, `xa` 0.5–1.8% (int8 out_proj
+     floor), head ratios uniform ≈ 1.000 at both layers. CLI greedy is
+     fixed: "The capital of France is" → " Paris, a city renowned for its
+     iconic landmarks such as the Eiffel Tower, the Louvre Museum, and
+     Notre-Dame Cathedral." (coherent through 150+ tokens, 10.6 tok/s).
+     Note: raw-completion prompts without the chat template make this
+     checkpoint emit its `<think>` preamble — model behavior, not engine
+     error (bf16 reference does the same via the template).
+   - Earlier probe evidence (engine-head reproduces engine logits,
+     full-attn layers clean on any input, embedding int4 refuted as the
+     driver, L1-vs-L0 t0 asymmetry) is all consistent with this one bug and
+     stands closed out.
 2. **Benchmarks:** once output quality is right, record tok/s and fill in
    the README "At a glance" table.
 

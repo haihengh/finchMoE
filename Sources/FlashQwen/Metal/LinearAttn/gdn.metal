@@ -93,7 +93,9 @@ static inline void gdn_block_sum(
 // ----------------------------------------------------------------------------
 // Recurrent gated-delta-rule decode step for one value head (one threadgroup).
 //
-//   qn    = l2norm(q[hv/2] * scale)
+//   qn    = l2norm(q[hv/2]) * scale   // scale AFTER the norm — torch l2norms
+//                                      // then applies 1/sqrt(head_dim); scaling
+//                                      // inside the norm would cancel it out
 //   kn    = l2norm(k[hv/2])
 //   decay = exp(g[hv])
 //   S     = S * decay
@@ -142,10 +144,11 @@ void gdn_recurrent(
     threadgroup float pQ[8];
     threadgroup float pK[8];
 
-    // Pass 1: l2norm of q (scaled) and k into threadgroup scratch.
+    // Pass 1: l2norm of q and k into threadgroup scratch (scale applied to
+    // the NORMED q below — after the l2norm, matching the torch oracle).
     float accq = 0.0f, acck = 0.0f;
     for (uint i = lid; i < D; i += lsize) {
-        float qv = float(qh[i]) * scale;
+        float qv = float(qh[i]);
         float kv = float(kh_[i]);
         accq = fma(qv, qv, accq);
         acck = fma(kv, kv, acck);
@@ -155,7 +158,7 @@ void gdn_recurrent(
     const float qinv = rsqrt(pQ[0] + l2eps);
     const float kinv = rsqrt(pK[0] + l2eps);
     for (uint i = lid; i < D; i += lsize) {
-        qn[i] = float(qh[i]) * scale * qinv;
+        qn[i] = float(qh[i]) * qinv * scale;
         kn[i] = float(kh_[i]) * kinv;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);

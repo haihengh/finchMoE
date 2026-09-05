@@ -109,7 +109,9 @@ public enum GDNRef {
     /// - `q`, `k`, `v`: raw per-head vectors (already conv-updated), length `headDim`.
     /// - `g`: `g = -exp(A_log) * softplus(a + dt_bias)` for this head (precomputed).
     /// - `beta`: `sigmoid(b)` for this head (precomputed).
-    /// - `scale`: `1/sqrt(headDim)`; applied to `q` only (before l2norm).
+    /// - `scale`: `1/sqrt(headDim)`; applied to `q` only (AFTER l2norm — torch
+    ///   `torch_recurrent_gated_delta_rule` does `query = l2norm(query, eps=1e-6)`
+    ///   then `query = query * scale`; scaling INSIDE the norm would cancel).
     ///
     /// Order (from `torch_recurrent_gated_delta_rule`, decode branch):
     /// decay → residual read → rank-1 write → output read from the UPDATED state.
@@ -121,7 +123,7 @@ public enum GDNRef {
         let d = v.count
         let decay = expf(g)
 
-        let qn = l2Norm(q.map { $0 * scale })
+        let qn = l2Norm(q).map { $0 * scale }
         let kn = l2Norm(k)
 
         // S = S * decay (elementwise over [v, k])

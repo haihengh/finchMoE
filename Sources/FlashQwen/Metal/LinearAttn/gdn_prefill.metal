@@ -153,7 +153,8 @@ void prefill_gdn_conv_chunk(
 //
 // For token t (in order), with q_t/k_t/v_t the t-th rows of the conv output
 // (q at element offset 0, k at kOff, v at vOff; row stride C):
-//   qn    = l2norm(q[hv/2]_t * scale)
+//   qn    = l2norm(q[hv/2]_t) * scale  // scale AFTER the norm, per the torch
+//                                      // chunk rule (scaling inside cancels)
 //   kn    = l2norm(k[hv/2]_t)
 //   decay = exp(g[t][hv])
 //   S     = S * decay
@@ -207,10 +208,11 @@ void prefill_gdn_recurrent_seq(
         const float decay = exp(g[t * V + hv]);
         const float betaV = beta[t * V + hv];
 
-        // Pass 1: l2norm of q (scaled) and k into threadgroup scratch.
+        // Pass 1: l2norm of q and k into threadgroup scratch (scale applied
+        // to the NORMED q below — after the l2norm, matching the torch oracle).
         float accq = 0.0f, acck = 0.0f;
         for (uint i = lid; i < D; i += lsize) {
-            float qv = float(qh[i]) * scale;
+            float qv = float(qh[i]);
             float kv = float(kh_[i]);
             accq = fma(qv, qv, accq);
             acck = fma(kv, kv, acck);
@@ -220,7 +222,7 @@ void prefill_gdn_recurrent_seq(
         const float qinv = rsqrt(pQ[0] + l2eps);
         const float kinv = rsqrt(pK[0] + l2eps);
         for (uint i = lid; i < D; i += lsize) {
-            qn[i] = float(qh[i]) * scale * qinv;
+            qn[i] = float(qh[i]) * qinv * scale;
             kn[i] = float(kh_[i]) * kinv;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
