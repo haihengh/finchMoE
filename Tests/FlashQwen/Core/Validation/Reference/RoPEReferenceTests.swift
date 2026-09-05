@@ -26,8 +26,9 @@ import FlashQwenValidationSupport
                     let angle = Float(position) * freq
                     let c = cosf(angle)
                     let s = sinf(angle)
-                    let i0 = base + 2 * k
-                    let i1 = i0 + 1
+                    // Half-split pairing: (i, i + rotaryDim/2).
+                    let i0 = base + k
+                    let i1 = base + pairs + k
                     let x0 = input[i0]
                     let x1 = input[i1]
                     out[i0] = x0 * c - x1 * s

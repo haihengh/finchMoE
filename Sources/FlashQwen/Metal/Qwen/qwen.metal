@@ -45,12 +45,15 @@ static inline void qwen_block_sum(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 }
 
-// Qwen partial RoPE: rotates the first `rotary_dim` contiguous elements as
-// adjacent pairs. The frequency denominator is the ROTARY dim (not the full
-// head dim): inv_freq_i = theta^(-2i/rotary_dim), i = 0..rotary_dim/2-1.
-// (Qwen3_5MoeTextRotaryEmbedding.compute_default_rope_parameters uses
-// `dim = int(head_dim * partial_rotary_factor)`.) For text-only runs the
-// interleaved-MRoPE reordering is identity, so it is not represented here.
+// Qwen partial RoPE: rotates the first `rotary_dim` contiguous elements in
+// HF half-split pairs (i, i + rotary_dim/2). The frequency denominator is
+// the ROTARY dim (not the full head dim): inv_freq_i = theta^(-2i/rotary_dim),
+// i = 0..rotary_dim/2-1. (Qwen3_5MoeTextRotaryEmbedding.compute_default_rope_
+// parameters uses `dim = int(head_dim * partial_rotary_factor)` and
+// Qwen3_5MoeAttention rotates with apply_rotary_pos_emb's rotate_half —
+// pairs split at rotary_dim/2, NOT adjacent (2i, 2i+1).) For text-only runs
+// the interleaved-MRoPE reordering is identity, so it is not represented
+// here.
 static inline void qwen_rope_pair(thread float& x0,
                                   thread float& x1,
                                   uint pair_index,
@@ -245,14 +248,17 @@ void qwen_full_attn_epilogue(
         }
     }
 
-    // Partial rotary over the first `rotary_dim` elements as adjacent pairs.
+    // Partial rotary over the first `rotary_dim` elements, HF half-split
+    // pairing (rotate_half): pair i mixes (i, i + rotary_dim/2) with the
+    // shared inv_freq_i. Frequencies come from qwen_rope_pair's exponent
+    // -2*i/rotary_dim, matching emb = cat(freqs, freqs) in the module.
     const uint half_rot = rotary_dim / 2u;
     for (uint pair = lid; pair < half_rot; pair += lsize) {
-        float x0 = float(head_tg[2u * pair]);
-        float x1 = float(head_tg[2u * pair + 1u]);
+        float x0 = float(head_tg[pair]);
+        float x1 = float(head_tg[pair + half_rot]);
         qwen_rope_pair(x0, x1, pair, rotary_dim, float(position), theta_base);
-        head_tg[2u * pair]     = half(x0);
-        head_tg[2u * pair + 1u] = half(x1);
+        head_tg[pair]            = half(x0);
+        head_tg[pair + half_rot] = half(x1);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 

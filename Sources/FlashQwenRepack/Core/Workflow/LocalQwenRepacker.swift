@@ -243,9 +243,11 @@ public final class LocalQwenRepacker {
                                metadata: QwenLocalSnapshot.SourceMetadata,
                                expertStride: UInt64) throws {
         // Locked writer decisions (docs/QWEN36_PORT.md): embedding/attention/
-        // shared/routed int4 affine, router int8 affine, group 64.
+        // shared/routed int4 affine, router int8 affine, group 64. The GDN
+        // linear_attn projections are int8 — int4 noise on them amplifies
+        // through the recurrent state and drowns the final logits.
         let bits = FQTurboJSON.QuantBitWidths(
-            embedding: 4, attention: 4, router: 8,
+            embedding: 4, attention: 4, linearAttention: 8, router: 8,
             sharedExpert: 4, routedExpert: 4)
         let files = audit.outputFiles.map {
             ($0.relativePath, FQTurboJSON.FileEntry(size: $0.size, sha256: $0.sha256))

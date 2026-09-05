@@ -403,6 +403,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         let model = try Model.load(
             directoryURL: modelDirectory,
             device: context.device,
+            expecting: try ManifestReader.detectPreset(directoryURL: modelDirectory),
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: .fullSha256)
@@ -410,7 +411,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                                            context: context,
                                            maxContext: maxContext,
                                            runtimeConfiguration: runtime)
-        let scratch = try RawCompletionScratch(context: context, vocab: model.config.vocabSize)
+        let scratch = try RawCompletionScratch(context: context, vocab: model.config.vocabSize, logitSoftcap: Float(model.config.finalLogitSoftcap))
         let templateDigest = SHA256.hash(data: try Data(contentsOf: templateURL))
             .map { String(format: "%02x", $0) }
             .joined()

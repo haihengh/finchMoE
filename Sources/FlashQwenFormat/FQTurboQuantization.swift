@@ -102,11 +102,17 @@ public enum FQTurboQuantization {
             biases[g] = bBits
             let scale = bf16ToFloat(sBits)
             let bias  = bf16ToFloat(bBits)
-            let invScale = scale == 0 ? Float(0) : 1.0 / scale
+            // Quantize against the BF16-rounded scale directly. A reciprocal
+            // would overflow FP32 to inf when the group's range is so small
+            // that the rounded scale is subnormal (checkpoints carry
+            // denormal-range residue rows), turning finite values into
+            // NaN/inf at the Int() conversion below.
+            let effectiveScale = scale == 0 ? Float(1) : scale
 
             for k in 0..<groupSize {
                 let w = buffer[g * groupSize + k]
-                var q = Int(((w - bias) * invScale).rounded())
+                let qv = scale == 0 ? Float(0) : (w - bias) / effectiveScale
+                var q = Int(qv.rounded())
                 q = max(0, min(15, q))
                 let nibble = UInt8(q) & 0x0F
                 let byteIdx = g * (groupSize / 2) + (k / 2)
@@ -193,11 +199,17 @@ public enum FQTurboQuantization {
             biases[g] = bBits
             let scale = bf16ToFloat(sBits)
             let bias  = bf16ToFloat(bBits)
-            let invScale = scale == 0 ? Float(0) : 1.0 / scale
+            // Quantize against the BF16-rounded scale directly. A reciprocal
+            // would overflow FP32 to inf when the group's range is so small
+            // that the rounded scale is subnormal (checkpoints carry
+            // denormal-range residue rows), turning finite values into
+            // NaN/inf at the Int() conversion below.
+            let effectiveScale = scale == 0 ? Float(1) : scale
 
             for k in 0..<groupSize {
                 let w = buffer[g * groupSize + k]
-                var q = Int(((w - bias) * invScale).rounded())
+                let qv = scale == 0 ? Float(0) : (w - bias) / effectiveScale
+                var q = Int(qv.rounded())
                 q = max(0, min(255, q))
                 packed[g * groupSize + k] = UInt8(q)
             }

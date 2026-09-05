@@ -10,7 +10,8 @@ import Accelerate
 /// different summation order — any bug that depends on the kernel's online
 /// (m, d) merge logic won't replicate here.
 ///
-/// Softcap is `c * tanh(x / c)` with c=30.0 by default for Gemma 4.
+/// Softcap is `c * tanh(x / c)` with c=30.0 by default for Gemma 4;
+/// `softcap <= 0` (Qwen 3.6) disables the cap — plain softmax.
 public enum LogitSoftcapSoftmaxRef {
     public static func apply(x: [Float], softcap: Float) -> [Float] {
         let v = x.count
@@ -18,17 +19,22 @@ public enum LogitSoftcapSoftmaxRef {
 
         // 1. Apply softcap: y = softcap * tanh(x / softcap)
         //    Two-step: y = x * invC; y = tanh(y); y = y * softcap.
+        //    softcap <= 0 passes x through unchanged.
         var y = [Float](repeating: 0, count: v)
-        var s = invC
-        x.withUnsafeBufferPointer { px in
-            y.withUnsafeMutableBufferPointer { py in
-                vDSP_vsmul(px.baseAddress!, 1, &s, py.baseAddress!, 1, vDSP_Length(v))
+        if softcap > 0 {
+            var s = invC
+            x.withUnsafeBufferPointer { px in
+                y.withUnsafeMutableBufferPointer { py in
+                    vDSP_vsmul(px.baseAddress!, 1, &s, py.baseAddress!, 1, vDSP_Length(v))
+                }
             }
-        }
-        y = vForce.tanh(y)
-        var c = softcap
-        y.withUnsafeMutableBufferPointer { py in
-            vDSP_vsmul(py.baseAddress!, 1, &c, py.baseAddress!, 1, vDSP_Length(v))
+            y = vForce.tanh(y)
+            var c = softcap
+            y.withUnsafeMutableBufferPointer { py in
+                vDSP_vsmul(py.baseAddress!, 1, &c, py.baseAddress!, 1, vDSP_Length(v))
+            }
+        } else {
+            y = x
         }
 
         // 2. Numerically stable softmax: subtract max, exp, divide by sum.

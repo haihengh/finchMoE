@@ -142,17 +142,24 @@ package struct FQTurboManifestQuantSlotV1: Codable, Equatable, Sendable {
 package struct FQTurboManifestQuantV1: Codable, Equatable, Sendable {
     package let embedding: FQTurboManifestQuantSlotV1
     package let attention: FQTurboManifestQuantSlotV1
+    /// Qwen GDN (`linear_attn.in_proj_qkv/z/a/b`, `out_proj`) — 8-bit on the
+    /// production build: int4 noise on these amplifies ~16x through the
+    /// recurrent state (see docs/QWEN36_PORT.md), so the slot is distinct
+    /// from `attention` (full-attention q/k/v/o stay at 4).
+    package let linearAttention: FQTurboManifestQuantSlotV1
     package let router: FQTurboManifestQuantSlotV1
     package let sharedExpert: FQTurboManifestQuantSlotV1
     package let routedExpert: FQTurboManifestQuantSlotV1
 
     package init(embedding: FQTurboManifestQuantSlotV1,
                  attention: FQTurboManifestQuantSlotV1,
+                 linearAttention: FQTurboManifestQuantSlotV1,
                  router: FQTurboManifestQuantSlotV1,
                  sharedExpert: FQTurboManifestQuantSlotV1,
                  routedExpert: FQTurboManifestQuantSlotV1) {
         self.embedding = embedding
         self.attention = attention
+        self.linearAttention = linearAttention
         self.router = router
         self.sharedExpert = sharedExpert
         self.routedExpert = routedExpert

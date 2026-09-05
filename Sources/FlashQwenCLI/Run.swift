@@ -63,6 +63,7 @@ public func run(args: Args,
         let model = try Model.load(
             directoryURL: modelURL,
             device: context.device,
+            expecting: try ManifestReader.detectPreset(directoryURL: modelURL),
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: .fullSha256)
@@ -72,7 +73,8 @@ public func run(args: Args,
             maxContext: args.maxContext,
             runtimeConfiguration: runtime)
         let scratch = try RawCompletionScratch(context: context,
-                                               vocab: model.config.vocabSize)
+                                               vocab: model.config.vocabSize,
+                                               logitSoftcap: Float(model.config.finalLogitSoftcap))
         let stats = try await runRawCompletion(
             producer: runner,
             tokenizer: tokenizer,
@@ -84,13 +86,24 @@ public func run(args: Args,
                 switch progress {
                 case .prefill:
                     break
-                case .token(_, _, let delta):
+                case .token(_, let id, let delta):
+                    if ProcessInfo.processInfo.environment["FQ_TOKEN_IDS"] != nil {
+                        let piece = tokenizer.decode([id], skipSpecialTokens: false)
+                        stdout.write(Data("\(id)[\(piece)] ".utf8))
+                    }
                     if !delta.isEmpty { stdout.write(Data(delta.utf8)) }
                 case .tail(let tail):
                     stdout.write(Data(tail.utf8))
                 }
             }
 
+        if ProcessInfo.processInfo.environment["FQ_PROMPT_IDS"] != nil {
+            stdout.write(Data(("prefill: " + promptIds.map(String.init)
+                .joined(separator: " ") + "\n").utf8))
+            stdout.write(Data(("pieces: " + promptIds.map {
+                "\($0)=[\(tokenizer.decode([$0], skipSpecialTokens: false))]"
+            }.joined(separator: " ") + "\n").utf8))
+        }
         if !args.quiet {
             let tokensPerSecond = stats.decodeSeconds > 0
                 ? Double(stats.newTokens) / stats.decodeSeconds

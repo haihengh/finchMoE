@@ -45,8 +45,8 @@ private enum FormatFixture {
         biasType: "BF16", groupSize: 64)
 
     static let quant = FQTurboManifestQuantV1(
-        embedding: quantSlot, attention: quantSlot, router: quantSlot,
-        sharedExpert: quantSlot, routedExpert: quantSlot)
+        embedding: quantSlot, attention: quantSlot, linearAttention: quantSlot,
+        router: quantSlot, sharedExpert: quantSlot, routedExpert: quantSlot)
 
     static func layout(explicitIDs: Bool = true,
                        explicitRanks: Bool = true) -> FQTurboPackedExpertsLayoutV1 {

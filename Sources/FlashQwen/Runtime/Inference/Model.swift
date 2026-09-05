@@ -35,6 +35,10 @@ public struct Model {
     public var modelID: String { manifest.modelID }
     public var sourceSnapshotHash: String? { manifest.sourceSnapshotHash }
     public var sharedExpertWeightBits: Int { manifest.quant?.sharedExpert.weightBits ?? 8 }
+    /// GDN linear-attention projection width (`linear_attn.in_proj_qkv/z/a/b`,
+    /// `out_proj`). 8 on the production build; raw/bf16 installs have no quant
+    /// manifest and never consult this (default 4 is inert there).
+    public var linearAttentionWeightBits: Int { manifest.quant?.linearAttention.weightBits ?? 4 }
 
     let residentBuffer: ResidentBuffer
     let residentIndex: ResidentIndex
@@ -900,22 +904,24 @@ extension Model {
                 try requireBF16("\(prefix).self_attn.q_norm.weight", config.fullHeadDim)
                 try requireBF16("\(prefix).self_attn.k_norm.weight", config.fullHeadDim)
             } else {
-                // GDN (linear-attention) layer.
+                // GDN (linear-attention) layer. The five projections ride the
+                // dedicated linearAttention slot (8-bit on the production
+                // build; the recurrent state amplifies their quant noise).
                 try requireAffine("\(prefix).linear_attn.in_proj_qkv.weight",
                                   qkvDim, config.hiddenSize,
-                                  quant.attention)
+                                  quant.linearAttention)
                 try requireAffine("\(prefix).linear_attn.in_proj_z.weight",
                                   valueDim, config.hiddenSize,
-                                  quant.attention)
+                                  quant.linearAttention)
                 try requireAffine("\(prefix).linear_attn.in_proj_a.weight",
                                   config.linearNumValueHeads, config.hiddenSize,
-                                  quant.attention)
+                                  quant.linearAttention)
                 try requireAffine("\(prefix).linear_attn.in_proj_b.weight",
                                   config.linearNumValueHeads, config.hiddenSize,
-                                  quant.attention)
+                                  quant.linearAttention)
                 try requireAffine("\(prefix).linear_attn.out_proj.weight",
                                   config.hiddenSize, valueDim,
-                                  quant.attention)
+                                  quant.linearAttention)
                 try requireBF16("\(prefix).linear_attn.norm.weight",
                                 config.linearValueHeadDim)
                 try requireRaw("\(prefix).linear_attn.A_log",

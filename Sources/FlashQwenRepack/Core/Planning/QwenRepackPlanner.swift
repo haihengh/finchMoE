@@ -22,6 +22,10 @@ enum QwenWriteTransform: Sendable, Equatable {
     /// bf16 `[n]` → bf16 with the Qwen `(1 + w)` RMSNorm form baked in, so
     /// the runtime kernels stay weight-direct.
     case normOnePlusW(Int)
+    /// bf16 `[n]` → raw bf16. `linear_attn.norm.weight` is a
+    /// Qwen3_5MoeRMSNormGated — torch multiplies its weight RAW (init ones),
+    /// so the (1 + w) bake would double every GDN gated norm.
+    case normRawBf16(Int)
     /// bf16 `[n]` → raw fp16 (linear_attn.conv1d.weight).
     case bf16ToFp16(Int)
     /// bf16 `[n]` → raw fp32 (linear_attn.A_log / dt_bias).
@@ -41,7 +45,7 @@ enum QwenWriteTransform: Sendable, Equatable {
         switch self {
         case .int4Affine: UInt64(rows) * UInt64(cols) / 2
         case .int8Affine: UInt64(rows) * UInt64(cols)
-        case .normOnePlusW(let n), .bf16ToFp16(let n): UInt64(n) * 2
+        case .normOnePlusW(let n), .normRawBf16(let n), .bf16ToFp16(let n): UInt64(n) * 2
         case .bf16ToFp32(let n): UInt64(n) * 4
         }
     }
@@ -221,7 +225,8 @@ enum QwenRepackPlanner {
             switch transform {
             case .int4Affine(let r, let c), .int8Affine(let r, let c):
                 rows = r; cols = c
-            case .normOnePlusW(let n), .bf16ToFp16(let n), .bf16ToFp32(let n):
+            case .normOnePlusW(let n), .normRawBf16(let n),
+                 .bf16ToFp16(let n), .bf16ToFp32(let n):
                 rows = n; cols = 0
             }
             let wSize = transform.weightBytes(rows: rows, cols: cols)
@@ -305,9 +310,31 @@ enum QwenRepackPlanner {
         if isFull && (source.hasSuffix(".q_norm.weight") || source.hasSuffix(".k_norm.weight")) {
             return .normOnePlusW(Int(shape[0]))
         }
+        if source.hasSuffix(".linear_attn.norm.weight") {
+            // Qwen3_5MoeRMSNormGated (inside the Gated DeltaNet) multiplies
+            // its weight raw — NOT (1 + w). Must come before the generic
+            // `.norm.weight` bake below.
+            guard shape.count == 1 else {
+                throw RepackError.shapeMismatch(name: source, detail: "\(shape)")
+            }
+            return .normRawBf16(Int(shape[0]))
+        }
+        if source.contains(".linear_attn.") {
+            // The GatedDeltaNet's five projections (in_proj_qkv / in_proj_z /
+            // in_proj_a / in_proj_b / out_proj) are stored at 8-bit: int4
+            // dequant noise on these enters the recurrent state and grows
+            // ~16x into the deep-layer hidden rows (torch probe isoMax up to
+            // 27 at L10), drowning the final logits. Full-attention q/k/v/o
+            // and the MoE stay int4 — their noise does not amplify.
+            guard source.hasSuffix(".weight"), shape.count == 2,
+                  shape[1] % 64 == 0 else {
+                throw RepackError.configurationInvalid(
+                    detail: "unclassifiable Qwen linear_attn tensor \(source) shape \(shape)")
+            }
+            return .int8Affine(rows: Int(shape[0]), cols: Int(shape[1]))
+        }
         if source.hasSuffix(".norm.weight") || source.hasSuffix(".input_layernorm.weight")
-            || source.hasSuffix(".post_attention_layernorm.weight")
-            || source.hasSuffix(".linear_attn.norm.weight") {
+            || source.hasSuffix(".post_attention_layernorm.weight") {
             return .normOnePlusW(Int(shape[0]))
         }
         // Everything else with `.weight` is a 2-D projection → int4 affine.
@@ -322,7 +349,7 @@ enum QwenRepackPlanner {
     private static func dtypeByte(for transform: QwenWriteTransform) -> UInt8 {
         switch transform {
         case .int4Affine, .int8Affine: return FQTurboFormatV1.DType.u32.rawValue
-        case .normOnePlusW:            return FQTurboFormatV1.DType.bf16.rawValue
+        case .normOnePlusW, .normRawBf16: return FQTurboFormatV1.DType.bf16.rawValue
         case .bf16ToFp16:              return FQTurboFormatV1.DType.fp16.rawValue
         case .bf16ToFp32:              return FQTurboFormatV1.DType.fp32.rawValue
         }
@@ -333,7 +360,8 @@ enum QwenRepackPlanner {
         switch transform {
         case .int4Affine(let r, let c), .int8Affine(let r, let c):
             return [UInt64(r), UInt64(c)]
-        case .normOnePlusW(let n), .bf16ToFp16(let n), .bf16ToFp32(let n):
+        case .normOnePlusW(let n), .normRawBf16(let n),
+             .bf16ToFp16(let n), .bf16ToFp32(let n):
             return [UInt64(n)]
         }
     }

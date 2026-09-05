@@ -567,6 +567,7 @@ public final class RemoteStreamingRepacker {
         var bits = FQTurboJSON.QuantBitWidths(
             embedding: 4,
             attention: 4,
+            linearAttention: 8,
             router: 8,
             sharedExpert: 8,
             routedExpert: 4)
@@ -576,6 +577,9 @@ public final class RemoteStreamingRepacker {
             }
             if e.name.hasSuffix(".self_attn.q_proj.weight"), let s = e.quantSpec {
                 bits.attention = s.bits
+            }
+            if e.name.hasSuffix(".linear_attn.in_proj_qkv.weight"), let s = e.quantSpec {
+                bits.linearAttention = s.bits
             }
             if e.name.hasSuffix(".router.proj.weight"), let s = e.quantSpec {
                 bits.router = s.bits

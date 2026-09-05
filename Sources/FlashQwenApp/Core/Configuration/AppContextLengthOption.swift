@@ -15,11 +15,22 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
     }
 
     public var fp16KVBytes: UInt64 {
-        let architecture = ArchConfig.gemma4_26B_A4B
+        Self.fp16KVBytes(tokens: tokens, architecture: .gemma4_26B_A4B)
+    }
+
+    /// FP16 K+V cache bytes for `tokens` context positions under the given
+    /// architecture. Qwen 3.6 has no sliding-window layers (its linear layers
+    /// hold no KV at all) — its cache is the 10 full-attention layers only
+    /// (2 KV heads × 256, fp16 K+V).
+    public static func fp16KVBytes(tokens: Int, architecture: ArchConfig) -> UInt64 {
         let fullLayers = architecture.fullAttentionLayerMask.reduce(0) {
             $0 + ($1 == 0 ? 0 : 1)
         }
-        let slidingLayers = architecture.numLayers - fullLayers
+        // slidingWindow == 0 means the non-full layers are linear-attention
+        // (Qwen) — no KV rows to count there.
+        let slidingLayers = architecture.slidingWindow > 0
+            ? architecture.numLayers - fullLayers
+            : 0
         let fp16Bytes = 2
         let keyAndValue = 2
         let slidingRows = min(

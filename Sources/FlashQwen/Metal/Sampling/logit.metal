@@ -40,6 +40,10 @@ constant constexpr float kSampleTopMaxK     = 256.0f;  // cap for top-k mask sca
 // ----------------------------------------------------------------------------
 
 inline float softcap_value(float z, float softcap) {
+    // softcap == 0 (Qwen 3.6's final_logit_softcapping) disables the cap —
+    // identity passthrough. Guarded because z/0 → ±inf and 0·NaN poisons the
+    // softmax.
+    if (softcap <= 0.0f) { return z; }
     // tanh saturates well before |z/softcap|=10, so values like +1e3 collapse
     // cleanly to softcap=30 without exp overflow downstream.
     return softcap * precise::tanh(z / softcap);

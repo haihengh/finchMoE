@@ -99,6 +99,11 @@ enum QwenQuantizedWriter {
                                   fd: fd, path: plan.path,
                                   dstOffset: entry.fileOffset,
                                   scratch: &scratch, audit: audit)
+        case .normRawBf16(let n):
+            try writeRawBf16(count: n, source: shard, srcBase: srcBase,
+                             fd: fd, path: plan.path,
+                             dstOffset: entry.fileOffset,
+                             audit: audit)
         case .bf16ToFp16(let n):
             try writeBf16To(count: n, fp32Out: false,
                             source: shard, srcBase: srcBase,
@@ -246,6 +251,24 @@ enum QwenQuantizedWriter {
                                 offset: dstOffset)
         }
         audit.recordWrite(bytes: baked.count * 2)
+        source.adviseDontNeed(offset: srcBase, count: count * 2)
+    }
+
+    /// Byte copy of the source's raw bf16 row (RMSNormGated weight-direct —
+    /// the runtime kernel multiplies the stored values unchanged).
+    private static func writeRawBf16(count: Int,
+                                     source: MmapHandle, srcBase: UInt64,
+                                     fd: Int32, path: String,
+                                     dstOffset: UInt64,
+                                     audit: RepackAudit) throws {
+        let src = source.slice(at: srcBase, count: count * 2)
+        audit.recordRead(bytes: count * 2)
+        try src.withUnsafeBytes { raw in
+            try Posix.pwriteAll(fd: fd, path: path,
+                                buf: raw.baseAddress!, count: raw.count,
+                                offset: dstOffset)
+        }
+        audit.recordWrite(bytes: count * 2)
         source.adviseDontNeed(offset: srcBase, count: count * 2)
     }
 

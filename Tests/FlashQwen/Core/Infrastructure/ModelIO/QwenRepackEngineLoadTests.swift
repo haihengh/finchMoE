@@ -209,6 +209,14 @@ import FlashQwenFormat
         defer { try? FileManager.default.removeItem(atPath: out) }
 
         let ctx = try MetalContext()
+        // The preset auto-detection: the manifest's qwen3_6 family picks the
+        // built-in Qwen preset.
+        let detected = try ManifestReader.detectPreset(
+            directoryURL: URL(fileURLWithPath: out))
+        // The manifest family selects the BUILT-IN preset (production dims),
+        // not the toy dims.
+        #expect(detected == .qwen3_6_35B_A3B)
+
         // The full runtime load: manifest + resident index decode, arch
         // cross-check against the toy preset, and validateRuntimeSchema.
         let model = try Model.load(

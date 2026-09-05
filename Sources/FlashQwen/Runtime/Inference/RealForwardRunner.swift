@@ -161,6 +161,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let gdnPrefill: GDNPrefill
     private let qwenFusions: QwenDecodeFusions
 
+    // GDN linear-attention projections (in_proj_qkv/z/a/b, out_proj): the
+    // manifest linearAttention slot is 4 on Gemma / legacy installs and 8 on
+    // the production Qwen build. At 8 the decode gate decomposes onto two
+    // int8 GEMVs + the batch-gate kernel at T=1, and prefill runs repeated
+    // per-token int8 GEMVs (no batched int8 QMM exists yet).
+    private let linearAttnBits: Int
+    private let int8GEMV: DequantInt8GEMV?
+    private let gateAB: MTLBuffer?   // fp16 [2V] in_proj_a|b decode scratch
+
     // Prefill kernels. These are initialized once per runner so the chunk path
     // cannot accidentally rebuild PSOs inside a per-layer loop.
     private let prefillEmbed: PrefillEmbedLookupInt4
@@ -220,6 +229,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// BF16 ones buffers: Qwen's router has no router.scale / per_expert_scale.
     private let qwenOnesEffectiveScale: MTLBuffer?
     private let qwenOnesPerExpertScale: MTLBuffer?
+    /// Internal test hook: receives (layer, phase, values) snapshots —
+    /// "preLayer" (the layer input hidden, before any compute), "postAttn"
+    /// (the post_attention_layernorm output, pre-MoE) after the layer-head CB
+    /// completes, and "postLayer" (the final hidden) after the tail. Nil in
+    /// production — the copies only run when a hook is installed.
+    internal var qwenLayerDebugHook: ((Int, String, [Float16]) -> Void)? = nil
     private var prefillChunkState = PrefillChunkCommitState()
     private var prefillScratch: PrefillChunkScratchBuffers?
 
@@ -290,6 +305,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.gdn = try GDN(context: context)
         self.gdnPrefill = try GDNPrefill(context: context)
         self.qwenFusions = try QwenDecodeFusions(context: context)
+        self.linearAttnBits = model.linearAttentionWeightBits
+        self.int8GEMV = model.linearAttentionWeightBits == 8
+            ? try DequantInt8GEMV(context: context) : nil
+        // gateAB is allocated with the Qwen state below (linearAttn == 8).
         self.prefillEmbed = try PrefillEmbedLookupInt4(context: context)
         self.prefillRMS = try PrefillRMSNorm(context: context)
         self.prefillQMM = try PrefillInt4QMM(context: context)
@@ -433,6 +452,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             self.gateBuf  = try buf(max(fullQ, 1))
             self.gBeta    = try zeros(2 * v, MemoryLayout<Float>.size,
                                       label: "qwen.g_beta")
+            self.gateAB   = linearAttnBits == 8
+                ? try buf(max(2 * v, 1)) : nil
 
             var recState: [MTLBuffer] = []
             var convState: [MTLBuffer] = []
@@ -447,44 +468,50 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     qkvDim * 3, MemoryLayout<Float16>.size,
                     label: "gdn_conv_state.L\(L)"))
 
-                // Assemble the fused in_proj_a|in_proj_b int4-affine block
-                // (a-rows then b-rows) the gate kernel reads. TensorView
-                // offsets are buffer-relative; copy the ranges once at init.
-                let aView = try model.gdnInProjA(layer: L)
-                let bView = try model.gdnInProjB(layer: L)
-                let rowBytes = D / 2
-                let groups = D / groupCount
-                let auxBytes = v * groups * MemoryLayout<UInt16>.size
-                guard let wBuf = device.makeBuffer(
-                        length: 2 * v * rowBytes,
-                        options: .storageModeShared),
-                      let sBuf = device.makeBuffer(
-                        length: 2 * auxBytes,
-                        options: .storageModeShared),
-                      let bBuf = device.makeBuffer(
-                        length: 2 * auxBytes,
-                        options: .storageModeShared) else {
-                    throw ModelError.residentBufferWrapFailed
+                // The fused in_proj_a|in_proj_b int4-affine block (a-rows
+                // then b-rows) is only assembled for the 4-bit decode gate
+                // kernel; at 8 bits in_proj_a/b stay separate resident
+                // tensors and the decode gate decomposes onto two int8 GEMVs
+                // + the batch-gate kernel (T=1).
+                if linearAttnBits == 4 {
+                    // TensorView offsets are buffer-relative; copy the ranges
+                    // once at init.
+                    let aView = try model.gdnInProjA(layer: L)
+                    let bView = try model.gdnInProjB(layer: L)
+                    let rowBytes = D / 2
+                    let groups = D / groupCount
+                    let auxBytes = v * groups * MemoryLayout<UInt16>.size
+                    guard let wBuf = device.makeBuffer(
+                            length: 2 * v * rowBytes,
+                            options: .storageModeShared),
+                          let sBuf = device.makeBuffer(
+                            length: 2 * auxBytes,
+                            options: .storageModeShared),
+                          let bBuf = device.makeBuffer(
+                            length: 2 * auxBytes,
+                            options: .storageModeShared) else {
+                        throw ModelError.residentBufferWrapFailed
+                    }
+                    func residentBytes(_ view: TensorView, _ offset: UInt64) -> UnsafeMutableRawPointer {
+                        view.buffer.contents().advanced(by: Int(offset))
+                    }
+                    func copy(_ view: TensorView, _ offset: UInt64, to dst: UnsafeMutableRawPointer, len: Int) {
+                        memcpy(dst, residentBytes(view, offset), len)
+                    }
+                    let wDst = wBuf.contents()
+                    copy(aView, aView.offset, to: wDst, len: v * rowBytes)
+                    copy(bView, bView.offset,
+                         to: wDst.advanced(by: v * rowBytes), len: v * rowBytes)
+                    let sDst = sBuf.contents()
+                    copy(aView, aView.scaleOffset, to: sDst, len: auxBytes)
+                    copy(bView, bView.scaleOffset,
+                         to: sDst.advanced(by: auxBytes), len: auxBytes)
+                    let bDst = bBuf.contents()
+                    copy(aView, aView.biasOffset, to: bDst, len: auxBytes)
+                    copy(bView, bView.biasOffset,
+                         to: bDst.advanced(by: auxBytes), len: auxBytes)
+                    gateWeights.append((wBuf, sBuf, bBuf))
                 }
-                func residentBytes(_ view: TensorView, _ offset: UInt64) -> UnsafeMutableRawPointer {
-                    view.buffer.contents().advanced(by: Int(offset))
-                }
-                func copy(_ view: TensorView, _ offset: UInt64, to dst: UnsafeMutableRawPointer, len: Int) {
-                    memcpy(dst, residentBytes(view, offset), len)
-                }
-                let wDst = wBuf.contents()
-                copy(aView, aView.offset, to: wDst, len: v * rowBytes)
-                copy(bView, bView.offset,
-                     to: wDst.advanced(by: v * rowBytes), len: v * rowBytes)
-                let sDst = sBuf.contents()
-                copy(aView, aView.scaleOffset, to: sDst, len: auxBytes)
-                copy(bView, bView.scaleOffset,
-                     to: sDst.advanced(by: auxBytes), len: auxBytes)
-                let bDst = bBuf.contents()
-                copy(aView, aView.biasOffset, to: bDst, len: auxBytes)
-                copy(bView, bView.biasOffset,
-                     to: bDst.advanced(by: auxBytes), len: auxBytes)
-                gateWeights.append((wBuf, sBuf, bBuf))
             }
             self.gdnRecurrentState = recState
             self.gdnConvState = convState
@@ -509,6 +536,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             self.qGateBuf = try buf(1)
             self.gateBuf  = try buf(1)
             self.gBeta    = try buf(1, MemoryLayout<Float>.size)
+            self.gateAB   = nil
             self.gdnRecurrentState = []
             self.gdnConvState = []
             self.gdnGateWeights = []
@@ -779,7 +807,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         let D = cfg.hiddenSize
         let eps: Float = 1e-6
-        let sqrtHidden = Float(D).squareRoot()
+        // Gemma scales embeddings by sqrt(hidden); Qwen 3.6 does NOT
+        // (qwen3_5_moe feeds embed_tokens straight into the layers — the
+        // residual would otherwise stay embed-dominated and the layer
+        // contributions would be attenuated by 1/sqrt(D) every residual add).
+        let sqrtHidden = cfg.modelFamily == "qwen3_6" ? 1.0 : Float(D).squareRoot()
         let t = tokens.count
         let emb = model.embedding
 
@@ -1288,6 +1320,35 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// families) when available, then the QMM batch kernel, then repeated
     /// decode-style GEMVs. `x` is [tokenCount][columns], `y` is
     /// [tokenCount][rows] with the given element strides.
+    private func encodeRepeatedInt8(commandBuffer: MTLCommandBuffer,
+                                    weights: TensorView,
+                                    x: MTLBuffer,
+                                    y: MTLBuffer,
+                                    rows: Int,
+                                    columns: Int,
+                                    tokenCount: Int,
+                                    xStrideElements: Int,
+                                    yStrideElements: Int,
+                                    yBaseElements: Int = 0) {
+        guard tokenCount >= 1 else { return }
+        for row in 0..<tokenCount {
+            int8GEMV!.encode(commandBuffer: commandBuffer,
+                             weights: weights.buffer,
+                             weightsOffset: Int(weights.offset),
+                             scales: weights.buffer,
+                             scalesOffset: Int(weights.scaleOffset),
+                             biases: weights.buffer,
+                             biasesOffset: Int(weights.biasOffset),
+                             x: x,
+                             xOffset: row * xStrideElements * MemoryLayout<Float16>.size,
+                             y: y,
+                             yOffset: (yBaseElements + row * yStrideElements)
+                                * MemoryLayout<Float16>.size,
+                             m: UInt32(rows),
+                             n: UInt32(columns))
+        }
+    }
+
     private func encodeInt4Projection(commandBuffer: MTLCommandBuffer,
                                       family: PrefillProjectionFamily,
                                       weights: TensorView,
@@ -1602,9 +1663,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let aLog = try model.gdnALog(layer: L)
             let dt = try model.gdnDtBias(layer: L)
             let normW = try model.gdnNormWeight(layer: L)
-            let gateW = gdnGateWeights[si]
             let recState = gdnRecurrentState[si]
             let convState = gdnConvState[si]
+            let aP = linearAttnBits == 8 ? try model.gdnInProjA(layer: L) : nil
+            let bP = linearAttnBits == 8 ? try model.gdnInProjB(layer: L) : nil
             let keyDim = cfg.linearNumKeyHeads * cfg.linearKeyHeadDim
             let valueDim = cfg.linearNumValueHeads * cfg.linearValueHeadDim
             let qkvDim = 2 * keyDim + valueDim
@@ -1613,37 +1675,85 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let scale = 1.0 / Float(cfg.linearKeyHeadDim).squareRoot()
             let betaByteOffset = t * numV * MemoryLayout<Float>.size
 
-            encodeInt4Projection(commandBuffer: cb,
-                                 family: .kv,
-                                 weights: qkvP,
-                                 x: scratch.normed,
-                                 y: scratch.qwenQKVProj,
-                                 rows: qkvDim,
-                                 columns: D,
-                                 tokenCount: t,
-                                 xStrideElements: D,
-                                 yStrideElements: qkvDim)
-            encodeInt4Projection(commandBuffer: cb,
-                                 family: .kv,
-                                 weights: zP,
-                                 x: scratch.normed,
-                                 y: scratch.qwenZ,
-                                 rows: valueDim,
-                                 columns: D,
-                                 tokenCount: t,
-                                 xStrideElements: D,
-                                 yStrideElements: valueDim)
-            // in_proj_a|in_proj_b as one [2V, D] QMM over the init-assembled
-            // fused block (the same buffer the decode gate GEMV reads).
-            prefillQMM.encode(commandBuffer: cb,
-                              weights: gateW.weights,
-                              scales: gateW.scales,
-                              biases: gateW.biases,
-                              x: scratch.normed,
-                              y: scratch.qwenAB,
-                              t: t,
-                              n: 2 * numV,
-                              k: D)
+            if linearAttnBits == 8 {
+                // int8 linear_attn projections: no batched int8 QMM exists,
+                // so each chunk token runs one decode-style int8 GEMV per
+                // projection (the 4-bit fused a|b block is not assembled).
+                encodeRepeatedInt8(commandBuffer: cb,
+                                   weights: qkvP,
+                                   x: scratch.normed,
+                                   y: scratch.qwenQKVProj,
+                                   rows: qkvDim,
+                                   columns: D,
+                                   tokenCount: t,
+                                   xStrideElements: D,
+                                   yStrideElements: qkvDim)
+                encodeRepeatedInt8(commandBuffer: cb,
+                                   weights: zP,
+                                   x: scratch.normed,
+                                   y: scratch.qwenZ,
+                                   rows: valueDim,
+                                   columns: D,
+                                   tokenCount: t,
+                                   xStrideElements: D,
+                                   yStrideElements: valueDim)
+                // a-rows then b-rows into the [T][2V] ab scratch the batched
+                // gate kernel reads (same layout the fused QMM wrote).
+                encodeRepeatedInt8(commandBuffer: cb,
+                                   weights: aP!,
+                                   x: scratch.normed,
+                                   y: scratch.qwenAB,
+                                   rows: numV,
+                                   columns: D,
+                                   tokenCount: t,
+                                   xStrideElements: D,
+                                   yStrideElements: 2 * numV,
+                                   yBaseElements: 0)
+                encodeRepeatedInt8(commandBuffer: cb,
+                                   weights: bP!,
+                                   x: scratch.normed,
+                                   y: scratch.qwenAB,
+                                   rows: numV,
+                                   columns: D,
+                                   tokenCount: t,
+                                   xStrideElements: D,
+                                   yStrideElements: 2 * numV,
+                                   yBaseElements: numV)
+            } else {
+                encodeInt4Projection(commandBuffer: cb,
+                                     family: .kv,
+                                     weights: qkvP,
+                                     x: scratch.normed,
+                                     y: scratch.qwenQKVProj,
+                                     rows: qkvDim,
+                                     columns: D,
+                                     tokenCount: t,
+                                     xStrideElements: D,
+                                     yStrideElements: qkvDim)
+                encodeInt4Projection(commandBuffer: cb,
+                                     family: .kv,
+                                     weights: zP,
+                                     x: scratch.normed,
+                                     y: scratch.qwenZ,
+                                     rows: valueDim,
+                                     columns: D,
+                                     tokenCount: t,
+                                     xStrideElements: D,
+                                     yStrideElements: valueDim)
+                // in_proj_a|in_proj_b as one [2V, D] QMM over the
+                // init-assembled fused block (the same buffer the decode
+                // gate GEMV reads).
+                let gateW = gdnGateWeights[si]
+                prefillQMM.encode(commandBuffer: cb,
+                                  weights: gateW.weights,
+                                  scales: gateW.scales,
+                                  biases: gateW.biases,
+                                  x: scratch.normed,
+                                  y: scratch.qwenAB,
+                                  t: t,
+                                  n: 2 * numV,
+                                  k: D)
+            }
             gdnPrefill.encodeGateBatch(commandBuffer: cb,
                                        ab: scratch.qwenAB,
                                        A_log: aLog.buffer, A_logOffset: Int(aLog.offset),
@@ -1683,16 +1793,28 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                numValueHeads: numV,
                                                tokens: t,
                                                eps: eps)
-            encodeInt4Projection(commandBuffer: cb,
-                                 family: .o,
-                                 weights: outP,
-                                 x: scratch.qwenRecOut,
-                                 y: scratch.h1,
-                                 rows: D,
-                                 columns: valueDim,
-                                 tokenCount: t,
-                                 xStrideElements: valueDim,
-                                 yStrideElements: D)
+            if linearAttnBits == 8 {
+                encodeRepeatedInt8(commandBuffer: cb,
+                                   weights: outP,
+                                   x: scratch.qwenRecOut,
+                                   y: scratch.h1,
+                                   rows: D,
+                                   columns: valueDim,
+                                   tokenCount: t,
+                                   xStrideElements: valueDim,
+                                   yStrideElements: D)
+            } else {
+                encodeInt4Projection(commandBuffer: cb,
+                                     family: .o,
+                                     weights: outP,
+                                     x: scratch.qwenRecOut,
+                                     y: scratch.h1,
+                                     rows: D,
+                                     columns: valueDim,
+                                     tokenCount: t,
+                                     xStrideElements: valueDim,
+                                     yStrideElements: D)
+            }
             gPostAttn(cb)
         }
 
@@ -1973,6 +2095,82 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         if let error = tailCB.error {
             throw error
+        }
+
+        if let hook = qwenLayerDebugHook {
+            // The prefill scratch is private-storage; blit the row to a
+            // shared snapshot buffer for the diagnostic hook.
+            func row(_ name: String, _ buf: MTLBuffer, _ stride: Int,
+                     sourceRow: Int = 0) {
+                guard let tmp = ctx.device.makeBuffer(length: stride * 2,
+                                                      options: .storageModeShared),
+                      let snapCB = ctx.queue.makeCommandBuffer(),
+                      let blit = snapCB.makeBlitCommandEncoder() else { return }
+                blit.copy(from: buf, sourceOffset: sourceRow * stride * 2,
+                          to: tmp, destinationOffset: 0, size: stride * 2)
+                blit.endEncoding()
+                snapCB.commit()
+                snapCB.waitUntilCompleted()
+                let ptr = tmp.contents().bindMemory(to: Float16.self,
+                                                    capacity: stride)
+                hook(L, name, Array(UnsafeBufferPointer(start: ptr,
+                                                        count: stride)))
+            }
+            row("prefillHidden0", scratch.hidden, cfg.hiddenSize)
+            row("prefillDense0", scratch.denseX, cfg.hiddenSize)
+            // Per-token rows: the mixers and the MoE tail write denseX /
+            // hidden row-strided — snapshots of every row let the diagnostic
+            // replay find the first diverging layer/token.
+            for t in 0..<tokenCount {
+                row("prefillHidden.\(t)", scratch.hidden, cfg.hiddenSize,
+                    sourceRow: t)
+                row("prefillDense.\(t)", scratch.denseX, cfg.hiddenSize,
+                    sourceRow: t)
+            }
+            // Router readback for the last token (shared-storage scratch):
+            // the engine's expert ids/weights for the MoE-tail comparison.
+            do {
+                let topK = cfg.topKExperts
+                let idPtr = scratch.routeIDs.contents()
+                    .bindMemory(to: UInt32.self, capacity: tokenCount * topK)
+                let wPtr = scratch.routeWeights.contents()
+                    .bindMemory(to: Float16.self, capacity: tokenCount * topK)
+                let last = tokenCount - 1
+                hook(L, "pfRouteIDs", (0..<topK).map { idPtr[last * topK + $0] }
+                    .map { Float16($0) })
+                hook(L, "pfRouteW", (0..<topK).map { wPtr[last * topK + $0] }
+                    .map { Float16($0) })
+            }
+            let si = gdnStateIndexByLayer[L]
+            if si >= 0 {
+                let n = cfg.linearNumValueHeads * cfg.linearValueHeadDim
+                    * cfg.linearValueHeadDim
+                let ptr = gdnRecurrentState[si].contents()
+                    .bindMemory(to: Float.self, capacity: n)
+                hook(L, "pfState", Array(UnsafeBufferPointer(start: ptr, count: n))
+                    .map { Float16($0) })
+                let cn = (cfg.linearNumKeyHeads * cfg.linearKeyHeadDim * 2
+                    + cfg.linearNumValueHeads * cfg.linearValueHeadDim) * 3
+                let cPtr = gdnConvState[si].contents()
+                    .bindMemory(to: Float16.self, capacity: cn)
+                hook(L, "pfConvState", Array(UnsafeBufferPointer(start: cPtr,
+                                                                 count: cn)))
+            } else if let kv {
+                // Full-attention layer: snapshot every KV row the prefill
+                // wrote (already normalized + rotated by the epilogue).
+                func slot(_ name: String,
+                          _ s: (buffer: MTLBuffer, offset: Int)) {
+                    let n = cfg.numFullKVHeads * cfg.fullHeadDim
+                    let ptr = s.buffer.contents().advanced(by: s.offset)
+                        .bindMemory(to: Float16.self, capacity: n)
+                    hook(L, name, Array(UnsafeBufferPointer(start: ptr,
+                                                            count: n)))
+                }
+                for p in 0..<tokenCount {
+                    slot("pfK.\(p)", kv.kSlot(layer: L, position: startPosition + p))
+                    slot("pfV.\(p)", kv.vSlot(layer: L, position: startPosition + p))
+                }
+            }
         }
 
         if L + 1 < cfg.numLayers {
@@ -2272,6 +2470,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let tCb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let cb = ctx.queue.makeCommandBuffer()!
 
+        if let hook = qwenLayerDebugHook {
+            let ptr = hidden.contents().bindMemory(to: Float16.self,
+                                                   capacity: cfg.hiddenSize)
+            hook(L, "preLayer", Array(UnsafeBufferPointer(start: ptr,
+                                                          count: cfg.hiddenSize)))
+        }
+
         let gInputNorm: (MTLCommandBuffer) -> Void = { [self] cb in
             rms.encodeBF16W(commandBuffer: cb,
                             x: hidden,
@@ -2352,8 +2557,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let gAttention: (MTLCommandBuffer) -> Void = { [self] cb in
                 attention.encodeFull(commandBuffer: cb,
                                      q: qScratch,
-                                     k: kSlot.buffer, kOffset: kSlot.offset,
-                                     v: vSlot.buffer, vOffset: vSlot.offset,
+                                     // The kernel walks positions [0, seqLen)
+                                     // from the buffer start (the cache base),
+                                     // NOT from the current token's slot —
+                                     // k/v offsets are always 0 on this path.
+                                     k: kSlot.buffer, kOffset: 0,
+                                     v: vSlot.buffer, vOffset: 0,
                                      out: attnOut,
                                      headDim: headDim,
                                      numQHeads: numQ,
@@ -2397,9 +2606,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let aLog = try model.gdnALog(layer: L)
             let dt = try model.gdnDtBias(layer: L)
             let normW = try model.gdnNormWeight(layer: L)
-            let gateW = gdnGateWeights[si]
             let recState = gdnRecurrentState[si]
             let convState = gdnConvState[si]
+            let aP = linearAttnBits == 8 ? try model.gdnInProjA(layer: L) : nil
+            let bP = linearAttnBits == 8 ? try model.gdnInProjB(layer: L) : nil
             let keyDim = UInt32(cfg.linearNumKeyHeads * cfg.linearKeyHeadDim)
             let valueDim = UInt32(cfg.linearNumValueHeads * cfg.linearValueHeadDim)
             let qkvDim = 2 * keyDim + valueDim
@@ -2409,20 +2619,37 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let betaByteOffset = numV * MemoryLayout<Float>.size
 
             let gProj: (MTLCommandBuffer) -> Void = { [self] cb in
-                int4.encode(commandBuffer: cb,
-                            weights: qkvP.buffer, weightsOffset: Int(qkvP.offset),
-                            scales: qkvP.buffer, scalesOffset: Int(qkvP.scaleOffset),
-                            biases: qkvP.buffer, biasesOffset: Int(qkvP.biasOffset),
-                            x: normed,
-                            y: qkvConv,
-                            m: qkvDim, n: D)
-                int4.encode(commandBuffer: cb,
-                            weights: zP.buffer, weightsOffset: Int(zP.offset),
-                            scales: zP.buffer, scalesOffset: Int(zP.scaleOffset),
-                            biases: zP.buffer, biasesOffset: Int(zP.biasOffset),
-                            x: normed,
-                            y: zBuf,
-                            m: valueDim, n: D)
+                if linearAttnBits == 8 {
+                    int8GEMV!.encode(commandBuffer: cb,
+                                     weights: qkvP.buffer, weightsOffset: Int(qkvP.offset),
+                                     scales: qkvP.buffer, scalesOffset: Int(qkvP.scaleOffset),
+                                     biases: qkvP.buffer, biasesOffset: Int(qkvP.biasOffset),
+                                     x: normed,
+                                     y: qkvConv,
+                                     m: qkvDim, n: D)
+                    int8GEMV!.encode(commandBuffer: cb,
+                                     weights: zP.buffer, weightsOffset: Int(zP.offset),
+                                     scales: zP.buffer, scalesOffset: Int(zP.scaleOffset),
+                                     biases: zP.buffer, biasesOffset: Int(zP.biasOffset),
+                                     x: normed,
+                                     y: zBuf,
+                                     m: valueDim, n: D)
+                } else {
+                    int4.encode(commandBuffer: cb,
+                                weights: qkvP.buffer, weightsOffset: Int(qkvP.offset),
+                                scales: qkvP.buffer, scalesOffset: Int(qkvP.scaleOffset),
+                                biases: qkvP.buffer, biasesOffset: Int(qkvP.biasOffset),
+                                x: normed,
+                                y: qkvConv,
+                                m: qkvDim, n: D)
+                    int4.encode(commandBuffer: cb,
+                                weights: zP.buffer, weightsOffset: Int(zP.offset),
+                                scales: zP.buffer, scalesOffset: Int(zP.scaleOffset),
+                                biases: zP.buffer, biasesOffset: Int(zP.biasOffset),
+                                x: normed,
+                                y: zBuf,
+                                m: valueDim, n: D)
+                }
             }
             let gConv: (MTLCommandBuffer) -> Void = { [self] cb in
                 gdn.encodeCausalConvUpdate(commandBuffer: cb,
@@ -2434,17 +2661,50 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                            channels: Int(qkvDim))
             }
             let gGateGEMV: (MTLCommandBuffer) -> Void = { [self] cb in
-                gdn.encodeGateGEMV(commandBuffer: cb,
-                                   weights: gateW.weights,
-                                   scales: gateW.scales,
-                                   biases: gateW.biases,
-                                   x: normed,
-                                   A_log: aLog.buffer, A_logOffset: Int(aLog.offset),
-                                   dt_bias: dt.buffer, dt_biasOffset: Int(dt.offset),
-                                   g: gBeta,
-                                   beta: gBeta, betaOffset: betaByteOffset,
-                                   numValueHeads: numV,
-                                   n: D)
+                if linearAttnBits == 8 {
+                    // Two int8 GEMVs (in_proj_a then in_proj_b) into the fp16
+                    // [2V] ab scratch, then the batched gate formula at T=1 —
+                    // g at offset 0, beta at +V floats, the same layout and
+                    // math as the 4-bit fused kernel.
+                    guard let gemv = int8GEMV, let ab = gateAB,
+                          let aView = aP, let bView = bP else { return }
+                    gemv.encode(commandBuffer: cb,
+                                weights: aView.buffer, weightsOffset: Int(aView.offset),
+                                scales: aView.buffer, scalesOffset: Int(aView.scaleOffset),
+                                biases: aView.buffer, biasesOffset: Int(aView.biasOffset),
+                                x: normed,
+                                y: ab,
+                                m: UInt32(numV), n: D)
+                    gemv.encode(commandBuffer: cb,
+                                weights: bView.buffer, weightsOffset: Int(bView.offset),
+                                scales: bView.buffer, scalesOffset: Int(bView.scaleOffset),
+                                biases: bView.buffer, biasesOffset: Int(bView.biasOffset),
+                                x: normed,
+                                y: ab,
+                                yOffset: numV * MemoryLayout<Float16>.size,
+                                m: UInt32(numV), n: D)
+                    gdnPrefill.encodeGateBatch(commandBuffer: cb,
+                                               ab: ab,
+                                               A_log: aLog.buffer, A_logOffset: Int(aLog.offset),
+                                               dt_bias: dt.buffer, dt_biasOffset: Int(dt.offset),
+                                               g: gBeta,
+                                               beta: gBeta, betaOffset: betaByteOffset,
+                                               numValueHeads: numV,
+                                               tokens: 1)
+                } else {
+                    let gateW = gdnGateWeights[si]
+                    gdn.encodeGateGEMV(commandBuffer: cb,
+                                       weights: gateW.weights,
+                                       scales: gateW.scales,
+                                       biases: gateW.biases,
+                                       x: normed,
+                                       A_log: aLog.buffer, A_logOffset: Int(aLog.offset),
+                                       dt_bias: dt.buffer, dt_biasOffset: Int(dt.offset),
+                                       g: gBeta,
+                                       beta: gBeta, betaOffset: betaByteOffset,
+                                       numValueHeads: numV,
+                                       n: D)
+                }
             }
             let gRecurrent: (MTLCommandBuffer) -> Void = { [self] cb in
                 gdn.encodeRecurrent(commandBuffer: cb,
@@ -2471,13 +2731,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                        eps: eps)
             }
             let gOProj: (MTLCommandBuffer) -> Void = { [self] cb in
-                int4.encode(commandBuffer: cb,
-                            weights: outP.buffer, weightsOffset: Int(outP.offset),
-                            scales: outP.buffer, scalesOffset: Int(outP.scaleOffset),
-                            biases: outP.buffer, biasesOffset: Int(outP.biasOffset),
-                            x: attnOut,
-                            y: oOut,
-                            m: D, n: valueDim)
+                if linearAttnBits == 8 {
+                    int8GEMV!.encode(commandBuffer: cb,
+                                     weights: outP.buffer, weightsOffset: Int(outP.offset),
+                                     scales: outP.buffer, scalesOffset: Int(outP.scaleOffset),
+                                     biases: outP.buffer, biasesOffset: Int(outP.biasOffset),
+                                     x: attnOut,
+                                     y: oOut,
+                                     m: D, n: valueDim)
+                } else {
+                    int4.encode(commandBuffer: cb,
+                                weights: outP.buffer, weightsOffset: Int(outP.offset),
+                                scales: outP.buffer, scalesOffset: Int(outP.scaleOffset),
+                                biases: outP.buffer, biasesOffset: Int(outP.biasOffset),
+                                x: attnOut,
+                                y: oOut,
+                                m: D, n: valueDim)
+                }
             }
             gInputNorm(cb)
             gProj(cb)
@@ -2507,10 +2777,57 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         waitForCompletion(cb)
         let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
         if let previous = pending {
-            finishPendingRoutedCommand(previous, waitIfNeeded: false)
+            // The debug hook snapshots read shared buffers on the CPU — wait
+            // out the deferred tail so the snapshots are race-free. Without a
+            // hook, the tail completes in CB order before the next layer.
+            finishPendingRoutedCommand(previous,
+                                       waitIfNeeded: qwenLayerDebugHook != nil)
             pending = nil
         }
         totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
+
+        if let hook = qwenLayerDebugHook {
+            func snap(_ name: String, _ buf: MTLBuffer, _ count: Int) {
+                let ptr = buf.contents().bindMemory(to: Float16.self, capacity: count)
+                hook(L, name, Array(UnsafeBufferPointer(start: ptr, count: count)))
+            }
+            snap("postAttn", denseX, cfg.hiddenSize)
+            snap("normed", normed, cfg.hiddenSize)
+            snap("qkvConv", qkvConv, 8192)
+            snap("recurrentOut", attnOut, 4096)
+            snap("oOut", oOut, cfg.hiddenSize)
+            do {
+                let n = 2 * cfg.linearNumValueHeads
+                let ptr = gBeta.contents().bindMemory(to: Float.self, capacity: n)
+                hook(L, "gFloat", Array(UnsafeBufferPointer(start: ptr, count: n))
+                    .map { Float16($0) })
+            }
+            if isFull, let kv {
+                let n = cfg.numHeads * cfg.fullHeadDim
+                let qPtr = qScratch.contents().bindMemory(to: Float16.self, capacity: n)
+                hook(L, "qOutF", Array(UnsafeBufferPointer(start: qPtr, count: n)))
+                let gPtr = gateBuf.contents().bindMemory(to: Float16.self, capacity: n)
+                hook(L, "gateF", Array(UnsafeBufferPointer(start: gPtr, count: n)))
+                let slot = kv.kSlot(layer: L, position: position)
+                let kn = cfg.numFullKVHeads * cfg.fullHeadDim
+                let kPtr = slot.buffer.contents().advanced(by: slot.offset)
+                    .bindMemory(to: Float16.self, capacity: kn)
+                hook(L, "kF", Array(UnsafeBufferPointer(start: kPtr, count: kn)))
+                let vSlot = kv.vSlot(layer: L, position: position)
+                let vPtr = vSlot.buffer.contents().advanced(by: vSlot.offset)
+                    .bindMemory(to: Float16.self, capacity: kn)
+                hook(L, "vF", Array(UnsafeBufferPointer(start: vPtr, count: kn)))
+            }
+            let si = gdnStateIndexByLayer[L]
+            if si >= 0 {
+                let n = cfg.linearNumValueHeads * cfg.linearValueHeadDim
+                    * cfg.linearValueHeadDim
+                let ptr = gdnRecurrentState[si].contents()
+                    .bindMemory(to: Float.self, capacity: n)
+                hook(L, "recState", Array(UnsafeBufferPointer(start: ptr, count: n))
+                    .map { Float16($0) })
+            }
+        }
 
         // Shared expert post stage: sigmoid(shared_expert_gate · x) scales h1.
         let sharedPost: (MTLCommandBuffer) -> Void = { [self] cb in
@@ -2543,6 +2860,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             sharedPostEncoder: sharedPost,
             tailEncoder: tail,
             pending: &pending)
+
+        if let hook = qwenLayerDebugHook {
+            // The just-committed tail (hidden += h2) is in flight — wait it
+            // out so the post-layer snapshot is race-free.
+            if let p = pending {
+                finishPendingRoutedCommand(p, waitIfNeeded: true)
+                pending = nil
+            }
+            let ptr = hidden.contents().bindMemory(to: Float16.self,
+                                                   capacity: cfg.hiddenSize)
+            hook(L, "postLayer", Array(UnsafeBufferPointer(start: ptr,
+                                                           count: cfg.hiddenSize)))
+        }
     }
 
     private func produceToken(token: Int32,
@@ -2561,7 +2891,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         let D    = UInt32(cfg.hiddenSize)
         let eps: Float = 1e-6
-        let sqrtHidden = Float(cfg.hiddenSize).squareRoot()
+        // Qwen 3.6 does not scale embeddings (see prefillChunked).
+        let sqrtHidden = cfg.modelFamily == "qwen3_6" ? 1.0 : Float(cfg.hiddenSize).squareRoot()
         var pendingRoutedCommand: PendingRoutedCommand?
 
         // Embed lookup + sqrt(H) fused.

@@ -18,6 +18,7 @@ import Testing
             bitWidths: FQTurboJSON.QuantBitWidths(
                 embedding: 4,
                 attention: 4,
+                linearAttention: 4,
                 router: 8,
                 sharedExpert: 4,
                 routedExpert: 4))
@@ -58,7 +59,9 @@ import Testing
             hash(frozenIndex),
         ]
         #expect(hashes == [
-            "a090f53daa9e56b0e30267a8af5ef73f87bd708ae6a3094199f3d9f851b896ce",
+            // Manifest hash changed when the linearAttention quant slot
+            // became a required wire key (fixture regenerated).
+            "1de997f6e819687c4951d415579575890f3b3a520c7d0909f27a0e6498ab8e02",
             "acf57a355128d1d8afb1d09b75dc1aa7fef98687871b1ff9f738dd511cb6e341",
             "aa705246112c17d4b60422a2705bda53e96553f7ff96e09b00e6fbb5a4ffa594",
         ], "fixture hashes: \(hashes)")

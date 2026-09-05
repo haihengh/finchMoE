@@ -26,8 +26,14 @@ Gated-DeltaNet unit is reference-checked against the `qwen3_5_moe`
 transformers source, the full Qwen decode-layer path and the chunked Qwen
 prefill path are wired into the forward pass (Gemma paths untouched), and
 the bf16 → int4 quantizing repack is built and proven against the real
-checkpoint. End-to-end runs remain blocked only on the interface: sampling /
-stop and the Qwen preset selection. The
+checkpoint. The interface is complete: the Qwen preset is auto-detected from
+the installed manifest in app / CLI / server, the tokenizer family handles
+Qwen special tokens + ChatML + the dual stop set (248046/248044), and the
+softcap-0 sampling path is wired. End-to-end runs execute (prefill → decode →
+sample at ~10–13 tok/s) — but generated text still degenerates into loops;
+the layer-by-layer diagnostics (all 40 mixers, states, weights, tokenizer
+ids) match their fp32/checkpoint references, and the hunt is narrowed to
+multi-step state continuity / the prefill tail. The
 [implementation plan](#implementation-plan) records the verified state and
 the remaining work, in order.
 
@@ -128,7 +134,9 @@ Details that matter for a Metal port:
 Verified against the working tree on 2026-09-01 (commit `6b1e2ec`), updated
 2026-09-03 after the decode-path wiring, 2026-09-04 after the Qwen chunked
 prefill wiring, and 2026-09-04 again after the quantizing repack landed
-(real 19.5 GB install built and load-validated). This section is the single
+(real 19.5 GB install built and load-validated), and 2026-09-05 after the
+int8 linearAttention repack + the denormal-scale trap fix (20.0 GB install).
+This section is the single
 source of truth for what is done, what is wired in, and what remains, in the
 order that unblocks an end-to-end Qwen 3.6 run.
 
@@ -302,24 +310,147 @@ order that unblocks an end-to-end Qwen 3.6 run.
 
 ### Wired in but not reachable for Qwen
 
-- **Preset not selectable.** App, CLI, and server still select
-  `ArchConfig.gemma4_26B_A4B` only
-  (`AppContextLengthOption.swift:18`, `AppModelInstallationProbe.swift:22`).
-  (The repack CLI itself takes the Qwen path via `--input-snapshot`; the
-  Gemma remote download remains the default.)
+Nothing. The Qwen preset is auto-detected from the installed manifest
+(`ManifestReader.detectPreset` → `ArchConfig.preset(forModelFamily:)`), wired
+into the app probe and the app/CLI/server model loads; the Qwen tokenizer
+family, sampling softcap, and stop tokens are wired (see below).
+
+### Done and verified (interface + end-to-end, 2026-09-04, uncommitted)
+
+- **Sampling / stop (Phase 4).** `final_logit_softcapping = 0` (Qwen 3.6
+  config) is honored: `softcap_value` in `logit.metal` guards `softcap <= 0`
+  (identity passthrough — `z/0 → ±inf` and `0·NaN` would poison the softmax),
+  the Sampler's repetition-penalty path already branched on `logitSoftcap > 0`,
+  and `RawCompletionScratch` now takes the softcap from
+  `model.config.finalLogitSoftcap` (plumbed through CLI, server, and app).
+  Validation: `zeroSoftcap_isPlainSoftmax` kernel-vs-reference test.
+  **Stop set:** the checkpoint's `generation_config.json` stops on BOTH
+  248046 (`<|im_end|>`) and 248044 (`<|endoftext|>`, the config's
+  bos/pad/eos_token_id) — the Qwen tokenizer family carries both, plus
+  `<|im_start|>` = 248045. Gemma special-token behavior is unchanged.
+- **Qwen tokenizer family** (`Tokenizer.swift`): `GFTokenizerFamily` detected
+  from the installed `config.json` (`model_type: qwen3_5_moe`); Qwen has no
+  standalone BOS (`encode(addBOS: true)` is a no-op on that family — the
+  ChatML template frames turns), pad/bos fall back to `<|endoftext|>`
+  (248044), the Gemma tool/channel markers become inert -1 sentinels, and
+  `applyChatTemplate` renders the standard
+  `<|im_start|>role\n…<|im_end|>\n…<|im_start|>assistant\n` ChatML form.
+  Five install-gated tests pin the family, stop set, special-token IDs, no-BOS
+  encode, and template round-trip.
+- **Preset selectable (Phase 6, finished).** `ManifestReader.detectPreset`
+  peeks the installed manifest and `ArchConfig.preset(forModelFamily:)` picks
+  `.qwen3_6_35B_A3B` for `qwen3_6`, Gemma otherwise — wired into
+  `AppModelInstallationProbe`, the app `RealInferenceClient`, the CLI `Run`,
+  and the server `ServerInference`. The app's KV memory estimator
+  (`AppContextLengthOption`) is now family-aware: `slidingWindow == 0` means
+  the non-full layers hold no KV (Qwen's cache is the 10 full-attention
+  layers only, 2 KV heads × 256 — a Qwen-pinned test was added).
+- **Decode full-attention KV offset fix.** The Qwen decode path passed the
+  current token's k/v slot offset to `encodeFull`; the kernel walks positions
+  `[0, seqLen)` from the buffer start, so any position > 0 read past the
+  written rows. Now `kOffset: 0` / `vOffset: 0` (matching the Gemma path).
+- **Real-install layer gate** (`RealForwardRunner.qwenLayerDebugHook` +
+  `QwenLayer0DebugTests`): an internal, nil-cost-when-unset hook snapshots
+  per-layer decode and prefill values; the test suite replays fp32 references
+  against the real install and pins: per-kernel real-weight comparisons, all
+  40 layers' decode mixers, the prefill per-row per-layer mixers, the
+  prefill conv/recurrent states, and the full-vocab lm_head argmax. All match
+  to fp16 noise.
+- **Repack fidelity gate** (`repackWeightsMatchBf16Checkpoint`): install
+  tensors dequantized and compared against the ORIGINAL bf16 checkpoint
+  shards (parsed directly) — the kernel-vs-reference tests all read the same
+  install bytes and cannot catch a repack mapping bug. Pinned: in_proj_qkv,
+  conv1d (exact), A_log (exact), input norm / post-attn norm / q_norm /
+  final norm with the `(1+w)` baking (the qwen3_5_moe RMSNorm computes
+  `x·rsqrt(mean(x²)+eps)·(1+w)` — the baking is correct for ALL of them,
+  including the final norm), lm_head rows, router (int8), embeddings for the
+  actual prompt ids, and expert 0's gate/up/down slices of the fused
+  `gate_up_proj`. All match to quantization noise.
+- **Embedding scaling bug fixed (2026-09-04).** The Gemma path scales
+  embeddings by `√hidden`; Qwen 3.5 does NOT (`embed_tokens` feeds the layers
+  straight). The inherited scale left every residual embed-dominated by √D
+  (45×) — each layer's contribution was attenuated by 1/√D and the model
+  collapsed into fixed-point loops ("Of.\nOf.\n…"). Both embed sites
+  (`prefillChunked`, `produceToken`) now pass
+  `modelFamily == "qwen3_6" ? 1.0 : √D`; the debug-test references were
+  updated to match.
+- **Tokenizer ids independently verified.** A ground-truth BPE encoder in
+  Python (vocab.json + merges + pretokenize regex + added tokens) reproduces
+  the engine's token counts exactly (raw prompt 5 ids, ChatML prompt 21 ids),
+  and the observed degenerate output decodes to a clean id cycle — the ids
+  were right while the model's distribution was collapsed.
+- **GDN linear-attention projections raised int4 → int8 (2026-09-05).** New
+  required wire slot `linearAttention` (manifest between `attention` and
+  `router`; fixture regenerated, hash pinned) and planner/writer/runner
+  plumbing (`int8Affine` for all five `linear_attn.*` projections —
+  in_proj_qkv / in_proj_z / in_proj_a|b / out_proj). Cut the recurrent-state
+  quant-noise amplification: probe A/B on the real install shows the engine's
+  per-layer isoMax vs the bf16 torch replay on linear layers dropping from
+  mean 5.42 → 2.02 (worst L10 27.7 → 14.7), every linear layer improved
+  (1.3–13.8×), full-attention layers unchanged at the ~0.03–0.4 noise floor.
+- **Denormal-scale repack trap fixed (2026-09-05).** The real checkpoint
+  carries subnormal residue rows (layer 0 `linear_attn.in_proj_qkv` row 143 =
+  alternating ±2^-123 = BF16 0x0200/0x8200, an export-pipeline artifact). The
+  canonical codecs divided via `× (1/scale)`; the FP32 reciprocal of a
+  BF16-rounded subnormal scale overflowed to inf → `0 × inf` NaN → the
+  `Int()` conversion trapped (deterministic SIGTRAP mid-repack at ~289 MiB,
+  int8-only because `/15` keeps int4 scales in normal range). Both codecs now
+  quantize with direct `(w − bias) / scale` division (`scale == 0 → q = 0`).
+  Regression tests in `Tests/FlashQwenFormat/FQTurboQuantizationTests.swift`
+  (3, passing). **Repack: exit 0, 20 014 114 816 bytes** (19.5 GiB install,
+  `linearAttention` 8). Engine-load tests green on the fresh install
+  (`QwenRealInstallLoadTests`, `QwenRepackEngineLoadTests`).
 
 ### Remaining work, in order
 
-1. **Sampling, stop on 248044** (Phase 4), and make the **Qwen preset
-   selectable** in app / CLI / server (finish Phase 6). (Untied lm_head is
-   already wired in the decode head.)
-2. **End-to-end** (Phase 7): load → prefill → decode → sample; check a short
-   reference generation for correctness; then measure and record tok/s so the
-   "At a glance" table in the README gets real Qwen 3.6 numbers.
+1. **End-to-end quality** (Phase 7, in progress): load → prefill → decode →
+   sample runs at ~9.4 tok/s greedy, but the output is still incoherent
+   (" nothingParams the article as did尚liea" for "The capital of France is")
+   after BOTH the embedding-scale fix and the int8 linear-attention fix.
+   The bf16 reference model greedy-completes " Paris, a city renowned for
+   its rich history," so the model is fine and the engine chain diverges.
+   Evidence trail from the 2026-09-05 probes (`torch_layer_probe.py` +
+   `chain_bisect.py` on the engine's `/tmp/fq_rows.bin` dump):
+   - Engine final norm + lm_head on the engine's OWN last hidden row
+     reproduces the engine's logits exactly (top-1 13269 = "yntax") — head,
+     final norm, and layer 39 are not at fault; the error is cumulative.
+   - Torch full-chain bisect: engine leaves the bf16 reference at L0–L1
+     (maxAbs 0.13 → 1.0 on rows of max 0.65–0.89), compounding to 5–9 by
+     L6+; logits flip to garbage around L10.
+   - Full-attention layers are CLEAN on any input (per-token isoMax
+     ≤ 0.05 with dense ≤ 0.5), including L3 fed a polluted input — the
+     full-attn + MoE + shared-expert path is not the diverger.
+   - Linear layers diverge even on clean inputs (L0-only clean comparison:
+     iso 0.06–0.13) with normed-space dense diffs of 1.6–5.2; L1 t0 (zero
+     state, near-clean input) is already 6× worse than L0 t0 (0.74 vs
+     0.12) — the per-token GDN error scales with the layer's activation
+     magnitudes, not with state depth alone.
+   - Embedding int4 quantization error (~70% of row RMS — embed rows are
+     tiny: rms ≈ 0.01) was measured and REFUTED as the driver: torch L0
+     output differs only 0.007 maxAbs between engine-embed and ref-embed
+     (L0 is contractive).
+   - Working hypothesis: the GDN branch's per-token output error (~0.1–1%
+     at the projection outputs, from int8 weights + fp16 activations +
+     fp16-vs-bf16 divergence — the GDN kernels DO accumulate fp32) lands in
+     a residual whose RMS at early layers is small, so the normed
+     post-attn row (router input) diverges O(1) → router boundary flips →
+     different expert mixtures → per-layer output jumps ~0.1–2.5 that
+     compound. Next bisect step: dump the engine's raw GDN branch output
+     (pre-residual `xa`) and compare against torch `linear_attn` per token
+     at L0 and L1, and check the L1-vs-L0 t0 asymmetry (both zero-state)
+     against the qwen3_5_moe source ordering (conv1d zero-padding, gate
+     formula, state update order). Candidate levers if the hypothesis
+     holds: bf16 (unquantized) GDN projections (+~1.8 GB), or fp16 → bf16
+     hidden activations on the linear path, or exact-reference conv/gate
+     fixes uncovered by the xa comparison.
+2. **Benchmarks:** once output quality is right, record tok/s and fill in
+   the README "At a glance" table.
 
-Each step gates the next: 1 completes the interface; 2 proves it. Kernels
-stay validated against the Swift fp32 reference with the `fp16ChainedReduction`
-tolerance before they are wired into a layer.
+Known toolchain quirk (this machine, Xcode 26.6 / Swift 6.3.3): `swift test
+-c release` discovers 0 tests under `-O` (the swift-testing section is linked
+but not enumerated); run the suite with `-c debug` (or
+`-c release -Xswiftc -Onone`). The heavy install-gated diagnostics are slow
+in debug — ~5–15 min each.
 
 ## Repository state
 

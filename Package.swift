@@ -120,7 +120,11 @@ let package = Package(
         .testTarget(
             name: "FlashQwenTestsCore",
             dependencies: ["FlashQwen", "FlashQwenValidationSupport", "FlashQwenRepackCore", "FlashQwenCLICore"],
-            path: "Tests/FlashQwen/Core"
+            path: "Tests/FlashQwen/Core",
+            // The fp32 model-replay probes (GDN recurrence, MoE tails) are
+            // ~50x slower at -Onone; -O on the test target is a debug-build
+            // convenience only (discovery still works with target-only -O).
+            swiftSettings: [.unsafeFlags(["-O"], .when(configuration: .debug))]
         ),
         .testTarget(
             name: "FlashQwenRepackTests",

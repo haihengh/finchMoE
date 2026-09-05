@@ -18,6 +18,7 @@ enum FQTurboJSON {
     struct QuantBitWidths {
         var embedding: Int
         var attention: Int
+        var linearAttention: Int
         var router: Int
         var sharedExpert: Int
         var routedExpert: Int
@@ -58,6 +59,7 @@ enum FQTurboJSON {
         let bitWidthsByQuantSlot = [
             "embedding": bitWidths.embedding,
             "attention": bitWidths.attention,
+            "linearAttention": bitWidths.linearAttention,
             "router": bitWidths.router,
             "sharedExpert": bitWidths.sharedExpert,
             "routedExpert": bitWidths.routedExpert,
@@ -106,6 +108,7 @@ enum FQTurboJSON {
         let quant = FQTurboManifestQuantV1(
             embedding: try slot("embedding"),
             attention: try slot("attention"),
+            linearAttention: try slot("linearAttention"),
             router: try slot("router"),
             sharedExpert: try slot("sharedExpert"),
             routedExpert: try slot("routedExpert"))

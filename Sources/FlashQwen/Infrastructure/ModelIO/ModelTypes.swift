@@ -101,6 +101,12 @@ public struct ArchConfig: Sendable, Equatable {
     /// Canonical Gemma 4 26B-A4B baseline, checked against the installed
     /// model manifest.
     /// `intermediateSize = 2112` is the shared-expert FFN width (3 × moe).
+    /// The built-in preset for a manifest-declared model family. Loaders use
+    /// this (via `ManifestReader.detectPreset`) instead of hardcoding Gemma.
+    public static func preset(forModelFamily family: String?) -> ArchConfig {
+        family == "qwen3_6" ? .qwen3_6_35B_A3B : .gemma4_26B_A4B
+    }
+
     public static let gemma4_26B_A4B = ArchConfig(
         hiddenSize: 2816,
         intermediateSize: 2112,

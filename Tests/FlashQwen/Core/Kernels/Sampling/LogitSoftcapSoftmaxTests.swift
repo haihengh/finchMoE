@@ -65,6 +65,27 @@ import FlashQwenValidationSupport
         }
     }
 
+    /// Qwen 3.6's `final_logit_softcapping` is 0 — the cap is DISABLED, so the
+    /// kernel must pass logits through unchanged (plain softmax). Guards the
+    /// `softcap <= 0` branch that would otherwise compute 0·tanh(z/0) = ±0.
+    @Test func zeroSoftcap_isPlainSoftmax() throws {
+        let v = 2048
+        var logits = [Float](repeating: 0, count: v)
+        logits[42] = 8.0
+        logits[99] = -3.0
+        let logitsFp16 = logits.map { Float16($0) }
+
+        let gpu = try Self.runKernel(logitsFp16: logitsFp16, v: v, softcap: 0.0)
+        let cpu = LogitSoftcapSoftmaxRef.apply(
+            x: logitsFp16.map { Float($0) }, softcap: 0.0
+        )
+        let rel = RelError.compute(actual: gpu, reference: cpu)
+        #expect(rel < Tolerance.fp16ChainedReduction, "relErr=\(rel)")
+        // The 8.0 logit must dominate the uniform floor — a uniform (all-zero)
+        // result is the softcap-0 failure signature (0·tanh(z/0) → ±0).
+        #expect(gpu[42] > 500.0 / Float(v))
+    }
+
     /// One logit far above the softcap, rest at zero. Softcap must pin the
     /// outlier — kernel must not let the un-capped 1000.0 leak through and
     /// overflow exp. Small softcap (5.0) so saturated prob is < 1.0.

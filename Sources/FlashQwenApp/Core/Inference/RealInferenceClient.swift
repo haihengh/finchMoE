@@ -197,6 +197,7 @@ actor RealInferenceSession {
             let loadedModel = try Model.load(
                 directoryURL: key.directory,
                 device: context.device,
+                expecting: try ManifestReader.detectPreset(directoryURL: key.directory),
                 streamingMode: .pread(slotCount: runtimeConfiguration.expertCacheSlots),
                 expertCachePolicy: runtimeConfiguration.modelExpertCachePolicy,
                 integrityPolicy: key.options.modelVerification.runtimeValue)
@@ -209,7 +210,8 @@ actor RealInferenceSession {
                 maxContext: key.maxContext,
                 runtimeConfiguration: runtimeConfiguration)
             let loadedScratch = try RawCompletionScratch(context: context,
-                                                         vocab: loadedModel.config.vocabSize)
+                                                         vocab: loadedModel.config.vocabSize,
+                                                         logitSoftcap: Float(loadedModel.config.finalLogitSoftcap))
             try Task.checkCancellation()
 
             runner = loadedRunner

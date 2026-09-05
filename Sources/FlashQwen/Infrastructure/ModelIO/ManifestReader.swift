@@ -49,6 +49,7 @@ public struct ManifestQuantSlot: Decodable, Equatable, Sendable {
 public struct ManifestQuant: Decodable, Equatable, Sendable {
     public let embedding: ManifestQuantSlot
     public let attention: ManifestQuantSlot
+    public let linearAttention: ManifestQuantSlot
     public let router: ManifestQuantSlot
     public let sharedExpert: ManifestQuantSlot
     public let routedExpert: ManifestQuantSlot
@@ -93,6 +94,22 @@ public enum ManifestReader {
             throw ModelError.partialInstall(path: directoryURL.path)
         }
         return try decode(data: data, expecting: expecting)
+    }
+
+    /// Peeks the installed manifest's arch and returns the built-in preset it
+    /// matches, so loaders pick the Qwen or Gemma preset from the model itself
+    /// instead of hardcoding one. Unknown/nil families fall back to Gemma.
+    public static func detectPreset(directoryURL: URL,
+                                    maxBytes: UInt64 = defaultMaxBytes) throws -> ArchConfig {
+        let directory = try FQTurboModelDirectory(rootURL: directoryURL)
+        let data: Data
+        do {
+            data = try directory.readMetadata("manifest.json", maxBytes: maxBytes)
+        } catch ModelError.missingFile {
+            throw ModelError.partialInstall(path: directoryURL.path)
+        }
+        let wire = try FQTurboManifestCodec.decodeUnchecked(data)
+        return ArchConfig.preset(forModelFamily: wire.arch.modelFamily)
     }
 
     package static func decode(data: Data,
@@ -150,6 +167,7 @@ public enum ManifestReader {
         let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
             ("embedding", quant.embedding, [4]),
             ("attention", quant.attention, [4]),
+            ("linearAttention", quant.linearAttention, [4, 8]),
             ("router", quant.router, [8]),
             ("sharedExpert", quant.sharedExpert, [4, 8]),
             ("routedExpert", quant.routedExpert, [4]),
@@ -264,6 +282,7 @@ private extension ManifestQuant {
     init(wire: FQTurboManifestQuantV1) {
         self.init(embedding: ManifestQuantSlot(wire: wire.embedding),
                   attention: ManifestQuantSlot(wire: wire.attention),
+                  linearAttention: ManifestQuantSlot(wire: wire.linearAttention),
                   router: ManifestQuantSlot(wire: wire.router),
                   sharedExpert: ManifestQuantSlot(wire: wire.sharedExpert),
                   routedExpert: ManifestQuantSlot(wire: wire.routedExpert))

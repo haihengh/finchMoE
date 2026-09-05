@@ -10,9 +10,14 @@ import Accelerate
 /// different operation order — kernel bugs that depend on per-pair
 /// rounding won't be replicated here.
 public enum RopeRef {
-    /// Paired-convention RoPE. Pairs in `[0, rotaryDim/2)` rotate; pairs
-    /// from `rotaryDim/2` to `headDim/2` pass through unchanged.
-    /// Setting `rotaryDim == headDim` recovers full rotation.
+    /// Qwen text RoPE (HF half-split convention). Rotates the first
+    /// `rotaryDim` elements of each head in pairs `(i, i + rotaryDim/2)`
+    /// for `i ∈ [0, rotaryDim/2)` — the `rotate_half` pairing of
+    /// `apply_rotary_pos_emb` over cos/sin built from `cat(freqs, freqs)`,
+    /// where `freqs` use the rotary dim as denominator
+    /// (`inv_freq_i = theta^(-2i / rotaryDim)`). Elements from
+    /// `rotaryDim` to `headDim` pass through unchanged. Setting
+    /// `rotaryDim == headDim` recovers full rotation.
     public static func apply(
         input: [Float],
         numTokens: Int,
@@ -48,8 +53,8 @@ public enum RopeRef {
             for h in 0..<numHeads {
                 let base = (t * numHeads + h) * headDim
                 for k in 0..<pairs {
-                    let i0 = base + 2 * k
-                    let i1 = i0 + 1
+                    let i0 = base + k
+                    let i1 = base + pairs + k
                     let x0 = input[i0]
                     let x1 = input[i1]
                     let c = cosTable[k]
