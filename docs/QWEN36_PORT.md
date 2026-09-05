@@ -466,8 +466,21 @@ family, sampling softcap, and stop tokens are wired (see below).
      full-attn layers clean on any input, embedding int4 refuted as the
      driver, L1-vs-L0 t0 asymmetry) is all consistent with this one bug and
      stands closed out.
-2. **Benchmarks:** once output quality is right, record tok/s and fill in
-   the README "At a glance" table.
+2. **Benchmarks — DONE (2026-09-05).** Measured on this 16 GB Mac mini with
+   the release CLI (greedy, local Qwen install, warm page cache), recorded
+   in the README "At a glance" table:
+   - Decode **~10.5 tok/s**, flat over 200–300 tokens (debug ≈ release —
+     decode is Metal-bound). Peak resident **~1.1 GiB** during decode (the
+     ~20 GB install streams out of core). Wall for load + prefill + 300
+     tokens ≈ 39 s.
+   - Prefill **~20 tok/s** at 705 tokens, but with a **≈7.9 s fixed per-run
+     cost inside the timed prefill** (5-token prompt: 7.9 s, 0.6 tok/s) —
+     identical in debug and release, deterministic across runs. Worth a
+     look if first-token latency matters (suspects: per-run expert-cache
+     warm / per-layer out-of-core stream setup in the Qwen prefill path),
+     not yet triaged.
+   - CLI footer now prints `prefill=<s> (<tok/s>)` (was decode-only) so
+     future runs report both.
 
 Known toolchain quirk (this machine, Xcode 26.6 / Swift 6.3.3): `swift test
 -c release` discovers 0 tests under `-O` (the swift-testing section is linked

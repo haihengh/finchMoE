@@ -108,7 +108,15 @@ public func run(args: Args,
             let tokensPerSecond = stats.decodeSeconds > 0
                 ? Double(stats.newTokens) / stats.decodeSeconds
                 : 0
-            let footer = "\n[stop=\(String(describing: stats.reason)) prefill=\(stats.prefillTokens)tok new=\(stats.newTokens)tok decode=\(String(format: "%.2f", stats.decodeSeconds))s tok/s=\(String(format: "%.3f", tokensPerSecond))]\n"
+            let prefillPerSecond = stats.prefillSeconds > 0
+                ? Double(stats.prefillTokens) / stats.prefillSeconds
+                : 0
+            let prefillText = stats.prefillSeconds > 0
+                ? String(format: " prefill=%.2fs (%@tok/s)",
+                         stats.prefillSeconds,
+                         String(format: "%.1f", prefillPerSecond))
+                : ""
+            let footer = "\n[stop=\(String(describing: stats.reason)) prefill=\(stats.prefillTokens)tok new=\(stats.newTokens)tok decode=\(String(format: "%.2f", stats.decodeSeconds))s tok/s=\(String(format: "%.3f", tokensPerSecond))\(prefillText)]\n"
             stderr.write(Data(footer.utf8))
         }
         return RunResult(exitCode: 0)

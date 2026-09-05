@@ -82,32 +82,32 @@ When the app opens, choose **Download** and let FlashQwen fetch and repack the
 pinned model. Once it is ready, choose **Load Model**, type your prompt, and
 press **Generate**.
 
-> **Note:** the default install is currently the upstream Gemma 4 26B-A4B
-> checkpoint (`mlx-community/gemma-4-26b-a4b-it-4bit`), because the Qwen 3.6
-> repack writer is not finished (port Phase 5). The runtime is already
-> Qwen-aware — the full decode path is wired and the Gemma path unchanged —
-> but the install path for the local `models/Qwen3.6-35B-A3B-bf16` checkpoint
-> lands once the writer and Qwen prefill close.
+> **Note:** the local install this repo builds and validates is **Qwen 3.6
+> 35B-A3B** (built from `models/Qwen3.6-35B-A3B-bf16` by `FlashQwenRepack`:
+> int8 GDN linear-attention projections, affine 4-bit MoE group 64, ~20 GB on
+> disk, streamed out-of-core). The upstream Gemma 4 26B-A4B path is intact;
+> family dispatch keeps both runnable from the same binary.
 
 ## At a glance
 
-The numbers below describe the model the installer ships today (the upstream
-Gemma 4 26B-A4B reference). Qwen 3.6 35B-A3B has no measured numbers yet —
-they will appear here once the port reaches end-to-end (Phase 7).
+Measured 2026-09-05 on a 16 GB Apple Silicon Mac mini (macOS 26, Metal 4)
+with the engine's release CLI, greedy decode, on the local Qwen install
+(page cache warm).
 
-| Metric          | Value (currently installed model)                                                                 |
-| --------------- | -------------------------------------------------------------------------------------------------- |
-| Model           | Gemma 4 26B-A4B IT, 26B total parameters, about 3.88B active per token                              |
-| Weights         | MLX affine 4-bit, group 64; 8-bit router; 4-bit shared and routed experts                           |
-| Memory          | ~2 GB of weights and KV cache                                                                       |
-| Storage         | About 14.3 GB for the installed text-only model                                                    |
-| Target model    | Qwen 3.6 35B-A3B (`qwen3_5_moe`) — port in progress, no measurements yet                            |
-| Hardware        | Apple Silicon Mac; 8 GB of RAM                                                                      |
-| Platform        | macOS 26, Metal 4, Swift 6.2                                                                        |
+| Metric          | Qwen 3.6 35B-A3B (`qwen3_5_moe`) install                                    |
+| --------------- | --------------------------------------------------------------------------- |
+| Model           | 35B total parameters, ~3B active per token; 30 Gated-DeltaNet linear-attention layers + 10 full-attention; MoE 256 experts top-8 + shared |
+| Weights         | GDN projections int8; router int8; shared/routed experts affine 4-bit group 64; fp16 activations, fp32 Metal accumulators |
+| Storage         | ~20.0 GB installed text-only `.fqturbo` (streamed from disk during decode)   |
+| Memory          | ~1.1 GiB peak resident while decoding (out-of-core expert streaming; OS page cache additional) |
+| Decode          | ~10.5 tok/s greedy, flat over 200–300 tokens                                |
+| Prefill         | ~20 tok/s on long prompts (705 tok); ≈8 s fixed per-run cost dominates short prompts |
+| Hardware        | Apple Silicon Mac (validated on 16 GB RAM)                                   |
+| Platform        | macOS 26, Metal 4, Swift 6.3                                                |
 
 Prompt length, generated length, page-cache state, and hardware all affect
-throughput. See [benchmarks](docs/BENCHMARKS.md) for the upstream measurements
-that the fork started from.
+throughput. See [benchmarks](docs/BENCHMARKS.md) for the upstream Gemma
+measurements the fork started from.
 
 ## The Qwen 3.6 35B-A3B port
 
@@ -121,12 +121,12 @@ linear-attention layer.
 | #  | Work                                                                                          | Status |
 | -- | --------------------------------------------------------------------------------------------- | ------ |
 | 1  | GDN unit: fp32 CPU reference, `gdn_conv_update` + `gdn_gate` + `gdn_recurrent` + `gdn_rmsnorm_gated` + `gdn_gate_gemv` Metal kernels, wrapper, tests | done   |
-| 2  | Full-attention path for the 10 `F` layers (partial RoPE, output gate) — decode wired; chunked prefill pending | decode done |
-| 3  | MoE: 256-expert routing and streamed execution (top-8, silu experts, shared expert 512, sigmoid gate) — decode wired; expert storage waits on the writer | decode done |
-| 4  | Embedding + untied `lm_head` (vocab 248320), sampling, stop on 248044 — `lm_head` wired; sampling/stop pending | partial |
-| 5  | Repack writer: bf16 shards → `.fqturbo` (int4 affine + int8 router, group 64), Qwen manifest, SHA-256s | pending |
+| 2  | Full-attention path for the 10 `F` layers (partial RoPE, output gate, chunked prefill) | done |
+| 3  | MoE: 256-expert routing and streamed execution (top-8, silu experts, shared expert 512, sigmoid gate) — decode and prefill | done |
+| 4  | Embedding + untied `lm_head` (vocab 248320), sampling, stop on 248044 | done |
+| 5  | Repack writer: bf16 shards → `.fqturbo` (int8 linear-attention + int4 affine experts + int8 router), Qwen manifest, SHA-256s | done |
 | 6  | `ArchConfig` preset for Qwen3.6-35B-A3B; wire `fullAttentionLayerMask` and the GDN dims        | done   |
-| 7  | End-to-end: load → prefill → decode → sample; check against a reference generation            | pending |
+| 7  | End-to-end: load → prefill → decode → sample; coherent generation vs the bf16 reference      | done   |
 
 Phase 1 was the gate: nothing in the engine exercised a linear-attention state
 before it, and the recurrence order (decay → read → update → read-out) is the
@@ -155,7 +155,9 @@ The Swift package exposes six products:
 
 ### Requirements
 
-- An Apple Silicon Mac; the validated target is an 8 GB M2 MacBook Air
+- An Apple Silicon Mac; validated on a 16 GB Mac mini (the ~20 GB Qwen
+  install streams out of core; the 8 GB M2 MacBook Air target applied to the
+  upstream Gemma 4-bit install)
 - macOS 26 with Metal 4
 - Xcode 26 and Swift 6.2 or newer
 - Enough free storage for the model installation
