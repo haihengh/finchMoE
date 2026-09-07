@@ -142,7 +142,8 @@ prefill wiring, and 2026-09-04 again after the quantizing repack landed
 int8 linearAttention repack + the denormal-scale trap fix (20.0 GB install),
 and 2026-09-05 again after the GDN readout-scale fix that resolved the
 degenerate generation (item 1 below), and 2026-09-07 after the long-form
-quality pass (item 3) and the prefill fixed-cost triage (item 2).
+quality pass (item 3), the prefill fixed-cost triage (item 2), and the
+4096-context soak (item 4).
 This section is the single
 source of truth for what is done, what is wired in, and what remains, in the
 order that unblocks an end-to-end Qwen 3.6 run.
@@ -531,6 +532,27 @@ family, sampling softcap, and stop tokens are wired (see below).
      so the CLI default `--max-new` 1024 truncates long reasoned answers
      (raise the budget); CLI usage line still claimed "Gemma 4 26B-A4B" —
      made model-neutral in this batch.
+4. **4096-context soak — DONE (2026-09-07).** Exercised the full context
+   window on the release CLI (`--verify trusted-install`): a **2,509-token
+   prompt** (a `docs/SYSTEM_DESIGN.md` slice) with five questions — pinned
+   recall items drawn from early, middle, and late document regions plus a
+   design-tradeoffs essay — then greedy decode ran to **exactly position
+   4096** (`stop=maxTokens` at the `maxContext` wall, exit 0).
+   - Prefill: 2,509 tok at **21.3 tok/s** (117.6 s) — the pure chunked
+     rate with no fixed SHA cost. Decode: 1,587 tok at **7.6 tok/s** (vs
+     ~10.2 at short context) — the expected full-attention KV growth at 4k
+     depth. ~0.5 GB RSS, no swap.
+   - Quality: all four pinned answers **quote-exact** (1,152-row rings with
+     128 extra rows for chunked-prefill writes; `manifest.json` vs
+     `verified-install.json` roles; symlinks inside the model directory
+     rejected; the default vs trusted-receipt policies — including "receipt
+     mode still hashes the three common files", matching the engine code).
+     The 1,587-token essay stays coherent and non-repetitive to its final
+     token at full depth. Verdict: GDN recurrent state + full-attention KV
+     carry cleanly across a complete 4,096-token window; no drift, loops,
+     or state breakage at the boundary. TTFT for the 2.5k prompt was ~2
+     minutes — prefill throughput stays the long-context latency limiter
+     (item 2).
 
 Known toolchain quirk (this machine, Xcode 26.6 / Swift 6.3.3): `swift test
 -c release` discovers 0 tests under `-O` (the swift-testing section is linked
