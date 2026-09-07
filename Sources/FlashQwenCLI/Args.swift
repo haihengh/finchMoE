@@ -63,7 +63,7 @@ public enum ArgsError: Error, Equatable, CustomStringConvertible {
 
 extension Args {
     public static let usage = """
-    FlashQwenCLI — Gemma 4 26B-A4B text generation
+    FlashQwenCLI — local text generation (instruction chat and raw completion)
 
     usage: FlashQwenCLI --model <dir> (--prompt <string> | --messages-file <path>) [options]
 

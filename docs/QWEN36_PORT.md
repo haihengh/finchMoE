@@ -14,7 +14,8 @@ Directive (owner, 2026-08-30): drop the previous Qwen3-30B-A3B engine, run
 Qwen 3.6 35B-A3B, use TurboFieldfare as the base, and feel free to rewrite
 anything in this codebase.
 
-Status: **in progress.** The engine is rebranded to **FlashQwen** — all
+Status: **port complete through end-to-end quality + benchmarks
+(2026-09-05).** The engine is rebranded to **FlashQwen** — all
 `TurboFieldfare`/`Fieldfare`/`.gturbo` identifiers, module/target names, and
 the on-disk format are renamed (binary magic `FQTURBO`, extension `.fqturbo`);
 the pristine upstream TurboFieldfare base is archived in `reference/`
@@ -29,13 +30,15 @@ the bf16 → int4 quantizing repack is built and proven against the real
 checkpoint. The interface is complete: the Qwen preset is auto-detected from
 the installed manifest in app / CLI / server, the tokenizer family handles
 Qwen special tokens + ChatML + the dual stop set (248046/248044), and the
-softcap-0 sampling path is wired. End-to-end runs execute (prefill → decode →
-sample at ~10–13 tok/s) — but generated text still degenerates into loops;
-the layer-by-layer diagnostics (all 40 mixers, states, weights, tokenizer
-ids) match their fp32/checkpoint references, and the hunt is narrowed to
-multi-step state continuity / the prefill tail. The
-[implementation plan](#implementation-plan) records the verified state and
-the remaining work, in order.
+softcap-0 sampling path is wired. End-to-end generation is coherent — greedy
+decode ~10.5 tok/s, chunked prefill ~20 tok/s, ~1.1 GiB resident while the
+19.5 GiB install streams out of core. The earlier degenerate-loop output was
+the GDN readout-scale bug (missing `1/sqrt(head_dim)` after the l2norm),
+resolved and verified 2026-09-05 — see item 1 under "Remaining work, in
+order" for the evidence. The one open item is the ≈8 s fixed per-run prefill
+cost (identical in debug/release, deterministic; untriaged — matters for
+first-token latency). The [implementation plan](#implementation-plan)
+records the verified state and the remaining work, in order.
 
 ## Target model
 
@@ -481,6 +484,35 @@ family, sampling softcap, and stop tokens are wired (see below).
      not yet triaged.
    - CLI footer now prints `prefill=<s> (<tok/s>)` (was decode-only) so
      future runs report both.
+3. **Long-form quality pass — DONE (2026-09-07).** Exercised the release CLI
+   (local int4 install, raw + chat modes) to shake out residual quality or
+   stopping issues before closing the port. Verdict: **no engine-side
+   defects** — all runs coherent, no degenerate loops, no late-sequence
+   drift (the degenerate symptom class) out to 1044 tokens; output style
+   tracks checkpoint behavior. Runs (all greedy unless noted):
+   - Raw, 300 tok: capital-cities continuation factually correct through
+     Ottawa; byte-identical output on rerun (determinism).
+   - Raw, 400 tok: computing-history prose clean end to end (drift check).
+   - Raw prompts that trip the model's thinking mode spend the budget inside
+     `<think>` (coherent chain-of-thought, no answer by 300 tok) — the
+     known raw-completion behavior, not engine error.
+   - Chat greedy: structured markdown/LaTeX explanations; two-turn
+     follow-up keeps context (prefill 312 tok across both turns).
+   - Chat greedy math: a train word problem solved end to end with
+     verification — "meet at 11:48, 138 km from Station A" — and §2's
+     head-start figure still consistent in §6 ~900 tokens later (good
+     KV/recurrent-state continuity at 1000+ tokens). The model answered
+     naturally (`stop=endOfTurn`) at 1044 tokens.
+   - Chat sampled (default temp 0.2, seed): correct 5-7-5 haiku, natural
+     stop at 29 tokens. Chinese raw prompt: coherent technical prose.
+   - Footer stop reporting correct throughout (`stop=maxTokens|endOfTurn`);
+     the ≈8 s fixed prefill cost reproduced in every run (7.8–8.6 s);
+     decode 8.8–10.9 tok/s (longer contexts slower, mild thermal drift
+     across back-to-back runs).
+   - Practical notes: this checkpoint writes >1024-token worked solutions,
+     so the CLI default `--max-new` 1024 truncates long reasoned answers
+     (raise the budget); CLI usage line still claimed "Gemma 4 26B-A4B" —
+     made model-neutral in this batch.
 
 Known toolchain quirk (this machine, Xcode 26.6 / Swift 6.3.3): `swift test
 -c release` discovers 0 tests under `-O` (the swift-testing section is linked
