@@ -142,8 +142,8 @@ prefill wiring, and 2026-09-04 again after the quantizing repack landed
 int8 linearAttention repack + the denormal-scale trap fix (20.0 GB install),
 and 2026-09-05 again after the GDN readout-scale fix that resolved the
 degenerate generation (item 1 below), and 2026-09-07 after the long-form
-quality pass (item 3), the prefill fixed-cost triage (item 2), and the
-4096-context soak (item 4).
+quality pass (item 3), the prefill fixed-cost triage (item 2), the
+4096-context soak (item 4), and the server smoke (item 5).
 This section is the single
 source of truth for what is done, what is wired in, and what remains, in the
 order that unblocks an end-to-end Qwen 3.6 run.
@@ -553,6 +553,31 @@ family, sampling softcap, and stop tokens are wired (see below).
      or state breakage at the boundary. TTFT for the 2.5k prompt was ~2
      minutes — prefill throughput stays the long-context latency limiter
      (item 2).
+5. **FlashQwenServer smoke on the Qwen install — DONE (2026-09-07).** The
+   loopback OpenAI-compatible server is the one product surface the port had
+   never exercised end-to-end. Release server binary was stale (predated the
+   GDN readout-scale fix) — rebuilt. Then, on the Qwen install at
+   `--max-context 4096` with `--model-id qwen3.6-35b-a3b`:
+   - `/health` ok and `/v1/models` serves the model id; server healthy ~3 s
+     after launch. Chat completion with the exact-READY echo returned
+     `READY.` correctly — 8.79 s wall, of which ~8 s is the first-use
+     layer-SHA pass: **the server has no `--verify` flag**, so every server
+     process pays the `.fullSha256` layer hashing once (CLI-only fix from
+     item 2). Streaming SSE with `include_usage` streams coherently (~10
+     tok/s decode). RSS 0.85 GiB, no swap, 57% memory free at end of run.
+   - **Single-prefix KV reuse: inconclusive.** A same-history repeat of a
+     27-token prompt reported `prompt_tokens_details.cached_tokens: 0` —
+     27 tokens is sub-chunk, so this is consistent with a minimum-length
+     threshold, but a reuse miss is not excluded; needs a long-prompt probe.
+   - **Tool calls: not bridged.** A function-tool request made the checkpoint
+     emit its native Qwen XML form (`<tool_call>…`) as plain text with
+     `finish_reason: stop` — no OpenAI-format `tool_calls`. The server's
+     tool parser expects OpenAI JSON function-call output and does not
+     translate this checkpoint's native tool syntax. (HF chat templates
+     usually perform that translation; the engine's template does not.)
+   - Verdict: the server envelope (loopback, one model, queue 4) is validated
+     on the Qwen install; the tool-call gap, the reuse probe, and the missing
+     `--verify` exposure stay open.
 
 Known toolchain quirk (this machine, Xcode 26.6 / Swift 6.3.3): `swift test
 -c release` discovers 0 tests under `-O` (the swift-testing section is linked
