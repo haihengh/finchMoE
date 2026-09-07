@@ -1,5 +1,6 @@
 import Testing
 @testable import FlashQwenCLICore
+@testable import FlashQwen
 
 @Suite struct CLIArgumentsTests {
     @Test func defaultsUseProductionGenerationValues() throws {
@@ -16,6 +17,7 @@ import Testing
         #expect(arguments.seed == nil)
         #expect(arguments.stops.isEmpty)
         #expect(!arguments.quiet)
+        #expect(arguments.verify == .fullSha256)
     }
 
     @Test func generationOptionsParseAndStopsRepeat() throws {
@@ -64,7 +66,7 @@ import Testing
         let expected: Set<String> = [
             "--model", "--prompt", "--messages-file", "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
-            "--seed", "--stop", "--quiet", "--help",
+            "--seed", "--stop", "--quiet", "--verify", "--help",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })
@@ -85,6 +87,20 @@ import Testing
         }
         #expect(throws: ArgsError.modeMissing) {
             _ = try Args.parse(["--model", "m.fqturbo"])
+        }
+    }
+
+    @Test func verifyPolicyParsesAndRejectsUnknownModes() throws {
+        let full = try Args.parse(["--model", "m.fqturbo", "--prompt", "hi",
+                                    "--verify", "full-sha256"])
+        #expect(full.verify == .fullSha256)
+        let trusted = try Args.parse(["--model", "m.fqturbo", "--prompt", "hi",
+                                      "--verify", "trusted-install"])
+        #expect(trusted.verify == .sizeCheckTrustedReceipt)
+
+        #expect(throws: ArgsError.invalidValue(flag: "--verify", value: "size-only")) {
+            _ = try Args.parse(["--model", "m.fqturbo", "--prompt", "hi",
+                                "--verify", "size-only"])
         }
     }
 

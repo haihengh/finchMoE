@@ -1,3 +1,5 @@
+import FlashQwen
+
 public struct Args: Equatable, Sendable {
     public var model: String
     public var prompt: String?
@@ -11,6 +13,7 @@ public struct Args: Equatable, Sendable {
     public var seed: UInt64?
     public var stops: [String]
     public var quiet: Bool
+    public var verify: ModelIntegrityPolicy
 
     public init(model: String,
                 prompt: String? = nil,
@@ -23,7 +26,8 @@ public struct Args: Equatable, Sendable {
                 repetitionPenalty: Float = 1.0,
                 seed: UInt64? = nil,
                 stops: [String] = [],
-                quiet: Bool = false) {
+                quiet: Bool = false,
+                verify: ModelIntegrityPolicy = .fullSha256) {
         self.model = model
         self.prompt = prompt
         self.messagesFile = messagesFile
@@ -36,6 +40,7 @@ public struct Args: Equatable, Sendable {
         self.seed = seed
         self.stops = stops
         self.quiet = quiet
+        self.verify = verify
     }
 }
 
@@ -82,6 +87,11 @@ extension Args {
       --seed <uint64>           Deterministic sampling seed (default off).
       --stop <string>           Stop substring (repeatable).
       --quiet                   Suppress the timing footer.
+      --verify <mode>           Integrity policy: full-sha256 (default) hashes
+                                model_weights.bin at load and each layer file on
+                                first use; trusted-install trusts the repack
+                                receipt (verified-install.json) and size-checks
+                                instead — removes the ~8 s one-time hash.
       --help                    Show this message.
     """
 
@@ -98,6 +108,7 @@ extension Args {
         var seed: UInt64?
         var stops: [String] = []
         var quiet = false
+        var verify = ModelIntegrityPolicy.fullSha256
 
         var index = 0
         while index < argv.count {
@@ -158,6 +169,16 @@ extension Args {
                 seed = parsed
             case "--stop":
                 stops.append(try takeValue(argv, &index, flag: flag))
+            case "--verify":
+                let value = try takeValue(argv, &index, flag: flag)
+                switch value {
+                case "full-sha256":
+                    verify = .fullSha256
+                case "trusted-install":
+                    verify = .sizeCheckTrustedReceipt
+                default:
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
             default:
                 throw ArgsError.unknownFlag(flag)
             }
@@ -184,7 +205,8 @@ extension Args {
                     repetitionPenalty: repetitionPenalty,
                     seed: seed,
                     stops: stops,
-                    quiet: quiet)
+                    quiet: quiet,
+                    verify: verify)
     }
 
     private static func takeValue(_ argv: [String],

@@ -263,6 +263,14 @@ CLI uses production runtime defaults — run `FlashQwenCLI --help` for the full
 list. Generated text goes to standard output; timing statistics go to standard
 error, with `--quiet` to suppress the footer.
 
+Model files are verified with `--verify full-sha256` by default: the CLI
+hashes `model_weights.bin` at load and every `packed_experts` layer file on
+first use (~8 s one-time cost for a large install). Pass
+`--verify trusted-install` to trust the repack receipt
+(`verified-install.json`) and size-check instead — on a ~20 GB Qwen install
+this cuts the fixed per-run cost before the first token from ~8 s to under a
+second. Same choice the Mac app exposes as its verification setting.
+
 ### Local OpenAI-compatible server
 
 Build the server and point it at an installed model:

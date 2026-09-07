@@ -35,10 +35,11 @@ decode ~10.5 tok/s, chunked prefill ~20 tok/s, ~1.1 GiB resident while the
 19.5 GiB install streams out of core. The earlier degenerate-loop output was
 the GDN readout-scale bug (missing `1/sqrt(head_dim)` after the l2norm),
 resolved and verified 2026-09-05 — see item 1 under "Remaining work, in
-order" for the evidence. The one open item is the ≈8 s fixed per-run prefill
-cost (identical in debug/release, deterministic; untriaged — matters for
-first-token latency). The [implementation plan](#implementation-plan)
-records the verified state and the remaining work, in order.
+order" for the evidence. The last open item — the ≈8 s fixed per-run
+prefill cost — was triaged 2026-09-07 and is gone under the CLI's new
+`--verify trusted-install` (item 2 below); the port is closed. The
+[implementation plan](#implementation-plan) records the verified state and
+the remaining work, in order.
 
 ## Target model
 
@@ -141,7 +142,7 @@ prefill wiring, and 2026-09-04 again after the quantizing repack landed
 int8 linearAttention repack + the denormal-scale trap fix (20.0 GB install),
 and 2026-09-05 again after the GDN readout-scale fix that resolved the
 degenerate generation (item 1 below), and 2026-09-07 after the long-form
-quality pass (item 3 below).
+quality pass (item 3) and the prefill fixed-cost triage (item 2).
 This section is the single
 source of truth for what is done, what is wired in, and what remains, in the
 order that unblocks an end-to-end Qwen 3.6 run.
@@ -477,12 +478,28 @@ family, sampling softcap, and stop tokens are wired (see below).
      decode is Metal-bound). Peak resident **~1.1 GiB** during decode (the
      ~20 GB install streams out of core). Wall for load + prefill + 300
      tokens ≈ 39 s.
-   - Prefill **~20 tok/s** at 705 tokens, but with a **≈7.9 s fixed per-run
+   - Prefill **~20 tok/s** at 705 tokens, plus a **≈7.9 s fixed per-run
      cost inside the timed prefill** (5-token prompt: 7.9 s, 0.6 tok/s) —
-     identical in debug and release, deterministic across runs. Worth a
-     look if first-token latency matters (suspects: per-run expert-cache
-     warm / per-layer out-of-core stream setup in the Qwen prefill path),
-     not yet triaged.
+     identical in debug and release, deterministic across runs.
+   - **Fixed-cost triage — RESOLVED (2026-09-07): lazy per-layer SHA-256.**
+     Under the `.fullSha256` policy (CLI and Mac-app defaults) `Model.load`
+     eagerly hashes `model_weights.bin` (1.8 GiB — the ≈5 s load) and each
+     `packed_experts/layer_XX.bin` (40 × 432 MiB = 17 GiB) is SHA-256'd on
+     first MoE open, serialized on the streamer queue through CommonCrypto
+     `CC_SHA256` with 1 MiB reads (single-core ≈2.2 GiB/s). The whole 17 GiB
+     lands inside the first prefill chunk regardless of prompt length;
+     debug = release because it is a C library. Not an engine-path defect.
+   - Fix: the CLI gained `--verify <full-sha256|trusted-install>` (default
+     unchanged: full-sha256), mirroring the Mac app's "Trust verified
+     install" setting. `trusted-install` validates the repack receipt
+     (`verified-install.json`) against the manifest at load and size-checks
+     layer files at open. Measured on the real install (5-token prompt,
+     warm cache): prefill **8.08 s → 0.92 s**, total wall **14.42 s →
+     6.76 s**, output byte-identical, decode tok/s unchanged; the ~1 s
+     residual is streamer setup + first-chunk compute. Receipt mode's
+     gap: silent same-size corruption of weight payloads goes undetected
+     (full SHA catches it); size + receipt/manifest binding still catch
+     partial installs, mixed files, and truncation.
    - CLI footer now prints `prefill=<s> (<tok/s>)` (was decode-only) so
      future runs report both.
 3. **Long-form quality pass — DONE (2026-09-07).** Exercised the release CLI

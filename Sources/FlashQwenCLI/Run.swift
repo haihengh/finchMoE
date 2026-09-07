@@ -66,7 +66,7 @@ public func run(args: Args,
             expecting: try ManifestReader.detectPreset(directoryURL: modelURL),
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
-            integrityPolicy: .fullSha256)
+            integrityPolicy: args.verify)
         let runner = try RealForwardRunner(
             model: model,
             context: context,
