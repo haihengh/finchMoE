@@ -140,7 +140,8 @@ prefill wiring, and 2026-09-04 again after the quantizing repack landed
 (real 19.5 GB install built and load-validated), and 2026-09-05 after the
 int8 linearAttention repack + the denormal-scale trap fix (20.0 GB install),
 and 2026-09-05 again after the GDN readout-scale fix that resolved the
-degenerate generation (item 1 below).
+degenerate generation (item 1 below), and 2026-09-07 after the long-form
+quality pass (item 3 below).
 This section is the single
 source of truth for what is done, what is wired in, and what remains, in the
 order that unblocks an end-to-end Qwen 3.6 run.
