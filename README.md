@@ -5,7 +5,7 @@
 <h1 align="center">FlashQwen</h1>
 
 <p align="center">
-  <strong>Out-of-core MoE inference on Apple Silicon — now being retargeted to Qwen 3.6 35B-A3B</strong><br>
+  <strong>Out-of-core MoE inference on Apple Silicon — running Qwen 3.6 35B-A3B</strong><br>
   A custom Swift + Metal runtime that streams MoE experts from SSD, so large models run on Macs with 8 GB of RAM.
 </p>
 
@@ -55,10 +55,14 @@ The upstream project ran **Gemma 4 26B-A4B**. The goal of this fork is to run
   softmax top-8 router, sigmoid-gated shared expert), per-layer recurrent
   state, and the untied `lm_head`. The Gemma path is unchanged and the whole
   suite stays green. Every new kernel is reference-checked before wiring.
-- The port is otherwise **in progress**: Qwen chunked prefill and the
-  bf16 → `.fqturbo` repack writer are the remaining gates (see below). Until
-  they land, the default installer still ships the upstream
-  **Gemma 4 26B-A4B** checkpoint, which is the working reference model today.
+- The port is **complete and closed (2026-09-07)**: Qwen chunked prefill
+  (GDN conv + recurrent + full-attention chunk kernels), the bf16 →
+  `.fqturbo` quantizing repack, the interface surface (tokenizer family,
+  ChatML, dual stop set, softcap-0 sampling), end-to-end quality (degenerate
+  output resolved), benchmarks, and a long-form quality pass have all
+  landed. The Qwen 3.6 install built and validated locally is the working
+  reference model today; the Gemma 4 26B-A4B path stays intact and family
+  dispatch runs both from the same binary.
 - The pristine upstream TurboFieldfare source is archived in `reference/`
   (gitignored, alongside `models/`).
 
@@ -101,7 +105,7 @@ with the engine's release CLI, greedy decode, on the local Qwen install
 | Storage         | ~20.0 GB installed text-only `.fqturbo` (streamed from disk during decode)   |
 | Memory          | ~1.1 GiB peak resident while decoding (out-of-core expert streaming; OS page cache additional) |
 | Decode          | ~10.5 tok/s greedy, flat over 200–300 tokens                                |
-| Prefill         | ~20 tok/s on long prompts (705 tok); ≈8 s fixed per-run cost dominates short prompts |
+| Prefill         | ~20 tok/s on long prompts (705 tok); short prompts pay SHA-256 verification unless `--verify trusted-install` (~1 s vs ~8 s) |
 | Hardware        | Apple Silicon Mac (validated on 16 GB RAM)                                   |
 | Platform        | macOS 26, Metal 4, Swift 6.3                                                |
 
