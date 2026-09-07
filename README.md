@@ -59,10 +59,10 @@ The upstream project ran **Gemma 4 26B-A4B**. The goal of this fork is to run
   (GDN conv + recurrent + full-attention chunk kernels), the bf16 →
   `.fqturbo` quantizing repack, the interface surface (tokenizer family,
   ChatML, dual stop set, softcap-0 sampling), end-to-end quality (degenerate
-  output resolved), benchmarks, and a long-form quality pass have all
-  landed. The Qwen 3.6 install built and validated locally is the working
-  reference model today; the Gemma 4 26B-A4B path stays intact and family
-  dispatch runs both from the same binary.
+  output resolved), benchmarks, a long-form quality pass, and a 4096-token
+  context soak have all landed. The Qwen 3.6 install built and validated
+  locally is the working reference model today; the Gemma 4 26B-A4B path
+  stays intact and family dispatch runs both from the same binary.
 - The pristine upstream TurboFieldfare source is archived in `reference/`
   (gitignored, alongside `models/`).
 
@@ -322,7 +322,8 @@ kernels, and the correctness invariants.
 FlashQwen currently includes:
 
 - Remote streaming repack into the `.fqturbo` model format
-- The upstream Gemma 4 26B-A4B instruction model as the working reference
+- The Qwen 3.6 35B-A3B `.fqturbo` install as the working reference model
+  (the upstream Gemma 4 26B-A4B path stays intact and runnable)
 - 4-bit MLX affine embedding, attention, shared-expert, and routed-expert
   weights, with an 8-bit router
 - Custom Metal kernels for quantized GEMV, attention, MoE, normalization,
@@ -341,8 +342,10 @@ targets the `text_config` only, consistent with the engine being text-only.
 
 ### Future work
 
-- Finish the Qwen 3.6 35B-A3B port — chunked prefill, the bf16 → `.fqturbo`
-  repack writer, sampling — and add its measured benchmark numbers.
+- Close the gaps the 2026-09-07 readiness review left open: an aggregate
+  numeric-fidelity measurement (perplexity-style) and a speed comparison
+  against reference engines; and broaden the validated envelope beyond the
+  16 GB loopback single-model setup.
 - Build iPhone and iPad apps, then measure inference speed and memory on
   mobile hardware.
 
