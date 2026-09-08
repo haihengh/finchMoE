@@ -323,7 +323,11 @@ import Testing
 
     @MainActor
     @Test func changingModelPathInvalidatesLoadedStateAndDiagnostics() {
-        let model = AppModel(client: MockInferenceClient())
+        // Mock installer keeps install readiness deterministic: the label after
+        // the path change must not depend on the volume's real free space.
+        let model = AppModel(
+            client: MockInferenceClient(),
+            installer: MockModelInstallerClient())
         let oldURL = FileManager.default.temporaryDirectory.appendingPathComponent("old.fqturbo")
         let newURL = FileManager.default.temporaryDirectory.appendingPathComponent("new.fqturbo")
         model.modelPathText = oldURL.path

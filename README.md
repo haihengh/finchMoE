@@ -179,13 +179,16 @@ swift build -c release
 ```
 
 Build the complete package so the app and its sibling decode service are both
-available. When launched from this checkout, the app stores the model in
-`scratch/gemma4.fqturbo`.
+available. When launched from this checkout, the app prefers the repack-made
+Qwen 3.6 install at `models/Qwen3.6-35B-A3B-4bit.fqturbo` when it is present;
+otherwise it targets `scratch/gemma4.fqturbo`.
 
 #### Install the model
 
-On first launch, the app checks available storage and shows the download and
-installed sizes. Choose **Download** to begin.
+On first launch with no install present, the app checks available storage and
+shows the download and installed sizes for the Gemma checkpoint. Choose
+**Download** to begin. (Qwen installs are made by `FlashQwenRepack` and are
+only ever *loaded* by the app — in-app download is Gemma-only.)
 
 The installer never materializes the full source checkpoint. It streams the
 required byte ranges from the pinned Hugging Face revision and repacks them

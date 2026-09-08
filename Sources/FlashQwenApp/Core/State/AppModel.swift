@@ -64,10 +64,15 @@ public final class AppModel {
 
     public init(modelDirectory: URL? = nil,
                 client: any AppInferenceClient = RealInferenceClient(),
-                installer: any AppModelInstallerClient = RepackModelInstallerClient(),
+                installer: (any AppModelInstallerClient)? = nil,
                 memorySampler: AppMemorySampler = AppMemorySampler(),
                 settingsPersistenceEnabled: Bool = false) {
         let directory = (modelDirectory ?? AppModelLocation.defaultURL()).standardizedFileURL
+        // The descriptor must key off the directory's checkpoint (Qwen or
+        // Gemma), because it drives the probe, the install UI, and the
+        // installer; nil means "build the default remote installer for the
+        // matched descriptor".
+        let descriptor = AppModelInstallationProbe.matchingDescriptor(at: directory)
         let installETAClock = SuspendingClock()
         let settings = settingsPersistenceEnabled
             ? MacAppSettingsFileStore.loadOrCreate(forModelDirectory: directory)
@@ -85,9 +90,10 @@ public final class AppModel {
         self.newlineShortcut = settings.newlineShortcut
         self.showPromptExamples = settings.showPromptExamples
         self.sentPromptBehavior = settings.sentPromptBehavior
-        self.installationStatus = AppModelInstallationProbe.status(at: directory)
+        self.installationStatus = AppModelInstallationProbe.status(at: directory,
+                                                                    descriptor: descriptor)
         self.client = client
-        self.installer = installer
+        self.installer = installer ?? RepackModelInstallerClient(descriptor: descriptor)
         self.memorySampler = memorySampler
         self.settingsPersistenceEnabled = settingsPersistenceEnabled
         self.installETAClock = installETAClock

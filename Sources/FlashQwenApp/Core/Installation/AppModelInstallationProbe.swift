@@ -8,6 +8,33 @@ public enum AppModelInstallationStatus: Equatable, Sendable {
 }
 
 public enum AppModelInstallationProbe {
+    /// The descriptor whose checkpoint a directory holds, keyed on the
+    /// manifest's `sourceSnapshotHash`. A directory the app cannot identify
+    /// (no manifest, unreadable, unknown hash) resolves to `.default`, which
+    /// also keeps the not-yet-installed download flow on the Gemma install.
+    /// Note: a Qwen directory whose receipt is corrupt/missing still resolves
+    /// to `.qwen3_6` and surfaces `.partial` in the install UI — Qwen is never
+    /// remotely installable (repack-made installs only); repair is re-running
+    /// the repack's receipt.
+    public static func matchingDescriptor(at directory: URL) -> AppModelInstallDescriptor {
+        let directory = directory.standardizedFileURL
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
+            return .default
+        }
+        do {
+            let manifest = try ManifestReader.load(
+                directoryURL: directory,
+                expecting: try ManifestReader.detectPreset(directoryURL: directory))
+            if manifest.sourceSnapshotHash == "sha256:" + AppModelInstallDescriptor.qwen3_6.sourceIndexSHA256 {
+                return .qwen3_6
+            }
+            return .default
+        } catch {
+            return .default
+        }
+    }
+
     public static func status(
         at directory: URL,
         descriptor: AppModelInstallDescriptor = .default

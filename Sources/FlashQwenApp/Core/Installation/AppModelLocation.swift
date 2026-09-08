@@ -28,16 +28,31 @@ enum AppModelLocation {
         if let executableURL,
            let root = packageRoot(startingAt: executableURL.deletingLastPathComponent(),
                                   fileExists: fileExists) {
-            return root.appendingPathComponent("scratch/gemma4.fqturbo", isDirectory: true)
-                .standardizedFileURL
+            return preferredInstallURL(inPackageRoot: root, fileExists: fileExists)
         }
         if let root = packageRoot(startingAt: currentDirectoryURL, fileExists: fileExists) {
-            return root.appendingPathComponent("scratch/gemma4.fqturbo", isDirectory: true)
-                .standardizedFileURL
+            return preferredInstallURL(inPackageRoot: root, fileExists: fileExists)
         }
         return applicationSupportURL
             .appendingPathComponent("FlashQwen", isDirectory: true)
             .appendingPathComponent("gemma4.fqturbo", isDirectory: true)
+            .standardizedFileURL
+    }
+
+    /// The app's default model inside a package checkout: the repack-made
+    /// Qwen install under `models/` when present, else the Gemma target under
+    /// `scratch/` (which is also the in-app download destination when nothing
+    /// is installed yet). Outside a checkout the Application Support Gemma
+    /// target above remains the fallback.
+    private static func preferredInstallURL(inPackageRoot root: URL,
+                                            fileExists: (String) -> Bool) -> URL {
+        let qwen = root
+            .appendingPathComponent("models/Qwen3.6-35B-A3B-4bit.fqturbo", isDirectory: true)
+        let qwenManifest = qwen.appendingPathComponent("manifest.json").path
+        if fileExists(qwenManifest) {
+            return qwen.standardizedFileURL
+        }
+        return root.appendingPathComponent("scratch/gemma4.fqturbo", isDirectory: true)
             .standardizedFileURL
     }
 

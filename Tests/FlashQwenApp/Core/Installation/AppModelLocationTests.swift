@@ -35,6 +35,37 @@ import Testing
         #expect(result.path == "/repo/scratch/gemma4.fqturbo")
     }
 
+    @Test func qwenInstallInPackageIsPreferredWhenPresent() {
+        let qwenManifest = "/repo/models/Qwen3.6-35B-A3B-4bit.fqturbo/manifest.json"
+        let files: Set<String> = [
+            "/repo/Package.swift",
+            "/repo/Sources/FlashQwenApp/Mac",
+            qwenManifest,
+        ]
+        let result = AppModelLocation.resolve(
+            explicitURL: nil,
+            executableURL: URL(fileURLWithPath: "/repo/.build/debug/FlashQwenMac"),
+            currentDirectoryURL: URL(fileURLWithPath: "/elsewhere"),
+            applicationSupportURL: URL(fileURLWithPath: "/support"),
+            fileExists: files.contains)
+        #expect(result.path == "/repo/models/Qwen3.6-35B-A3B-4bit.fqturbo")
+    }
+
+    @Test func absentQwenManifestKeepsGemmaTargetEvenWhenModelsDirExists() {
+        let files: Set<String> = [
+            "/repo/Package.swift",
+            "/repo/Sources/FlashQwenApp/Mac",
+            "/repo/models",  // directory exists, but no Qwen install inside
+        ]
+        let result = AppModelLocation.resolve(
+            explicitURL: nil,
+            executableURL: nil,
+            currentDirectoryURL: URL(fileURLWithPath: "/repo"),
+            applicationSupportURL: URL(fileURLWithPath: "/support"),
+            fileExists: files.contains)
+        #expect(result.path == "/repo/scratch/gemma4.fqturbo")
+    }
+
     @Test func standaloneAppFallsBackToApplicationSupport() {
         let result = AppModelLocation.resolve(
             explicitURL: nil,

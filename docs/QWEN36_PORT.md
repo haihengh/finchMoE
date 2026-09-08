@@ -612,6 +612,39 @@ family, sampling softcap, and stop tokens are wired (see below).
      0.3.1 problem dicts lack, zips against `[]`, and reports PASS for any
      exec-able solution; all numbers here are evalplus's.
 
+7. **Mac app loads the local Qwen install — DONE (2026-09-07).** The app
+   layer (reused from TurboFieldfare) was Gemma-only while the engine,
+   decode service, and protocol were already dual-family (service-side
+   `ManifestReader.detectPreset`). Three app-layer changes:
+   - `AppModelInstallDescriptor.qwen3_6` — descriptor pinned to the local
+     install's manifest hash (`sha256:41b93561…`, the bf16 snapshot's
+     index hash); `.default` (Gemma) untouched. Added `shortDisplayName`/
+     `shortName` for the status badge.
+   - `AppModelLocation` now prefers `models/Qwen3.6-35B-A3B-4bit.fqturbo`
+     inside a package checkout when its `manifest.json` exists; otherwise
+     behavior is unchanged (scratch/Gemma target, Application Support
+     fallback, Gemma download flow intact).
+   - `AppModelInstallationProbe.matchingDescriptor(at:)` selects the
+     descriptor by the directory's manifest hash; `AppModel.init` probes
+     with it and builds the installer for it.
+   - Verified: app opens on the conversation view against the Qwen
+     install (no install UI), Load Model bootstraps `FlashQwenDecodeService`
+     via launchctl, model resident ~1.08 GiB.
+   - Notes: Qwen is never remotely installable in-app (repack-made
+     installs only — the descriptor's download sizing is zero). The app's
+     verification default stays `full-sha256` (no UI setting), so a fresh
+     service process pays the one-time ~8 s lazy layer-SHA pass on first
+     expert touch — exposing `trusted-install` in the app mirrors the CLI
+     `--verify` story and remains an open follow-up, along with the
+     context-picker KV labels (still Gemma-arch footnote values).
+   - Test-infrastructure fix discovered while enabling Qwen: the app
+     install fixture predated the mandatory `linearAttention` quant slot
+     (added with the GDN int8 repack, 8004779) and every fixture-based app
+     test was red at HEAD (`manifest.json: keyNotFound linearAttention`);
+     the fixture now writes the slot. Two existing cancel-timing tests
+     (`AppModelTests`) flake under load on this machine and pass isolated —
+     pre-existing, untouched.
+
 Known toolchain quirk (this machine, Xcode 26.6 / Swift 6.3.3): `swift test
 -c release` discovers 0 tests under `-O` (the swift-testing section is linked
 but not enumerated); run the suite with `-c debug` (or

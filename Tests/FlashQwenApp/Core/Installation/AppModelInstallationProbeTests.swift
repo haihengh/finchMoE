@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import FlashQwen
 @testable import FlashQwenAppCore
 
 @Suite struct AppModelInstallationProbeTests {
@@ -56,5 +57,50 @@ import Testing
             Issue.record("expected checkpoint mismatch to be partial")
             return
         }
+    }
+
+    @Test func qwenInstallIsCompleteUnderQwenDescriptor() throws {
+        let url = try makeCompleteModelInstall(
+            "qwen",
+            arch: ArchConfig.qwen3_6_35B_A3B,
+            modelID: "local/Qwen3.6-35B-A3B",
+            descriptor: .qwen3_6)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(AppModelInstallationProbe.status(at: url, descriptor: .qwen3_6) == .complete)
+    }
+
+    @Test func qwenInstallIsPartialUnderDefaultDescriptor() throws {
+        let url = try makeCompleteModelInstall(
+            "qwen-default-probe",
+            arch: ArchConfig.qwen3_6_35B_A3B,
+            modelID: "local/Qwen3.6-35B-A3B",
+            descriptor: .qwen3_6)
+        defer { try? FileManager.default.removeItem(at: url) }
+        guard case .partial(let message) = AppModelInstallationProbe.status(at: url) else {
+            Issue.record("expected Qwen install probed as Gemma to be partial")
+            return
+        }
+        // The probe names the expected (Gemma) checkpoint in its mismatch text.
+        #expect(message.contains("does not match Gemma 4 26B-A4B IT 4-bit"))
+    }
+
+    @Test func matchingDescriptorReadsManifestHash() throws {
+        let qwen = try makeCompleteModelInstall(
+            "match-qwen",
+            arch: ArchConfig.qwen3_6_35B_A3B,
+            modelID: "local/Qwen3.6-35B-A3B",
+            descriptor: .qwen3_6)
+        defer { try? FileManager.default.removeItem(at: qwen) }
+        #expect(AppModelInstallationProbe.matchingDescriptor(at: qwen) == .qwen3_6)
+
+        let gemma = try makeCompleteModelInstall("match-gemma")
+        defer { try? FileManager.default.removeItem(at: gemma) }
+        #expect(AppModelInstallationProbe.matchingDescriptor(at: gemma) == .default)
+    }
+
+    @Test func matchingDescriptorWithoutManifestFallsBackToDefault() {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("flashqwen-match-missing-\(UUID().uuidString).fqturbo")
+        #expect(AppModelInstallationProbe.matchingDescriptor(at: url) == .default)
     }
 }

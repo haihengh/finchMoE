@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import FlashQwen
 import FlashQwenRepackCore
 
 @testable import FlashQwenAppCore
@@ -79,12 +80,47 @@ import FlashQwenRepackCore
   @Test func defaultInstallDescriptorMatchesPinnedAudit() {
     let descriptor = AppModelInstallDescriptor.default
     #expect(descriptor.displayName == "Gemma 4 26B-A4B IT 4-bit")
+    #expect(descriptor.shortDisplayName == "Gemma 4 26B")
+    #expect(descriptor.shortName == "Gemma 4 26B")
     #expect(descriptor.repoID == "mlx-community/gemma-4-26b-a4b-it-4bit")
     #expect(descriptor.revision == "0d77464eeb233a2da68ebf9d7dc4edaac7db956d")
     #expect(descriptor.sourceIndexSHA256 == "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13")
     #expect(descriptor.approximateDownloadBytes == 14_620_479_420)
     #expect(descriptor.installedBytes == 14_291_921_884)
     #expect(descriptor.requiredFreeBytes == 15_432_772_572)
+  }
+
+  @MainActor
+  @Test func qwenInstallProbesCompleteAndSelectsQwenDescriptor() throws {
+    let directory = try makeCompleteModelInstall(
+      "app-qwen",
+      arch: ArchConfig.qwen3_6_35B_A3B,
+      modelID: "local/Qwen3.6-35B-A3B",
+      descriptor: .qwen3_6)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let model = AppModel(
+      modelDirectory: directory,
+      client: MockLifecycleInferenceClient())
+
+    #expect(model.isModelInstalled)
+    #expect(!model.requiresModelInstallation)
+    #expect(model.canLoadModel)
+    #expect(model.installDescriptor == .qwen3_6)
+    #expect(model.modelPathText == directory.standardizedFileURL.path)
+  }
+
+  @MainActor
+  @Test func qwenInstallDescriptorMatchesPinnedAudit() {
+    let descriptor = AppModelInstallDescriptor.qwen3_6
+    #expect(descriptor.displayName == "Qwen 3.6 35B-A3B")
+    #expect(descriptor.shortName == "Qwen 3.6 35B-A3B")
+    #expect(descriptor.repoID == "Qwen/Qwen3.6-35B-A3B")
+    #expect(descriptor.sourceIndexSHA256 == "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83")
+    #expect(descriptor.approximateDownloadBytes == 0)
+    #expect(descriptor.installedBytes == 20_014_114_816)
+    #expect(descriptor.rangeStagingBytes == 0)
+    #expect(descriptor.reserveBytes == 0)
+    #expect(descriptor.requiredFreeBytes == 20_014_114_816)
   }
 
   @MainActor

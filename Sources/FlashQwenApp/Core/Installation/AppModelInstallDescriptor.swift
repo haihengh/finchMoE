@@ -10,6 +10,8 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     public let installedBytes: UInt64
     public let rangeStagingBytes: UInt64
     public let reserveBytes: UInt64
+    /// Short label for tight UI (status badge); falls back to `displayName`.
+    public let shortDisplayName: String?
 
     public init(displayName: String,
                 repoID: String,
@@ -18,7 +20,8 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
                 approximateDownloadBytes: UInt64,
                 installedBytes: UInt64,
                 rangeStagingBytes: UInt64,
-                reserveBytes: UInt64) {
+                reserveBytes: UInt64,
+                shortDisplayName: String? = nil) {
         self.displayName = displayName
         self.repoID = repoID
         self.revision = revision
@@ -27,7 +30,10 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         self.installedBytes = installedBytes
         self.rangeStagingBytes = rangeStagingBytes
         self.reserveBytes = reserveBytes
+        self.shortDisplayName = shortDisplayName
     }
+
+    public var shortName: String { shortDisplayName ?? displayName }
 
     public var requiredFreeBytes: UInt64 {
         installedBytes + rangeStagingBytes + reserveBytes
@@ -41,7 +47,23 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         approximateDownloadBytes: 14_620_479_420,
         installedBytes: 14_291_921_884,
         rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
-        reserveBytes: 1_073_741_824)
+        reserveBytes: 1_073_741_824,
+        shortDisplayName: "Gemma 4 26B")
+
+    /// Local Qwen 3.6 install made by `FlashQwenRepack`. The app only ever
+    /// *probes* this checkpoint — in-app remote install is not supported for
+    /// it (the range-streaming installer targets the mlx 4-bit Gemma layout),
+    /// so repo/revision are informational and download sizing is zero.
+    public static let qwen3_6 = AppModelInstallDescriptor(
+        displayName: "Qwen 3.6 35B-A3B",
+        repoID: "Qwen/Qwen3.6-35B-A3B",
+        revision: "",
+        sourceIndexSHA256: "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83",
+        approximateDownloadBytes: 0,
+        installedBytes: 20_014_114_816,
+        rangeStagingBytes: 0,
+        reserveBytes: 0,
+        shortDisplayName: "Qwen 3.6 35B-A3B")
 }
 
 public struct AppModelInstallRequirement: Equatable, Sendable {
