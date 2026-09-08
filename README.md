@@ -96,18 +96,21 @@ press **Generate**.
 
 Measured 2026-09-05 on a 16 GB Apple Silicon Mac mini (macOS 26, Metal 4)
 with the engine's release CLI, greedy decode, on the local Qwen install
-(page cache warm).
+(page cache warm). Reproduced 2026-09-08 on a 24 GiB Apple M4 Pro
+(macOS 26.6.2) against a freshly repacked install from the public
+[`Qwen/Qwen3.6-35B-A3B`](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) bf16
+checkpoint.
 
 | Metric   | Qwen 3.6 35B-A3B (`qwen3_5_moe`) install                                                                                                |
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | Model    | 35B total parameters, ~3B active per token; 30 Gated-DeltaNet linear-attention layers + 10 full-attention; MoE 256 experts top-8 + shared |
 | Weights  | GDN projections int8; router int8; shared/routed experts affine 4-bit group 64; fp16 activations, fp32 Metal accumulators                 |
 | Storage  | ~20.0 GB installed text-only `.finch` (streamed from disk during decode)                                                           |
-| Memory   | ~1.1 GiB peak resident while decoding (out-of-core expert streaming; OS page cache additional)                                            |
-| Decode   | ~10.5 tok/s greedy, flat over 200–300 tokens                                                                                             |
-| Prefill  | ~20 tok/s on long prompts (705 tok); short prompts pay SHA-256 verification unless `--verify trusted-install` (~1 s vs ~8 s)            |
-| Hardware | Apple Silicon Mac (validated on 16 GB RAM)                                                                                                |
-| Platform | macOS 26, Metal 4, Swift 6.3                                                                                                              |
+| Memory   | ~1.1-1.2 GiB peak resident while decoding (out-of-core expert streaming; OS page cache additional)                                            |
+| Decode   | ~10.5 tok/s (16 GB Mac mini) / ~17-19 tok/s (24 GiB M4 Pro), greedy, flat over 100-300 tokens                                                                                             |
+| Prefill  | ~20 tok/s on long prompts (705 tok, Mac mini) / ~44 tok/s (1,020 tok, M4 Pro); short prompts pay SHA-256 verification unless `--verify trusted-install` (~1 s vs ~8 s)            |
+| Hardware | Apple Silicon Mac (validated on 16 GB and 24 GiB RAM)                                                                                                |
+| Platform | macOS 26 / 26.6.2, Metal 4, Swift 6.3                                                                                                              |
 
 Prompt length, generated length, page-cache state, and hardware all affect
 throughput.
