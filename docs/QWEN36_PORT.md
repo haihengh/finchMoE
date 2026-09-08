@@ -1,7 +1,7 @@
 # Qwen 3.6 35B-A3B port
 
 This document covers the Qwen 3.6 model side of the FinchMoE engine and the
-port plan: the `.finchturbo` on-disk layout, expert streaming, and
+port plan: the `.finch` on-disk layout, expert streaming, and
 prefill/decode phases. FinchMoE runs **Qwen 3.6 35B-A3B**
 (`model_type: qwen3_5_moe`) out-of-core on Apple Silicon.
 
@@ -16,7 +16,7 @@ untouched), and the bf16 → int4 quantizing repack is built and proven against
 the real checkpoint. The original `QwenFieldfare*` sources (the earlier
 Qwen3-30B-A3B engine) were deleted; the bf16 Qwen 3.6 checkpoint is present at
 `models/Qwen3.6-35B-A3B-bf16/` and the repacked int4 install at
-`models/Qwen3.6-35B-A3B-4bit.finchturbo/` (19.5 GB, load-validated). The
+`models/Qwen3.6-35B-A3B-4bit.finch/` (19.5 GB, load-validated). The
 interface is complete: the Qwen preset is auto-detected from
 the installed manifest in app / CLI / server, the tokenizer family handles
 Qwen special tokens + ChatML + the dual stop set (248046/248044), and the
@@ -674,7 +674,7 @@ side). Protocol that has kept this box alive since:
 
 - `Sources/FinchMoE*/`, `Tests/FinchMoE*/` — the working engine. Modules,
   targets, product/binary names, and the on-disk format are all `FinchMoE`
-  / `FinchTurbo` / `.finchturbo` now.
+  / `Finch` / `.finch` now.
 - `models/Qwen3.6-35B-A3B-bf16/` — local bf16 checkpoint (27 shards), plus
   tokenizer files and `expert_index.json`.
 - `docs/` — describes the runtime and stays valid for the engine mechanics.

@@ -1,6 +1,6 @@
 import Foundation
 
-/// Canonical affine int4/int8 quantization for the `.finchturbo` on-disk format.
+/// Canonical affine int4/int8 quantization for the `.finch` on-disk format.
 ///
 /// This is the single source of truth shared by every side that touches the
 /// packed weights: the engine's decode reference, the Metal kernels' expected
@@ -14,7 +14,7 @@ import Foundation
 /// `w ≈ q * scale + bias`. Scale and bias are stored as raw BF16 bits
 /// (`UInt16`) so the same buffer uploads verbatim to a Metal
 /// `device const bfloat*`.
-public enum FinchTurboQuantization {
+public enum FinchQuantization {
 
     public static let groupSize: Int = 64
 

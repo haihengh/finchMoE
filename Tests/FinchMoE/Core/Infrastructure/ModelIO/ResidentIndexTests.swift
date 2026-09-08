@@ -20,8 +20,8 @@ import Darwin
         // offset to the name inside the index region.
         let names = ["embedding.weight", "layer.0.q_proj.weight"]
         let stringTable = names.joined().data(using: .utf8)!
-        let headerBytes = FinchTurboBinary.indexHeaderBytes
-        let entryBytes  = FinchTurboBinary.indexEntryBytes
+        let headerBytes = FinchBinary.indexHeaderBytes
+        let entryBytes  = FinchBinary.indexEntryBytes
         let entriesBase = headerBytes
         let stringTableBase = entriesBase + names.count * entryBytes
         var nameOffsets: [UInt32] = []
@@ -30,7 +30,7 @@ import Darwin
             nameOffsets.append(UInt32(stringTableBase + cursor))
             cursor += n.utf8.count
         }
-        let indexBytes = Int(FinchTurboFormatV1.alignmentBytes)
+        let indexBytes = Int(FinchFormatV1.alignmentBytes)
         let residentBytes = 96
 
         let entries: [ResidentEntry] = [
@@ -57,13 +57,13 @@ import Darwin
         var fileBuf = [UInt8](repeating: 0, count: indexBytes + residentBytes)
         fileBuf.withUnsafeMutableBytes { raw in
             let base = raw.baseAddress!
-            FinchTurboBinary.writeIndexHeader(into: base,
+            FinchBinary.writeIndexHeader(into: base,
                                           indexSize: UInt64(indexBytes),
                                           residentSize: UInt64(residentBytes),
                                           entryCount: UInt64(entries.count))
             for (i, e) in entries.enumerated() {
                 let dst = base.advanced(by: entriesBase + i * entryBytes)
-                FinchTurboBinary.writeIndexEntry(into: dst, entry: e,
+                FinchBinary.writeIndexEntry(into: dst, entry: e,
                                              nameOffset: nameOffsets[i])
             }
             stringTable.withUnsafeBytes { sb in
@@ -72,7 +72,7 @@ import Darwin
         }
 
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchturbo-index-roundtrip-\(UUID().uuidString).bin")
+            .appendingPathComponent("finch-index-roundtrip-\(UUID().uuidString).bin")
         defer { try? FileManager.default.removeItem(at: url) }
         try Data(fileBuf).write(to: url)
 
@@ -95,7 +95,7 @@ import Darwin
 
     @Test func shortFileThrowsIndexCorrupt() throws {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchturbo-short-\(UUID().uuidString).bin")
+            .appendingPathComponent("finch-short-\(UUID().uuidString).bin")
         defer { try? FileManager.default.removeItem(at: url) }
         try Data(repeating: 0, count: 8).write(to: url)
         #expect {
@@ -110,12 +110,12 @@ import Darwin
         let cap = ResidentIndexReader.defaultMaxBytes
         var data = Data(repeating: 0, count: Int(cap))
         data.withUnsafeMutableBytes {
-            FinchTurboBinary.writeIndexHeader(
+            FinchBinary.writeIndexHeader(
                 into: $0.baseAddress!, indexSize: cap,
                 residentSize: 0, entryCount: 0)
         }
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchturbo-index-cap-\(UUID().uuidString).bin")
+            .appendingPathComponent("finch-index-cap-\(UUID().uuidString).bin")
         defer { try? FileManager.default.removeItem(at: url) }
         try data.write(to: url)
         let parsed = try ResidentIndexReader.load(fileURL: url)
@@ -125,14 +125,14 @@ import Darwin
 
     @Test func rejectsIndexRegionAboveMetadataCapBeforeAllocation() throws {
         let claimed = ResidentIndexReader.defaultMaxBytes + 1
-        var data = Data(repeating: 0, count: FinchTurboBinary.indexHeaderBytes)
+        var data = Data(repeating: 0, count: FinchBinary.indexHeaderBytes)
         data.withUnsafeMutableBytes {
-            FinchTurboBinary.writeIndexHeader(
+            FinchBinary.writeIndexHeader(
                 into: $0.baseAddress!, indexSize: claimed,
                 residentSize: 0, entryCount: 0)
         }
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchturbo-index-over-cap-\(UUID().uuidString).bin")
+            .appendingPathComponent("finch-index-over-cap-\(UUID().uuidString).bin")
         defer { try? FileManager.default.removeItem(at: url) }
         try data.write(to: url)
         #expect {
@@ -144,14 +144,14 @@ import Darwin
     }
 
     @Test func rejectsIndexSizeSmallerThanHeader() throws {
-        var data = Data(repeating: 0, count: FinchTurboBinary.indexHeaderBytes)
+        var data = Data(repeating: 0, count: FinchBinary.indexHeaderBytes)
         data.withUnsafeMutableBytes {
-            FinchTurboBinary.writeIndexHeader(
-                into: $0.baseAddress!, indexSize: UInt64(FinchTurboBinary.indexHeaderBytes - 1),
+            FinchBinary.writeIndexHeader(
+                into: $0.baseAddress!, indexSize: UInt64(FinchBinary.indexHeaderBytes - 1),
                 residentSize: 0, entryCount: 0)
         }
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchturbo-index-small-header-\(UUID().uuidString).bin")
+            .appendingPathComponent("finch-index-small-header-\(UUID().uuidString).bin")
         defer { try? FileManager.default.removeItem(at: url) }
         try data.write(to: url)
         #expect(throws: ModelError.self) {
@@ -160,15 +160,15 @@ import Darwin
     }
 
     @Test func callerSelectedSymlinkToRegularIndexStillLoads() throws {
-        let indexSize = Int(FinchTurboFormatV1.alignmentBytes)
+        let indexSize = Int(FinchFormatV1.alignmentBytes)
         var data = Data(repeating: 0, count: indexSize)
         data.withUnsafeMutableBytes {
-            FinchTurboBinary.writeIndexHeader(
+            FinchBinary.writeIndexHeader(
                 into: $0.baseAddress!, indexSize: UInt64(indexSize),
                 residentSize: 0, entryCount: 0)
         }
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchturbo-index-symlink-\(UUID().uuidString)")
+            .appendingPathComponent("finch-index-symlink-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let target = directory.appendingPathComponent("target.bin")
@@ -181,7 +181,7 @@ import Darwin
 
     @Test func symlinkToFIFOIsRejectedWithoutReading() throws {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchturbo-index-fifo-\(UUID().uuidString)")
+            .appendingPathComponent("finch-index-fifo-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let fifo = directory.appendingPathComponent("index.fifo")

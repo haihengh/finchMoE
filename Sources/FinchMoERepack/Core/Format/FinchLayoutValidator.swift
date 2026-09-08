@@ -1,7 +1,7 @@
 import Foundation
 import FinchMoEFormat
 
-enum FinchTurboLayoutValidator {
+enum FinchLayoutValidator {
     static func validate(path: String,
                                 plan: RepackPlan,
                                 audit: RepackAudit? = nil) throws {
@@ -13,8 +13,8 @@ enum FinchTurboLayoutValidator {
                                 audit: RepackAudit? = nil) throws {
         // Qwen 3.6 (256 experts × 40 layers) produces a ~22 MB layout.json.
         let data = try Posix.readBoundedData(path, maximumBytes: 64 * 1024 * 1024)
-        let layout: FinchTurboPackedExpertsLayoutV1
-        do { layout = try FinchTurboPackedExpertsLayoutCodec.decode(data) }
+        let layout: FinchPackedExpertsLayoutV1
+        do { layout = try FinchPackedExpertsLayoutCodec.decode(data) }
         catch {
             throw RepackError.configurationInvalid(
                 detail: "layout.json validation failed: \(error)")

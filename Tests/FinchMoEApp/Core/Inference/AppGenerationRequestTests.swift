@@ -85,7 +85,7 @@ import Testing
 
     @Test func missingModelDirectoryRejected() {
         let request = AppGenerationRequest(
-            modelDirectory: URL(fileURLWithPath: "/nonexistent/model.finchturbo"),
+            modelDirectory: URL(fileURLWithPath: "/nonexistent/model.finch"),
             prompt: "hello")
         #expect(throws: AppInferenceError.self) {
             try request.validate()

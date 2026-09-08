@@ -328,8 +328,8 @@ import Testing
         let model = AppModel(
             client: MockInferenceClient(),
             installer: MockModelInstallerClient())
-        let oldURL = FileManager.default.temporaryDirectory.appendingPathComponent("old.finchturbo")
-        let newURL = FileManager.default.temporaryDirectory.appendingPathComponent("new.finchturbo")
+        let oldURL = FileManager.default.temporaryDirectory.appendingPathComponent("old.finch")
+        let newURL = FileManager.default.temporaryDirectory.appendingPathComponent("new.finch")
         model.modelPathText = oldURL.path
         model.loadState = .ready(modelDirectory: oldURL, loadSeconds: 1)
         model.diagnostics = AppDiagnostics(

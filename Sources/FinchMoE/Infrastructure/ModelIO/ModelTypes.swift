@@ -190,7 +190,7 @@ public struct ArchConfig: Sendable, Equatable {
 /// Failure modes for the validation gates in `Model.load`.
 enum ModelError: Error, CustomStringConvertible, Equatable {
     case partialInstall(path: String)
-    case notAFinchTurboDirectory
+    case notAFinchDirectory
     case unsupportedVersion(major: Int, minor: Int)
     case unknownFlag(name: String)
     case archMismatch(field: String, expected: String, actual: String)
@@ -207,9 +207,9 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
     public var description: String {
         switch self {
         case .partialInstall(let p):
-            return "model.finchturbo directory at \(p) is missing manifest.json"
-        case .notAFinchTurboDirectory:
-            return "manifest.json magic does not equal \"FINCHTURBO\""
+            return "model.finch directory at \(p) is missing manifest.json"
+        case .notAFinchDirectory:
+            return "manifest.json magic does not equal \"FINCH\""
         case .unsupportedVersion(let maj, let min):
             return "manifest version \(maj).\(min) is not supported (need 1.x)"
         case .unknownFlag(let n):
@@ -219,7 +219,7 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
         case .expertStrideNotPageAligned(let s, let p):
             return "expertStride \(s) is not a multiple of page size \(p)"
         case .missingFile(let n):
-            return "model.finchturbo is missing required file \(n)"
+            return "model.finch is missing required file \(n)"
         case .checksumMismatch(let f):
             return "SHA-256 of \(f) does not match manifest.files[\(f)].sha256"
         case .tensorNotFound(let n):

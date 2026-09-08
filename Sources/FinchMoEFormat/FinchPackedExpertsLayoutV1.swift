@@ -1,6 +1,6 @@
 import Foundation
 
-package struct FinchTurboSubTensorV1: Codable, Equatable, Sendable {
+package struct FinchSubTensorV1: Codable, Equatable, Sendable {
     package let offset: UInt64
     package let size: UInt64
     package let dtype: String
@@ -17,15 +17,15 @@ package struct FinchTurboSubTensorV1: Codable, Equatable, Sendable {
     }
 }
 
-package struct FinchTurboExpertV1: Codable, Equatable, Sendable {
+package struct FinchExpertV1: Codable, Equatable, Sendable {
     package let expert: Int?
     package let physicalRank: Int?
     package let offset: UInt64
     package let size: UInt64
-    package let tensors: [String: FinchTurboSubTensorV1]
+    package let tensors: [String: FinchSubTensorV1]
 
     package init(expert: Int?, physicalRank: Int?, offset: UInt64, size: UInt64,
-                 tensors: [String: FinchTurboSubTensorV1]) {
+                 tensors: [String: FinchSubTensorV1]) {
         self.expert = expert
         self.physicalRank = physicalRank
         self.offset = offset
@@ -34,26 +34,26 @@ package struct FinchTurboExpertV1: Codable, Equatable, Sendable {
     }
 }
 
-package struct FinchTurboLayerV1: Codable, Equatable, Sendable {
+package struct FinchLayerV1: Codable, Equatable, Sendable {
     package let layer: Int
     package let file: String
-    package let experts: [FinchTurboExpertV1]
+    package let experts: [FinchExpertV1]
 
-    package init(layer: Int, file: String, experts: [FinchTurboExpertV1]) {
+    package init(layer: Int, file: String, experts: [FinchExpertV1]) {
         self.layer = layer
         self.file = file
         self.experts = experts
     }
 }
 
-package struct FinchTurboPackedExpertsLayoutV1: Codable, Equatable, Sendable {
+package struct FinchPackedExpertsLayoutV1: Codable, Equatable, Sendable {
     package let expertStride: UInt64
     package let numLayers: Int
     package let expertsPerLayer: Int
-    package let layers: [FinchTurboLayerV1]
+    package let layers: [FinchLayerV1]
 
     package init(expertStride: UInt64, numLayers: Int, expertsPerLayer: Int,
-                 layers: [FinchTurboLayerV1]) {
+                 layers: [FinchLayerV1]) {
         self.expertStride = expertStride
         self.numLayers = numLayers
         self.expertsPerLayer = expertsPerLayer
@@ -61,17 +61,17 @@ package struct FinchTurboPackedExpertsLayoutV1: Codable, Equatable, Sendable {
     }
 }
 
-package enum FinchTurboPackedExpertsLayoutCodec {
-    package static func decode(_ data: Data) throws -> FinchTurboPackedExpertsLayoutV1 {
-        let layout: FinchTurboPackedExpertsLayoutV1
-        do { layout = try JSONDecoder().decode(FinchTurboPackedExpertsLayoutV1.self, from: data) }
-        catch { throw FinchTurboFormatError.invalid(field: "packed_experts/layout.json", reason: "\(error)") }
-        try FinchTurboV1StructuralValidator.validate(layout)
+package enum FinchPackedExpertsLayoutCodec {
+    package static func decode(_ data: Data) throws -> FinchPackedExpertsLayoutV1 {
+        let layout: FinchPackedExpertsLayoutV1
+        do { layout = try JSONDecoder().decode(FinchPackedExpertsLayoutV1.self, from: data) }
+        catch { throw FinchFormatError.invalid(field: "packed_experts/layout.json", reason: "\(error)") }
+        try FinchV1StructuralValidator.validate(layout)
         return layout
     }
 
-    package static func encode(_ layout: FinchTurboPackedExpertsLayoutV1) throws -> Data {
-        try FinchTurboV1StructuralValidator.validate(layout)
+    package static func encode(_ layout: FinchPackedExpertsLayoutV1) throws -> Data {
+        try FinchV1StructuralValidator.validate(layout)
         let encoder = JSONEncoder()
         do {
             let object = try JSONSerialization.jsonObject(with: encoder.encode(layout))
@@ -79,42 +79,42 @@ package enum FinchTurboPackedExpertsLayoutCodec {
                 withJSONObject: object,
                 options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
         } catch {
-            throw FinchTurboFormatError.invalid(
+            throw FinchFormatError.invalid(
                 field: "packed_experts/layout.json", reason: "\(error)")
         }
     }
 }
 
-package enum FinchTurboV1StructuralValidator {
-    package static func validate(_ layout: FinchTurboPackedExpertsLayoutV1) throws {
+package enum FinchV1StructuralValidator {
+    package static func validate(_ layout: FinchPackedExpertsLayoutV1) throws {
         guard layout.numLayers > 0, layout.expertsPerLayer > 0,
               layout.expertStride > 0,
-              layout.expertStride % FinchTurboFormatV1.alignmentBytes == 0,
+              layout.expertStride % FinchFormatV1.alignmentBytes == 0,
               layout.layers.count == layout.numLayers else {
-            throw FinchTurboFormatError.invalid(field: "layout", reason: "invalid dimensions or stride")
+            throw FinchFormatError.invalid(field: "layout", reason: "invalid dimensions or stride")
         }
         var layerIDs = Set<Int>()
         var layerFiles = Set<String>()
         for layer in layout.layers {
             guard layer.layer >= 0, layer.layer < layout.numLayers,
                   layerIDs.insert(layer.layer).inserted else {
-                throw FinchTurboFormatError.invalid(field: "layout.layers", reason: "duplicate or invalid layer")
+                throw FinchFormatError.invalid(field: "layout.layers", reason: "duplicate or invalid layer")
             }
-            try FinchTurboPathValidator.validateBasename(layer.file,
+            try FinchPathValidator.validateBasename(layer.file,
                                                       field: "layout.layers[\(layer.layer)].file")
-            let fileKey = FinchTurboPathValidator.appleFilesystemKey(layer.file)
+            let fileKey = FinchPathValidator.appleFilesystemKey(layer.file)
             guard fileKey != "layout.json" else {
-                throw FinchTurboFormatError.invalid(
+                throw FinchFormatError.invalid(
                     field: "layout.layers[\(layer.layer)].file",
                     reason: "reserved packed-expert filename")
             }
             guard layerFiles.insert(fileKey).inserted else {
-                throw FinchTurboFormatError.invalid(
+                throw FinchFormatError.invalid(
                     field: "layout.layers[\(layer.layer)].file",
                     reason: "duplicate layer filename")
             }
             guard layer.experts.count == layout.expertsPerLayer else {
-                throw FinchTurboFormatError.invalid(field: "layout.layers[\(layer.layer)].experts",
+                throw FinchFormatError.invalid(field: "layout.layers[\(layer.layer)].experts",
                                                 reason: "wrong expert count")
             }
             var logicalIDs = Set<Int>()
@@ -123,7 +123,7 @@ package enum FinchTurboV1StructuralValidator {
             let hasExplicitLogicalIDs = layer.experts.map(\.expert)
             guard hasExplicitLogicalIDs.allSatisfy({ $0 == nil })
                     || hasExplicitLogicalIDs.allSatisfy({ $0 != nil }) else {
-                throw FinchTurboFormatError.invalid(
+                throw FinchFormatError.invalid(
                     field: "layout.layers[\(layer.layer)].experts",
                     reason: "expert ids must be either all explicit or all positional")
             }
@@ -135,13 +135,13 @@ package enum FinchTurboV1StructuralValidator {
                       logicalIDs.insert(logical).inserted,
                       physicalRanks.insert(physical).inserted,
                       offsets.insert(expert.offset).inserted else {
-                    throw FinchTurboFormatError.invalid(field: "layout.layers[\(layer.layer)].experts",
+                    throw FinchFormatError.invalid(field: "layout.layers[\(layer.layer)].experts",
                                                     reason: "duplicate or invalid expert mapping")
                 }
-                let expectedOffset = try finchturboCheckedMultiply(UInt64(physical), layout.expertStride,
+                let expectedOffset = try finchCheckedMultiply(UInt64(physical), layout.expertStride,
                                                                field: "expert.offset")
                 guard expert.offset == expectedOffset, expert.size == layout.expertStride else {
-                    throw FinchTurboFormatError.invalid(field: "expert[\(logical)]",
+                    throw FinchFormatError.invalid(field: "expert[\(logical)]",
                                                     reason: "offset or size does not match physical rank")
                 }
                 var tensorRanges: [(start: UInt64, end: UInt64, name: String)] = []
@@ -151,13 +151,13 @@ package enum FinchTurboV1StructuralValidator {
                           !tensor.shape.isEmpty,
                           tensor.shape.allSatisfy({ $0 > 0 }),
                           tensor.bits.map({ $0 > 0 && $0 <= 32 }) ?? true else {
-                        throw FinchTurboFormatError.invalid(field: "expert[\(logical)].tensors.\(name)",
+                        throw FinchFormatError.invalid(field: "expert[\(logical)].tensors.\(name)",
                                                         reason: "invalid dtype or shape")
                     }
-                    let end = try finchturboCheckedAdd(tensor.offset, tensor.size,
+                    let end = try finchCheckedAdd(tensor.offset, tensor.size,
                                                    field: "tensor.\(name).range")
                     guard end <= expert.size else {
-                        throw FinchTurboFormatError.invalid(field: "expert[\(logical)].tensors.\(name)",
+                        throw FinchFormatError.invalid(field: "expert[\(logical)].tensors.\(name)",
                                                         reason: "range exceeds expert blob")
                     }
                     tensorRanges.append((tensor.offset, end, name))
@@ -167,7 +167,7 @@ package enum FinchTurboV1StructuralValidator {
                 }
                 for pair in zip(sortedRanges, sortedRanges.dropFirst())
                     where pair.0.end > pair.1.start {
-                    throw FinchTurboFormatError.invalid(
+                    throw FinchFormatError.invalid(
                         field: "expert[\(logical)].tensors",
                         reason: "overlapping ranges \(pair.0.name) and \(pair.1.name)")
                 }
@@ -175,8 +175,8 @@ package enum FinchTurboV1StructuralValidator {
         }
     }
 
-    package static func crossValidate(manifest: FinchTurboManifestV1,
-                                      layout: FinchTurboPackedExpertsLayoutV1) throws {
+    package static func crossValidate(manifest: FinchManifestV1,
+                                      layout: FinchPackedExpertsLayoutV1) throws {
         try crossValidate(
             manifestNumLayers: manifest.numLayers,
             manifestExpertsPerLayer: manifest.expertsPerLayer,
@@ -190,21 +190,21 @@ package enum FinchTurboV1StructuralValidator {
         manifestExpertsPerLayer: Int,
         manifestExpertStride: UInt64,
         manifestFileSizes: [String: UInt64],
-        layout: FinchTurboPackedExpertsLayoutV1
+        layout: FinchPackedExpertsLayoutV1
     ) throws {
         guard manifestNumLayers == layout.numLayers,
               manifestExpertsPerLayer == layout.expertsPerLayer,
               manifestExpertStride == layout.expertStride else {
-            throw FinchTurboFormatError.invalid(field: "manifest/layout",
+            throw FinchFormatError.invalid(field: "manifest/layout",
                                             reason: "dimension mismatch")
         }
-        let expectedLayerSize = try finchturboCheckedMultiply(UInt64(layout.expertsPerLayer),
+        let expectedLayerSize = try finchCheckedMultiply(UInt64(layout.expertsPerLayer),
                                                           layout.expertStride,
                                                           field: "layout.layerSize")
         for layer in layout.layers {
             let path = "packed_experts/\(layer.file)"
             guard manifestFileSizes[path] == expectedLayerSize else {
-                throw FinchTurboFormatError.invalid(field: "manifest.files.\(path)",
+                throw FinchFormatError.invalid(field: "manifest.files.\(path)",
                                                 reason: "missing or wrong layer size")
             }
         }

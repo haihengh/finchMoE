@@ -1,6 +1,6 @@
 import Foundation
 
-package struct FinchTurboResidentIndexHeaderV1: Equatable, Sendable {
+package struct FinchResidentIndexHeaderV1: Equatable, Sendable {
     package let indexSize: UInt64
     package let residentSize: UInt64
     package let entryCount: UInt64
@@ -12,7 +12,7 @@ package struct FinchTurboResidentIndexHeaderV1: Equatable, Sendable {
     }
 }
 
-package struct FinchTurboResidentIndexEntryV1: Equatable, Sendable {
+package struct FinchResidentIndexEntryV1: Equatable, Sendable {
     package let name: String
     package let dtype: UInt8
     package let fileOffset: UInt64
@@ -38,71 +38,71 @@ package struct FinchTurboResidentIndexEntryV1: Equatable, Sendable {
     }
 }
 
-package enum FinchTurboResidentIndexCodec {
-    package static func decodeHeader(_ bytes: UnsafeRawBufferPointer) throws -> FinchTurboResidentIndexHeaderV1 {
-        guard bytes.count >= FinchTurboFormatV1.residentHeaderBytes else {
-            throw FinchTurboFormatError.truncated(field: "resident.header")
+package enum FinchResidentIndexCodec {
+    package static func decodeHeader(_ bytes: UnsafeRawBufferPointer) throws -> FinchResidentIndexHeaderV1 {
+        guard bytes.count >= FinchFormatV1.residentHeaderBytes else {
+            throw FinchFormatError.truncated(field: "resident.header")
         }
         let base = bytes.baseAddress!
-        return FinchTurboResidentIndexHeaderV1(
+        return FinchResidentIndexHeaderV1(
             indexSize: readU64(base, 0),
             residentSize: readU64(base, 8),
             entryCount: readU64(base, 16))
     }
 
     package static func decodeRegion(_ bytes: UnsafeRawBufferPointer,
-                                     header: FinchTurboResidentIndexHeaderV1) throws -> [FinchTurboResidentIndexEntryV1] {
-        guard header.indexSize <= FinchTurboFormatV1.residentIndexMaxBytes else {
-            throw FinchTurboFormatError.invalid(
+                                     header: FinchResidentIndexHeaderV1) throws -> [FinchResidentIndexEntryV1] {
+        guard header.indexSize <= FinchFormatV1.residentIndexMaxBytes else {
+            throw FinchFormatError.invalid(
                 field: "resident.indexSize", reason: "exceeds v1 metadata cap")
         }
         guard header.indexSize <= UInt64(bytes.count),
-              header.indexSize >= UInt64(FinchTurboFormatV1.residentHeaderBytes),
-              header.indexSize % FinchTurboFormatV1.alignmentBytes == 0 else {
-            throw FinchTurboFormatError.truncated(field: "resident.index")
+              header.indexSize >= UInt64(FinchFormatV1.residentHeaderBytes),
+              header.indexSize % FinchFormatV1.alignmentBytes == 0 else {
+            throw FinchFormatError.truncated(field: "resident.index")
         }
-        let tableBytes = try finchturboCheckedMultiply(header.entryCount,
-                                                   UInt64(FinchTurboFormatV1.residentEntryBytes),
+        let tableBytes = try finchCheckedMultiply(header.entryCount,
+                                                   UInt64(FinchFormatV1.residentEntryBytes),
                                                    field: "resident.entryTable")
-        let tableEnd = try finchturboCheckedAdd(UInt64(FinchTurboFormatV1.residentHeaderBytes),
+        let tableEnd = try finchCheckedAdd(UInt64(FinchFormatV1.residentHeaderBytes),
                                             tableBytes, field: "resident.entryTable")
         guard tableEnd <= header.indexSize, header.entryCount <= UInt64(Int.max) else {
-            throw FinchTurboFormatError.invalid(field: "resident.entryTable", reason: "outside index")
+            throw FinchFormatError.invalid(field: "resident.entryTable", reason: "outside index")
         }
-        let residentEnd = try finchturboCheckedAdd(header.indexSize, header.residentSize,
+        let residentEnd = try finchCheckedAdd(header.indexSize, header.residentSize,
                                                field: "resident.payload")
         let base = bytes.baseAddress!
-        var result: [FinchTurboResidentIndexEntryV1] = []
+        var result: [FinchResidentIndexEntryV1] = []
         result.reserveCapacity(Int(header.entryCount))
         var names = Set<String>()
         var payloadRanges: [(start: UInt64, end: UInt64, field: String)] = []
         payloadRanges.reserveCapacity(Int(header.entryCount) * 3)
         for index in 0..<Int(header.entryCount) {
-            let offset = FinchTurboFormatV1.residentHeaderBytes + index * FinchTurboFormatV1.residentEntryBytes
+            let offset = FinchFormatV1.residentHeaderBytes + index * FinchFormatV1.residentEntryBytes
             let entry = base.advanced(by: offset)
             let nameOffset = UInt64(readU32(entry, 0))
             let nameLength = UInt64(readU16(entry, 4))
             guard readU8(entry, 7) == 0 else {
-                throw FinchTurboFormatError.invalid(field: "resident.entries[\(index)].reserved",
+                throw FinchFormatError.invalid(field: "resident.entries[\(index)].reserved",
                                                 reason: "must be zero")
             }
-            let nameEnd = try finchturboCheckedAdd(nameOffset, nameLength,
+            let nameEnd = try finchCheckedAdd(nameOffset, nameLength,
                                                field: "resident.entries[\(index)].name")
             guard nameOffset >= tableEnd, nameEnd <= header.indexSize,
                   nameLength <= UInt64(Int.max) else {
-                throw FinchTurboFormatError.invalid(field: "resident.entries[\(index)].name",
+                throw FinchFormatError.invalid(field: "resident.entries[\(index)].name",
                                                 reason: "range outside string table")
             }
             let nameBytes = UnsafeRawBufferPointer(start: base.advanced(by: Int(nameOffset)),
                                                    count: Int(nameLength))
             guard let name = String(bytes: nameBytes, encoding: .utf8),
                   !name.isEmpty, names.insert(name).inserted else {
-                throw FinchTurboFormatError.invalid(field: "resident.entries[\(index)].name",
+                throw FinchFormatError.invalid(field: "resident.entries[\(index)].name",
                                                 reason: "invalid UTF-8 or duplicate")
             }
             let dtype = readU8(entry, 6)
-            guard FinchTurboFormatV1.DType(rawValue: dtype) != nil else {
-                throw FinchTurboFormatError.invalid(field: "resident.entries[\(index)].dtype",
+            guard FinchFormatV1.DType(rawValue: dtype) != nil else {
+                throw FinchFormatError.invalid(field: "resident.entries[\(index)].dtype",
                                                 reason: "unknown dtype")
             }
             let fileOffset = readU64(entry, 8)
@@ -133,7 +133,7 @@ package enum FinchTurboResidentIndexCodec {
                 payloadRanges.append((biasOffset, biasOffset + biasSize,
                                       "resident.entries[\(index)].biases"))
             }
-            result.append(FinchTurboResidentIndexEntryV1(
+            result.append(FinchResidentIndexEntryV1(
                 name: name, dtype: dtype, fileOffset: fileOffset, sizeBytes: sizeBytes,
                 shape: shape,
                 scaleOffset: scaleOffset, scaleSize: scaleSize,
@@ -145,7 +145,7 @@ package enum FinchTurboResidentIndexCodec {
         if payloadRanges.count > 1 {
             for index in 1..<payloadRanges.count
                 where payloadRanges[index].start < payloadRanges[index - 1].end {
-                throw FinchTurboFormatError.invalid(
+                throw FinchFormatError.invalid(
                     field: payloadRanges[index].field,
                     reason: "overlaps \(payloadRanges[index - 1].field)")
             }
@@ -154,14 +154,14 @@ package enum FinchTurboResidentIndexCodec {
     }
 
     package static func writeHeader(into buffer: UnsafeMutableRawPointer,
-                                    header: FinchTurboResidentIndexHeaderV1) {
+                                    header: FinchResidentIndexHeaderV1) {
         writeU64(buffer, 0, header.indexSize)
         writeU64(buffer, 8, header.residentSize)
         writeU64(buffer, 16, header.entryCount)
     }
 
     package static func writeEntry(into buffer: UnsafeMutableRawPointer,
-                                   entry: FinchTurboResidentIndexEntryV1,
+                                   entry: FinchResidentIndexEntryV1,
                                    nameOffset: UInt32) {
         precondition(entry.shape.count == 4)
         writeU32(buffer, 0, nameOffset)
@@ -178,11 +178,11 @@ package enum FinchTurboResidentIndexCodec {
     }
 
     private static func validatePrimaryPayloadRange(offset: UInt64, size: UInt64,
-                                                    header: FinchTurboResidentIndexHeaderV1,
+                                                    header: FinchResidentIndexHeaderV1,
                                                     residentEnd: UInt64,
                                                     field: String) throws {
         guard size > 0 else {
-            throw FinchTurboFormatError.invalid(field: field, reason: "primary payload is empty")
+            throw FinchFormatError.invalid(field: field, reason: "primary payload is empty")
         }
         try validateContainedPayloadRange(offset: offset, size: size,
                                           header: header, residentEnd: residentEnd,
@@ -190,12 +190,12 @@ package enum FinchTurboResidentIndexCodec {
     }
 
     private static func validateOptionalPayloadRange(offset: UInt64, size: UInt64,
-                                                     header: FinchTurboResidentIndexHeaderV1,
+                                                     header: FinchResidentIndexHeaderV1,
                                                      residentEnd: UInt64,
                                                      field: String) throws {
         if size == 0 {
             guard offset == 0 else {
-                throw FinchTurboFormatError.invalid(field: field, reason: "absent payload offset must be zero")
+                throw FinchFormatError.invalid(field: field, reason: "absent payload offset must be zero")
             }
             return
         }
@@ -205,18 +205,18 @@ package enum FinchTurboResidentIndexCodec {
     }
 
     private static func validateContainedPayloadRange(offset: UInt64, size: UInt64,
-                                                      header: FinchTurboResidentIndexHeaderV1,
+                                                      header: FinchResidentIndexHeaderV1,
                                                       residentEnd: UInt64,
                                                       field: String) throws {
-        let end = try finchturboCheckedAdd(offset, size, field: field)
+        let end = try finchCheckedAdd(offset, size, field: field)
         guard offset >= header.indexSize, end <= residentEnd else {
-            throw FinchTurboFormatError.invalid(field: field, reason: "range outside resident payload")
+            throw FinchFormatError.invalid(field: field, reason: "range outside resident payload")
         }
     }
 
     private static func validateShape(_ shape: [UInt32], index: Int) throws {
         guard shape.count == 4, shape[0] > 0 else {
-            throw FinchTurboFormatError.invalid(
+            throw FinchFormatError.invalid(
                 field: "resident.entries[\(index)].shape", reason: "first dimension must be positive")
         }
         var sawZero = false
@@ -224,7 +224,7 @@ package enum FinchTurboResidentIndexCodec {
             if dimension == 0 {
                 sawZero = true
             } else if sawZero {
-                throw FinchTurboFormatError.invalid(
+                throw FinchFormatError.invalid(
                     field: "resident.entries[\(index)].shape",
                     reason: "zero dimensions must be trailing")
             }

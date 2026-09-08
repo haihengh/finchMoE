@@ -3,10 +3,10 @@ import FinchMoERepackCore
 
 private let usage = """
 Usage:
-  FinchMoERepack --output <model.finchturbo> [--overwrite] [--resume]
-  FinchMoERepack --input-snapshot <dir> --output <model.finchturbo> [--overwrite]
-  FinchMoERepack --discard-partial --output <model.finchturbo>
-  FinchMoERepack --verify-install --input-finchturbo <model.finchturbo>
+  FinchMoERepack --output <model.finch> [--overwrite] [--resume]
+  FinchMoERepack --input-snapshot <dir> --output <model.finch> [--overwrite]
+  FinchMoERepack --discard-partial --output <model.finch>
+  FinchMoERepack --verify-install --input-finch <model.finch>
   FinchMoERepack --help
 
 Without --input-snapshot, the installer streams the supported Gemma 4
@@ -16,7 +16,7 @@ authentication. A cancelled or interrupted download can be continued with
 --resume or removed with --discard-partial.
 
 With --input-snapshot, the installer quantizes a LOCAL bf16 Qwen 3.6 35B-A3B
-safetensors snapshot (int4 affine, group 64) into the .finchturbo format.
+safetensors snapshot (int4 affine, group 64) into the .finch format.
 """
 
 private struct Arguments {
@@ -26,7 +26,7 @@ private struct Arguments {
     var resume = false
     var discardPartial = false
     var verifyInstall = false
-    var inputFinchTurbo: String?
+    var inputFinch: String?
 
     static func parse(_ values: [String]) throws -> Arguments {
         var parsed = Arguments()
@@ -48,7 +48,7 @@ private struct Arguments {
             case "--verify-install":
                 parsed.verifyInstall = true
                 index += 1
-            case "--output", "--input-finchturbo", "--input-snapshot":
+            case "--output", "--input-finch", "--input-snapshot":
                 guard index + 1 < values.count else {
                     throw ParseError.missingValue(flag)
                 }
@@ -57,7 +57,7 @@ private struct Arguments {
                 } else if flag == "--input-snapshot" {
                     parsed.inputSnapshot = values[index + 1]
                 } else {
-                    parsed.inputFinchTurbo = values[index + 1]
+                    parsed.inputFinch = values[index + 1]
                 }
                 index += 2
             default:
@@ -72,26 +72,26 @@ private struct Arguments {
             guard parsed.output != nil else {
                 throw ParseError.missingRequired("--output")
             }
-            guard parsed.inputFinchTurbo == nil, !parsed.overwrite, !parsed.verifyInstall,
+            guard parsed.inputFinch == nil, !parsed.overwrite, !parsed.verifyInstall,
                   parsed.inputSnapshot == nil else {
                 throw ParseError.invalidMode("--discard-partial only accepts --output")
             }
             return parsed
         }
         if parsed.verifyInstall {
-            guard parsed.inputFinchTurbo != nil else {
-                throw ParseError.missingRequired("--input-finchturbo")
+            guard parsed.inputFinch != nil else {
+                throw ParseError.missingRequired("--input-finch")
             }
             guard parsed.output == nil, !parsed.overwrite, !parsed.resume,
                   parsed.inputSnapshot == nil else {
-                throw ParseError.invalidMode("verification accepts only --input-finchturbo")
+                throw ParseError.invalidMode("verification accepts only --input-finch")
             }
         } else {
             guard parsed.output != nil else {
                 throw ParseError.missingRequired("--output")
             }
-            guard parsed.inputFinchTurbo == nil else {
-                throw ParseError.invalidMode("--input-finchturbo requires --verify-install")
+            guard parsed.inputFinch == nil else {
+                throw ParseError.invalidMode("--input-finch requires --verify-install")
             }
             if let snapshot = parsed.inputSnapshot {
                 guard !parsed.resume else {
@@ -152,10 +152,10 @@ private func run(_ values: [String]) async -> Int32 {
         }
     }
 
-    if arguments.verifyInstall, let input = arguments.inputFinchTurbo {
+    if arguments.verifyInstall, let input = arguments.inputFinch {
         do {
             let result = try VerifiedInstallTool.run(
-                options: VerifyInstallOptions(inputFinchTurbo: input))
+                options: VerifyInstallOptions(inputFinch: input))
             print("Verified \(result.fileCount) files (\(result.bytesVerified) bytes)")
             print("Receipt: \(result.receiptPath)")
             return 0

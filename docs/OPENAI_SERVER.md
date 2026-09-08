@@ -18,7 +18,7 @@ If the command prints a match, do not start the server.
 ```bash
 swift build -c release --product FinchMoEServer
 .build/release/FinchMoEServer \
-  --model scratch/gemma4.finchturbo \
+  --model scratch/gemma4.finch \
   --port 8080 \
   --max-context 16384
 ```

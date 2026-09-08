@@ -203,7 +203,7 @@ extension ModelLoaderTests {
       root["modelDirectoryPath"] =
         dir
         .deletingLastPathComponent()
-        .appendingPathComponent("other.finchturbo")
+        .appendingPathComponent("other.finch")
         .standardizedFileURL
         .path
     }

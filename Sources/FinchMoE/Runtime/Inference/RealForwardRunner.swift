@@ -75,7 +75,7 @@ struct RDAdviceAdaptivePolicyState: Sendable, Equatable {
 
 /// Gemma 4 real-forward decode pass.
 ///
-/// Composes the production kernels against the `.finchturbo` model:
+/// Composes the production kernels against the `.finch` model:
 ///
 ///   embed_lookup_int4(token) * sqrt(H)
 ///   for L in 0..<30:

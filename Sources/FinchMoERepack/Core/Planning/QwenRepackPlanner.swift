@@ -53,7 +53,7 @@ enum QwenWriteTransform: Sendable, Equatable {
     /// Size of the emitted scales (== biases) payload (0 for raw entries).
     func scaleBytes(rows: Int, cols: Int) -> UInt64 {
         guard weightBits != nil else { return 0 }
-        return UInt64(rows) * UInt64(cols / FinchTurboQuantization.groupSize) * 2
+        return UInt64(rows) * UInt64(cols / FinchQuantization.groupSize) * 2
     }
 }
 
@@ -238,8 +238,8 @@ enum QwenRepackPlanner {
         }
 
         // The index region: header + entries + string table, page-padded.
-        let rawIdx = UInt64(FinchTurboBinary.indexHeaderBytes
-            + protos.count * FinchTurboBinary.indexEntryBytes
+        let rawIdx = UInt64(FinchBinary.indexHeaderBytes
+            + protos.count * FinchBinary.indexEntryBytes
             + stringTable.count)
         let indexSize = roundUpToPage(rawIdx)
 
@@ -348,10 +348,10 @@ enum QwenRepackPlanner {
 
     private static func dtypeByte(for transform: QwenWriteTransform) -> UInt8 {
         switch transform {
-        case .int4Affine, .int8Affine: return FinchTurboFormatV1.DType.u32.rawValue
-        case .normOnePlusW, .normRawBf16: return FinchTurboFormatV1.DType.bf16.rawValue
-        case .bf16ToFp16:              return FinchTurboFormatV1.DType.fp16.rawValue
-        case .bf16ToFp32:              return FinchTurboFormatV1.DType.fp32.rawValue
+        case .int4Affine, .int8Affine: return FinchFormatV1.DType.u32.rawValue
+        case .normOnePlusW, .normRawBf16: return FinchFormatV1.DType.bf16.rawValue
+        case .bf16ToFp16:              return FinchFormatV1.DType.fp16.rawValue
+        case .bf16ToFp32:              return FinchFormatV1.DType.fp32.rawValue
         }
     }
 
@@ -424,21 +424,21 @@ enum QwenRepackPlanner {
         // gate = fused rows [0, F)
         let gateWSlice = PerExpertTensorSlice(
             role: "gate", component: "weights",
-            dtype: FinchTurboFormatV1.DType.u32.rawValue,
+            dtype: FinchFormatV1.DType.u32.rawValue,
             logicalShape: [UInt64(f), UInt64(d)],
             offsetInExpertBlob: 0, sizeInExpertBlob: gateW,
             sourceOffsetPerExpert: UInt64(2 * f * d * 2),
             sourceTensor: gateUp, bitsForWeights: 4)
         let gateSSlice = PerExpertTensorSlice(
             role: "gate", component: "scales",
-            dtype: FinchTurboFormatV1.DType.bf16.rawValue,
+            dtype: FinchFormatV1.DType.bf16.rawValue,
             logicalShape: [UInt64(f), UInt64(d / 64)],
             offsetInExpertBlob: gateW, sizeInExpertBlob: gateAux,
             sourceOffsetPerExpert: UInt64(2 * f * d * 2),
             sourceTensor: gateUp, bitsForWeights: nil)
         let gateBSlice = PerExpertTensorSlice(
             role: "gate", component: "biases",
-            dtype: FinchTurboFormatV1.DType.bf16.rawValue,
+            dtype: FinchFormatV1.DType.bf16.rawValue,
             logicalShape: [UInt64(f), UInt64(d / 64)],
             offsetInExpertBlob: gateW + gateAux, sizeInExpertBlob: gateAux,
             sourceOffsetPerExpert: UInt64(2 * f * d * 2),
@@ -448,7 +448,7 @@ enum QwenRepackPlanner {
         // up = fused rows [F, 2F)
         let upWSlice = PerExpertTensorSlice(
             role: "up", component: "weights",
-            dtype: FinchTurboFormatV1.DType.u32.rawValue,
+            dtype: FinchFormatV1.DType.u32.rawValue,
             logicalShape: [UInt64(f), UInt64(d)],
             offsetInExpertBlob: roleBytes, sizeInExpertBlob: gateW,
             sourceOffsetPerExpert: UInt64(2 * f * d * 2),
@@ -456,7 +456,7 @@ enum QwenRepackPlanner {
             sourceTensor: gateUp, bitsForWeights: 4)
         let upSSlice = PerExpertTensorSlice(
             role: "up", component: "scales",
-            dtype: FinchTurboFormatV1.DType.bf16.rawValue,
+            dtype: FinchFormatV1.DType.bf16.rawValue,
             logicalShape: [UInt64(f), UInt64(d / 64)],
             offsetInExpertBlob: roleBytes + gateW, sizeInExpertBlob: gateAux,
             sourceOffsetPerExpert: UInt64(2 * f * d * 2),
@@ -464,7 +464,7 @@ enum QwenRepackPlanner {
             sourceTensor: gateUp, bitsForWeights: nil)
         let upBSlice = PerExpertTensorSlice(
             role: "up", component: "biases",
-            dtype: FinchTurboFormatV1.DType.bf16.rawValue,
+            dtype: FinchFormatV1.DType.bf16.rawValue,
             logicalShape: [UInt64(f), UInt64(d / 64)],
             offsetInExpertBlob: roleBytes + gateW + gateAux, sizeInExpertBlob: gateAux,
             sourceOffsetPerExpert: UInt64(2 * f * d * 2),
@@ -475,21 +475,21 @@ enum QwenRepackPlanner {
         // down
         let downWSlice = PerExpertTensorSlice(
             role: "down", component: "weights",
-            dtype: FinchTurboFormatV1.DType.u32.rawValue,
+            dtype: FinchFormatV1.DType.u32.rawValue,
             logicalShape: [UInt64(d), UInt64(f)],
             offsetInExpertBlob: 2 * roleBytes, sizeInExpertBlob: downW,
             sourceOffsetPerExpert: UInt64(d * f * 2),
             sourceTensor: down, bitsForWeights: 4)
         let downSSlice = PerExpertTensorSlice(
             role: "down", component: "scales",
-            dtype: FinchTurboFormatV1.DType.bf16.rawValue,
+            dtype: FinchFormatV1.DType.bf16.rawValue,
             logicalShape: [UInt64(d), UInt64(f / 64)],
             offsetInExpertBlob: 2 * roleBytes + downW, sizeInExpertBlob: downAux,
             sourceOffsetPerExpert: UInt64(d * f * 2),
             sourceTensor: down, bitsForWeights: nil)
         let downBSlice = PerExpertTensorSlice(
             role: "down", component: "biases",
-            dtype: FinchTurboFormatV1.DType.bf16.rawValue,
+            dtype: FinchFormatV1.DType.bf16.rawValue,
             logicalShape: [UInt64(d), UInt64(f / 64)],
             offsetInExpertBlob: 2 * roleBytes + downW + downAux, sizeInExpertBlob: downAux,
             sourceOffsetPerExpert: UInt64(d * f * 2),
@@ -505,7 +505,7 @@ enum QwenRepackPlanner {
     // MARK: - Helpers
 
     private static func roundUpToPage(_ v: UInt64) -> UInt64 {
-        let p = FinchTurboFormatV1.alignmentBytes
+        let p = FinchFormatV1.alignmentBytes
         return ((v + p - 1) / p) * p
     }
 

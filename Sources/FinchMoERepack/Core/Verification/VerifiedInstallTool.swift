@@ -3,10 +3,10 @@ import Darwin
 import FinchMoEFormat
 
 public struct VerifyInstallOptions: Sendable {
-    public let inputFinchTurbo: String
+    public let inputFinch: String
 
-    public init(inputFinchTurbo: String) {
-        self.inputFinchTurbo = inputFinchTurbo
+    public init(inputFinch: String) {
+        self.inputFinch = inputFinch
     }
 }
 
@@ -23,8 +23,8 @@ public enum VerifiedInstallTool {
     public static let layoutMaxBytes: UInt64 = 16 * 1024 * 1024
 
     public static func run(options: VerifyInstallOptions) throws -> VerifyInstallResult {
-        let root = URL(fileURLWithPath: options.inputFinchTurbo).standardizedFileURL
-        let access = try FinchTurboDirectoryAccess(rootPath: root.path)
+        let root = URL(fileURLWithPath: options.inputFinch).standardizedFileURL
+        let access = try FinchDirectoryAccess(rootPath: root.path)
         let manifestFD = try access.openFile("manifest.json")
         defer { close(manifestFD) }
         _ = fcntl(manifestFD, F_NOCACHE, 1)
@@ -108,7 +108,7 @@ public enum VerifiedInstallTool {
         return hasher.finalizeHexString()
     }
 
-    private static func inspectFile(access: FinchTurboDirectoryAccess,
+    private static func inspectFile(access: FinchDirectoryAccess,
                                     relativePath: String) throws -> (UInt64, String) {
         let fd = try access.openFile(relativePath)
         defer { close(fd) }
@@ -129,25 +129,25 @@ public enum VerifiedInstallTool {
         return result
     }
 
-    private static func loadManifest(data: Data) throws -> FinchTurboManifestV1 {
+    private static func loadManifest(data: Data) throws -> FinchManifestV1 {
         do {
-            return try FinchTurboManifestCodec.decode(data)
+            return try FinchManifestCodec.decode(data)
         } catch {
             throw RepackError.configurationInvalid(detail: "manifest.json invalid: \(error)")
         }
     }
 
-    private static func loadLayout(data: Data) throws -> FinchTurboPackedExpertsLayoutV1 {
+    private static func loadLayout(data: Data) throws -> FinchPackedExpertsLayoutV1 {
         do {
-            return try FinchTurboPackedExpertsLayoutCodec.decode(data)
+            return try FinchPackedExpertsLayoutCodec.decode(data)
         } catch {
             throw RepackError.configurationInvalid(detail: "packed_experts/layout.json invalid: \(error)")
         }
     }
 
-    private static func validatePackedExpertLayout(manifest: FinchTurboManifestV1,
-                                                   layout: FinchTurboPackedExpertsLayoutV1) throws {
-        do { try FinchTurboV1StructuralValidator.crossValidate(manifest: manifest, layout: layout) }
+    private static func validatePackedExpertLayout(manifest: FinchManifestV1,
+                                                   layout: FinchPackedExpertsLayoutV1) throws {
+        do { try FinchV1StructuralValidator.crossValidate(manifest: manifest, layout: layout) }
         catch {
             throw RepackError.configurationInvalid(
                 detail: "packed expert layout does not match manifest: \(error)")
@@ -173,8 +173,8 @@ public enum VerifiedInstallTool {
         }
     }
 
-    private static func findUnexpectedEntries(access: FinchTurboDirectoryAccess,
-                                              manifest: FinchTurboManifestV1) throws -> [String] {
+    private static func findUnexpectedEntries(access: FinchDirectoryAccess,
+                                              manifest: FinchManifestV1) throws -> [String] {
         let declaredFiles = Set(manifest.files.keys)
             .union(["manifest.json", VerifiedInstallReceiptWriter.fileName])
         var allowed = declaredFiles

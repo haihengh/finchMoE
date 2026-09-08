@@ -86,7 +86,7 @@ enum ResidentWriter {
                             indexSize: UInt64,
                             residentSize: UInt64) throws -> Data {
         guard indexSize <= UInt64(Int.max),
-              indexSize <= FinchTurboFormatV1.residentIndexMaxBytes else {
+              indexSize <= FinchFormatV1.residentIndexMaxBytes else {
             throw RepackError.configurationInvalid(
                 detail: "resident index size \(indexSize) exceeds v1 metadata cap")
         }
@@ -100,8 +100,8 @@ enum ResidentWriter {
                 detail: "resident index entry/string offset count mismatch")
         }
         let (entryTableBytes, tableOverflow) = records.count
-            .multipliedReportingOverflow(by: FinchTurboBinary.indexEntryBytes)
-        let (stringTableBase, baseOverflow) = FinchTurboBinary.indexHeaderBytes
+            .multipliedReportingOverflow(by: FinchBinary.indexEntryBytes)
+        let (stringTableBase, baseOverflow) = FinchBinary.indexHeaderBytes
             .addingReportingOverflow(entryTableBytes)
         guard !tableOverflow, !baseOverflow,
               stringTableBase <= idxBytes,
@@ -113,7 +113,7 @@ enum ResidentWriter {
         for (index, entry) in records.enumerated() {
             guard entry.name.utf8.count <= Int(UInt16.max),
                   entry.logicalShape4.count == 4,
-                  FinchTurboFormatV1.DType(rawValue: entry.dtype) != nil else {
+                  FinchFormatV1.DType(rawValue: entry.dtype) != nil else {
                 throw RepackError.configurationInvalid(
                     detail: "resident index entry \(index) is not representable")
             }
@@ -129,15 +129,15 @@ enum ResidentWriter {
                                                             alignment: 16_384)
         defer { idxBuf.deallocate() }
         idxBuf.initializeMemory(as: UInt8.self, repeating: 0)
-        FinchTurboBinary.writeIndexHeader(into: idxBuf.baseAddress!,
+        FinchBinary.writeIndexHeader(into: idxBuf.baseAddress!,
                                       indexSize: indexSize,
                                       residentSize: residentSize,
                                       entryCount: UInt64(records.count))
-        let entriesBase = FinchTurboBinary.indexHeaderBytes
+        let entriesBase = FinchBinary.indexHeaderBytes
         for i in 0..<records.count {
-            let dst = idxBuf.baseAddress!.advanced(by: entriesBase + i * FinchTurboBinary.indexEntryBytes)
+            let dst = idxBuf.baseAddress!.advanced(by: entriesBase + i * FinchBinary.indexEntryBytes)
             let nameOff = UInt32(stringTableBase) + stringTableOffsets[i]
-            FinchTurboBinary.writeIndexEntry(into: dst, entry: records[i], nameOffset: nameOff)
+            FinchBinary.writeIndexEntry(into: dst, entry: records[i], nameOffset: nameOff)
         }
         stringTable.withUnsafeBufferPointer { src in
             let dst = idxBuf.baseAddress!.advanced(by: stringTableBase)
@@ -146,8 +146,8 @@ enum ResidentWriter {
         let data = Data(bytes: idxBuf.baseAddress!, count: idxBytes)
         do {
             try data.withUnsafeBytes { raw in
-                let header = try FinchTurboResidentIndexCodec.decodeHeader(raw)
-                _ = try FinchTurboResidentIndexCodec.decodeRegion(raw, header: header)
+                let header = try FinchResidentIndexCodec.decodeHeader(raw)
+                _ = try FinchResidentIndexCodec.decodeRegion(raw, header: header)
             }
         } catch {
             throw RepackError.configurationInvalid(

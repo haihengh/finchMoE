@@ -323,9 +323,9 @@ public final class RemoteStreamingRepacker {
             .appendingPathComponent("packed_experts") as NSString)
             .appendingPathComponent("layout.json")
         let expertStride = plan.layers.first(where: { $0.expertsPerLayer > 0 })?.expertStride ?? 0
-        let layoutData = try FinchTurboJSON.encodeLayout(plan: plan, expertStride: expertStride)
+        let layoutData = try FinchJSON.encodeLayout(plan: plan, expertStride: expertStride)
         try writeSmall(path: layoutPath, data: layoutData)
-        try FinchTurboLayoutValidator.validate(path: layoutPath, plan: plan)
+        try FinchLayoutValidator.validate(path: layoutPath, plan: plan)
         try recordOutputFile(relativePath: "packed_experts/layout.json",
                              path: layoutPath,
                              progress: progress)
@@ -564,7 +564,7 @@ public final class RemoteStreamingRepacker {
                                metadata: IndexLoader.SourceMetadata,
                                expertStride: UInt64,
                                resolvedCommit: String) throws {
-        var bits = FinchTurboJSON.QuantBitWidths(
+        var bits = FinchJSON.QuantBitWidths(
             embedding: 4,
             attention: 4,
             linearAttention: 8,
@@ -593,9 +593,9 @@ public final class RemoteStreamingRepacker {
             bits.routedExpert = routedBits
         }
         let files = audit.outputFiles.map {
-            ($0.relativePath, FinchTurboJSON.FileEntry(size: $0.size, sha256: $0.sha256))
+            ($0.relativePath, FinchJSON.FileEntry(size: $0.size, sha256: $0.sha256))
         }
-        let data = try FinchTurboJSON.encodeManifest(
+        let data = try FinchJSON.encodeManifest(
             plan: plan,
             modelID: plan.matchedModelID ?? "unknown/snapshot",
             sourceSnapshotHash: "sha256:" + metadata.indexSha256Hex,

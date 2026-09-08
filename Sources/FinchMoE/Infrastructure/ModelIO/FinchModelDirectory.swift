@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import FinchMoEFormat
 
-package final class FinchTurboModelDirectory {
+package final class FinchModelDirectory {
     package let rootURL: URL
     private let rootFD: Int32
 
@@ -20,7 +20,7 @@ package final class FinchTurboModelDirectory {
 
     package func openFile(_ relativePath: String) throws -> Int32 {
         do {
-            try FinchTurboPathValidator.validateRelativePath(relativePath,
+            try FinchPathValidator.validateRelativePath(relativePath,
                                                          field: "path.\(relativePath)")
         } catch {
             throw ModelError.indexCorrupt(detail: "unsafe path \(relativePath): \(error)")
