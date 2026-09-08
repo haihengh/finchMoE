@@ -4,7 +4,7 @@ This repository is in the middle of a port. The upstream project is
 [TurboFieldfare](https://github.com/drumih/turbo-fieldfare), a Swift + Metal
 runtime for Gemma 4 26B-A4B. This fork's goal is to run
 **Qwen 3.6 35B-A3B** (`model_type: qwen3_5_moe`) on the same engine. The
-engine has since been rebranded to **FlashQwen** (upstream TurboFieldfare
+engine has since been rebranded to **FinchMoE** (upstream TurboFieldfare
 base archived in `reference/`); the inherited docs in this directory describe
 its runtime (`.fqturbo` layout, expert streaming, prefill/decode phases) and
 remain the reference for the engine mechanics. This document covers the Qwen
@@ -15,7 +15,7 @@ Qwen 3.6 35B-A3B, use TurboFieldfare as the base, and feel free to rewrite
 anything in this codebase.
 
 Status: **port complete through end-to-end quality + benchmarks
-(2026-09-05).** The engine is rebranded to **FlashQwen** — all
+(2026-09-05).** The engine is rebranded to **FinchMoE** — all
 `TurboFieldfare`/`Fieldfare`/`.gturbo` identifiers, module/target names, and
 the on-disk format are renamed (binary magic `FQTURBO`, extension `.fqturbo`);
 the pristine upstream TurboFieldfare base is archived in `reference/`
@@ -38,7 +38,7 @@ resolved and verified 2026-09-05 — see item 1 under "Remaining work, in
 order" for the evidence. The last open item — the ≈8 s fixed per-run
 prefill cost — was triaged 2026-09-07 and is gone under the CLI's new
 `--verify trusted-install` (item 2 below); the port is closed. A post-close
-EvalPlus HumanEval run against FlashQwenServer (item 6) scored 90.9% base /
+EvalPlus HumanEval run against FinchMoEServer (item 6) scored 90.9% base /
 87.8% HumanEval+ — reference parity with the llama.cpp cells for the same
 checkpoint family. The [implementation plan](#implementation-plan) records
 the verified state and the remaining work, in order.
@@ -155,9 +155,9 @@ order that unblocks an end-to-end Qwen 3.6 run.
 - **GDN decode unit (Phase 1, complete).** `Metal/LinearAttn/gdn.metal`
   (`gdn_conv_update`, `gdn_gate`, `gdn_recurrent`, `gdn_rmsnorm_gated`,
   `gdn_gate_gemv`), wrapper `Kernels/LinearAttn/GDN.swift`, fp32 CPU reference
-  `FlashQwenValidation/Support/Reference/LinearAttn/GDNRef.swift`,
+  `FinchMoEValidation/Support/Reference/LinearAttn/GDNRef.swift`,
   registered in `MetalContext`, Swift-Testing tests in
-  `Tests/FlashQwen/Core/Kernels/LinearAttn/GDNTests.swift` passing within
+  `Tests/FinchMoE/Core/Kernels/LinearAttn/GDNTests.swift` passing within
   `fp16ChainedReduction`. Covers the full decode step except the out_proj GEMV
   (shared with the existing int4 GEMV): causal conv → gate
   (`beta=sigmoid(b)`, `g=-exp(A_log)·softplus(a+dt_bias)`) → per-value-head
@@ -187,8 +187,8 @@ order that unblocks an end-to-end Qwen 3.6 run.
     `Qwen3_5MoeTextRotaryEmbedding`; the interleaved-MRoPE reordering is
     identity for text-only position ids). Wrapper
     `Kernels/Qwen/QwenDecodeFusions.swift`; refs in
-    `FlashQwenValidation/Support/Reference/Qwen/QwenDecodeRef.swift`; tests in
-    `Tests/FlashQwen/Core/Kernels/Qwen/`.
+    `FinchMoEValidation/Support/Reference/Qwen/QwenDecodeRef.swift`; tests in
+    `Tests/FinchMoE/Core/Kernels/Qwen/`.
   - **GDN branch**: in_proj_qkv GEMV → silu causal conv (in-place state) →
     fused `gdn_gate_gemv` (a/b GEMVs + gate; the runner assembles the
     a|b-packed block once at init from the two resident entries) → recurrent
@@ -235,7 +235,7 @@ order that unblocks an end-to-end Qwen 3.6 run.
     (batched `g`/`beta` from the fp16 a|b QMM output), and
     `prefill_gdn_rmsnorm_gated` (batched mean-based gated norm). Wrapper
     `Kernels/LinearAttn/GDNPrefill.swift`; reference `GDNPrefillRef.swift`;
-    17 tests in `Tests/FlashQwen/Core/Kernels/LinearAttn/GDNPrefillTests.swift`,
+    17 tests in `Tests/FinchMoE/Core/Kernels/LinearAttn/GDNPrefillTests.swift`,
     including a composed conv → gate → recurrent → norm chunk with the fp16
     boundary roundings the production path applies, and a two-chunk
     conv-state carry test. **The batched conv is not in-place-safe** (row
@@ -300,7 +300,7 @@ order that unblocks an end-to-end Qwen 3.6 run.
     and that norm weights carry the baked `(1+w)`. Full suite: 692 tests
     green (only the pre-existing environment-driven AppModelTests flake
     fails).
-  - **Real dry run DONE (2026-09-04):** `FlashQwenRepack --input-snapshot
+  - **Real dry run DONE (2026-09-04):** `FinchMoERepack --input-snapshot
     models/Qwen3.6-35B-A3B-bf16 --output models/Qwen3.6-35B-A3B-4bit.fqturbo`
     → **19.5 GB install** (`model_weights.bin`, 40 packed-expert layer files,
     layout.json, tokenizer sidecars, manifest, receipt). Three real-shape
@@ -406,7 +406,7 @@ family, sampling softcap, and stop tokens are wired (see below).
   `Int()` conversion trapped (deterministic SIGTRAP mid-repack at ~289 MiB,
   int8-only because `/15` keeps int4 scales in normal range). Both codecs now
   quantize with direct `(w − bias) / scale` division (`scale == 0 → q = 0`).
-  Regression tests in `Tests/FlashQwenFormat/FQTurboQuantizationTests.swift`
+  Regression tests in `Tests/FinchMoEFormat/FQTurboQuantizationTests.swift`
   (3, passing). **Repack: exit 0, 20 014 114 816 bytes** (19.5 GiB install,
   `linearAttention` 8). Engine-load tests green on the fresh install
   (`QwenRealInstallLoadTests`, `QwenRepackEngineLoadTests`).
@@ -555,7 +555,7 @@ family, sampling softcap, and stop tokens are wired (see below).
      or state breakage at the boundary. TTFT for the 2.5k prompt was ~2
      minutes — prefill throughput stays the long-context latency limiter
      (item 2).
-5. **FlashQwenServer smoke on the Qwen install — DONE (2026-09-07).** The
+5. **FinchMoEServer smoke on the Qwen install — DONE (2026-09-07).** The
    loopback OpenAI-compatible server is the one product surface the port had
    never exercised end-to-end. Release server binary was stale (predated the
    GDN readout-scale fix) — rebuilt. Then, on the Qwen install at
@@ -581,7 +581,7 @@ family, sampling softcap, and stop tokens are wired (see below).
      on the Qwen install; the tool-call gap, the reuse probe, and the missing
      `--verify` exposure stay open.
 6. **EvalPlus HumanEval on the Qwen install — DONE (2026-09-08).** The same
-   rig as the finchMoE reference matrix, run against FlashQwenServer:
+   rig as the finchMoE reference matrix, run against FinchMoEServer:
    EvalPlus 0.3.1 venv, greedy T=0, 1 sample, 768-token cap, system "You
    are a helpful assistant good at coding.", top_p 0.95, OpenAI backend on
    127.0.0.1:8080, scored with `evalplus.evaluate` (base + HumanEval+).
@@ -628,7 +628,7 @@ family, sampling softcap, and stop tokens are wired (see below).
      descriptor by the directory's manifest hash; `AppModel.init` probes
      with it and builds the installer for it.
    - Verified: app opens on the conversation view against the Qwen
-     install (no install UI), Load Model bootstraps `FlashQwenDecodeService`
+     install (no install UI), Load Model bootstraps `FinchMoEDecodeService`
      via launchctl, model resident ~1.08 GiB.
    - Notes: Qwen is never remotely installable in-app (repack-made
      installs only — the descriptor's download sizing is zero). The app's
@@ -661,7 +661,7 @@ hang from memory/IO thrash, not a process crash:
 - 2026-09-05 04:08:07 (`panic-full-2026-09-05-040807`) — followed by
   `apfsd` CPU-resource and `ResetCounter` diagnostics; GUI session restarted.
 
-Unrelated to the panics: 8× `FlashQwenRepack` SIGTRAPs 2026-09-04 23:16–00:00
+Unrelated to the panics: 8× `FinchMoERepack` SIGTRAPs 2026-09-04 23:16–00:00
 were the pre-fix denormal-scale traps (see above); the fix landed in 8004779
 at 00:28:26, after the last trap.
 
@@ -682,9 +682,9 @@ side). Protocol that has kept this box alive since:
 
 ## Repository state
 
-- `Sources/FlashQwen*/`, `Tests/FlashQwen*/` — the working engine, rebranded
+- `Sources/FinchMoE*/`, `Tests/FinchMoE*/` — the working engine, rebranded
   from the TurboFieldfare base (upstream `drumih/turbo-fieldfare`). Modules,
-  targets, product/binary names, and the on-disk format are all `FlashQwen`
+  targets, product/binary names, and the on-disk format are all `FinchMoE`
   / `FQTurbo` / `.fqturbo` now.
 - `reference/` — a pristine snapshot of the upstream TurboFieldfare source
   taken before the rebrand (gitignored, like `models/`), kept for reference.
@@ -694,6 +694,17 @@ side). Protocol that has kept this box alive since:
 - `docs/` — inherited TurboFieldfare documentation; `SYSTEM_DESIGN.md` and
   `IMPLEMENTATION_REFERENCES.md` describe the runtime and stay valid for the
   engine mechanics.
+- **Consolidation (2026-09-07, commits `4d00aa0` + `ff0076e` + `cf2057d`):**
+  the project now lives under the **FinchMoE** name and repository
+  (`haihengh/finchMoE`, full git history preserved). The C/Metal finchmoe
+  engine — the name's first generation — is archived under `archive/`
+  (`4d00aa0`); this engine merged in with its entire 19-commit history
+  (`ff0076e`) and was renamed end-to-end from FlashQwen to FinchMoE:
+  modules, products, binaries, launchd label, Unix socket, HTTP server owner,
+  and app icon. `models/` is a symlink to the payload-home checkout, and the
+  verified-install receipt binding resolves symlinks so the install stays
+  trusted from this checkout. The flash-qwen checkout and GitHub repo remain
+  as payload home and history archive; future work happens here.
 
 ## References
 
@@ -705,8 +716,8 @@ side). Protocol that has kept this box alive since:
 - [System design](SYSTEM_DESIGN.md) — `.fqturbo` layout, streaming,
   prefill/decode phases, Metal conventions the new kernels must follow.
 - Kernel templates for the GDN unit:
-  `Sources/FlashQwen/Metal/Primitives/rmsnorm.metal` (function-constant
-  guards, two-stage block reduce), `Sources/FlashQwen/Kernels/Primitives/RMSNorm.swift`
-  (PSO caching, dispatch), `Sources/FlashQwenValidation/Support/Reference/Primitives/RmsNorm.swift`
-  (reference style), `Tests/FlashQwen/Core/Kernels/Primitives/RMSNormTests.swift`
+  `Sources/FinchMoE/Metal/Primitives/rmsnorm.metal` (function-constant
+  guards, two-stage block reduce), `Sources/FinchMoE/Kernels/Primitives/RMSNorm.swift`
+  (PSO caching, dispatch), `Sources/FinchMoEValidation/Support/Reference/Primitives/RmsNorm.swift`
+  (reference style), `Tests/FinchMoE/Core/Kernels/Primitives/RMSNormTests.swift`
   (test harness).

@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/assets/turbofieldfare-logo-rounded.png" alt="Fieldfare logo: a fieldfare inside a segmented cache ring" width="280">
+  <img src="docs/assets/finchmoe-logo.jpg" alt="FinchMoE logo" width="280">
 </p>
 
-<h1 align="center">FlashQwen</h1>
+<h1 align="center">FinchMoE</h1>
 
 <p align="center">
   <strong>Out-of-core MoE inference on Apple Silicon — running Qwen 3.6 35B-A3B</strong><br>
@@ -25,25 +25,35 @@
   <a href="docs/IMPLEMENTATION_REFERENCES.md">References</a>
 </p>
 
-![FlashQwen Mac app generating text](docs/assets/turbofieldfare-app.webp)
+![FinchMoE Mac app generating text](docs/assets/finchmoe-app.webp)
 
 ## What this is
 
-FlashQwen is a fork of
-[TurboFieldfare](https://github.com/drumih/turbo-fieldfare) — a Swift + Metal
-runtime that runs a MoE LLM **without loading the whole model into RAM**. It
-keeps the shared core and KV/linear state in memory, then streams only the
-experts a token needs from SSD through a bounded LFU cache. That is what lets a
-tens-of-billions-parameter model run on an 8 GB Mac. It is model-specific, not
-a wrapper around MLX or llama.cpp.
+FinchMoE is a Swift + Metal runtime that runs a MoE LLM **without loading the
+whole model into RAM**. It keeps the shared core and KV/linear state in
+memory, then streams only the experts a token needs from SSD through a bounded
+LFU cache. That is what lets a tens-of-billions-parameter model run on an 8 GB
+Mac. It is model-specific, not a wrapper around MLX or llama.cpp.
 
-The upstream project ran **Gemma 4 26B-A4B**. The goal of this fork is to run
-**Qwen 3.6 35B-A3B** (`model_type: qwen3_5_moe`) on the same engine.
+The **FinchMoE** name comes from this project's first generation — a C/Metal
+engine that stalled at ~13% HumanEval and was abandoned in August 2026. What
+you see here is its second generation: the Swift + Metal runtime (formerly
+**FlashQwen**) that built on the out-of-core design of
+[TurboFieldfare](https://github.com/drumih/turbo-fieldfare) and reached the
+quality the first generation could not (90.9% HumanEval — llama.cpp parity).
+The first-generation codebase and payload live on, archived, under
+`archive/`.
+
+The upstream project ran **Gemma 4 26B-A4B**. This engine's port goal was
+**Qwen 3.6 35B-A3B** (`model_type: qwen3_5_moe`), and that is the working
+reference model today; the Gemma path is intact, and family dispatch runs
+both from the same binary.
 
 ## Current state
 
-- The engine is rebranded to **FlashQwen**: the module, target, product, and
-  binary names all use `FlashQwen`, and the on-disk model format is
+- The engine ships as **FinchMoE** (renamed from FlashQwen when the two
+  generations consolidated under this name, 2026-09-07): the module, target,
+  product, and binary names all use `FinchMoE`, and the on-disk model format is
   **`.fqturbo`** (binary magic `FQTURBO`) in place of the upstream `.gturbo`.
 - The Gated-DeltaNet (linear-attention) decode unit — the piece with no Gemma
   analogue — is implemented and reference-checked against the
@@ -72,22 +82,22 @@ and the phase plan — in [docs/QWEN36_PORT.md](docs/QWEN36_PORT.md).
 ## Try it
 
 ```bash
-git clone https://github.com/haihengh/flash-qwen.git
-cd flash-qwen
+git clone https://github.com/haihengh/finchMoE.git
+cd finchMoE
 swift build -c release
-.build/release/FlashQwenMac
+.build/release/FinchMoEMac
 ```
 
 On the first run, Swift Package Manager downloads and builds the packages
 required by the tokenizer. The complete release build produces the Mac app and
 its sibling decode-service executable.
 
-When the app opens, choose **Download** and let FlashQwen fetch and repack the
+When the app opens, choose **Download** and let FinchMoE fetch and repack the
 pinned model. Once it is ready, choose **Load Model**, type your prompt, and
 press **Generate**.
 
 > **Note:** the local install this repo builds and validates is **Qwen 3.6
-> 35B-A3B** (built from `models/Qwen3.6-35B-A3B-bf16` by `FlashQwenRepack`:
+> 35B-A3B** (built from `models/Qwen3.6-35B-A3B-bf16` by `FinchMoERepack`:
 > int8 GDN linear-attention projections, affine 4-bit MoE group 64, ~20 GB on
 > disk, streamed out-of-core). The upstream Gemma 4 26B-A4B path is intact;
 > family dispatch keeps both runnable from the same binary.
@@ -139,9 +149,9 @@ fp32 reference before any layer is wired in. Full details, the locked GDN
 math, and the target-model spec live in
 [docs/QWEN36_PORT.md](docs/QWEN36_PORT.md).
 
-## Using FlashQwen
+## Using FinchMoE
 
-FlashQwen provides a native Mac app, a command-line interface, and an
+FinchMoE provides a native Mac app, a command-line interface, and an
 experimental loopback OpenAI-compatible server. They share the same
 `.fqturbo` model directory, but only one model-owning product should run at a
 time.
@@ -150,12 +160,12 @@ The Swift package exposes six products:
 
 | Product | Purpose |
 | --- | --- |
-| `FlashQwen` | Swift library containing the runtime and Metal kernels |
-| `FlashQwenMac` | Native Mac app for installation and generation |
-| `FlashQwenDecodeService` | One-shot local model and Metal owner used by the Mac app |
-| `FlashQwenCLI` | Command-line instruction chat and raw completion |
-| `FlashQwenServer` | Loopback OpenAI-compatible Chat Completions server |
-| `FlashQwenRepack` | Streaming model installer and install verifier |
+| `FinchMoE` | Swift library containing the runtime and Metal kernels |
+| `FinchMoEMac` | Native Mac app for installation and generation |
+| `FinchMoEDecodeService` | One-shot local model and Metal owner used by the Mac app |
+| `FinchMoECLI` | Command-line instruction chat and raw completion |
+| `FinchMoEServer` | Loopback OpenAI-compatible Chat Completions server |
+| `FinchMoERepack` | Streaming model installer and install verifier |
 
 ### Requirements
 
@@ -175,7 +185,7 @@ Clone the repository, then run the app from its root:
 
 ```bash
 swift build -c release
-.build/release/FlashQwenMac
+.build/release/FinchMoEMac
 ```
 
 Build the complete package so the app and its sibling decode service are both
@@ -187,7 +197,7 @@ otherwise it targets `scratch/gemma4.fqturbo`.
 
 On first launch with no install present, the app checks available storage and
 shows the download and installed sizes for the Gemma checkpoint. Choose
-**Download** to begin. (Qwen installs are made by `FlashQwenRepack` and are
+**Download** to begin. (Qwen installs are made by `FinchMoERepack` and are
 only ever *loaded* by the app — in-app download is Gemma-only.)
 
 The installer never materializes the full source checkpoint. It streams the
@@ -216,7 +226,7 @@ Mac app it is already at `scratch/gemma4.fqturbo`; otherwise install it from
 the command line:
 
 ```bash
-swift run -c release FlashQwenRepack \
+swift run -c release FinchMoERepack \
   --output scratch/gemma4.fqturbo \
   --overwrite
 ```
@@ -224,12 +234,12 @@ swift run -c release FlashQwenRepack \
 Continue a cancelled or interrupted download, or remove saved download state:
 
 ```bash
-swift run -c release FlashQwenRepack \
+swift run -c release FinchMoERepack \
   --output scratch/gemma4.fqturbo \
   --overwrite \
   --resume
 
-swift run -c release FlashQwenRepack \
+swift run -c release FinchMoERepack \
   --discard-partial \
   --output scratch/gemma4.fqturbo
 ```
@@ -237,7 +247,7 @@ swift run -c release FlashQwenRepack \
 Verify an existing installation without loading the model:
 
 ```bash
-swift run -c release FlashQwenRepack \
+swift run -c release FinchMoERepack \
   --verify-install \
   --input-fqturbo scratch/gemma4.fqturbo
 ```
@@ -256,7 +266,7 @@ Put chat messages in a JSON array and pass it with `--messages-file`:
 ```
 
 ```bash
-swift run -c release FlashQwenCLI \
+swift run -c release FinchMoECLI \
   --model scratch/gemma4.fqturbo \
   --messages-file messages.json
 ```
@@ -266,7 +276,7 @@ set with `--max-new` (default 1,024 tokens); the Mac app can generate until the
 selected context window is full. Common generation options include
 `--max-context`, `--temperature`, `--top-k`, `--top-p`,
 `--repetition-penalty`, `--seed`, and repeatable `--stop` strings. The public
-CLI uses production runtime defaults — run `FlashQwenCLI --help` for the full
+CLI uses production runtime defaults — run `FinchMoECLI --help` for the full
 list. Generated text goes to standard output; timing statistics go to standard
 error, with `--quiet` to suppress the footer.
 
@@ -283,8 +293,8 @@ second. Same choice the Mac app exposes as its verification setting.
 Build the server and point it at an installed model:
 
 ```bash
-swift build -c release --product FlashQwenServer
-.build/release/FlashQwenServer \
+swift build -c release --product FinchMoEServer
+.build/release/FinchMoEServer \
   --model scratch/gemma4.fqturbo
 ```
 
@@ -311,8 +321,8 @@ directly into `.fqturbo` without staging a full shard or tensor.
 The Qwen 3.6 GDN layers replace the KV cache on 30 of the 40 layers with a
 per-value-head recurrent state (a 2 MiB device buffer per layer, updated each
 decode step). The decode path for both Qwen layer types —
-`Sources/FlashQwen/Metal/LinearAttn/gdn.metal` plus
-`Sources/FlashQwen/Metal/Qwen/qwen.metal`, dispatched from
+`Sources/FinchMoE/Metal/LinearAttn/gdn.metal` plus
+`Sources/FinchMoE/Metal/Qwen/qwen.metal`, dispatched from
 `RealForwardRunner` by `modelFamily` — is wired in and reference-checked
 against the `qwen3_5_moe` Transformers source.
 
@@ -322,7 +332,7 @@ kernels, and the correctness invariants.
 
 ## Status and scope
 
-FlashQwen currently includes:
+FinchMoE currently includes:
 
 - Remote streaming repack into the `.fqturbo` model format
 - The Qwen 3.6 35B-A3B `.fqturbo` install as the working reference model
@@ -371,7 +381,7 @@ Useful entry points:
 
 ## License and model terms
 
-FlashQwen's source and documentation are licensed under the
+FinchMoE's source and documentation are licensed under the
 [Apache License 2.0](LICENSE).
 
 Model weights are not included. The installer downloads them separately from
@@ -379,7 +389,7 @@ the pinned checkpoint, and the weights remain governed by their source terms.
 
 ## Credits
 
-FlashQwen is a fork of
+The Swift + Metal runtime is a fork of
 [TurboFieldfare](https://github.com/drumih/turbo-fieldfare) by
 **Andrey Mikhaylov** (an iOS and Metal engineer), whose out-of-core MoE
 streaming, Metal kernel conventions, and test harness this project builds on.
@@ -397,5 +407,5 @@ The dedication from the original project, reproduced with thanks:
 > but I built it with my favourite tools, especially Metal, in my favourite
 > field, on-device ML inference.
 
-FlashQwen is not affiliated with, sponsored by, or endorsed by Google or
+FinchMoE is not affiliated with, sponsored by, or endorsed by Google or
 Alibaba.
