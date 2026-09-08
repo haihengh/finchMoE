@@ -635,6 +635,21 @@ family, sampling softcap, and stop tokens are wired (see below).
      (`AppModelTests`) flake under load on this machine and pass isolated —
      pre-existing, untouched.
 
+8. **Reproduced end-to-end on a second machine — DONE (2026-09-08).**
+   Downloaded the public [`Qwen/Qwen3.6-35B-A3B`](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)
+   bf16 checkpoint (67 GB, 26 shards) fresh, repacked it with
+   `FinchMoERepack --input-snapshot` (19 GB `.finch` install, 352 non-text
+   tensors dropped), and ran the release CLI on a 24 GiB Apple M4 Pro
+   (macOS 26.6.2). Fixed a real bug this surfaced: `--verify-install` capped
+   `packed_experts/layout.json` at the old 16 MB Gemma-era limit, but Qwen's
+   256-expert/40-layer layout.json is ~22 MB — the runtime loader
+   (`PackedExpertsLayoutReader`) had already been raised to 64 MB for this,
+   `VerifiedInstallTool` had not; fixed to match. Post-fix, `--verify-install`
+   passes (49 files, 20,059,530,793 bytes). Benchmarks (greedy, `--verify
+   trusted-install`): decode **17.2-18.4 tok/s** at 256 new tokens, prefill
+   **43.8 tok/s** at 1,020 tokens, peak resident **~1.22 GiB**. Output
+   coherent. Numbers recorded in the README "At a glance" table.
+
 Known toolchain quirk (this machine, Xcode 26.6 / Swift 6.3.3): `swift test
 -c release` discovers 0 tests under `-O` (the swift-testing section is linked
 but not enumerated); run the suite with `-c debug` (or
