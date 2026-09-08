@@ -1,6 +1,6 @@
 # Optimizing a 14.3 GB model for an 8 GB machine
 
-TurboFieldfare runs Gemma 4 26B-A4B on an 8 GB Apple Silicon machine. Its
+FinchMoE runs Gemma 4 26B-A4B on an 8 GB Apple Silicon machine. Its
 text-only installation, without the vision tower, is about 14.3 GB. The model
 was never going to fit politely in memory.
 
@@ -340,4 +340,4 @@ to keep, what to run in parallel, and what to leave out. Clean local designs
 often lost in the full runtime. That pattern mattered more than any single win.
 
 For the current runtime, see [System design](SYSTEM_DESIGN.md).
-[Benchmarks](BENCHMARKS.md) has the latest result and reproduction command.
+The [README](../README.md#at-a-glance) has the latest result and reproduction command.
