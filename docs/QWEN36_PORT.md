@@ -1,33 +1,23 @@
 # Qwen 3.6 35B-A3B port
 
-This repository is in the middle of a port. The upstream project is
-[TurboFieldfare](https://github.com/drumih/turbo-fieldfare), a Swift + Metal
-runtime for Gemma 4 26B-A4B. This fork's goal is to run
-**Qwen 3.6 35B-A3B** (`model_type: qwen3_5_moe`) on the same engine. The
-engine has since been rebranded to **FlashQwen** (upstream TurboFieldfare
-base archived in `reference/`); the inherited docs in this directory describe
-its runtime (`.fqturbo` layout, expert streaming, prefill/decode phases) and
-remain the reference for the engine mechanics. This document covers the Qwen
-3.6 model side and the port plan.
+This document covers the Qwen 3.6 model side of the FinchMoE engine and the
+port plan: the `.finchturbo` on-disk layout, expert streaming, and
+prefill/decode phases. FinchMoE runs **Qwen 3.6 35B-A3B**
+(`model_type: qwen3_5_moe`) out-of-core on Apple Silicon.
 
 Directive (owner, 2026-08-30): drop the previous Qwen3-30B-A3B engine, run
-Qwen 3.6 35B-A3B, use TurboFieldfare as the base, and feel free to rewrite
-anything in this codebase.
+Qwen 3.6 35B-A3B, and feel free to rewrite anything in this codebase.
 
 Status: **port complete through end-to-end quality + benchmarks
-(2026-09-05).** The engine is rebranded to **FlashQwen** — all
-`TurboFieldfare`/`Fieldfare`/`.gturbo` identifiers, module/target names, and
-the on-disk format are renamed (binary magic `FQTURBO`, extension `.fqturbo`);
-the pristine upstream TurboFieldfare base is archived in `reference/`
-(gitignored, like `models/`). The original `QwenFieldfare*` sources were
-deleted; the bf16 Qwen 3.6 checkpoint is present at
+(2026-09-05).** The Gated-DeltaNet unit is reference-checked against the
+`qwen3_5_moe` transformers source, the full Qwen decode-layer path and the
+chunked Qwen prefill path are wired into the forward pass (Gemma paths
+untouched), and the bf16 → int4 quantizing repack is built and proven against
+the real checkpoint. The original `QwenFieldfare*` sources (the earlier
+Qwen3-30B-A3B engine) were deleted; the bf16 Qwen 3.6 checkpoint is present at
 `models/Qwen3.6-35B-A3B-bf16/` and the repacked int4 install at
-`models/Qwen3.6-35B-A3B-4bit.fqturbo/` (19.5 GB, load-validated). The
-Gated-DeltaNet unit is reference-checked against the `qwen3_5_moe`
-transformers source, the full Qwen decode-layer path and the chunked Qwen
-prefill path are wired into the forward pass (Gemma paths untouched), and
-the bf16 → int4 quantizing repack is built and proven against the real
-checkpoint. The interface is complete: the Qwen preset is auto-detected from
+`models/Qwen3.6-35B-A3B-4bit.finchturbo/` (19.5 GB, load-validated). The
+interface is complete: the Qwen preset is auto-detected from
 the installed manifest in app / CLI / server, the tokenizer family handles
 Qwen special tokens + ChatML + the dual stop set (248046/248044), and the
 softcap-0 sampling path is wired. End-to-end generation is coherent — greedy
@@ -613,7 +603,7 @@ family, sampling softcap, and stop tokens are wired (see below).
      exec-able solution; all numbers here are evalplus's.
 
 7. **Mac app loads the local Qwen install — DONE (2026-09-07).** The app
-   layer (reused from TurboFieldfare) was Gemma-only while the engine,
+   layer was Gemma-only while the engine,
    decode service, and protocol were already dual-family (service-side
    `ManifestReader.detectPreset`). Three app-layer changes:
    - `AppModelInstallDescriptor.qwen3_6` — descriptor pinned to the local
@@ -682,18 +672,12 @@ side). Protocol that has kept this box alive since:
 
 ## Repository state
 
-- `Sources/FlashQwen*/`, `Tests/FlashQwen*/` — the working engine, rebranded
-  from the TurboFieldfare base (upstream `drumih/turbo-fieldfare`). Modules,
-  targets, product/binary names, and the on-disk format are all `FlashQwen`
-  / `FQTurbo` / `.fqturbo` now.
-- `reference/` — a pristine snapshot of the upstream TurboFieldfare source
-  taken before the rebrand (gitignored, like `models/`), kept for reference.
-- `Sources/QwenFieldfare*/` — the earlier Qwen3-30B-A3B engine, deleted.
+- `Sources/FinchMoE*/`, `Tests/FinchMoE*/` — the working engine. Modules,
+  targets, product/binary names, and the on-disk format are all `FinchMoE`
+  / `FinchTurbo` / `.finchturbo` now.
 - `models/Qwen3.6-35B-A3B-bf16/` — local bf16 checkpoint (27 shards), plus
   tokenizer files and `expert_index.json`.
-- `docs/` — inherited TurboFieldfare documentation; `SYSTEM_DESIGN.md` and
-  `IMPLEMENTATION_REFERENCES.md` describe the runtime and stay valid for the
-  engine mechanics.
+- `docs/` — describes the runtime and stays valid for the engine mechanics.
 
 ## References
 

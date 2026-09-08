@@ -225,6 +225,6 @@ keep the evidence and final disposition readable without reproducing every raw
 capture.
 
 [Optimization journey](../OPTIMIZATION_JOURNEY.md) |
-[Benchmarks](../BENCHMARKS.md) |
+[Benchmarks](../../README.md#at-a-glance) |
 [System design](../SYSTEM_DESIGN.md) |
 [Implementation references](../IMPLEMENTATION_REFERENCES.md)

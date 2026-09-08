@@ -1,30 +1,30 @@
 # Local OpenAI-compatible server
 
-`TurboFieldfareServer` exposes a local Chat Completions API for one Gemma
+`FinchMoEServer` exposes a local Chat Completions API for one Gemma
 model. It binds to `127.0.0.1` without authentication or TLS. Do not expose it
 through a proxy or tunnel.
 
 ## Start the server
 
-First, install the model with the Mac app or `TurboFieldfareRepack`. Then check
-that no other TurboFieldfare model process is running:
+First, install the model with the Mac app or `FinchMoERepack`. Then check
+that no other FinchMoE model process is running:
 
 ```bash
-pgrep -fl 'TurboFieldfareServer|TurboFieldfareMac|TurboFieldfareDecodeService|TurboFieldfareCLI|TurboFieldfarePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
+pgrep -fl 'FinchMoEServer|FinchMoEMac|FinchMoEDecodeService|FinchMoECLI|FinchMoEPackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
 ```
 
 If the command prints a match, do not start the server.
 
 ```bash
-swift build -c release --product TurboFieldfareServer
-.build/release/TurboFieldfareServer \
-  --model scratch/gemma4.gturbo \
+swift build -c release --product FinchMoEServer
+.build/release/FinchMoEServer \
+  --model scratch/gemma4.finchturbo \
   --port 8080 \
   --max-context 16384
 ```
 
 The server loads the model before opening the port. Wait for
-`TurboFieldfareServer ready`, then keep the process running while clients use
+`FinchMoEServer ready`, then keep the process running while clients use
 it.
 
 Check the server from another terminal:
@@ -71,9 +71,9 @@ OpenCode:
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {
-    "turbofieldfare": {
+    "finchmoe": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "TurboFieldfare",
+      "name": "FinchMoE",
       "options": {
         "baseURL": "http://127.0.0.1:8080/v1",
         "apiKey": "local"
@@ -92,14 +92,14 @@ OpenCode:
 }
 ```
 
-Select `turbofieldfare/gemma-4-26b-a4b-it` in OpenCode.
+Select `finchmoe/gemma-4-26b-a4b-it` in OpenCode.
 
 Pi uses its `openai-completions` adapter:
 
 ```json
 {
   "providers": {
-    "turbofieldfare": {
+    "finchmoe": {
       "baseUrl": "http://127.0.0.1:8080/v1",
       "api": "openai-completions",
       "apiKey": "local",

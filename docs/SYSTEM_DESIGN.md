@@ -1,6 +1,6 @@
 # System design
 
-TurboFieldfare is a Swift and Metal runtime for Gemma 4 26B-A4B on Apple
+FinchMoE is a Swift and Metal runtime for Gemma 4 26B-A4B on Apple
 Silicon. The text-only installation is about 14.3 GB, but the target machine
 has 8 GB of memory. The runtime keeps the common weights and working state
 available to Metal. It stores routed experts in per-layer files and reads only
@@ -83,12 +83,12 @@ See the [command-line instructions](../README.md#command-line-interface) for
 installation. The [optimization journey](OPTIMIZATION_JOURNEY.md#explicit-reads-made-expert-streaming-work)
 records the current instruction-checkpoint validation.
 
-## The `.gturbo` directory
+## The `.finchturbo` directory
 
 The installation tree is abridged below:
 
 ```text
-gemma4.gturbo/
+gemma4.finchturbo/
   manifest.json
   verified-install.json
   model_weights.bin
@@ -125,15 +125,15 @@ may load. It records the architecture, file sizes, and SHA-256 hashes. Without
 it, the runtime treats the installation as partial. `verified-install.json`
 records which manifest, directory, and files were verified.
 
-[`TurboFieldfareFormat`](../Sources/TurboFieldfareFormat) defines the v1 JSON
+[`FinchMoEFormat`](../Sources/FinchMoEFormat) defines the v1 JSON
 files and resident index used by the installer, verifier, and runtime. This
 keeps parsing and validation consistent across all three.
 
-The model path itself may be a symlink. TurboFieldfare resolves it once when
+The model path itself may be a symlink. FinchMoE resolves it once when
 the model opens, then rejects any symlinks inside the model directory. Changing
 the original symlink later cannot switch files under a running model.
 
-By default, TurboFieldfare hashes `manifest.json`, `model_weights.bin`, and
+By default, FinchMoE hashes `manifest.json`, `model_weights.bin`, and
 `packed_experts/layout.json` at load, then hashes each routed-expert layer file
 on first use. The trusted-receipt policy is an explicit alternative. It still
 hashes the same three common files. For large layer files, it checks the
@@ -190,7 +190,7 @@ the same slot concurrently.
 
 ```mermaid
 flowchart LR
-    subgraph Disk[".gturbo on SSD"]
+    subgraph Disk[".finchturbo on SSD"]
         MW["model_weights.bin\ncommon weights"]
         LF["30 layer files\n128 routed experts each"]
         MF["manifest + layout + tokenizer"]
@@ -261,7 +261,7 @@ The production profile handles up to 128 prompt tokens at a time. Execution
 stays layer-major: it moves each bounded group of rows through the transformer
 one layer at a time, without holding expert activations for the full prompt.
 
-For each chunk and layer, TurboFieldfare:
+For each chunk and layer, FinchMoE:
 
 - runs projection GEMM/QMM paths where the row count can amortize setup;
 - applies causal sliding-window or full attention and writes K/V rows;
@@ -357,7 +357,7 @@ logits path, temperature `0` selects the argmax after any repetition penalty.
 
 ## Metal execution
 
-TurboFieldfare compiles its Metal source at runtime. Decode uses custom affine
+FinchMoE compiles its Metal source at runtime. Decode uses custom affine
 INT4 and INT8 GEMV kernels that consume the checkpoint's packed values, BF16
 scales, and BF16 biases directly. MPP prefill dequantizes one bounded weight
 tile into FP16 threadgroup memory and passes FP16 tensors to `matmul2d`. The
@@ -382,40 +382,40 @@ operations. Single-token decode stays on custom GEMV kernels.
 These files are the main entry points for the design described above. Their
 references lead to the supporting code and tests.
 
-- **Model contract and runtime path.** [`ArchConfig`](../Sources/TurboFieldfare/Infrastructure/ModelIO/ModelTypes.swift)
-  defines the fixed Gemma 4 shape; [`RuntimeConfiguration`](../Sources/TurboFieldfare/Runtime/Configuration/RuntimeConfiguration.swift)
+- **Model contract and runtime path.** [`ArchConfig`](../Sources/FinchMoE/Infrastructure/ModelIO/ModelTypes.swift)
+  defines the fixed Gemma 4 shape; [`RuntimeConfiguration`](../Sources/FinchMoE/Runtime/Configuration/RuntimeConfiguration.swift)
   defines the production configuration.
-- **Remote install and `.gturbo` layout.** Start with
-  [`SupportedModelSource`](../Sources/TurboFieldfareRepack/Core/Remote/SupportedModelSource.swift),
-  [`RemoteStreamingRepacker`](../Sources/TurboFieldfareRepack/Core/Remote/RemoteStreamingRepacker.swift),
-  and [`RepackPlanner`](../Sources/TurboFieldfareRepack/Core/Planning/RepackPlanner.swift)
+- **Remote install and `.finchturbo` layout.** Start with
+  [`SupportedModelSource`](../Sources/FinchMoERepack/Core/Remote/SupportedModelSource.swift),
+  [`RemoteStreamingRepacker`](../Sources/FinchMoERepack/Core/Remote/RemoteStreamingRepacker.swift),
+  and [`RepackPlanner`](../Sources/FinchMoERepack/Core/Planning/RepackPlanner.swift)
   for the pinned source, bounded range repack, and resident/per-layer file plan.
-- **Integrity and model load.** [`ManifestReader`](../Sources/TurboFieldfare/Infrastructure/ModelIO/ManifestReader.swift),
-  [`VerifiedInstallReceipt`](../Sources/TurboFieldfare/Infrastructure/ModelIO/VerifiedInstallReceipt.swift),
-  and [`Model.load`](../Sources/TurboFieldfare/Runtime/Inference/Model.swift) cover
+- **Integrity and model load.** [`ManifestReader`](../Sources/FinchMoE/Infrastructure/ModelIO/ManifestReader.swift),
+  [`VerifiedInstallReceipt`](../Sources/FinchMoE/Infrastructure/ModelIO/VerifiedInstallReceipt.swift),
+  and [`Model.load`](../Sources/FinchMoE/Runtime/Inference/Model.swift) cover
   validation, resident mapping, and lazy layer verification.
-- **Resident and streamed weights.** [`ResidentBuffer`](../Sources/TurboFieldfare/Infrastructure/ModelIO/ResidentBuffer.swift),
-  [`ModelExpertIO`](../Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift),
-  and [`PreadExpertStreamer`](../Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift)
+- **Resident and streamed weights.** [`ResidentBuffer`](../Sources/FinchMoE/Infrastructure/ModelIO/ResidentBuffer.swift),
+  [`ModelExpertIO`](../Sources/FinchMoE/Runtime/Inference/ModelExpertIO.swift),
+  and [`PreadExpertStreamer`](../Sources/FinchMoE/Infrastructure/Streaming/PreadExpertStreamer.swift)
   own common weights, expert-cache planning, slots, and parallel bounded reads.
-- **KV cache and attention.** [`KVCacheManager`](../Sources/TurboFieldfare/Runtime/KVCache/KVCacheManager.swift)
+- **KV cache and attention.** [`KVCacheManager`](../Sources/FinchMoE/Runtime/KVCache/KVCacheManager.swift)
   owns bounded circular SWA storage and linear full-attention storage.
-  [`Attention`](../Sources/TurboFieldfare/Kernels/Attention/Attention.swift) and
-  [`PrefillAttention`](../Sources/TurboFieldfare/Kernels/Attention/PrefillAttention.swift)
+  [`Attention`](../Sources/FinchMoE/Kernels/Attention/Attention.swift) and
+  [`PrefillAttention`](../Sources/FinchMoE/Kernels/Attention/PrefillAttention.swift)
   consume distinct FP16 K/V ranges.
-- **Prompt and decode orchestration.** [`runRawCompletion`](../Sources/TurboFieldfare/Runtime/Generation/RawCompletion.swift)
-  owns the outer generation loop; [`RealForwardRunner`](../Sources/TurboFieldfare/Runtime/Inference/RealForwardRunner.swift)
+- **Prompt and decode orchestration.** [`runRawCompletion`](../Sources/FinchMoE/Runtime/Generation/RawCompletion.swift)
+  owns the outer generation loop; [`RealForwardRunner`](../Sources/FinchMoE/Runtime/Inference/RealForwardRunner.swift)
   owns the per-layer prefill and decode graph.
-- **Prefill memory and scheduling.** [`PrefillChunkScratch`](../Sources/TurboFieldfare/Runtime/Prefill/PrefillChunkScratch.swift),
-  [`PrefillRoutedTileScheduler`](../Sources/TurboFieldfare/Kernels/Prefill/MoE/PrefillRoutedTileScheduler.swift),
-  and [`MPPPrefillInt4QMM`](../Sources/TurboFieldfare/Kernels/TensorCore/MPPPrefillInt4QMM.swift)
+- **Prefill memory and scheduling.** [`PrefillChunkScratch`](../Sources/FinchMoE/Runtime/Prefill/PrefillChunkScratch.swift),
+  [`PrefillRoutedTileScheduler`](../Sources/FinchMoE/Kernels/Prefill/MoE/PrefillRoutedTileScheduler.swift),
+  and [`MPPPrefillInt4QMM`](../Sources/FinchMoE/Kernels/TensorCore/MPPPrefillInt4QMM.swift)
   show bounded scratch, slot-safe expert tiles, and staged affine MPP projections.
-- **Router and routed MoE.** [`MoE`](../Sources/TurboFieldfare/Kernels/MoE/MoE.swift)
-  and [`moe.metal`](../Sources/TurboFieldfare/Metal/MoE/moe.metal) implement
+- **Router and routed MoE.** [`MoE`](../Sources/FinchMoE/Kernels/MoE/MoE.swift)
+  and [`moe.metal`](../Sources/FinchMoE/Metal/MoE/moe.metal) implement
   top-8 selection, cached-hit work, affine GeGLU, and weighted down reduction.
-- **Metal library and fusions.** [`MetalContext`](../Sources/TurboFieldfare/Infrastructure/Metal/MetalContext.swift),
-  [`tensorops.metal`](../Sources/TurboFieldfare/Metal/TensorCore/tensorops.metal),
-  and [`fused.metal`](../Sources/TurboFieldfare/Metal/Fusions/fused.metal) show
+- **Metal library and fusions.** [`MetalContext`](../Sources/FinchMoE/Infrastructure/Metal/MetalContext.swift),
+  [`tensorops.metal`](../Sources/FinchMoE/Metal/TensorCore/tensorops.metal),
+  and [`fused.metal`](../Sources/FinchMoE/Metal/Fusions/fused.metal) show
   runtime compilation, the MPP tensor-ops kernel, and production decode fusions.
 
 ## Correctness and safety invariants
@@ -439,7 +439,7 @@ references lead to the supporting code and tests.
 
 The current runtime supports text-only generation with the pinned Gemma 4
 26B-A4B instruction checkpoint. The source model supports image input, but
-TurboFieldfare omits its vision tower.
+FinchMoE omits its vision tower.
 
 The Mac app offers 4K, 8K, 16K, 32K, and 64K context lengths. Published app
 and CLI acceptance evidence covers up to 4K. Vision input, training,
@@ -449,7 +449,7 @@ warm model, serializes generation, and retains one verified conversational KV
 prefix by default. It retains only that prefix. See the
 [local server guide](OPENAI_SERVER.md).
 
-TurboFieldfare is a research system. The Mac app exposes a small set of typed
+FinchMoE is a research system. The Mac app exposes a small set of typed
 runtime controls. The production path uses FP16 KV, exact split-K/V
 attention, a 16-slot LFU expert cache, chunked prefill, staged affine MPP
 prefill, and batched routed MoE prefill. File-read advice (`RDADVISE`) is off by
@@ -459,7 +459,7 @@ default.
 
 - [Qwen 3.6 35B-A3B port](QWEN36_PORT.md)
 - [Local OpenAI-compatible server](OPENAI_SERVER.md)
-- [Benchmarks](BENCHMARKS.md)
-- [The experiments that shaped TurboFieldfare](OPTIMIZATION_JOURNEY.md)
+- [Benchmarks](../README.md#at-a-glance)
+- [The experiments that shaped FinchMoE](OPTIMIZATION_JOURNEY.md)
 - [Complete experiment inventory](experiments/EXPERIMENT_INVENTORY.md)
 - [Implementation references](IMPLEMENTATION_REFERENCES.md)
