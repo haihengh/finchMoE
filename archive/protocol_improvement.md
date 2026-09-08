@@ -1,8 +1,141 @@
 # Protocol Improvement Plan — finchMoE HumanEval Prompt-Protocol Parity
 
-**Status:** PLAN ONLY — not yet executed. Execute on the Mac (M4 builds, M1 runs), per the checklists at the end.
-**Pinned to:** finchMoE checkout `0b78d45` (`test(humaneval): add Ornith-1.5-35B-A3B results, ties Qwen3.6-35B-A3B`). All `infer.m` line numbers below refer to that commit; re-check anchors if the file has moved since.
-**Scope:** `finchmoe/infer.m` (engine) + `humaneval_m1/generate.py` + `humaneval_m1/start_server.sh` (harness). No changes to `humaneval_3090/` (spec baseline, frozen).
+**Status:** §1-§9's prompt-protocol fixes (chat endpoint, matching system message, `--no-think`,
+think re-entry ban) are IMPLEMENTED and VERIFIED — see §0. They did **not** close the gap.
+**§0 is the current diagnosis and the active plan. §1-§14 below are the ORIGINAL plan, kept
+for history/rationale; their line-number anchors are STALE (written against `0b78d45`,
+~10-11k lines; current `infer.m` is ~15.8k lines) and their root-cause theory (D1-D4, a
+prompt-template mismatch) is REFUTED as the dominant cause by the §0 evidence. Do not
+re-derive or re-apply §5/§6 without re-checking against current `infer.m` first — most of it
+already exists (see §0.1).**
+**Scope now:** `finchmoe/infer.m` (numeric/sampling path) + `humaneval_evalplus/` (harness,
+already built and run on this Mac) + local `llama.cpp/build/bin/llama-server` (Metal, already
+built in-tree) as a same-machine reference. `humaneval_3090/` stays the frozen external
+baseline; `humaneval_m1/` is superseded by `humaneval_evalplus/` and should not be extended
+further.
+
+---
+
+## 0. Status update (2026-08-23): the gap is numeric, not protocol
+
+### 0.1 What actually got run
+
+`humaneval_evalplus/` (branch `3090`, merged to `main` at `e679204`) is a byte-identical-tooling
+re-run of the 3090's EvalPlus 0.3.1 harness against `finchmoe-infer`, via `shim.py` (OpenAI-shaped
+proxy in front of the engine's SSE `/v1/chat/completions`). It already implements the core of
+this plan's §4 "Chosen approach":
+
+- request shape matches `humaneval_3090/humaneval_gen.py` byte-for-byte (same file, only `root=`
+  changed): system message `"You are a helpful assistant good at coding."`, greedy, `max_tokens`
+  768 (not 512 — confirmed on the wire, see `humaneval_evalplus/README.md`), `top_p=0.95` (a
+  no-op at T=0 on both sides)
+- `shim.py` forces the request onto the chat endpoint and injects the system prompt via
+  `~/.flash-moe/system.md` — the file-based override `load_system_prompt()` already supports
+  this operationally; no engine patch was needed for this cell
+- `--no-think` is passed; the empty-think-block suffix (Bug 12's fix) plus the post-close
+  re-entry ban (`infer.m:14277-14279`, `logits[THINK_START_TOKEN] = -INFINITY` etc.) are already
+  in the current binary
+- `smoke_check.py` measures `<think>` leakage directly per run — it is 0-2/164 across every
+  cell (§0.3), so D4 (think leakage) is **not** the dominant failure mode any more
+
+In other words: the concrete engine/harness changes this plan's §5-§6 called for are, in
+substance, already in place and already exercised. The remaining gap must be explained by
+something else.
+
+### 0.2 The decisive test: byte-identical weights, still ~13%
+
+`run_cell.sh gguf3090` loads `Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf` — the *exact*
+`lmstudio-community` file the 3090 used to score 91.5/89.0 (733 tensors, imatrix-quantized,
+21,166,757,728 bytes, same file the 3090's README documents). Through `finchmoe-infer`'s GGUF
+path, with the already-fixed protocol above, it scores:
+
+| Cell | Weights | pass@1 base | pass@1 plus |
+|---|---|---|---|
+| A (3090, external, reference) | lmstudio-community Q4_K_M | 91.5% | 89.0% |
+| B — `finchmoe-3bit` | native 3-bit | 13.4% (22/164) | 12.8% |
+| C — `finchmoe-4bit` | native 4-bit | 12.8% | 12.8% |
+| D — `finchmoe-gguf-q4km` | our own Q4_K_M GGUF (no imatrix) | 12.8% | 12.8% |
+| D′ — `finchmoe-gguf-q4km-3090` | **the 3090's exact GGUF file** | 12.8% | 12.8% |
+
+(Cross-check: `evalplus.evaluate` on the 3090's own published sample file, run through this
+Mac's patched evalplus install, reproduces 0.915/0.890 exactly — the *scoring* half is
+byte-identical across machines; every point of the gap above comes from *generation*.)
+
+Cell D′ is the load-bearing result: identical weights, identical prompts, identical greedy
+decoding — yet finchMoE reproduces neither the 3090's score nor even a materially different
+score from its own 3-bit/4-bit native tiers. Four tiers spanning native 3-bit through
+imatrix-quantized Q4_K_M all converge to the same ~12.8-13.4% band. **A quantization-quality
+explanation cannot produce that convergence** — 3-bit and imatrix Q4_K_M are not equivalent in
+weight fidelity, but they are equivalent in *finchMoE's* score. Something common to all four
+paths through `finchmoe-infer` is capping every tier at the same ceiling. §5 of the original
+plan's D1-D4 (endpoint mismatch, wrong system text, implicit double system prompt, think
+leakage) are the things that historically differed between the 3090 and finchMoE — and they are
+now confirmed matched (§0.1) while the gap persists. That refutes the prompt-template theory as
+the dominant cause; it may still be worth a few points, but it is not the ~78-point story.
+
+### 0.3 Forensic finding: greedy-attractor loops break the docstring, not the logic
+
+`smoke_check.py` per-cell diagnostics (164/164, full runs):
+
+| Cell | fenced | `<think>` leaked | sanitizer → no `def` | repetition loops (5x+ line) |
+|---|---|---|---|---|
+| 3bit | 164/164 | 2/164 (1%) | 16/164 (10%) | not separately counted in this run |
+| 4bit | 164/164 | 0/164 | 23/164 (14%) | 14/164 (9%) |
+| gguf (ours) | 164/164 | 0/164 | 28/164 (17%) | 16/164 (10%) |
+| gguf3090 (exact file) | 164/164 | 0/164 | 30/164 (18%) | 21/164 (13%) |
+
+The protocol layer is clean (100% fenced, near-zero think leakage). The failures are inside the
+model's own token stream. Comparing finchMoE's raw output for `HumanEval/0` and `HumanEval/1`
+against the 3090's own published sanitized solutions for the same two tasks:
+
+- **3090 (llama.cpp)**, `HumanEval/0`: docstring keeps exactly 2 short `>>>` examples, closes
+  `"""` cleanly, then writes `sorted_numbers = sorted(numbers)` and finishes the function.
+- **finchMoE (any GGUF/native tier)**, `HumanEval/0`: docstring reproduces 5-6+ `>>>` examples,
+  each slightly mutated, and never reaches the closing `"""` before the 768-token cap — the
+  sanitizer's `ast.parse` fails on the unterminated string, and everything after the last import
+  is discarded, scoring as `no def` / fail.
+- Same pattern on `HumanEval/1`: finchMoE's continuation drops a closing quote inside
+  `paren_string.replace('` and de-indents by one space — a malformed statement, not merely a
+  "slow" or "verbose" one.
+
+This is a **greedy-decoding attractor** (the same failure family as `BUGS.md` Bug 12's
+repetition loops): once the model samples one more `>>>` example than llama.cpp would have, it
+falls into a basin where reproducing docstring-example lines becomes the greedy-optimal
+continuation and it cannot escape before the token budget runs out. The question is *why*
+finchMoE's greedy argmax diverges from llama.cpp's greedy argmax on the **same weights**, at
+some early token — if the logits truly matched, greedy decoding is deterministic and the two
+engines would produce identical output. That divergence has to originate in the forward pass:
+dequantization, attention/RoPE, MoE routing/combine, or final-norm/lm_head numerics. This
+codebase has hit this exact class of bug before (Bug 18: FMA contraction created ULP-level logit
+noise invisible at the source level; Bug 17: a silent clobber that only showed up as an RMS
+mismatch two components downstream) — greedy decoding is unforgiving of exactly this kind of
+small, otherwise-harmless numeric drift, because it can flip an argmax tie into the wrong basin,
+and greedy decoding then "locks in" and amplifies the mistake for hundreds of tokens.
+
+**Revised diagnosis:** the ~78-point gap is dominated by a numeric divergence in finchMoE's
+forward pass relative to llama.cpp on the same GGUF weights, not by the prompt-protocol
+differences this plan originally targeted. §5-§9's protocol work should still be treated as
+correct and worth keeping (it removed real confounders and got the harness to a trustworthy
+byte-identical-weights control), but it is not the fix. §15 below is the new, active
+investigation plan.
+
+### 0.4 What is NOT yet ruled out (keep these on the list, do not re-litigate blindly)
+
+- **`--low-memory` CPU fallback.** The `gguf`/`gguf3090` cells pass `--low-memory` (routes matmuls
+  through a CPU fallback path instead of the Metal zero-copy path used by 3-bit/4-bit — see
+  `infer.m:15253-15259` region, current file). That path has less test/parity history than the
+  GPU path (only expert dequant had a bitwise-parity check historically, Bug 4). It is a weaker
+  suspect than it looks, because 3-bit/4-bit do NOT use `--low-memory` and show the same ~13%
+  ceiling and the same loop signature — so it cannot be the *sole* cause, but it could still be
+  contributing independently on top of a shared bug. Test in isolation (§15.4).
+- **Sampling/engine parity beyond greedy.** `-e 0 --top-k 1 --rep-penalty 1.0` is intended to
+  match llama.cpp's greedy default (`penalty_repeat = 1.0` is llama.cpp's own "disabled" value
+  too, confirmed in `llama.cpp/common/common.h:239`) — this looks matched on paper, but has not
+  been probed by dumping both engines' per-step top-20 and diffing (§15.2 does exactly this).
+- **Reference file provenance for the non-3090-exact GGUF cell.** Cell D (`gguf`, our own
+  conversion) is a different, non-imatrix file from the 3090's, so in principle it should score
+  lower than D′ — but it doesn't (both ~12.8%), which is itself evidence the attractor bug
+  dominates over weight-quality differences at this level.
 
 ---
 
@@ -489,24 +622,180 @@ The diagnosis is the same two mechanisms, on the deepseek-harness side of the wi
 
 ---
 
+## 15. Phase 7 (ACTIVE) — Numeric parity probe: finchMoE vs local llama.cpp, same weights, same Mac
+
+This is the current plan of record. Goal: find the earliest token position where finchMoE's
+greedy argmax diverges from llama.cpp's greedy argmax on the identical GGUF file, then use that
+position to localize the bug to a specific stage of the forward pass (embedding / a specific
+transformer layer's attention or MoE / final norm / lm_head). Everything runs on this one Mac —
+no 3090 needed, which removes the CUDA-vs-Metal and Windows-vs-macOS variables that were
+previously conflated with "llama.cpp vs finchMoE".
+
+Both binaries already exist in this checkout:
+- `finchmoe/finchmoe-infer` (Metal), flag `--logit-diag N` dumps top-20 logits + entropy every
+  N tokens to stderr (`infer.m:1917-1966`, wired at `infer.m:14168`/`14282`/`15711`/`15815`).
+- `llama.cpp/build/bin/llama-server` (Metal, AppleClang, arm64 — confirmed built and runnable on
+  this machine) and `llama.cpp/build/bin/llama-cli`, both support `n_probs` (server) for top-K
+  logprobs per generated token (`tools/server/server-context.cpp:1909-1926`).
+
+### 15.1 Fix the prompt first — use ONE task, not the full 164
+
+Pick `HumanEval/0` (already the clearest failure case in §0.3). Use the *exact* rendered prompt
+finchMoE received for that task — pull it straight out of the harness rather than re-typing it,
+to avoid introducing a whitespace/formatting difference of your own:
+
+```bash
+cd humaneval_evalplus
+.venv/bin/python3 - <<'EOF'
+import json
+# grab the exact user-turn text evalplus sent for HumanEval/0
+from evalplus.data import get_human_eval_plus
+from evalplus.data.utils import CACHE_DIR
+problems = get_human_eval_plus()
+print(problems["HumanEval/0"]["prompt"])
+EOF
+```
+
+Save that prompt text to `/tmp/he0_prompt.txt` (or pipe directly into the two probes below).
+The system message is fixed: `You are a helpful assistant good at coding.`
+
+### 15.2 Capture finchMoE's per-token top-20
+
+```bash
+cd finchmoe
+printf 'You are a helpful assistant good at coding.' > ~/.flash-moe/system.md
+./finchmoe-infer -R 9000 --gguf ../models/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf \
+    -e 0 --top-k 1 --no-think --rep-penalty 1.0 --low-memory \
+    --logit-diag 1 > /tmp/finchmoe_he0.log 2>&1 &
+# wait for /health, then send the SAME request shim.py would (via curl, chat endpoint):
+curl -s http://127.0.0.1:9000/v1/chat/completions -H 'Content-Type: application/json' -d "$(python3 -c "
+import json
+prompt = open('/tmp/he0_prompt.txt').read()
+print(json.dumps({'model':'x','messages':[{'role':'system','content':'You are a helpful assistant good at coding.'},{'role':'user','content':prompt}],'max_tokens':768,'temperature':0}))
+")" > /tmp/finchmoe_he0_response.json
+kill %1
+```
+
+`/tmp/finchmoe_he0.log` now has one `[logit-diag]` block per generated token: `step=N
+token=<id> ("<text>") entropy=... max_logit=...` followed by the top-20 (id, logit) pairs.
+
+Also run the SAME probe against the **native 3-bit/4-bit** tiers (drop `--gguf`/`--low-memory`,
+add `--4bit` for the 4-bit tier) to get their per-token top-20 too — useful for §15.4's
+`--low-memory` isolation test.
+
+### 15.3 Capture llama.cpp's per-token top-20 on the identical file, locally
+
+```bash
+cd llama.cpp
+./build/bin/llama-server -m ../models/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf \
+    -c 4096 -ngl 99 -fa on --reasoning off --temp 0 --top-k 1 --repeat-penalty 1.0 \
+    --host 127.0.0.1 --port 8090 &
+# wait for "server is listening", then hit /completion directly (not /v1/chat) so llama.cpp
+# applies its OWN chat template deterministically the same way the 3090 did:
+python3 - <<'EOF'
+import json, requests
+prompt = open('/tmp/he0_prompt.txt').read()
+r = requests.post('http://127.0.0.1:8090/v1/chat/completions', json={
+    "model": "x",
+    "messages": [
+        {"role": "system", "content": "You are a helpful assistant good at coding."},
+        {"role": "user", "content": prompt},
+    ],
+    "max_tokens": 768, "temperature": 0,
+    "n_probs": 20, "post_sampling_probs": True,
+})
+open('/tmp/llamacpp_he0_response.json', 'w').write(r.text)
+EOF
+kill %1
+```
+
+The response's `choices[0].logprobs` (or `completion_probabilities` if you use the legacy
+`/completion` endpoint instead) has the same shape as finchMoE's `--logit-diag`: per-token top-K
+candidates with their probabilities. Convert probabilities back to a comparable ranking (you do
+not need literal logit values — you only need each engine's rank-1 token id and whether the
+other engine's rank-1 choice appears anywhere in your top-20).
+
+### 15.4 Diff token-by-token, find the first divergence
+
+Write a small script (`scripts/logit_diff.py`, does not exist yet — create it) that:
+
+1. Parses both dumps into a list of `(step, top1_id, top1_text, top20_ids)`.
+2. Walks both lists in lockstep while `top1_id` matches on both sides.
+3. Reports the first step where `finchmoe.top1_id != llamacpp.top1_id`, and whether llama.cpp's
+   top-1 appears anywhere in finchMoE's top-20 (small numeric drift, still recoverable) or not at
+   all (a larger/qualitative divergence).
+4. Print the decoded token text on both sides at and immediately around the divergence step —
+   this tells you whether it's an early divergence (before the docstring even starts — likely a
+   structural/dequant bug) or a late one (only appears once the docstring is already several
+   `>>>` examples deep — consistent with the attractor amplifying a small earlier drift rather
+   than causing it outright).
+
+**Acceptance / next action table for this probe:**
+
+| Finding | Interpretation | Next step |
+|---|---|---|
+| Divergence at step 0-5 (prompt is barely consumed) | Bug is in prompt encoding, RoPE position base, or the very first layers/embedding | Dump per-layer RMS (the technique from Bug 17/18: compare `[PRE-NORM]`/`[POST-NORM]` rms per layer) between finchMoE and a from-scratch reference (e.g. HF transformers CPU fp32 forward, if available, or llama.cpp's own `--verbose-prompt` + internal logging) for the identical prompt, walking layer-by-layer until the RMS values diverge |
+| Divergence appears only after several `>>>` examples (10-30+ tokens in) | Consistent with attractor amplifying a small, otherwise-tolerable per-token drift (e.g. Bug 18-style FMA/rounding-order difference in the MoE combine or attention softmax) rather than a structural bug | Audit `finchmoe/infer.m`'s combine/softmax code for FMA-contraction or summation-order differences vs a reference implementation, same method as Bug 18 |
+| llama.cpp's top-1 always appears in finchMoE's top-20, just not rank-1 | Small logit-scale/precision issue, not a wrong computation | Check final-norm epsilon, attention scale (`1/sqrt(d)`), and any float32-vs-float16 accumulation differences in the dequant kernels for Q4_K_M specifically (Bonsai/native tiers use different code paths — compare whether native 3-bit/4-bit diverge at the SAME step as GGUF, which would point to a bug shared by all dequant paths, e.g. RMSNorm or attention, rather than something GGUF-Q4_K_M-specific) |
+| llama.cpp's top-1 is nowhere in finchMoE's top-20 | Large, qualitative divergence — likely a real correctness bug (wrong tensor, wrong offset, transposed weight, wrong MoE routing) | Re-run the Bug 1/2/7-style extraction-correctness audit: dump the specific tensor(s) active at that layer/step and diff against a known-good reference (e.g. `llama.cpp`'s own `--verbose` internal tensor dumps, or a Python `gguf` library read of the same tensor) |
+
+### 15.5 Isolate `--low-memory` (CPU fallback) as an independent variable
+
+Because `gguf`/`gguf3090` use `--low-memory` and the native `3bit`/`4bit` cells do not, and all
+four still land in the same ~13% band, `--low-memory` is unlikely to be the sole cause — but
+confirm directly:
+
+1. Check available RAM; if the machine can fit the BF16/Q4_K_M weights without the low-memory
+   guard, re-run `run_cell.sh gguf` with `--low-memory` removed from `ENGINE_ARGS` (edit the
+   `gguf`/`gguf3090` cases in `humaneval_evalplus/run_cell.sh`).
+2. If the engine now takes the Metal zero-copy path (confirm via the startup log line the memory
+   gate prints, `infer.m` region documented in Bug 13), re-run `smoke_check.py` on a 20-30 task
+   slice (`run_cell.sh gguf3090 0 30`) and compare the loop-rate/no-def-rate against the
+   `--low-memory` run's same slice.
+3. If the rate is materially different, `--low-memory`'s CPU fallback is contributing a
+   *second*, independent numeric bug on top of whatever affects all four tiers — split the
+   investigation into two bugs instead of one.
+4. If the rate is the same, drop `--low-memory` from suspicion entirely and focus solely on
+   §15.4's shared-code-path findings (embedding, RoPE, attention, MoE combine, final norm,
+   sampling — the parts common to every tier).
+
+### 15.6 Cheap parallel diagnostic: does breaking the loop externally recover score?
+
+This does not fix the root cause and must not be presented as parity-preserving, but it is a
+fast, informative test: temporarily add a repetition penalty (e.g. `--rep-penalty 1.3
+--rep-last-n 64`, or whatever the engine's existing flags support) purely as a probe, and re-run
+`smoke_check.py` on the same 20-30 task slice.
+
+- **If the loop rate collapses and pass@1 jumps sharply** (say, from ~13% toward the 40-60%
+  range): the underlying per-token logits are close enough to reasonable that only the
+  *greedy-tie-breaking* is unusually attractor-prone in this engine — this narrows §15.4's search
+  to numeric precision effects (small logit differences that make ties/near-ties resolve
+  differently), not a gross correctness bug. It also becomes a legitimate interim mitigation
+  (document it as a deliberate deviation from strict greedy-parity, not as "fixed").
+- **If the loop rate is unaffected**: the model is confidently (not marginally) choosing the
+  wrong continuation — i.e., the top-1 logit itself is wrong, not just numerically fragile at a
+  tie. That is stronger evidence for a real correctness bug per §15.4's bottom row, and rules out
+  "it's just noise" as an excuse.
+
+---
+
 ## 11. Execution checklist (on the Mac)
 
-### On the M4 (build machine)
+**Historical (§1-§9, already done):** system-message/chat-endpoint/no-think parity is in place
+via `humaneval_evalplus/` — no further action needed here. Do not re-run this checklist as
+written; it targeted the retired `humaneval_m1/` two-machine setup.
 
-- [ ] `cd ~/Desktop/code/finchMoE && git log --oneline -1` — source is at `0b78d45` or newer and contains all §5 hunks (`grep -n "system-prompt" finchmoe/infer.m`).
-- [ ] Apply §5.1, §5.2, §5.3 edits to `finchmoe/infer.m`.
-- [ ] `cd finchmoe && make` — clean build.
-- [ ] Copy `finchmoe-infer` to the M1 deploy dir (back up old binary on the M1 first, `chmod +x` after copy).
+**Active checklist (§15):**
 
-### On the M1 (run machine)
-
-- [ ] Update `humaneval_m1/generate.py` (§6.1) and `humaneval_m1/start_server.sh` (§6.2).
-- [ ] Move old `he_results.jsonl` aside.
-- [ ] Restart server via `start_server.sh` (memory-gate retry loop; tail `/tmp/he_server.log` until `Listening`).
-- [ ] Run smoke tests (§7) — all EXPECT lines pass, in particular `grep -c "<think>"` = 0.
-- [ ] Run the parity gate (§8) and record the two prompt-id lists.
-- [ ] Launch full run (§9): `python3 generate.py`, then `python3 evaluate.py`.
-- [ ] Record results in this file's §12, or in the repo's results table alongside the 3090 baseline.
+- [x] §15.1: extract the exact `HumanEval/0` prompt text from evalplus, save to `/tmp/he0_prompt.txt`.
+- [x] §15.2: capture finchMoE's `--logit-diag 1` dump for GGUF (3090-exact file) on that one prompt. (3-bit/4-bit tiers not re-captured this pass.)
+- [x] §15.3: capture llama.cpp's `n_probs`/logprobs dump for the identical file + prompt, locally on this Mac via `llama-server`. (Note: the server's chat-template rendering differs from finchMoE's `--no-think` suffix, so the step-0 divergence seen there is partly a template artifact; the identical-token probes in §15.4 supersede it.)
+- [x] §15.4: write `scripts/logit_diff.py`, run it, find the first divergence step, classify it against the acceptance table. **RESULT: divergence at step 0, but NOT a finchMoE bug — see `scripts/PARITY_FINDINGS_2026-08-23.md`. llama.cpp's own logits vary by maxd 2.0-3.7 (with argmax flips) across its prefill batch configurations; finchMoE sits inside that spread. The step-0 flips are near-tie argmax flips (both engines' top-2 within ~0.6 logits).**
+- [x] §15.5: with `--low-memory` removed (if RAM allows), re-run a 20-30 task slice of `gguf3090` and compare loop/no-def rates to the `--low-memory` run. **DONE via `--cpu-linear` probe: CPU delta-net path gives identical logits (maxd 0.003) — GPU delta-net kernel ruled out as the h_diff seed.**
+- [x] §15.6: as a probe only, re-run a 20-30 task slice with a non-zero repeat penalty and record whether the loop rate collapses. **DONE: `--rep-penalty 1.05` shipped in all 4 tiers — 12.8% -> 18.3% base / 16.5% plus (full 164-task sweep). Docstring loop fixed.**
+- [x] Record all findings — `scripts/PARITY_FINDINGS_2026-08-23.md` holds the parity numbers; the open thread was the generation-level attractor under the EvalPlus wrapper prompt (see §0.3), now closed by the NumPy counterfactual (see `scripts/NUMPY_VERDICT_2026-08-27.md`).
+- [x] NumPy offline forward (the decisive counterfactual): **20/20 = 100% PASS** — finchMoE's math executed with BLAS ordering is clean; the drift is Metal matmul ordering, not formulation. See `scripts/NUMPY_VERDICT_2026-08-27.md`.
+- [ ] Once the kernel-ordering fix (fixed-order fp32 Metal matmuls) lands, re-run the full 164-task sweep (`run_all.sh`) and update the §0.2 results table with the corrected numbers.
 
 ---
 
@@ -514,30 +803,60 @@ The diagnosis is the same two mechanisms, on the deepseek-harness side of the wi
 
 | Step | Result |
 |---|---|
-| Smoke §7.3 `<think>` count | |
-| Prompt-ids parity (§8), Mode A/B | |
-| Full-run records | /164 completed, errors |
-| pass@1 base (m1) | |
-| 3090 baseline | 91.5 base / 89.0 plus |
+| §0.2 matrix (baseline, already measured) | A 91.5/89.0, B 13.4/12.8, C 12.8/12.8, D 12.8/12.8, D′ 12.8/12.8 |
+| §15.4 first divergence step (HumanEval/0) | |
+| §15.4 classification (structural / amplified-drift / precision / qualitative) | |
+| §15.5 `--low-memory` isolation result | |
+| §15.6 repeat-penalty probe result | `--rep-penalty 1.05` shipped in all 4 tiers (`run_cell.sh`): 12.8% -> 18.3% base / 16.5% plus (full 164-task sweep) |
+| NumPy offline forward (counterfactual, 2026-08-27) | **20/20 = 100% PASS on the 20-task slice** (`scripts/numpy_forward.py`, BLAS-order numpy, same dequant + GDN/FA/MoE math as finchMoE). See `scripts/NUMPY_VERDICT_2026-08-27.md`. |
+| Root cause (fill in once found) | finchMoE's layer math is **clean** (NumPy reproduction of it passes 100% and matches llama's CPU slice 19/19). The 12.8%-vs-91.5% gap decomposes into: (a) docstring loop -> fixed by `--rep-penalty 1.05` (12.8% -> 18.3%); (b) h_diff-driven newline/structural token suppression (verified `logit_diff = W @ h_diff` at corr 0.999, growing with sequence length) from general Metal-vs-CPU matmul ordering — NOT a formulation bug. |
+| Fix applied | rep105 (shipped); kernel ordering is the remaining lever — scope fixed-order fp32 Metal kernels for the delta-net/attention/MoE matmuls |
+| Full 164-task re-run after fix | rep105 re-run done (18.3% base / 16.5% plus); kernel-ordering fix pending |
 
 ---
 
 ## 13. Rollback and follow-ups
 
 **Rollback** (any phase):
-1. Restore the deployed binary: `cp finchmoe-infer.bak finchmoe-infer` on the M1, restart server.
-2. `git checkout` the §5 edits; `generate.py`/`start_server.sh` revert is a separate file-level revert (keep the old `he_results_pre_protocol_fix.jsonl` as the "before" record).
+1. Restore the deployed binary: keep a `finchmoe-infer.bak` before any `infer.m` change under investigation; `cp` it back and restart via `run_cell.sh` if a change needs to be reverted.
+2. `git checkout` any `infer.m` edits made during the §15 investigation; `humaneval_evalplus/` files are not modified by the probe (it only adds `scripts/logit_diff.py` and temp files under `/tmp`).
 
 **Follow-ups (out of scope here, tracked for later):**
-1. **Honor per-request system messages** in `/v1/chat/completions` (replaces `extract_last_content`-only parsing with a proper system/user extraction; requires reworking the startup system-prompt pre-cache or per-request full-message tokenization via `tokenize_chat_message`, `infer.m:10146-10162`).
-2. **Strip or mask think tokens in streaming output** for thinking-mode servers (currently streamed verbatim, `10629-10633`) if a client needs reasoning-free responses without `--no-think`.
-3. **Parse per-request `temperature`/`top_p`** (currently ignored; server flags only).
-4. **HumanEval+ evaluation** on the M1 results (port `evalplus.evaluate` or extend `evaluate.py` with plus tests) to compare the 89.0 plus number.
-5. **Mode B decision record**: if Mode B was used for the final run, log why in this file.
+1. **Honor per-request system messages** in `/v1/chat/completions` (replace `extract_last_content`-only parsing with a proper system/user extraction; would remove the need for `shim.py`'s `~/.flash-moe/system.md` file trick). Still valid, still deferred — not the current bottleneck.
+a2. **Strip or mask think tokens in streaming output** for thinking-mode servers (today streamed verbatim when `--no-think` is not passed). Still valid, still deferred.
+3. **Parse per-request `temperature`/`top_p`** (currently ignored; server flags only). Still valid, still deferred.
+4. **HumanEval+ number** for whichever tier ends up fixed, to compare against the 3090's 89.0 plus.
+5. Once §15 lands a fix, revisit whether Mode A vs Mode B (§4) still matters at all — if the numeric bug explains the gap, the think-suffix wording is unlikely to matter further, but re-verify rather than assume.
 
 ---
 
 ## 14. Key code map (for quick re-anchoring)
+
+**Caution:** the table below is pinned to commit `0b78d45` and is stale — current `infer.m` has
+grown to ~15.8k lines and most of these anchors have shifted. Use `grep -n` for the function
+names, not these line numbers, e.g.:
+
+```bash
+grep -n "static.*build_think_suffix\|static.*load_system_prompt\|static.*tokenize_chat_message\|static.*logit_diag_dump\|g_low_memory\|THINK_START_TOKEN\|THINK_END_TOKEN" finchmoe/infer.m
+```
+
+Current confirmed anchors (2026-08-23, this checkout):
+
+| Anchor | current `infer.m` line |
+|---|---|
+| `THINK_START_TOKEN` / `THINK_END_TOKEN` | 260-261 |
+| `g_no_think` | 463 |
+| `g_low_memory` | 464 |
+| `logit_diag_dump` | 1920 (wired at 14168, 14282, 15711, 15815) |
+| generation loop / think tracking (chat path) | ~14170-14285 |
+| think re-entry ban (chat path) | 14277-14279 |
+| generation loop / think tracking (2nd path — completions?) | ~15740-15820 |
+| `--no-think` flag parse | 15006 |
+| `--logit-diag` flag parse | 15013 |
+| `--low-memory` flag parse | 15007 |
+
+Stale table below (commit `0b78d45`) kept for historical cross-reference only — do not use for
+current edits:
 
 | Anchor | `infer.m` line (commit `0b78d45`) |
 |---|---|

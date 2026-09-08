@@ -27,19 +27,19 @@ SYSMD_BAK="$HOME/.flash-moe/system.md.evalbak"
 
 case "$CELL" in
   3bit) MODEL_ID="finchmoe-3bit"
-        ENGINE_ARGS="-m . -e 0 --top-k 1 --no-think --rep-penalty 1.0"
+        ENGINE_ARGS="-m . -e 0 --top-k 1 --no-think --rep-penalty 1.05"
         EXPECT="3-bit experts (1376256 bytes each)" ;;
   4bit) MODEL_ID="finchmoe-4bit"
-        ENGINE_ARGS="-m . --4bit -e 0 --top-k 1 --no-think --rep-penalty 1.0"
+        ENGINE_ARGS="-m . --4bit -e 0 --top-k 1 --no-think --rep-penalty 1.05"
         EXPECT="4-bit experts (1769472 bytes each)" ;;
   gguf) MODEL_ID="finchmoe-gguf-q4km"
-        ENGINE_ARGS="--gguf ../models/Qwen3.6-35B-A3B-Q4_K_M.gguf -e 0 --top-k 1 --no-think --rep-penalty 1.0 --low-memory"
+        ENGINE_ARGS="--gguf ../models/Qwen3.6-35B-A3B-Q4_K_M.gguf -e 0 --top-k 1 --no-think --rep-penalty 1.05 --low-memory"
         EXPECT="[gguf] magic OK" ;;
   gguf3090) MODEL_ID="finchmoe-gguf-q4km-3090"
         # the EXACT lmstudio-community Q4_K_M the 3090 ran (733 tensors,
         # imatrix-quantized; 21,166,757,728 bytes) — cell D prime, the true
         # control against the published 91.5%.
-        ENGINE_ARGS="--gguf Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf -e 0 --top-k 1 --no-think --rep-penalty 1.0 --low-memory"
+        ENGINE_ARGS="--gguf Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf -e 0 --top-k 1 --no-think --rep-penalty 1.05 --low-memory"
         EXPECT="[gguf] magic OK" ;;
   *) echo "ABORT: unknown cell '$CELL' (want 3bit|4bit|gguf|gguf3090)" >&2; exit 2 ;;
 esac

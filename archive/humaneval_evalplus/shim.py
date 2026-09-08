@@ -36,7 +36,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 UPSTREAM_HOST = "127.0.0.1"
 UPSTREAM_PORT = 9000
 CONNECT_TIMEOUT = 10      # engine accept() should be instant once up
-READ_TIMEOUT = 120        # engine writes continuously while generating;
+READ_TIMEOUT = 600        # engine writes continuously while generating;
                           # 120 s of silence means it is wedged
 MAX_503_RETRIES = 8
 STRIP_THINK = True
