@@ -1,0 +1,10 @@
+models/*
+/reference/
+scratch/
+.build/*
+.claude/*
+.vscode/*
+.DS_Store
+*.xcodeproj
+*.xcworkspace
+DerivedData/
