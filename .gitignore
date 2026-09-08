@@ -1,4 +1,4 @@
-# Archived pre-flash-qwen engine (see archive/README) — build artifacts
+# Archived pre-FinchMoE-engine legacy code (see archive/) — build artifacts
 archive/finchmoe/finchmoe-infer
 archive/finchmoe/infer
 archive/finchmoe/infer_*
@@ -7,6 +7,8 @@ archive/finchmoe/*.dSYM/
 archive/finchmoe/finchTool/finchTool
 archive/finchmoe/finchTool/test_large_matvec
 archive/finchmoe/chat
+archive/finchmoe/397b/
+archive/finchmoe-m1/
 
 # Model binaries and quantization artifacts (multi-GB, regenerated from
 # the pristine BF16 base — see archive/finchmoe/OPTIMIZATION_PLAN.md)
@@ -24,6 +26,9 @@ archive/finchmoe/test_quant_weights
 /archive/models/
 /archive/turbo-fieldfare/
 
+# HumanEval run artifacts (generated results, resumable)
+archive/humaneval_m1/he_results*.jsonl
+
 # Reference project clones (comparison/analysis only)
 /lmdeploy/
 /miles/
@@ -38,8 +43,10 @@ archive/finchmoe/test_quant_weights
 # Misc
 .DS_Store
 **/__pycache__/
+.claude/*
+.vscode/*
 
-# flash-qwen build artifacts / downloaded model installs
+# FinchMoE engine build artifacts / downloaded model installs
 .build/
 models/
 reference/
@@ -47,10 +54,3 @@ scratch/
 *.xcodeproj
 *.xcworkspace
 DerivedData/
-finchmoe/397b/
-
-# M1 deploy folder (prebuilt binary + model symlinks, 15 GB — see M4_REBUILD.md)
-/finchmoe-m1/
-
-# HumanEval run artifacts (generated results, resumable)
-humaneval_m1/he_results*.jsonl
