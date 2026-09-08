@@ -1898,11 +1898,53 @@ static void rep_penalty_register(int token_id) {
     if (g_rep_count < REPETITION_WINDOW) g_rep_count++;
 }
 
+// Structural whitespace tokens (198=\n, 220=1sp, 256=2sp, 257=4sp, and ALL
+// merged whitespace-only tokens like 262="   ", 271="\n\n", 6987="\n    \n")
+// are exempt from the repetition penalty and n-gram blocker: their repetition
+// is Python code structure (every line ends in \n, every indent is 4sp), and
+// the per-occurrence penalty divides their logit by 1.05^k (k = count in ring),
+// crushing raw margins of 1-7 logits below the runner-up code token -> line
+// collapse / indent mixing (HumanEval task-5 whole-body collapse, task-1 mixed
+// 3sp/4sp). Numpy reference (no penalty) emits NL at those steps -> 20/20 slice.
+// Option-b whitespace calibration (scripts/QKNORM_FIX_2026-08-29.md).
+// A/B gate: FINCHMOE_PENALIZE_WS=1 restores the old penalize-everything path.
+//
+// NOTE: the exempt set is derived from the vocab at init (decode(t) is
+// non-empty and every char is space/\n/\r/\t). A hardcoded list is WRONG:
+// e.g. id 9 is '*' not tab, and merged whitespace tokens must be included.
+static uint8_t *g_ws_token_bitmap = NULL;   // VOCAB_SIZE bytes, built at init
+static int g_ws_penalty_exempt = 1;          // set from env in main()
+
+static int ws_token(int tid) {
+    if (!g_ws_token_bitmap) return 0;
+    if (tid < 0 || tid >= VOCAB_SIZE) return 0;
+    return g_ws_token_bitmap[tid] != 0;
+}
+
+// Build the whitespace-only token bitmap from the vocab (called once at init
+// with the loaded Vocabulary; decode_token(v, t) needs the real vocab).
+static void ws_token_build_bitmap(Vocabulary *v) {
+    if (g_ws_token_bitmap) return;
+    g_ws_token_bitmap = calloc(VOCAB_SIZE, 1);
+    int count = 0;
+    for (int t = 0; t < VOCAB_SIZE && t < v->num_tokens; t++) {
+        const char *s = decode_token(v, t);
+        if (!s || !s[0] || strcmp(s, "<unk>") == 0) continue;
+        int ws = 1;
+        for (const char *p = s; *p; p++) {
+            if (*p != ' ' && *p != '\n' && *p != '\r' && *p != '\t') { ws = 0; break; }
+        }
+        if (ws) { g_ws_token_bitmap[t] = 1; count++; }
+    }
+    fprintf(stderr, "[ws-exempt] whitespace-only tokens in vocab: %d (bitmap built)\n", count);
+}
+
 static void rep_penalty_apply(float *logits, int dim) {
     if (g_rep_penalty <= 1.0f || g_rep_count == 0) return;
     for (int i = 0; i < g_rep_count; i++) {
         int tid = g_rep_ring[i];
         if (tid >= 0 && tid < dim) {
+            if (g_ws_penalty_exempt && ws_token(tid)) continue;
             // Standard formula: push positive logits down, negative up
             if (logits[tid] > 0.0f) {
                 logits[tid] /= g_rep_penalty;
@@ -1964,6 +2006,20 @@ static void logit_diag_dump(const float *logits, int dim, int token_idx, int gen
         fprintf(stderr, "%s%.4f(%s%s)", i > 0 ? " " : "",
                 top_val[i], s ? s : "?", i < DIAG_TOPK - 1 ? "," : "");
     }
+    // Whitespace-margin probe: raw ids + logits for the whitespace/indent
+    // tokens (198=newline, 220=1sp, 256=2sp, 257=4sp; NOTE id 9 is '*' in
+    // this vocab, NOT tab — keep the ws classification vocab-derived).
+    // Used by the option-b margin calibration analysis
+    // (scripts/QKNORM_FIX_2026-08-29.md).
+    fprintf(stderr, " [ws]");
+    { int ws_ids[5] = {198, 220, 256, 257, 9};
+      for (int w = 0; w < 5; w++) {
+          int t = ws_ids[w];
+          float v = (t >= 0 && t < dim) ? logits[t] : -INFINITY;
+          fprintf(stderr, " %d:%.4f", t, v);
+      } }
+    fprintf(stderr, " [topids]");
+    for (int i = 0; i < DIAG_TOPK; i++) fprintf(stderr, " %d", top_idx[i]);
     fprintf(stderr, "\n");
     #undef DIAG_TOPK
 }
@@ -1983,6 +2039,10 @@ static int ng_win_pos = 0;
 static int ng_win_fill = 0;
 
 static int ng_blocked(int tok) {
+    // Structural whitespace exemption (same rationale as rep_penalty_apply):
+    // hard -INF blocking of newline/indent candidates turns repeated code
+    // structure into line collapse. Only code tokens are repetition suspects.
+    if (g_ws_penalty_exempt && ws_token(tok)) return 0;
     // 3-in-a-row check
     if (tok == ng_last[0] && tok == ng_last[1]) return 1;
     // 2-gram recurrence within the window
@@ -14840,6 +14900,10 @@ int main(int argc, char **argv) {
     setlinebuf(stdout);
     setlinebuf(stderr);
 
+    // Option-b whitespace calibration gate (default: whitespace exempt from
+    // rep penalty + n-gram blocker; FINCHMOE_PENALIZE_WS=1 restores old path)
+    if (getenv("FINCHMOE_PENALIZE_WS")) g_ws_penalty_exempt = 0;
+
     srand48(time(NULL));
     @autoreleasepool {
         // ---- Ultra-early memory safety check ----
@@ -15285,6 +15349,7 @@ int main(int argc, char **argv) {
             fprintf(stderr, "ERROR: Failed to load vocabulary\n");
             return 1;
         }
+        if (g_ws_penalty_exempt) ws_token_build_bitmap(vocab);
 
         // ---- Get prompt tokens (skip in serve mode) ----
         PromptTokens *pt = NULL;

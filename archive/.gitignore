@@ -54,3 +54,10 @@ finchmoe/397b/
 
 # HumanEval run artifacts (generated results, resumable)
 humaneval_m1/he_results*.jsonl
+
+# ——— Archival (2026-09-07): the finchmoe C-engine era under archive/ ———
+# Everything below that is not already tracked stays untracked: model and
+# quant payload, nested git repos (llama.cpp, turbo-fieldfare), QwenFieldfare/,
+# the humaneval results corpus, .venv, agent configs. Tracked files moved here
+# by the archival commit remain tracked; new keeps are added with -f.
+*
