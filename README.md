@@ -43,16 +43,28 @@ under [archive/](archive/); it is no longer developed.
 
 ## Goal
 
-Phase 1 goal: Qwen 3.6 35B-A3B (current)
+- **Phase 1 (current, done):** Qwen 3.6 35B-A3B — GDN linear-attention port,
+  end-to-end quality, and benchmarks. See [Status and scope](#status-and-scope).
+- **Phase 2:** Qwen 3.8 Flash Next implementation.
+- **Phase 3:** DeepSeek V4 Flash implementation.
+- **Phase 4:** GLM 5.3 Flash implementation.
 
-Phase 2 goal: Qwen 3.8 Flash Next implementation
-
-Phase 3 goal: DeepSeek V4 Flash implementation
-
-Phase 4 goal: GLM 5.3 Flash implementation
-
+Each later phase targets a different model family on the same out-of-core
+runtime: add the family's `ArchConfig` preset, port whatever attention/MoE
+variant it uses (GDN was Qwen 3.6's), and repack a `.finchturbo` install —
+the streaming, caching, and Metal execution core stays shared. None of this
+is scheduled yet; Phase 1 is the only phase with a doc, plan, and working
+install.
 
 ## Current state
+
+The Qwen 3.6 35B-A3B port (Phase 1) is complete and closed: the GDN
+linear-attention layers, the 10 full-attention layers, the Qwen MoE tail, the
+bf16 → `.finchturbo` quantizing repack, and the interface surface (CLI, Mac
+app, OpenAI-compatible server) all load and run against the local Qwen
+install (see [At a glance](#at-a-glance) for the measured numbers). The
+Gemma 4 26B-A4B path this engine was built on stays intact and runnable from
+the same binary. Phases 2-4 have no work started yet.
 
 - The Qwen 3.6 port is documented end-to-end — target model, locked GDN math,
   and the phase plan — in [docs/QWEN36_PORT.md](docs/QWEN36_PORT.md).
@@ -90,7 +102,7 @@ with the engine's release CLI, greedy decode, on the local Qwen install
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | Model    | 35B total parameters, ~3B active per token; 30 Gated-DeltaNet linear-attention layers + 10 full-attention; MoE 256 experts top-8 + shared |
 | Weights  | GDN projections int8; router int8; shared/routed experts affine 4-bit group 64; fp16 activations, fp32 Metal accumulators                 |
-| Storage  | ~20.0 GB installed text-only `.finchturbo` (streamed from disk during decode)                                                              |
+| Storage  | ~20.0 GB installed text-only `.finchturbo` (streamed from disk during decode)                                                           |
 | Memory   | ~1.1 GiB peak resident while decoding (out-of-core expert streaming; OS page cache additional)                                            |
 | Decode   | ~10.5 tok/s greedy, flat over 200–300 tokens                                                                                             |
 | Prefill  | ~20 tok/s on long prompts (705 tok); short prompts pay SHA-256 verification unless `--verify trusted-install` (~1 s vs ~8 s)            |
@@ -115,7 +127,7 @@ linear-attention layer.
 | 2 | Full-attention path for the 10 `F` layers (partial RoPE, output gate, chunked prefill)                                                                      | done   |
 | 3 | MoE: 256-expert routing and streamed execution (top-8, silu experts, shared expert 512, sigmoid gate) — decode and prefill                                   | done   |
 | 4 | Embedding + untied `lm_head` (vocab 248320), sampling, stop on 248044                                                                                       | done   |
-| 5 | Repack writer: bf16 shards → `.finchturbo` (int8 linear-attention + int4 affine experts + int8 router), Qwen manifest, SHA-256s                                | done   |
+| 5 | Repack writer: bf16 shards →`.finchturbo` (int8 linear-attention + int4 affine experts + int8 router), Qwen manifest, SHA-256s                             | done   |
 | 6 | `ArchConfig` preset for Qwen3.6-35B-A3B; wire `fullAttentionLayerMask` and the GDN dims                                                                   | done   |
 | 7 | End-to-end: load → prefill → decode → sample; coherent generation vs the bf16 reference                                                                    | done   |
 

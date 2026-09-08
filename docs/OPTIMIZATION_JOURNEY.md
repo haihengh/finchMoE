@@ -4,6 +4,12 @@ FinchMoE runs Gemma 4 26B-A4B on an 8 GB Apple Silicon machine. Its
 text-only installation, without the vision tower, is about 14.3 GB. The model
 was never going to fit politely in memory.
 
+> **Note:** these experiments shaped the shared runtime against the original
+> Gemma 4 target. The working reference model today is **Qwen 3.6 35B-A3B**
+> (~20 GB installed, streamed the same way); see the [README](../README.md#at-a-glance)
+> for its measurements and [Qwen 3.6 port](QWEN36_PORT.md) for what changed
+> to run it.
+
 Instead, the runtime keeps 1.35 GB of common model weights available to Metal
 and streams the 12.9 GB routed-expert pool from NVMe. Every useful optimization
 had to work within that design. We could reduce I/O, schedule it better, or
