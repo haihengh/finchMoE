@@ -6,6 +6,13 @@ has 8 GB of memory. The runtime keeps the common weights and working state
 available to Metal. It stores routed experts in per-layer files and reads only
 the experts chosen for the current token or prefill chunk.
 
+> **Note:** this document describes the runtime mechanics — the
+> `.finchturbo` layout, expert streaming, memory ownership, and the
+> prefill/decode phases — as built for Gemma 4. The working reference model
+> today is **Qwen 3.6 35B-A3B**, which reuses this same runtime end to end;
+> [Qwen 3.6 port](QWEN36_PORT.md) covers what's different for that model
+> (Gated-DeltaNet linear-attention layers, the MoE shape, and the repack).
+
 This document covers the current `production` path. The [optimization
 journey](OPTIMIZATION_JOURNEY.md) covers the experiments, including the
 failures and changes we later reversed.
