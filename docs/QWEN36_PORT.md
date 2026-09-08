@@ -291,7 +291,7 @@ order that unblocks an end-to-end Qwen 3.6 run.
     green (only the pre-existing environment-driven AppModelTests flake
     fails).
   - **Real dry run DONE (2026-09-04):** `FlashQwenRepack --input-snapshot
-    models/Qwen3.6-35B-A3B-bf16 --output models/Qwen3.6-35B-A3B-4bit.fqturbo`
+    models/Qwen3.6-35B-A3B-bf16 --output models/Qwen3.6-35B-A3B-4bit.finch`
     → **19.5 GB install** (`model_weights.bin`, 40 packed-expert layer files,
     layout.json, tokenizer sidecars, manifest, receipt). Three real-shape
     issues found and fixed by the run: the per-row scratch cap was 2048
@@ -610,7 +610,7 @@ family, sampling softcap, and stop tokens are wired (see below).
      install's manifest hash (`sha256:41b93561…`, the bf16 snapshot's
      index hash); `.default` (Gemma) untouched. Added `shortDisplayName`/
      `shortName` for the status badge.
-   - `AppModelLocation` now prefers `models/Qwen3.6-35B-A3B-4bit.fqturbo`
+   - `AppModelLocation` now prefers `models/Qwen3.6-35B-A3B-4bit.finch`
      inside a package checkout when its `manifest.json` exists; otherwise
      behavior is unchanged (scratch/Gemma target, Application Support
      fallback, Gemma download flow intact).
@@ -686,7 +686,7 @@ side). Protocol that has kept this box alive since:
   `transformers/models/qwen3_5_moe/`). Do **not** use `models/qwen3_next/`
   as the reference — it is a different model family with similar-looking
   code.
-- [System design](SYSTEM_DESIGN.md) — `.fqturbo` layout, streaming,
+- [System design](SYSTEM_DESIGN.md) — `.finch` layout, streaming,
   prefill/decode phases, Metal conventions the new kernels must follow.
 - Kernel templates for the GDN unit:
   `Sources/FlashQwen/Metal/Primitives/rmsnorm.metal` (function-constant
