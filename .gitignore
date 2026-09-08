@@ -1,4 +1,8 @@
-models/*
+# models is a symlink to the payload home (../flash-qwen/models); ignore the
+# link itself — everything under it is already untracked in the home checkout.
+# (No trailing slash: a symlink to a directory is matched as a file.)
+/models
+.abacusai/
 /reference/
 scratch/
 .build/*

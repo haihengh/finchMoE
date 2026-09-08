@@ -48,7 +48,7 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
 
 torch.set_num_threads(4)
 
-REPO = "/Volumes/samsung 2t/code/flash-qwen"
+REPO = "/Volumes/samsung 2t/code/finchmoe"
 CKPT = f"{REPO}/models/Qwen3.6-35B-A3B-bf16"
 DUMP = sys.argv[1] if len(sys.argv) > 1 else "/tmp/fq_rows.bin"
 LINEAR_LAYERS = (0, 1)  # drill targets per docs/QWEN36_PORT.md remaining work

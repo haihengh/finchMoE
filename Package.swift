@@ -2,18 +2,18 @@
 import PackageDescription
 
 let package = Package(
-    name: "flash-qwen",
+    name: "finchmoe",
     platforms: [
         .macOS(.v26),
         .iOS(.v26),
     ],
     products: [
-        .library(name: "FlashQwen", targets: ["FlashQwen"]),
-        .executable(name: "FlashQwenRepack", targets: ["FlashQwenRepack"]),
-        .executable(name: "FlashQwenCLI", targets: ["FlashQwenCLI"]),
-        .executable(name: "FlashQwenMac", targets: ["FlashQwenMac"]),
-        .executable(name: "FlashQwenDecodeService", targets: ["FlashQwenDecodeService"]),
-        .executable(name: "FlashQwenServer", targets: ["FlashQwenServer"]),
+        .library(name: "FinchMoE", targets: ["FinchMoE"]),
+        .executable(name: "FinchMoERepack", targets: ["FinchMoERepack"]),
+        .executable(name: "FinchMoECLI", targets: ["FinchMoECLI"]),
+        .executable(name: "FinchMoEMac", targets: ["FinchMoEMac"]),
+        .executable(name: "FinchMoEDecodeService", targets: ["FinchMoEDecodeService"]),
+        .executable(name: "FinchMoEServer", targets: ["FinchMoEServer"]),
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
@@ -21,138 +21,138 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "FlashQwenFormat",
-            path: "Sources/FlashQwenFormat"
+            name: "FinchMoEFormat",
+            path: "Sources/FinchMoEFormat"
         ),
         .target(
-            name: "FlashQwen",
+            name: "FinchMoE",
             dependencies: [
-                "FlashQwenFormat",
+                "FinchMoEFormat",
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ],
-            path: "Sources/FlashQwen",
+            path: "Sources/FinchMoE",
             resources: [
                 .copy("Metal"),
             ]
         ),
         .target(
-            name: "FlashQwenRepackCore",
-            dependencies: ["FlashQwenFormat"],
-            path: "Sources/FlashQwenRepack/Core"
+            name: "FinchMoERepackCore",
+            dependencies: ["FinchMoEFormat"],
+            path: "Sources/FinchMoERepack/Core"
         ),
         .executableTarget(
-            name: "FlashQwenRepack",
-            dependencies: ["FlashQwenRepackCore"],
-            path: "Sources/FlashQwenRepack/Command"
+            name: "FinchMoERepack",
+            dependencies: ["FinchMoERepackCore"],
+            path: "Sources/FinchMoERepack/Command"
         ),
         .target(
-            name: "FlashQwenCLICore",
-            dependencies: ["FlashQwen"],
-            path: "Sources/FlashQwenCLI",
+            name: "FinchMoECLICore",
+            dependencies: ["FinchMoE"],
+            path: "Sources/FinchMoECLI",
             exclude: ["Command"]
         ),
         .executableTarget(
-            name: "FlashQwenCLI",
-            dependencies: ["FlashQwenCLICore"],
-            path: "Sources/FlashQwenCLI/Command"
+            name: "FinchMoECLI",
+            dependencies: ["FinchMoECLICore"],
+            path: "Sources/FinchMoECLI/Command"
         ),
         .target(
-            name: "FlashQwenAppCore",
-            dependencies: ["FlashQwen", "FlashQwenRepackCore", "FlashQwenDecodeProtocol"],
-            path: "Sources/FlashQwenApp/Core",
+            name: "FinchMoEAppCore",
+            dependencies: ["FinchMoE", "FinchMoERepackCore", "FinchMoEDecodeProtocol"],
+            path: "Sources/FinchMoEApp/Core",
             resources: [
                 .copy("Resources/app-prompts.json"),
             ]
         ),
         .target(
-            name: "FlashQwenMacPresentation",
-            dependencies: ["FlashQwenAppCore"],
-            path: "Sources/FlashQwenApp/MacPresentation"
+            name: "FinchMoEMacPresentation",
+            dependencies: ["FinchMoEAppCore"],
+            path: "Sources/FinchMoEApp/MacPresentation"
         ),
         .target(
-            name: "FlashQwenDecodeProtocol",
-            path: "Sources/FlashQwenDecodeProtocol"
+            name: "FinchMoEDecodeProtocol",
+            path: "Sources/FinchMoEDecodeProtocol"
         ),
         .executableTarget(
-            name: "FlashQwenDecodeService",
-            dependencies: ["FlashQwenAppCore", "FlashQwenDecodeProtocol"],
-            path: "Sources/FlashQwenDecodeService"
+            name: "FinchMoEDecodeService",
+            dependencies: ["FinchMoEAppCore", "FinchMoEDecodeProtocol"],
+            path: "Sources/FinchMoEDecodeService"
         ),
         .target(
-            name: "FlashQwenServerCore",
+            name: "FinchMoEServerCore",
             dependencies: [
-                "FlashQwen",
+                "FinchMoE",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
-            path: "Sources/FlashQwenServer/Core"
+            path: "Sources/FinchMoEServer/Core"
         ),
         .executableTarget(
-            name: "FlashQwenServer",
-            dependencies: ["FlashQwenServerCore"],
-            path: "Sources/FlashQwenServer/Command"
+            name: "FinchMoEServer",
+            dependencies: ["FinchMoEServerCore"],
+            path: "Sources/FinchMoEServer/Command"
         ),
         .executableTarget(
-            name: "FlashQwenMac",
-            dependencies: ["FlashQwenAppCore", "FlashQwenMacPresentation"],
-            path: "Sources/FlashQwenApp/Mac",
+            name: "FinchMoEMac",
+            dependencies: ["FinchMoEAppCore", "FinchMoEMacPresentation"],
+            path: "Sources/FinchMoEApp/Mac",
             resources: [
-                .copy("Resources/flashqwen-app-icon.png"),
+                .copy("Resources/finchmoe-app-icon.png"),
             ]
         ),
         .target(
-            name: "FlashQwenValidationSupport",
-            dependencies: ["FlashQwen"],
-            path: "Sources/FlashQwenValidation/Support"
+            name: "FinchMoEValidationSupport",
+            dependencies: ["FinchMoE"],
+            path: "Sources/FinchMoEValidation/Support"
         ),
         .testTarget(
-            name: "FlashQwenFormatTests",
-            dependencies: ["FlashQwenFormat"],
-            path: "Tests/FlashQwenFormat"
+            name: "FinchMoEFormatTests",
+            dependencies: ["FinchMoEFormat"],
+            path: "Tests/FinchMoEFormat"
         ),
         .testTarget(
-            name: "FlashQwenFormatCompatibilityTests",
-            dependencies: ["FlashQwenFormat", "FlashQwen", "FlashQwenRepackCore"],
-            path: "Tests/FlashQwenFormatCompatibility",
+            name: "FinchMoEFormatCompatibilityTests",
+            dependencies: ["FinchMoEFormat", "FinchMoE", "FinchMoERepackCore"],
+            path: "Tests/FinchMoEFormatCompatibility",
             resources: [.copy("Fixtures")]
         ),
         .testTarget(
-            name: "FlashQwenTestsCore",
-            dependencies: ["FlashQwen", "FlashQwenValidationSupport", "FlashQwenRepackCore", "FlashQwenCLICore"],
-            path: "Tests/FlashQwen/Core",
+            name: "FinchMoETestsCore",
+            dependencies: ["FinchMoE", "FinchMoEValidationSupport", "FinchMoERepackCore", "FinchMoECLICore"],
+            path: "Tests/FinchMoE/Core",
             // The fp32 model-replay probes (GDN recurrence, MoE tails) are
             // ~50x slower at -Onone; -O on the test target is a debug-build
             // convenience only (discovery still works with target-only -O).
             swiftSettings: [.unsafeFlags(["-O"], .when(configuration: .debug))]
         ),
         .testTarget(
-            name: "FlashQwenRepackTests",
-            dependencies: ["FlashQwenFormat", "FlashQwenRepackCore"],
-            path: "Tests/FlashQwenRepack/Core"
+            name: "FinchMoERepackTests",
+            dependencies: ["FinchMoEFormat", "FinchMoERepackCore"],
+            path: "Tests/FinchMoERepack/Core"
         ),
         .testTarget(
-            name: "FlashQwenAppCoreTests",
-            dependencies: ["FlashQwenAppCore", "FlashQwen", "FlashQwenRepackCore", "FlashQwenDecodeProtocol"],
-            path: "Tests/FlashQwenApp/Core"
+            name: "FinchMoEAppCoreTests",
+            dependencies: ["FinchMoEAppCore", "FinchMoE", "FinchMoERepackCore", "FinchMoEDecodeProtocol"],
+            path: "Tests/FinchMoEApp/Core"
         ),
         .testTarget(
-            name: "FlashQwenDecodeServiceTests",
-            dependencies: ["FlashQwenDecodeService", "FlashQwenAppCore", "FlashQwenDecodeProtocol"],
-            path: "Tests/FlashQwenDecodeService"
+            name: "FinchMoEDecodeServiceTests",
+            dependencies: ["FinchMoEDecodeService", "FinchMoEAppCore", "FinchMoEDecodeProtocol"],
+            path: "Tests/FinchMoEDecodeService"
         ),
         .testTarget(
-            name: "FlashQwenMacPresentationTests",
-            dependencies: ["FlashQwenAppCore", "FlashQwenMacPresentation"],
-            path: "Tests/FlashQwenApp/MacPresentation"
+            name: "FinchMoEMacPresentationTests",
+            dependencies: ["FinchMoEAppCore", "FinchMoEMacPresentation"],
+            path: "Tests/FinchMoEApp/MacPresentation"
         ),
         .testTarget(
-            name: "FlashQwenServerTests",
+            name: "FinchMoEServerTests",
             dependencies: [
-                "FlashQwenServerCore",
+                "FinchMoEServerCore",
                 .product(name: "NIOEmbedded", package: "swift-nio"),
             ],
-            path: "Tests/FlashQwenServer",
+            path: "Tests/FinchMoEServer",
             resources: [.copy("Fixtures")]
         ),
     ]
