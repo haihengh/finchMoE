@@ -281,6 +281,73 @@ remote authentication or TLS. See
 [Local server](docs/OPENAI_SERVER.md) for a test request, setup, and the
 supported API subset.
 
+### Claude Code (experimental)
+
+Claude Code speaks Anthropic's `/v1/messages` API, not the server's
+OpenAI-compatible one, so a small translation proxy sits between them.
+[LiteLLM](https://docs.litellm.ai/) does this out of the box.
+
+**1. Start the engine** (build once, then run):
+
+```bash
+swift build -c release --product FinchMoEServer
+.build/release/FinchMoEServer \
+  --model models/Qwen3.6-35B-A3B-4bit.finch \
+  --model-id qwen3.6-35b-a3b \
+  --port 8080 \
+  --max-context 16384
+```
+
+**2. Install and configure the LiteLLM bridge** (a one-time setup, kept
+outside the repo):
+
+```bash
+python3 -m venv ~/.finchmoe-litellm/venv
+~/.finchmoe-litellm/venv/bin/pip install 'litellm[proxy]'
+
+cat > ~/.finchmoe-litellm/config.yaml << 'EOF'
+model_list:
+  - model_name: qwen3.6-35b-a3b
+    litellm_params:
+      # hosted_vllm (not openai/) keeps LiteLLM on the Chat Completions path;
+      # the openai/ prefix routes through the Responses API, which this
+      # server doesn't implement.
+      model: hosted_vllm/qwen3.6-35b-a3b
+      api_base: http://127.0.0.1:8080/v1
+      api_key: local
+
+general_settings:
+  master_key: sk-finchmoe-<generate-your-own-random-value>
+EOF
+```
+
+**3. Start the bridge and point Claude Code at it:**
+
+```bash
+~/.finchmoe-litellm/venv/bin/litellm --config ~/.finchmoe-litellm/config.yaml --port 4000
+
+export ANTHROPIC_BASE_URL="http://127.0.0.1:4000"
+export ANTHROPIC_AUTH_TOKEN="sk-finchmoe-<the-master-key-from-config.yaml>"
+claude --model qwen3.6-35b-a3b
+```
+
+> **Known limitation:** Claude Code registers a large built-in tool set
+> (`SendMessage`, `TaskUpdate`, `Task`, `Workflow`, and more), and several of
+> their JSON schemas use constructs (`allOf`, multi-branch nullable unions,
+> schemas without an explicit `type`) that
+> [`GemmaToolSchema`](Sources/FinchMoEServer/Core/GemmaToolSchema.swift)
+> rejects rather than mis-render. Passing `--disallowedTools
+> SendMessage,TaskUpdate,Task,Workflow` gets past the tool-schema errors, but
+> Claude Code's request shape then hits a second, more fundamental rejection:
+> [`OpenAIModels.swift`](Sources/FinchMoEServer/Core/OpenAIModels.swift#L427)
+> requires every `system`/`developer` message to sit as a contiguous prefix
+> before the conversation, and Claude Code's system-reminder injections don't
+> honor that. Reaching a fully working Claude Code session means relaxing
+> both checks in the server — real engine work, not a client-side
+> workaround. Until then, drive the engine directly: `FinchMoECLI`, the Mac
+> app, or plain HTTP against `FinchMoEServer` all work today (see
+> [Command-line interface](#command-line-interface) above).
+
 ## How the inference engine works
 
 At each transformer layer, Metal computes attention and the router from
