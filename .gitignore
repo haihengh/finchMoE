@@ -1,30 +1,28 @@
-# Build artifacts
-finchmoe/finchmoe-infer
-finchmoe/infer
-finchmoe/infer_*
-finchmoe/finchmoe-deepseek
-finchmoe/*.dSYM/
-finchmoe/finchTool/finchTool
-finchmoe/finchTool/test_large_matvec
-finchmoe/chat
+# Archived pre-flash-qwen engine (see archive/README) — build artifacts
+archive/finchmoe/finchmoe-infer
+archive/finchmoe/infer
+archive/finchmoe/infer_*
+archive/finchmoe/finchmoe-deepseek
+archive/finchmoe/*.dSYM/
+archive/finchmoe/finchTool/finchTool
+archive/finchmoe/finchTool/test_large_matvec
+archive/finchmoe/chat
 
 # Model binaries and quantization artifacts (multi-GB, regenerated from
-# the pristine BF16 base — see OPTIMIZATION_PLAN.md)
-finchmoe/*.bin
-!finchmoe/hot_sets.bin
-finchmoe/*.bak
-finchmoe/model_weights_*.json
-finchmoe/packed_experts
-finchmoe/packed_experts_*
-finchmoe/quant_*/
-finchmoe/hybrid_old_*
-finchmoe/expert_index.json
-finchmoe/test_engine_path
-finchmoe/test_quant_weights
-/model_weights.bin
-/model_weights.json
-/vocab.bin
-/models/
+# the pristine BF16 base — see archive/finchmoe/OPTIMIZATION_PLAN.md)
+archive/finchmoe/*.bin
+!archive/finchmoe/hot_sets.bin
+archive/finchmoe/*.bak
+archive/finchmoe/model_weights_*.json
+archive/finchmoe/packed_experts
+archive/finchmoe/packed_experts_*
+archive/finchmoe/quant_*/
+archive/finchmoe/hybrid_old_*
+archive/finchmoe/expert_index.json
+archive/finchmoe/test_engine_path
+archive/finchmoe/test_quant_weights
+/archive/models/
+/archive/turbo-fieldfare/
 
 # Reference project clones (comparison/analysis only)
 /lmdeploy/
@@ -36,12 +34,19 @@ finchmoe/test_quant_weights
 /flash-moe/
 /llama.cpp/
 /omlx/
-/turbo-fieldfare/
 
 # Misc
 .DS_Store
 **/__pycache__/
-archive/
+
+# flash-qwen build artifacts / downloaded model installs
+.build/
+models/
+reference/
+scratch/
+*.xcodeproj
+*.xcworkspace
+DerivedData/
 finchmoe/397b/
 
 # M1 deploy folder (prebuilt binary + model symlinks, 15 GB — see M4_REBUILD.md)
