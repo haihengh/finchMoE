@@ -7,7 +7,7 @@ available to Metal. It stores routed experts in per-layer files and reads only
 the experts chosen for the current token or prefill chunk.
 
 > **Note:** this document describes the runtime mechanics — the
-> `.finchturbo` layout, expert streaming, memory ownership, and the
+> `.finch` layout, expert streaming, memory ownership, and the
 > prefill/decode phases — as built for Gemma 4. The working reference model
 > today is **Qwen 3.6 35B-A3B**, which reuses this same runtime end to end;
 > [Qwen 3.6 port](QWEN36_PORT.md) covers what's different for that model
@@ -90,12 +90,12 @@ See the [command-line instructions](../README.md#command-line-interface) for
 installation. The [optimization journey](OPTIMIZATION_JOURNEY.md#explicit-reads-made-expert-streaming-work)
 records the current instruction-checkpoint validation.
 
-## The `.finchturbo` directory
+## The `.finch` directory
 
 The installation tree is abridged below:
 
 ```text
-gemma4.finchturbo/
+gemma4.finch/
   manifest.json
   verified-install.json
   model_weights.bin
@@ -197,7 +197,7 @@ the same slot concurrently.
 
 ```mermaid
 flowchart LR
-    subgraph Disk[".finchturbo on SSD"]
+    subgraph Disk[".finch on SSD"]
         MW["model_weights.bin\ncommon weights"]
         LF["30 layer files\n128 routed experts each"]
         MF["manifest + layout + tokenizer"]
@@ -392,7 +392,7 @@ references lead to the supporting code and tests.
 - **Model contract and runtime path.** [`ArchConfig`](../Sources/FinchMoE/Infrastructure/ModelIO/ModelTypes.swift)
   defines the fixed Gemma 4 shape; [`RuntimeConfiguration`](../Sources/FinchMoE/Runtime/Configuration/RuntimeConfiguration.swift)
   defines the production configuration.
-- **Remote install and `.finchturbo` layout.** Start with
+- **Remote install and `.finch` layout.** Start with
   [`SupportedModelSource`](../Sources/FinchMoERepack/Core/Remote/SupportedModelSource.swift),
   [`RemoteStreamingRepacker`](../Sources/FinchMoERepack/Core/Remote/RemoteStreamingRepacker.swift),
   and [`RepackPlanner`](../Sources/FinchMoERepack/Core/Planning/RepackPlanner.swift)

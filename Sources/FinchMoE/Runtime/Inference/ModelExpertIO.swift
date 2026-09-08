@@ -156,7 +156,7 @@ extension Model {
                 biasOffset: 0,
                 biasLength: 0,
                 shape: (UInt32(layer), UInt32(experts[index]), 0, 0),
-                dtype: FinchTurboFormatV1.DType.u32.rawValue)
+                dtype: FinchFormatV1.DType.u32.rawValue)
         }
     }
 }

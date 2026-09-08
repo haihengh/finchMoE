@@ -483,7 +483,7 @@ struct StreamingStopMatcherTests {
 @Suite("Server arguments")
 struct ServerArgumentTests {
     @Test func defaults() throws {
-        let arguments = try ServerArguments.parse(["--model", "model.finchturbo"])
+        let arguments = try ServerArguments.parse(["--model", "model.finch"])
         #expect(arguments.port == 8080)
         #expect(arguments.maxContext == 16_384)
         #expect(arguments.queueLimit == 4)
@@ -492,18 +492,18 @@ struct ServerArgumentTests {
 
     @Test func parsesSinglePrefixModeAndRejectsUnknownMode() throws {
         let arguments = try ServerArguments.parse([
-            "--model", "model.finchturbo",
+            "--model", "model.finch",
             "--prompt-cache-mode", "single-prefix",
         ])
         #expect(arguments.promptCacheMode == .singlePrefix)
         let rollback = try ServerArguments.parse([
-            "--model", "model.finchturbo",
+            "--model", "model.finch",
             "--prompt-cache-mode", "off",
         ])
         #expect(rollback.promptCacheMode == .off)
         #expect(throws: ServerArgumentError.self) {
             try ServerArguments.parse([
-                "--model", "model.finchturbo",
+                "--model", "model.finch",
                 "--prompt-cache-mode", "many",
             ])
         }

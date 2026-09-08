@@ -48,16 +48,16 @@ import FinchMoEFormat
         // Global entries.
         let embed = try #require(byName["language_model.model.embed_tokens.weight"])
         let (ew, ea) = affineSizes(SyntheticQwenSnapshot.Toy.vocab, D, 4)
-        #expect(embed.dtype == FinchTurboFormatV1.DType.u32.rawValue)
+        #expect(embed.dtype == FinchFormatV1.DType.u32.rawValue)
         #expect(embed.sizeBytes == ew)
         #expect(embed.scaleSize == ea && embed.biasSize == ea)
         #expect(embed.logicalShape4 == [256, 64, 0, 0])
 
         let lmHead = try #require(byName["lm_head.weight"])
-        #expect(lmHead.dtype == FinchTurboFormatV1.DType.u32.rawValue)
+        #expect(lmHead.dtype == FinchFormatV1.DType.u32.rawValue)
 
         let finalNorm = try #require(byName["language_model.model.norm.weight"])
-        #expect(finalNorm.dtype == FinchTurboFormatV1.DType.bf16.rawValue)
+        #expect(finalNorm.dtype == FinchFormatV1.DType.bf16.rawValue)
         #expect(finalNorm.sizeBytes == UInt64(D * 2))
         #expect(finalNorm.scaleSize == 0 && finalNorm.biasSize == 0)
 
@@ -67,12 +67,12 @@ import FinchMoEFormat
         #expect(qkv.sizeBytes == qw && qkv.scaleSize == qa)
 
         let conv = try #require(byName["language_model.model.layers.0.linear_attn.conv1d.weight"])
-        #expect(conv.dtype == FinchTurboFormatV1.DType.fp16.rawValue)
+        #expect(conv.dtype == FinchFormatV1.DType.fp16.rawValue)
         #expect(conv.sizeBytes == UInt64(SyntheticQwenSnapshot.Toy.qkvDim * 4 * 2))
         #expect(conv.logicalShape4 == [2048, 0, 0, 0])
 
         let aLog = try #require(byName["language_model.model.layers.0.linear_attn.A_log"])
-        #expect(aLog.dtype == FinchTurboFormatV1.DType.fp32.rawValue)
+        #expect(aLog.dtype == FinchFormatV1.DType.fp32.rawValue)
         #expect(aLog.sizeBytes == UInt64(SyntheticQwenSnapshot.Toy.linearValueHeads * 4))
         #expect(aLog.logicalShape4 == [8, 0, 0, 0])
 

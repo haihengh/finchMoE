@@ -6,7 +6,7 @@ import FinchMoEFormat
 @Suite struct LocalQwenRepackerTests {
 
     private static func makeOutputDir() -> String {
-        NSTemporaryDirectory() + "qwen-finchturbo-\(UUID().uuidString)"
+        NSTemporaryDirectory() + "qwen-finch-\(UUID().uuidString)"
     }
 
     private static func runRepack(snapshotDir: String) async throws -> LocalQwenRepackResult {
@@ -28,7 +28,7 @@ import FinchMoEFormat
         let floats = try scratch.decodeBf16Row(
             UnsafeRawBufferPointer(bytes), count: 4096)
         #expect(floats.count == 4096)
-        let q = FinchTurboQuantization.quantizeInt4Affine(floats)
+        let q = FinchQuantization.quantizeInt4Affine(floats)
         #expect(q.packed.count == 2048)
     }
 
@@ -55,7 +55,7 @@ import FinchMoEFormat
 
         // Manifest: qwen3_6 arch + locked quant slots.
         let manifestData = try Data(contentsOf: URL(fileURLWithPath: out + "/manifest.json"))
-        let manifest = try FinchTurboManifestCodec.decode(manifestData)
+        let manifest = try FinchManifestCodec.decode(manifestData)
         #expect(manifest.modelID == "local/Qwen3.6-35B-A3B")
         #expect(manifest.arch.modelFamily == "qwen3_6")
         #expect(manifest.arch.attnOutputGate == true)
@@ -76,10 +76,10 @@ import FinchMoEFormat
         let weightsURL = URL(fileURLWithPath: out + "/model_weights.bin")
         let weightsData = try Data(contentsOf: weightsURL)
         let (header, entries) = try weightsData.withUnsafeBytes { raw -> (
-            FinchTurboResidentIndexHeaderV1, [FinchTurboResidentIndexEntryV1]
+            FinchResidentIndexHeaderV1, [FinchResidentIndexEntryV1]
         ) in
-            let h = try FinchTurboResidentIndexCodec.decodeHeader(raw)
-            let e = try FinchTurboResidentIndexCodec.decodeRegion(raw, header: h)
+            let h = try FinchResidentIndexCodec.decodeHeader(raw)
+            let e = try FinchResidentIndexCodec.decodeRegion(raw, header: h)
             return (h, e)
         }
         #expect(entries.count == SyntheticQwenSnapshot.Toy.residentEntryCount())
@@ -104,7 +104,7 @@ import FinchMoEFormat
 
         // Layout.json decodes with 9 subtensors per expert.
         let layoutData = try Data(contentsOf: URL(fileURLWithPath: out + "/packed_experts/layout.json"))
-        let layout = try FinchTurboPackedExpertsLayoutCodec.decode(layoutData)
+        let layout = try FinchPackedExpertsLayoutCodec.decode(layoutData)
         #expect(layout.layers.count == 4)
         for layer in layout.layers {
             #expect(layer.experts.count == 4)
@@ -127,7 +127,7 @@ import FinchMoEFormat
         defer { try? FileManager.default.removeItem(atPath: result.outputDir) }
 
         // Spot-check one int4 entry end to end: the source rows quantized by
-        // FinchTurboQuantization must byte-match the packed payload.
+        // FinchQuantization must byte-match the packed payload.
         let snapshot = try QwenLocalSnapshot.load(snapshotDir: dir)
         let srcTensor = try #require(snapshot.shardHeaders.flatMap(\.tensors)
             .first { $0.name == "model.language_model.layers.0.linear_attn.in_proj_a.weight" })
@@ -145,10 +145,10 @@ import FinchMoEFormat
 
         let weightsData = try Data(contentsOf: URL(fileURLWithPath: result.outputDir + "/model_weights.bin"))
         let (_, entries) = try weightsData.withUnsafeBytes { raw -> (
-            FinchTurboResidentIndexHeaderV1, [FinchTurboResidentIndexEntryV1]
+            FinchResidentIndexHeaderV1, [FinchResidentIndexEntryV1]
         ) in
-            let h = try FinchTurboResidentIndexCodec.decodeHeader(raw)
-            return (h, try FinchTurboResidentIndexCodec.decodeRegion(raw, header: h))
+            let h = try FinchResidentIndexCodec.decodeHeader(raw)
+            return (h, try FinchResidentIndexCodec.decodeRegion(raw, header: h))
         }
         let entry = try #require(entries.first {
             $0.name == "language_model.model.layers.0.linear_attn.in_proj_a.weight"
@@ -162,8 +162,8 @@ import FinchMoEFormat
                 UInt16(srcBytes[row * cols * 2 + 2 * i])
                     | UInt16(srcBytes[row * cols * 2 + 2 * i + 1]) << 8
             }
-            let floats = bits16.map { FinchTurboQuantization.bf16ToFloat($0) }
-            let q = FinchTurboQuantization.quantizeInt4Affine(floats)
+            let floats = bits16.map { FinchQuantization.bf16ToFloat($0) }
+            let q = FinchQuantization.quantizeInt4Affine(floats)
             packedPayload.append(contentsOf: q.packed)
             scalesPayload.append(contentsOf: q.scales)
             biasesPayload.append(contentsOf: q.biases)
@@ -206,10 +206,10 @@ import FinchMoEFormat
 
         let weightsData = try Data(contentsOf: URL(fileURLWithPath: result.outputDir + "/model_weights.bin"))
         let (_, entries) = try weightsData.withUnsafeBytes { raw -> (
-            FinchTurboResidentIndexHeaderV1, [FinchTurboResidentIndexEntryV1]
+            FinchResidentIndexHeaderV1, [FinchResidentIndexEntryV1]
         ) in
-            let h = try FinchTurboResidentIndexCodec.decodeHeader(raw)
-            return (h, try FinchTurboResidentIndexCodec.decodeRegion(raw, header: h))
+            let h = try FinchResidentIndexCodec.decodeHeader(raw)
+            return (h, try FinchResidentIndexCodec.decodeRegion(raw, header: h))
         }
         let entry = try #require(entries.first { $0.name == "language_model.model.norm.weight" })
 
@@ -221,8 +221,8 @@ import FinchMoEFormat
         }
         for i in 0..<n {
             let srcBits = UInt16(srcBytes[2 * i]) | UInt16(srcBytes[2 * i + 1]) << 8
-            let src = FinchTurboQuantization.bf16ToFloat(srcBits)
-            let expected = FinchTurboQuantization.bf16Bits(1.0 + src)
+            let src = FinchQuantization.bf16ToFloat(srcBits)
+            let expected = FinchQuantization.bf16Bits(1.0 + src)
             #expect(written[i] == expected)
         }
     }

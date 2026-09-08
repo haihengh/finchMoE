@@ -55,7 +55,7 @@ import FinchMoE
 
     @Test func generationRunnerPolicyKeepsFusionHeadForPureGreedyChunkedPrefill() {
         let request = AppGenerationRequest(
-            modelDirectory: URL(fileURLWithPath: "/tmp/model.finchturbo"),
+            modelDirectory: URL(fileURLWithPath: "/tmp/model.finch"),
             prompt: "hello",
             temperature: 0,
             repetitionPenalty: 1)
@@ -65,7 +65,7 @@ import FinchMoE
 
     @Test func generationRunnerPolicyForcesLogitsForSamplingChunkedPrefill() {
         let request = AppGenerationRequest(
-            modelDirectory: URL(fileURLWithPath: "/tmp/model.finchturbo"),
+            modelDirectory: URL(fileURLWithPath: "/tmp/model.finch"),
             prompt: "hello",
             temperature: 0.7,
             repetitionPenalty: 1)
@@ -75,7 +75,7 @@ import FinchMoE
 
     @Test func generationConfigCarriesDocumentedSamplingPolicy() {
         let request = AppGenerationRequest(
-            modelDirectory: URL(fileURLWithPath: "/tmp/model.finchturbo"),
+            modelDirectory: URL(fileURLWithPath: "/tmp/model.finch"),
             prompt: "hello")
 
         let config = RealInferenceSession.generationConfig(for: request)
@@ -87,8 +87,8 @@ import FinchMoE
 
     @Test func tokenizerDirectoryCacheReloadsOnlyWhenModelDirectoryChanges() {
         var cache = TokenizerDirectoryCache()
-        let first = URL(fileURLWithPath: "/tmp/first.finchturbo")
-        let second = URL(fileURLWithPath: "/tmp/second.finchturbo")
+        let first = URL(fileURLWithPath: "/tmp/first.finch")
+        let second = URL(fileURLWithPath: "/tmp/second.finch")
 
         #expect(cache.shouldReload(for: first))
         cache.markLoaded(for: first)
@@ -101,7 +101,7 @@ import FinchMoE
     @Test func generateWithoutLoadedModelFailsWithoutPartialDiagnostics() async throws {
         let client = RealInferenceClient()
         let modelDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchturbo-prefill-off-\(UUID().uuidString)")
+            .appendingPathComponent("finch-prefill-off-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: modelDirectory,
                                                 withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: modelDirectory) }
@@ -136,7 +136,7 @@ import FinchMoE
 
         await #expect(throws: AppInferenceError.self) {
             try await client.ensureLoaded(
-                modelDirectory: URL(fileURLWithPath: "/nonexistent/model.finchturbo"),
+                modelDirectory: URL(fileURLWithPath: "/nonexistent/model.finch"),
                 maxContextTokens: 1024,
                 options: AppRuntimeOptions(),
                 forceLogitsHead: false,
@@ -151,7 +151,7 @@ import FinchMoE
     @Test func generateWithMissingDirectoryFailsStream() async {
         let client = RealInferenceClient()
         let request = AppGenerationRequest(
-            modelDirectory: URL(fileURLWithPath: "/nonexistent/model.finchturbo"),
+            modelDirectory: URL(fileURLWithPath: "/nonexistent/model.finch"),
             prompt: "hello")
 
         var failure: AppInferenceError?
@@ -164,7 +164,7 @@ import FinchMoE
         } catch {
             Issue.record("unexpected error type: \(error)")
         }
-        #expect(failure == .modelNotFound("/nonexistent/model.finchturbo"))
+        #expect(failure == .modelNotFound("/nonexistent/model.finch"))
     }
 
     @Test func prefillFailureDiagnosticsMarksUnsupportedModeAndReason() {

@@ -7,7 +7,7 @@ import Testing
 @Suite struct RepackModelInstallerClientTests {
     @Test func mapsCoreProgressAndCompletion() async throws {
         let output = FileManager.default.temporaryDirectory
-            .appendingPathComponent("scripted.finchturbo")
+            .appendingPathComponent("scripted.finch")
         let client = RepackModelInstallerClient { outputDirectory, progress in
             progress(.downloadingMetadata)
             progress(.planning(downloadBytes: 10, outputBytes: 20))
@@ -54,7 +54,7 @@ import Testing
             return outputDirectory
         }
         let output = FileManager.default.temporaryDirectory
-            .appendingPathComponent("cancelled.finchturbo")
+            .appendingPathComponent("cancelled.finch")
         let consume = Task {
             for try await _ in client.installDefaultModel(outputDirectory: output) {}
         }
@@ -93,7 +93,7 @@ import Testing
             rangeStagingBytes: 0,
             reserveBytes: 0)
         let output = FileManager.default.temporaryDirectory
-            .appendingPathComponent("checkpoint-bytes-\(UUID().uuidString).finchturbo")
+            .appendingPathComponent("checkpoint-bytes-\(UUID().uuidString).finch")
         let paths = try RemoteInstallPaths(outputDirectory: output.path)
         defer {
             for path in [

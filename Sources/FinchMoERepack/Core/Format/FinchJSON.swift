@@ -4,11 +4,11 @@ import FinchMoEFormat
 /// JSON encoders for `manifest.json` and `packed_experts/layout.json`. The
 /// files are small (kilobytes), so we use Foundation's `JSONSerialization`
 /// rather than streaming.
-enum FinchTurboJSON {
+enum FinchJSON {
 
-    static let magic = FinchTurboFormatV1.magic
-    static let versionMajor = FinchTurboFormatV1.versionMajor
-    static let versionMinor = FinchTurboFormatV1.versionMinor
+    static let magic = FinchFormatV1.magic
+    static let versionMajor = FinchFormatV1.versionMajor
+    static let versionMinor = FinchFormatV1.versionMinor
 
     struct FileEntry {
         let size: UInt64
@@ -64,7 +64,7 @@ enum FinchTurboJSON {
             "sharedExpert": bitWidths.sharedExpert,
             "routedExpert": bitWidths.routedExpert,
         ]
-        let wireArch = FinchTurboManifestArchV1(
+        let wireArch = FinchManifestArchV1(
             hiddenSize: arch.hiddenSize,
             ffnIntermediate: arch.intermediateSize,
             moeIntermediateSize: arch.moeIntermediateSize,
@@ -93,36 +93,36 @@ enum FinchTurboJSON {
             linearKeyHeadDim: arch.linearKeyHeadDim,
             linearValueHeadDim: arch.linearValueHeadDim,
             linearConvKernelDim: arch.linearConvKernelDim)
-        func slot(_ name: String) throws -> FinchTurboManifestQuantSlotV1 {
+        func slot(_ name: String) throws -> FinchManifestQuantSlotV1 {
             guard let weightBits = bitWidthsByQuantSlot[name] else {
                 throw RepackError.configurationInvalid(
                     detail: "missing manifest quant slot bit width for \(name)")
             }
-            return FinchTurboManifestQuantSlotV1(
+            return FinchManifestQuantSlotV1(
                 weightBits: weightBits,
                 scheme: baseMode,
                 scaleType: "BF16",
                 biasType: "BF16",
                 groupSize: baseGroupSize)
         }
-        let quant = FinchTurboManifestQuantV1(
+        let quant = FinchManifestQuantV1(
             embedding: try slot("embedding"),
             attention: try slot("attention"),
             linearAttention: try slot("linearAttention"),
             router: try slot("router"),
             sharedExpert: try slot("sharedExpert"),
             routedExpert: try slot("routedExpert"))
-        var wireFiles: [String: FinchTurboManifestFileV1] = [:]
+        var wireFiles: [String: FinchManifestFileV1] = [:]
         wireFiles.reserveCapacity(files.count)
         for file in files {
             guard wireFiles.updateValue(
-                FinchTurboManifestFileV1(size: file.info.size, sha256: file.info.sha256),
+                FinchManifestFileV1(size: file.info.size, sha256: file.info.sha256),
                 forKey: file.relativePath) == nil else {
                 throw RepackError.configurationInvalid(
                     detail: "duplicate manifest file entry \(file.relativePath)")
             }
         }
-        return try FinchTurboManifestCodec.encode(FinchTurboManifestV1(
+        return try FinchManifestCodec.encode(FinchManifestV1(
             flags: [
                 "streamingPresent": true,
                 "quantKV": false,
@@ -149,16 +149,16 @@ enum FinchTurboJSON {
     static func encodeLayout(layers: [LayerFilePlan],
                                     numLayers: Int,
                                     expertStride: UInt64) throws -> Data {
-        var wireLayers: [FinchTurboLayerV1] = []
+        var wireLayers: [FinchLayerV1] = []
         wireLayers.reserveCapacity(layers.count)
         for lp in layers {
             let layerFile = (lp.path as NSString).lastPathComponent
-            var experts: [FinchTurboExpertV1] = []
+            var experts: [FinchExpertV1] = []
             experts.reserveCapacity(lp.expertsPerLayer)
             for e in 0..<lp.expertsPerLayer {
                 let physicalRank = lp.physicalRank(for: e)
                 let base = UInt64(physicalRank) * lp.expertStride
-                var tensors: [String: FinchTurboSubTensorV1] = [:]
+                var tensors: [String: FinchSubTensorV1] = [:]
                 for slice in lp.subTensors {
                     let key: String
                     switch slice.component {
@@ -167,8 +167,8 @@ enum FinchTurboJSON {
                     case "biases":  key = slice.role + "_biases"
                     default:        key = slice.role + "_" + slice.component
                     }
-                    guard slice.dtype == FinchTurboFormatV1.DType.u32.rawValue
-                            || slice.dtype == FinchTurboFormatV1.DType.bf16.rawValue else {
+                    guard slice.dtype == FinchFormatV1.DType.u32.rawValue
+                            || slice.dtype == FinchFormatV1.DType.bf16.rawValue else {
                         throw RepackError.configurationInvalid(
                             detail: "unsupported packed expert dtype \(slice.dtype) for \(key)")
                     }
@@ -179,10 +179,10 @@ enum FinchTurboJSON {
                         }
                         return UInt32(value)
                     }
-                    let previous = tensors.updateValue(FinchTurboSubTensorV1(
+                    let previous = tensors.updateValue(FinchSubTensorV1(
                         offset: slice.offsetInExpertBlob,
                         size: slice.sizeInExpertBlob,
-                        dtype: slice.dtype == FinchTurboFormatV1.DType.u32.rawValue ? "U32" : "BF16",
+                        dtype: slice.dtype == FinchFormatV1.DType.u32.rawValue ? "U32" : "BF16",
                         shape: shape,
                         bits: slice.bitsForWeights), forKey: key)
                     guard previous == nil else {
@@ -190,19 +190,19 @@ enum FinchTurboJSON {
                             detail: "duplicate packed expert tensor key \(key)")
                     }
                 }
-                experts.append(FinchTurboExpertV1(
+                experts.append(FinchExpertV1(
                     expert: e,
                     physicalRank: nil,
                     offset: base,
                     size: lp.expertStride,
                     tensors: tensors))
             }
-            wireLayers.append(FinchTurboLayerV1(layer: lp.layerIndex,
+            wireLayers.append(FinchLayerV1(layer: lp.layerIndex,
                                         file: layerFile,
                                         experts: experts))
         }
-        return try FinchTurboPackedExpertsLayoutCodec.encode(
-            FinchTurboPackedExpertsLayoutV1(
+        return try FinchPackedExpertsLayoutCodec.encode(
+            FinchPackedExpertsLayoutV1(
                 expertStride: expertStride,
                 numLayers: numLayers,
                 expertsPerLayer: layers.first?.expertsPerLayer ?? 0,

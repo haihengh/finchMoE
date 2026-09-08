@@ -73,7 +73,7 @@ enum PackedExpertsLayoutReader {
     private static func load(directoryURL: URL,
                              manifest: Manifest?,
                              maxBytes: UInt64) throws -> PackedExpertsLayout {
-        let directory = try FinchTurboModelDirectory(rootURL: directoryURL)
+        let directory = try FinchModelDirectory(rootURL: directoryURL)
         let data = try directory.readMetadata(
             "packed_experts/layout.json", maxBytes: maxBytes)
         return try decode(data: data, manifest: manifest)
@@ -81,11 +81,11 @@ enum PackedExpertsLayoutReader {
 
     package static func decode(data: Data,
                                manifest: Manifest?) throws -> PackedExpertsLayout {
-        let wire: FinchTurboPackedExpertsLayoutV1
+        let wire: FinchPackedExpertsLayoutV1
         do {
-            wire = try FinchTurboPackedExpertsLayoutCodec.decode(data)
+            wire = try FinchPackedExpertsLayoutCodec.decode(data)
             if let manifest {
-                try FinchTurboV1StructuralValidator.crossValidate(
+                try FinchV1StructuralValidator.crossValidate(
                     manifestNumLayers: manifest.numLayers,
                     manifestExpertsPerLayer: manifest.expertsPerLayer,
                     manifestExpertStride: manifest.expertStride,

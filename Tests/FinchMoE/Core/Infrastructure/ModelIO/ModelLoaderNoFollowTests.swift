@@ -8,9 +8,9 @@ extension ModelLoaderTests {
     @Test func acceptsRootSymlinkAndRetainsOpenedDirectory() throws {
         let target = try Self.writeToySynthetic()
         let alias = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchturbo-root-\(UUID().uuidString)")
+            .appendingPathComponent("finch-root-\(UUID().uuidString)")
         let replacement = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchturbo-replacement-\(UUID().uuidString)")
+            .appendingPathComponent("finch-replacement-\(UUID().uuidString)")
         defer {
             try? FileManager.default.removeItem(at: alias)
             try? FileManager.default.removeItem(at: target)
@@ -31,7 +31,7 @@ extension ModelLoaderTests {
     @Test func trustedReceiptKeepsRootSymlinkPathBinding() throws {
         let target = try Self.writeToySynthetic()
         let alias = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchturbo-receipt-root-\(UUID().uuidString)")
+            .appendingPathComponent("finch-receipt-root-\(UUID().uuidString)")
         defer {
             try? FileManager.default.removeItem(at: alias)
             try? FileManager.default.removeItem(at: target)
@@ -53,7 +53,7 @@ extension ModelLoaderTests {
     @Test func rejectsManifestLeafSymlink() throws {
         let dir = try Self.writeToySynthetic()
         let outside = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchturbo-manifest-\(UUID().uuidString).json")
+            .appendingPathComponent("finch-manifest-\(UUID().uuidString).json")
         defer {
             try? FileManager.default.removeItem(at: dir)
             try? FileManager.default.removeItem(at: outside)
@@ -71,7 +71,7 @@ extension ModelLoaderTests {
     @Test func rejectsPackedExpertsParentSymlink() throws {
         let dir = try Self.writeToySynthetic()
         let outside = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchturbo-packed-\(UUID().uuidString)")
+            .appendingPathComponent("finch-packed-\(UUID().uuidString)")
         defer {
             try? FileManager.default.removeItem(at: dir)
             try? FileManager.default.removeItem(at: outside)
@@ -90,7 +90,7 @@ extension ModelLoaderTests {
         let dir = try Self.writeToySynthetic()
         try Self.writeVerifiedInstallReceipt(directoryURL: dir)
         let outside = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchturbo-receipt-\(UUID().uuidString).json")
+            .appendingPathComponent("finch-receipt-\(UUID().uuidString).json")
         defer {
             try? FileManager.default.removeItem(at: dir)
             try? FileManager.default.removeItem(at: outside)
@@ -110,7 +110,7 @@ extension ModelLoaderTests {
     @Test func rejectsRoutedLayerLeafSymlinkOnLazyOpen() throws {
         let dir = try Self.writeToySynthetic()
         let outside = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchturbo-layer-\(UUID().uuidString).bin")
+            .appendingPathComponent("finch-layer-\(UUID().uuidString).bin")
         defer {
             try? FileManager.default.removeItem(at: dir)
             try? FileManager.default.removeItem(at: outside)

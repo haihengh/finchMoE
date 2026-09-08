@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import FinchMoEFormat
 
-package final class FinchTurboDirectoryAccess {
+package final class FinchDirectoryAccess {
     package let rootPath: String
     private let rootFD: Int32
 
@@ -22,7 +22,7 @@ package final class FinchTurboDirectoryAccess {
 
     package func openFile(_ relativePath: String) throws -> Int32 {
         do {
-            try FinchTurboPathValidator.validateRelativePath(relativePath,
+            try FinchPathValidator.validateRelativePath(relativePath,
                                                          field: "path.\(relativePath)")
         } catch {
             throw RepackError.configurationInvalid(detail: "unsafe path \(relativePath): \(error)")
@@ -202,13 +202,13 @@ package final class FinchTurboDirectoryAccess {
 
     package func atomicWrite(_ data: Data, to relativePath: String) throws {
         do {
-            try FinchTurboPathValidator.validateBasename(
+            try FinchPathValidator.validateBasename(
                 relativePath, field: "output.\(relativePath)")
         } catch {
             throw RepackError.configurationInvalid(
                 detail: "unsafe output path \(relativePath): \(error)")
         }
-        let temporary = ".finchturbo-\(UUID().uuidString).tmp"
+        let temporary = ".finch-\(UUID().uuidString).tmp"
         var fd = openat(rootFD, temporary,
                         O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
                         0o600)

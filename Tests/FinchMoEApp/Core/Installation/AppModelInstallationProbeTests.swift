@@ -6,13 +6,13 @@ import FinchMoE
 @Suite struct AppModelInstallationProbeTests {
     @Test func missingDirectoryIsMissing() {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchmoe-missing-\(UUID().uuidString).finchturbo")
+            .appendingPathComponent("finchmoe-missing-\(UUID().uuidString).finch")
         #expect(AppModelInstallationProbe.status(at: url) == .missing)
     }
 
     @Test func manifestWithoutFinalMetadataIsPartial() throws {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchmoe-partial-\(UUID().uuidString).finchturbo")
+            .appendingPathComponent("finchmoe-partial-\(UUID().uuidString).finch")
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: url) }
         try Data("{}".utf8).write(to: url.appendingPathComponent("manifest.json"))
@@ -33,7 +33,7 @@ import FinchMoE
         defer { try? FileManager.default.removeItem(at: url) }
         let receiptURL = url.appendingPathComponent("verified-install.json")
         var receipt = try JSONSerialization.jsonObject(with: Data(contentsOf: receiptURL)) as! [String: Any]
-        receipt["modelDirectoryPath"] = "/different/model.finchturbo"
+        receipt["modelDirectoryPath"] = "/different/model.finch"
         try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys]).write(to: receiptURL)
         guard case .partial = AppModelInstallationProbe.status(at: url) else {
             Issue.record("expected partial status")
@@ -100,7 +100,7 @@ import FinchMoE
 
     @Test func matchingDescriptorWithoutManifestFallsBackToDefault() {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("finchmoe-match-missing-\(UUID().uuidString).finchturbo")
+            .appendingPathComponent("finchmoe-match-missing-\(UUID().uuidString).finch")
         #expect(AppModelInstallationProbe.matchingDescriptor(at: url) == .default)
     }
 }

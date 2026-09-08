@@ -12,7 +12,7 @@ import FinchMoEDecodeProtocol
             rdadvisePolicy: "adaptive",
             modelVerification: "trusted-install")
         let request = DecodeLoadRequest(
-            modelPath: "/tmp/model.finchturbo",
+            modelPath: "/tmp/model.finch",
             maxContextTokens: 8192,
             runtimeOptions: options,
             forceLogitsHead: true)

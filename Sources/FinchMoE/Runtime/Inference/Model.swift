@@ -23,7 +23,7 @@ public enum ExpertStreamingMode: Sendable {
     case pread(slotCount: Int)
 }
 
-/// Loaded `.finchturbo/` model. Resident weights live behind one mmap'd
+/// Loaded `.finch/` model. Resident weights live behind one mmap'd
 /// `MTLBuffer`; routed expert weights live behind per-layer streaming
 /// backends opened lazily on first touch.
 public struct Model {
@@ -45,7 +45,7 @@ public struct Model {
     let packedExpertsLayout: PackedExpertsLayout
     let manifest: Manifest
     let directoryURL: URL
-    let modelDirectory: FinchTurboModelDirectory
+    let modelDirectory: FinchModelDirectory
 
     /// Lazy state. Held inside a reference box so `Model` can stay a struct
     /// while still letting accessors mutate layer state via a serial queue.
@@ -71,7 +71,7 @@ public struct Model {
          packedExpertsLayout: PackedExpertsLayout,
          manifest: Manifest,
          directoryURL: URL,
-         modelDirectory: FinchTurboModelDirectory) {
+         modelDirectory: FinchModelDirectory) {
         self.device = device
         self.config = config
         self.streamingMode = streamingMode
@@ -324,7 +324,7 @@ public struct Model {
             scaleOffset: 0, scaleLength: 0,
             biasOffset:  0, biasLength:  0,
             shape: (UInt32(L), UInt32(E), 0, 0),
-            dtype: FinchTurboFormatV1.DType.u32.rawValue)
+            dtype: FinchFormatV1.DType.u32.rawValue)
     }
 
     /// Open layer L's file + verify SHA, idempotent.
@@ -405,7 +405,7 @@ public struct Model {
 
 extension Model {
 
-    /// Open a `.finchturbo/` directory and return a typed handle. Eagerly verifies
+    /// Open a `.finch/` directory and return a typed handle. Eagerly verifies
     /// SHA-256 of `model_weights.bin` and `packed_experts/layout.json`; layer
     /// files are verified lazily on first `routedExpert(...)` touch.
     public static func load(directoryURL: URL,
@@ -420,7 +420,7 @@ extension Model {
             loadStats?.pointee = stats
         }
         let resolvedIntegrityPolicy = integrityPolicy ?? .fullSha256
-        let modelDirectory = try FinchTurboModelDirectory(rootURL: directoryURL)
+        let modelDirectory = try FinchModelDirectory(rootURL: directoryURL)
         let manifestFD: Int32
         do { manifestFD = try modelDirectory.openFile("manifest.json") }
         catch ModelError.missingFile { throw ModelError.partialInstall(path: directoryURL.path) }
@@ -559,7 +559,7 @@ extension Model {
             modelDirectory: modelDirectory)
     }
 
-    private static func validateTrustedReceiptLayerLayout(modelDirectory: FinchTurboModelDirectory,
+    private static func validateTrustedReceiptLayerLayout(modelDirectory: FinchModelDirectory,
                                                           manifest: Manifest,
                                                           layout: PackedExpertsLayout) throws {
         for layer in layout.layers {
@@ -623,7 +623,7 @@ extension Model {
             }
             let expectedBytes = try checkedMultiply(
                 UInt64(logicalCount), UInt64(MemoryLayout<UInt16>.size), field: name)
-            guard entry.dtype == FinchTurboFormatV1.DType.bf16.rawValue,
+            guard entry.dtype == FinchFormatV1.DType.bf16.rawValue,
                   entry.shape.0 == logicalCount,
                   entry.shape.1 == 0, entry.shape.2 == 0, entry.shape.3 == 0,
                   entry.sizeBytes == expectedBytes,
@@ -637,7 +637,7 @@ extension Model {
         /// Raw (unquantized) 1-D resident tensor of a fixed dtype — used for
         /// the Qwen GDN scalars (`A_log`/`dt_bias` fp32) and the conv1d weight
         /// (fp16; the writer converts bf16 → fp16 at emit).
-        func requireRaw(_ name: String, count: Int, dtype: FinchTurboFormatV1.DType) throws {
+        func requireRaw(_ name: String, count: Int, dtype: FinchFormatV1.DType) throws {
             precondition(dtype == .fp16 || dtype == .fp32,
                          "requireRaw supports only fp16/fp32")
             guard let entry = residentIndex.entries[name] else {
@@ -694,7 +694,7 @@ extension Model {
             let primaryAlignment: UInt64 = slot.weightBits == 4
                 ? UInt64(MemoryLayout<UInt16>.alignment)
                 : 1
-            guard entry.dtype == FinchTurboFormatV1.DType.u32.rawValue,
+            guard entry.dtype == FinchFormatV1.DType.u32.rawValue,
                   entry.shape.0 == expected.shape.0,
                   entry.shape.1 == expected.shape.1,
                   entry.shape.2 == 0, entry.shape.3 == 0,
@@ -858,7 +858,7 @@ extension Model {
         quant: ManifestQuant,
         requireBF16: (String, Int) throws -> Void,
         requireAffine: (String, Int, Int, ManifestQuantSlot) throws -> Void,
-        requireRaw: (String, Int, FinchTurboFormatV1.DType) throws -> Void,
+        requireRaw: (String, Int, FinchFormatV1.DType) throws -> Void,
         checkedIntMultiply: (Int, Int, String) throws -> Int
     ) throws {
         let keyDim = try checkedIntMultiply(

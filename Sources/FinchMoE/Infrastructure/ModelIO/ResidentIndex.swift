@@ -41,7 +41,7 @@ struct ResidentIndex: Sendable {
 }
 
 enum ResidentIndexReader {
-    static let defaultMaxBytes = FinchTurboFormatV1.residentIndexMaxBytes
+    static let defaultMaxBytes = FinchFormatV1.residentIndexMaxBytes
 
     /// `pread` the header + index region out of `model_weights.bin`. The
     /// tensor data region (starting at byte `header.indexSize`) is **not**
@@ -68,16 +68,16 @@ enum ResidentIndexReader {
     package static func load(fileDescriptor fd: Int32,
                              displayPath: String,
                              maxBytes: UInt64 = defaultMaxBytes) throws -> ResidentIndex {
-        let headerBytes = FinchTurboFormatV1.residentHeaderBytes
+        let headerBytes = FinchFormatV1.residentHeaderBytes
         var headerBuf = [UInt8](repeating: 0, count: headerBytes)
         try headerBuf.withUnsafeMutableBytes {
             try preadExactly(fd: fd, into: $0, offset: 0,
                              field: "IndexHeader")
         }
-        let wireHeader: FinchTurboResidentIndexHeaderV1
+        let wireHeader: FinchResidentIndexHeaderV1
         do {
             wireHeader = try headerBuf.withUnsafeBytes {
-                try FinchTurboResidentIndexCodec.decodeHeader($0)
+                try FinchResidentIndexCodec.decodeHeader($0)
             }
         } catch {
             throw ModelError.indexCorrupt(detail: "\(error)")
@@ -111,10 +111,10 @@ enum ResidentIndexReader {
                 field: "index region")
         }
 
-        let wireEntries: [FinchTurboResidentIndexEntryV1]
+        let wireEntries: [FinchResidentIndexEntryV1]
         do {
             wireEntries = try indexBuf.withUnsafeBytes {
-                try FinchTurboResidentIndexCodec.decodeRegion($0, header: wireHeader)
+                try FinchResidentIndexCodec.decodeRegion($0, header: wireHeader)
             }
         } catch {
             throw ModelError.indexCorrupt(detail: "\(error)")
