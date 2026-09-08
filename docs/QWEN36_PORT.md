@@ -37,9 +37,11 @@ the GDN readout-scale bug (missing `1/sqrt(head_dim)` after the l2norm),
 resolved and verified 2026-09-05 — see item 1 under "Remaining work, in
 order" for the evidence. The last open item — the ≈8 s fixed per-run
 prefill cost — was triaged 2026-09-07 and is gone under the CLI's new
-`--verify trusted-install` (item 2 below); the port is closed. The
-[implementation plan](#implementation-plan) records the verified state and
-the remaining work, in order.
+`--verify trusted-install` (item 2 below); the port is closed. A post-close
+EvalPlus HumanEval run against FlashQwenServer (item 6) scored 90.9% base /
+87.8% HumanEval+ — reference parity with the llama.cpp cells for the same
+checkpoint family. The [implementation plan](#implementation-plan) records
+the verified state and the remaining work, in order.
 
 ## Target model
 
@@ -578,6 +580,37 @@ family, sampling softcap, and stop tokens are wired (see below).
    - Verdict: the server envelope (loopback, one model, queue 4) is validated
      on the Qwen install; the tool-call gap, the reuse probe, and the missing
      `--verify` exposure stay open.
+6. **EvalPlus HumanEval on the Qwen install — DONE (2026-09-08).** The same
+   rig as the finchMoE reference matrix, run against FlashQwenServer:
+   EvalPlus 0.3.1 venv, greedy T=0, 1 sample, 768-token cap, system "You
+   are a helpful assistant good at coding.", top_p 0.95, OpenAI backend on
+   127.0.0.1:8080, scored with `evalplus.evaluate` (base + HumanEval+).
+   - **Base pass@1 0.909 (149/164); HumanEval+ 0.878 (144/164).** Reference
+     cells for the same checkpoint family at Q4-class quantization:
+     llama.cpp 91.5/89.0 (RTX 3090) and 90.9/88.4 (CPU Mac) — exactly on
+     the CPU-Mac base cell and within 1–2 problems of the 3090 cell:
+     reference parity, no engine-path deficit visible at HumanEval scale.
+     (The finchMoE engine's ~13% cells on this same rig are that engine's
+     template/tokenizer protocol deficit — its evaluation half is
+     identical to this one.)
+   - Generation: 164/164 in 1:53:04 (6,786 s), exit 0. Server lifecycle
+     (144 fresh requests; 0–19 resumed from the earlier slice file): 136
+     `finish=stop`, 8 `length`-capped at 768, 0 failed, RSS 0.85 GiB. The
+     caps and all wrong outputs are greedy-T=0 model errors, not engine-
+     path failures — no degenerate loops, no imports-only shells.
+   - Base fails (15): 32, 62, 93, 95, 99, 113, 124, 129, 130, 132, 134,
+     145, 147, 160, 163. HumanEval+-only extra fails (5): 39, 76, 91, 151,
+     154. Slice 0–19 passes base under evalplus (none in the fail list).
+   - End-of-run machine state: 59% memory free; swap 2.1 GB used — charged
+     to the concurrently running 360 GB Qwen 3.8 Flash Next BF16 snapshot
+     download (page-cache writeback), not the engine; pass/fail scoring is
+     timing-independent.
+   - Evidence: `quality/humaneval/` (sanitized + raw samples and the
+     per-task `_eval_results.json`, base/plus verdict per problem).
+     Tooling caveat: finchMoE's `score_slice.py` (used for slice checks)
+     never executes a test — it reads a `base_output` key that evalplus
+     0.3.1 problem dicts lack, zips against `[]`, and reports PASS for any
+     exec-able solution; all numbers here are evalplus's.
 
 Known toolchain quirk (this machine, Xcode 26.6 / Swift 6.3.3): `swift test
 -c release` discovers 0 tests under `-O` (the swift-testing section is linked
