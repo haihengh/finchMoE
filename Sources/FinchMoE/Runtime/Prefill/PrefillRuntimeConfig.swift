@@ -8,13 +8,15 @@ public enum PrefillError: Error, CustomStringConvertible, Equatable {
     case chunkedRunnerDirty(String)
     case prefillCursorMismatch(String)
     case unsupportedPrefillSeed(String)
+    case modelFamilyUnsupported(String)
 
     public var description: String {
         switch self {
         case .chunkedUnsupported(let reason),
              .chunkedRunnerDirty(let reason),
              .prefillCursorMismatch(let reason),
-             .unsupportedPrefillSeed(let reason):
+             .unsupportedPrefillSeed(let reason),
+             .modelFamilyUnsupported(let reason):
             return reason
         }
     }

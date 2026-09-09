@@ -2,7 +2,10 @@
 using namespace metal;
 
 constant constexpr uint kMoEGroupSize = 64;
-constant constexpr uint kMaxStreamedExperts = 8;
+// Cap for the routed-expert streaming path (blob array + select/phase-2
+// working sets). Must stay in lockstep with MoE.maxStreamedExperts: 8 covers
+// Gemma 4 / Qwen 3.6 (top-8); Qwen 3.8 Flash-Next routes top-10 over 512.
+constant constexpr uint kMaxStreamedExperts = 10;
 constant constexpr float kGeluSqrt2OverPi = 0.7978845608028654f;
 constant constexpr float kGeluCubicCoeff = 0.044715f;
 
@@ -34,6 +37,14 @@ static inline uint router_fc_d(constant uint& D) {
             is_function_constant_defined(FC_ROUTER_D))
         ? FC_ROUTER_D
         : D;
+}
+
+static inline uint router_fc_top_k(constant uint& top_k) {
+    return (is_function_constant_defined(FC_ROUTER_USE_FC) &&
+            FC_ROUTER_USE_FC &&
+            is_function_constant_defined(FC_ROUTER_TOP_K))
+        ? FC_ROUTER_TOP_K
+        : top_k;
 }
 
 static inline uint moe_fc_d(constant uint& D) {
@@ -142,35 +153,40 @@ kernel void router_gemv_gemma4_r4(
                             out_logits, num_experts, D, 4, tg_idx, sg_idx, lane);
 }
 
+// Sorted top-k select + softmax over exactly the k winners. k is a runtime
+// uniform (specialized PSOs bake it via FC_ROUTER_TOP_K); for k == 8 the
+// math is bit-identical to the historical fixed-8 kernel.
 kernel void router_topk_select_k8(
     device const float* logits [[buffer(0)]],
     device const bfloat* per_expert_scale [[buffer(1)]],
     device uint* out_indices [[buffer(2)]],
     device half* out_weights [[buffer(3)]],
     constant uint& num_experts [[buffer(4)]],
+    constant uint& top_k [[buffer(5)]],
     uint tid [[thread_position_in_threadgroup]]
 ) {
     if (tid != 0) return;
     const uint NE = router_fc_num_experts(num_experts);
-    uint top_idx[8];
-    float top_score[8];
-    for (uint i = 0; i < 8; ++i) {
+    const uint K = router_fc_top_k(top_k);
+    uint top_idx[kMaxStreamedExperts];
+    float top_score[kMaxStreamedExperts];
+    for (uint i = 0; i < K; ++i) {
         top_idx[i] = 0u;
         top_score[i] = -INFINITY;
     }
 
     for (uint e = 0; e < NE; ++e) {
         const float s = logits[e];
-        if (s <= top_score[7]) continue;
-        uint pos = 8u;
-        for (uint i = 0; i < 8; ++i) {
+        if (s <= top_score[K - 1]) continue;
+        uint pos = K;
+        for (uint i = 0; i < K; ++i) {
             if (s > top_score[i] || (s == top_score[i] && e < top_idx[i])) {
                 pos = i;
                 break;
             }
         }
-        if (pos >= 8u) continue;
-        for (uint i = 7; i > pos; --i) {
+        if (pos >= K) continue;
+        for (uint i = K - 1; i > pos; --i) {
             top_idx[i] = top_idx[i - 1];
             top_score[i] = top_score[i - 1];
         }
@@ -180,13 +196,13 @@ kernel void router_topk_select_k8(
 
     const float max_s = top_score[0];
     float sum_exp = 0.0f;
-    float exps[8];
-    for (uint i = 0; i < 8; ++i) {
+    float exps[kMaxStreamedExperts];
+    for (uint i = 0; i < K; ++i) {
         const float ex = fast::exp(top_score[i] - max_s);
         exps[i] = ex;
         sum_exp += ex;
     }
-    for (uint i = 0; i < 8; ++i) {
+    for (uint i = 0; i < K; ++i) {
         const uint expert_idx = top_idx[i];
         const float weight = exps[i] / sum_exp;
         out_indices[i] = expert_idx;
@@ -459,6 +475,11 @@ kernel void moe_phase1_gate_up_act_subset_u16load(
         tg_idx, sg_idx, lane);
 }
 
+// Down-projection + weighted reduce over the k routed experts. One 256-thread
+// threadgroup per output row: each of the 8 SIMDs accumulates its experts
+// (slot = sg_idx + 8*j for j < ceil(k/8)), so k > 8 only adds work per SIMD,
+// never a second barrier; for k == 8 the per-SIMD partials and the final
+// add order are identical to the historical fixed-8 kernel.
 kernel void moe_phase2_down_reduce_k8(
     device const RoutedBlobs& routed [[buffer(0)]],
     constant ExpertOffsets& routed_offsets [[buffer(1)]],
@@ -468,31 +489,37 @@ kernel void moe_phase2_down_reduce_k8(
     device half* y [[buffer(5)]],
     constant uint& D [[buffer(6)]],
     constant uint& F [[buffer(7)]],
+    constant uint& top_k [[buffer(8)]],
     uint d [[threadgroup_position_in_grid]],
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
-    threadgroup float partial[8];
+    threadgroup float partial[kMaxStreamedExperts];
     const uint DD = moe_fc_d(D);
     const uint FF = moe_fc_f(F);
+    const uint K = moe_fc_top_k(top_k);
     if (d >= DD) return;
 
-    device const uint8_t* base = routed.blob[sg_idx];
-    const ExpertOffsets re = routed_offsets;
-    device const uint8_t* dW = base + re.down_W_off;
-    device const bfloat* dS = (device const bfloat*)(base + re.down_s_off);
-    device const bfloat* dB = (device const bfloat*)(base + re.down_b_off);
-    device const half* act_slot = acts + sg_idx * FF;
+    float p = 0.0f;
+    for (uint j = 0; sg_idx + j * 8u < K; ++j) {
+        const uint slot = sg_idx + j * 8u;
+        device const uint8_t* base = routed.blob[slot];
+        const ExpertOffsets re = routed_offsets;
+        device const uint8_t* dW = base + re.down_W_off;
+        device const bfloat* dS = (device const bfloat*)(base + re.down_s_off);
+        device const bfloat* dB = (device const bfloat*)(base + re.down_b_off);
+        device const half* act_slot = acts + slot * FF;
 
-    const float value = moe_int4_gemv_row_simd_dev_vec(
-        dW, dS, dB, act_slot, d, FF, lane);
-    if (lane == 0) partial[sg_idx] = float(routing_w[sg_idx]) * value;
+        const float value = moe_int4_gemv_row_simd_dev_vec(
+            dW, dS, dB, act_slot, d, FF, lane);
+        p += float(routing_w[slot]) * value;
+    }
+    if (lane == 0) partial[sg_idx] = p;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (sg_idx == 0 && lane == 0) {
         float acc = float(residual[d]);
-        acc += partial[0]; acc += partial[1]; acc += partial[2]; acc += partial[3];
-        acc += partial[4]; acc += partial[5]; acc += partial[6]; acc += partial[7];
+        for (uint i = 0; i < 8u; ++i) acc += partial[i];
         y[d] = half(acc);
     }
 }

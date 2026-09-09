@@ -160,6 +160,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let gdn: GDN
     private let gdnPrefill: GDNPrefill
     private let qwenFusions: QwenDecodeFusions
+    // Qwen 3.8 Flash-Next hyper-connection (mix/combine/plane-init kernels).
+    private let hyperConnection: HyperConnection
 
     // GDN linear-attention projections (in_proj_qkv/z/a/b, out_proj): the
     // manifest linearAttention slot is 4 on Gemma / legacy installs and 8 on
@@ -229,6 +231,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// BF16 ones buffers: Qwen's router has no router.scale / per_expert_scale.
     private let qwenOnesEffectiveScale: MTLBuffer?
     private let qwenOnesPerExpertScale: MTLBuffer?
+    /// Qwen 3.8 hyper-connection plane + mixer scratch (empty for other
+    /// families). The plane `hcPlane` ([hc·D] fp16, 4 streams of 2560) is the
+    /// cross-layer residual: rebuilt from the embedding every decode step and
+    /// updated in place by each layer's two combines. `hcXn`/`hcGateRaw`/
+    /// `hcGated` ([hc·D]) and `hcLo` ([lowrank]) are the grouped-RMS → silu →
+    /// sigmoid-gate mixer stages; `hcInject` ([hc]) carries the current
+    /// mixer's raw block_inject row dot into the combine. One mixer's scratch
+    /// is reused by the next — the serial kernel order inside a CB is the only
+    /// ordering the stages need.
+    private let hcPlane: MTLBuffer
+    private let hcXn: MTLBuffer
+    private let hcGateRaw: MTLBuffer
+    private let hcGated: MTLBuffer
+    private let hcLo: MTLBuffer
+    private let hcInject: MTLBuffer
     /// Internal test hook: receives (layer, phase, values) snapshots —
     /// "preLayer" (the layer input hidden, before any compute), "postAttn"
     /// (the post_attention_layernorm output, pre-MoE) after the layer-head CB
@@ -305,6 +322,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.gdn = try GDN(context: context)
         self.gdnPrefill = try GDNPrefill(context: context)
         self.qwenFusions = try QwenDecodeFusions(context: context)
+        self.hyperConnection = try HyperConnection(context: context)
         self.linearAttnBits = model.linearAttentionWeightBits
         self.int8GEMV = model.linearAttentionWeightBits == 8
             ? try DequantInt8GEMV(context: context) : nil
@@ -533,6 +551,30 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             self.qwenOnesEffectiveScale = try ones(D, label: "qwen.ones_effective_scale")
             self.qwenOnesPerExpertScale = try ones(cfg.numExperts, label: "qwen.ones_per_expert_scale")
+
+            // Qwen 3.8 Flash-Next: the wide hyper-connection residual plane and
+            // its per-mixer scratch. The plane is rebuilt from the embedding
+            // every decode step (`hc_plane_init` in produceToken), so nothing
+            // here needs zeroing in reset() — unlike the GDN states above.
+            if cfg.isQwen3_8 {
+                let hcDim = cfg.hyperConnectionDim       // hc·D = 10240
+                let hcCount = cfg.hyperConnectionCount   // 4 streams
+                let lowrank = cfg.hyperConnectionLowrank // 320
+                self.hcPlane   = try zeros(hcDim, 2, label: "qwen38.hc_plane")
+                self.hcXn      = try zeros(hcDim, 2, label: "qwen38.hc_xn")
+                self.hcGateRaw = try zeros(hcDim, 2, label: "qwen38.hc_gate_raw")
+                self.hcGated   = try zeros(hcDim, 2, label: "qwen38.hc_gated")
+                self.hcLo      = try zeros(max(lowrank, 1), 2, label: "qwen38.hc_lo")
+                self.hcInject  = try zeros(max(hcCount, 1), 2,
+                                           label: "qwen38.hc_inject")
+            } else {
+                self.hcPlane   = try buf(1)
+                self.hcXn      = try buf(1)
+                self.hcGateRaw = try buf(1)
+                self.hcGated   = try buf(1)
+                self.hcLo      = try buf(1)
+                self.hcInject  = try buf(1)
+            }
         } else {
             self.qkvConv  = try buf(1)
             self.zBuf     = try buf(1)
@@ -546,6 +588,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             self.gdnStateIndexByLayer = []
             self.qwenOnesEffectiveScale = nil
             self.qwenOnesPerExpertScale = nil
+            self.hcPlane   = try buf(1)
+            self.hcXn      = try buf(1)
+            self.hcGateRaw = try buf(1)
+            self.hcGated   = try buf(1)
+            self.hcLo      = try buf(1)
+            self.hcInject  = try buf(1)
         }
     }
 
@@ -844,6 +892,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                       startPosition: startPosition,
                                                       tokenCount: t, cb: cb)
                 continue
+            }
+            if cfg.isQwen3_8 {
+                // Qwen 3.8 prefill lands with M3.4. M3.1c wires decode only:
+                // falling through here would run the Gemma body against the
+                // 3.8 schema (no model.norm, no preFFN sandwich).
+                throw PrefillError.modelFamilyUnsupported(
+                    "qwen3_8 chunked prefill is not wired until M3.4")
             }
             let views = layerViews[L]
             let isFull = cfg.fullAttentionLayerMask[L] != 0
@@ -2978,6 +3033,553 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
+    /// Qwen 3.8 Flash-Next hyper-connection mix stage — llama `build_hc_mix`
+    /// (`archive/llama.cpp/src/models/qwen4exp.cpp` :226-262): grouped RMS
+    /// over the [hc·D] plane scaled by the raw-BF16 [hc·D] gamma → int4 down
+    /// [lowrank × hc·D] → silu(·÷hc) → int4 up [hc·D × lowrank] → sigmoid
+    /// read gate × xn → mean over the hc streams into the [D] `blockOut`. The
+    /// per-stream scatter weights (raw `block_inject` row dot over xn, no
+    /// activation) land in `inject` [hc]; the root mixer passes nil for both
+    /// `blockInject` and `inject`. All stages encode serially into `cb` — each
+    /// reads only what an earlier stage in the same CB wrote, so one shared
+    /// scratch set (`hcXn`/`hcLo`/`hcGateRaw`/`hcGated`) is reused by the
+    /// layer's second mixer.
+    private func encodeQwen38Mix(
+        commandBuffer cb: MTLCommandBuffer,
+        norm: TensorView,
+        down: TensorView,
+        up: TensorView,
+        blockInject: TensorView?,
+        blockOut: MTLBuffer,
+        inject: MTLBuffer?,
+        d: UInt32,
+        hc: UInt32,
+        lowrank: UInt32,
+        invHc: Float,
+        eps: Float
+    ) {
+        precondition((blockInject == nil) == (inject == nil),
+                     "block_inject and inject buffers come as a pair")
+        let hcDim = UInt32(Int(d) * Int(hc))
+
+        // xn = per-stream RMS of the plane, scaled by the [hc·D] BF16 gamma.
+        hyperConnection.encodeGroupedRMS(commandBuffer: cb,
+                                         x: hcPlane,
+                                         gamma: norm.buffer,
+                                         gammaOffset: Int(norm.offset),
+                                         out: hcXn,
+                                         d: d, hc: hc, eps: eps)
+        // lo = silu(down · xn · 1/hc) — the ÷hc precedes the silu.
+        int4.encode(commandBuffer: cb,
+                    weights: down.buffer, weightsOffset: Int(down.offset),
+                    scales: down.buffer, scalesOffset: Int(down.scaleOffset),
+                    biases: down.buffer, biasesOffset: Int(down.biasOffset),
+                    x: hcXn, y: hcLo, m: lowrank, n: hcDim)
+        hyperConnection.encodeSiluScale(commandBuffer: cb,
+                                        z: hcLo, out: hcLo,
+                                        n: lowrank, invHc: invHc)
+        // Raw read-gate dot over the whole plane: z = up · lo.
+        int4.encode(commandBuffer: cb,
+                    weights: up.buffer, weightsOffset: Int(up.offset),
+                    scales: up.buffer, scalesOffset: Int(up.scaleOffset),
+                    biases: up.buffer, biasesOffset: Int(up.biasOffset),
+                    x: hcLo, y: hcGateRaw, m: hcDim, n: lowrank)
+        if let w = blockInject, let inj = inject {
+            // inject[c] = block_inject row c · xn — a raw dot, no activation
+            // (the combine's 2·sigmoid(·/hc) is applied on read).
+            int4.encode(commandBuffer: cb,
+                        weights: w.buffer, weightsOffset: Int(w.offset),
+                        scales: w.buffer, scalesOffset: Int(w.scaleOffset),
+                        biases: w.buffer, biasesOffset: Int(w.biasOffset),
+                        x: hcXn, y: inj, m: hc, n: hcDim)
+        }
+        // gated = xn · sigmoid(z), collapsed to the [D] block input.
+        hyperConnection.encodeGateMul(commandBuffer: cb,
+                                      xn: hcXn, z: hcGateRaw,
+                                      out: hcGated, n: hcDim)
+        hyperConnection.encodeStreamMean(commandBuffer: cb,
+                                         gated: hcGated,
+                                         out: blockOut,
+                                         d: d, hc: hc, invHc: invHc)
+    }
+
+    /// One Qwen 3.8 Flash-Next decode layer: the hyper-connection mixers
+    /// replace both per-layer norms (llama `qwen4exp.cpp` decode :329-378).
+    /// Per layer:
+    ///   1. attn mix — plane → xn → silu(÷hc) lowrank → sigmoid read gate →
+    ///      stream mean = the [D] attn block input (`normed`), plus the raw
+    ///      block_inject dot (`hcInject`).
+    ///   2. attention body (full or GDN) at [D] width — the same bodies as
+    ///      Qwen 3.6, except the GDN output norm's z-gate is a SIGMOID
+    ///      (`qwen4exp` `build_norm_gated` :411-421, the family's sole GDN
+    ///      numerical delta).
+    ///   3. attn combine — plane += oOut · 2·sigmoid(inject/hc).
+    ///   4. ffn mix on the updated plane → `denseX` + a fresh `hcInject`.
+    ///   5. router on `denseX`; the deferred tail runs the experts and closes
+    ///      with plane += h2 · 2·sigmoid(inject/hc).
+    /// `hidden` is untouched by the layer — the plane is the residual (it is
+    /// rebuilt from the embedding each step in `produceToken`).
+    ///
+    /// Debug-hook snapshots: "hc.pre"/"hc.post" bracket the layer's plane
+    /// writes (post is llama's `l_last`), with "attnBlockIn"/"attnBlockOut"/
+    /// "hc.mid"/"ffnBlockIn" between the stages.
+    private func encodeQwen38DecodeLayer(
+        _ L: Int,
+        position: Int,
+        pending: inout PendingRoutedCommand?
+    ) async throws {
+        let D = UInt32(cfg.hiddenSize)
+        let hc = UInt32(cfg.hyperConnectionCount)
+        let lowrank = UInt32(cfg.hyperConnectionLowrank)
+        let invHc: Float = 1.0 / Float(cfg.hyperConnectionCount)
+        let eps: Float = 1e-6
+        let isFull = cfg.fullAttentionLayerMask[L] != 0
+        let seqLen = UInt32(position + 1)
+        let hcDim = cfg.hyperConnectionDim
+
+        let attnMixW = try model.attnHyperConnection(layer: L)
+        let ffnMixW = try model.mlpHyperConnection(layer: L)
+        let routerW = try model.router(layer: L)
+        let sharedProj = sharedExpertProjections[L]
+        let sharedGate = try model.sharedExpertGateProj(layer: L)
+        guard let onesEffective = qwenOnesEffectiveScale,
+              let onesExpert = qwenOnesPerExpertScale else {
+            preconditionFailure("Qwen decode layer on a non-Qwen runner")
+        }
+
+        let tCb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let cb = ctx.queue.makeCommandBuffer()!
+
+        if let hook = qwenLayerDebugHook {
+            func snap(_ name: String, _ buf: MTLBuffer, _ count: Int) {
+                let ptr = buf.contents().bindMemory(to: Float16.self, capacity: count)
+                hook(L, name, Array(UnsafeBufferPointer(start: ptr, count: count)))
+            }
+            snap("preLayer", hidden, cfg.hiddenSize)
+            // hc.pre: the wide plane entering the layer (layer 0: the
+            // embedding copies from plane init; later layers: the previous
+            // layer's l_last). The plane is only written by the deferred
+            // tail, which a hook run already waited out at the previous
+            // layer's hc.post snapshot, so this read is race-free.
+            snap("hc.pre", hcPlane, hcDim)
+        }
+
+        // The two mixers of the layer and the attention scatter — all encode
+        // serially into CB1. The ffn mix reuses the same scratch after the
+        // attn combine consumed it.
+        let gAttnMix: (MTLCommandBuffer) -> Void = { [self] cb in
+            encodeQwen38Mix(commandBuffer: cb,
+                            norm: attnMixW.hcNorm, down: attnMixW.mixDown,
+                            up: attnMixW.mixUp, blockInject: attnMixW.blockInject,
+                            blockOut: normed, inject: hcInject,
+                            d: D, hc: hc, lowrank: lowrank, invHc: invHc,
+                            eps: eps)
+        }
+        let gAttnCombine: (MTLCommandBuffer) -> Void = { [self] cb in
+            hyperConnection.encodeCombine(commandBuffer: cb,
+                                          plane: hcPlane,
+                                          blockOut: oOut,
+                                          inject: hcInject,
+                                          d: D, hc: hc, invHc: invHc)
+        }
+        let gFfnMix: (MTLCommandBuffer) -> Void = { [self] cb in
+            encodeQwen38Mix(commandBuffer: cb,
+                            norm: ffnMixW.hcNorm, down: ffnMixW.mixDown,
+                            up: ffnMixW.mixUp, blockInject: ffnMixW.blockInject,
+                            blockOut: denseX, inject: hcInject,
+                            d: D, hc: hc, lowrank: lowrank, invHc: invHc,
+                            eps: eps)
+        }
+        // The MLP combine runs in the deferred tail CB, after h2Buf lands.
+        let gMlpCombine: (MTLCommandBuffer) -> Void = { [self] cb in
+            hyperConnection.encodeCombine(commandBuffer: cb,
+                                          plane: hcPlane,
+                                          blockOut: h2Buf,
+                                          inject: hcInject,
+                                          d: D, hc: hc, invHc: invHc)
+        }
+
+        if isFull {
+            // Full-attention layer: q_proj is doubled (per-head q|gate pairs),
+            // q/k per-head norms, partial RoPE (rotary dim = 0.25 * head_dim),
+            // attention scale rsqrt(head_dim), then the output gate. (The
+            // QSA indexer mask rides on top of this dense body — M3.2.)
+            let qP = try model.qProj(layer: L)
+            let kP = try model.kProj(layer: L)
+            let vP = try model.vProj(layer: L)
+            let oP = try model.oProj(layer: L)
+            let qN = try model.qNorm(layer: L)
+            let kN = try model.kNorm(layer: L)
+            let kSlot = kv?.kSlot(layer: L, position: position)
+                ?? (buffer: kStage, offset: 0)
+            let vSlot = kv?.vSlot(layer: L, position: position)
+                ?? (buffer: vStage, offset: 0)
+            let headDim = UInt32(cfg.fullHeadDim)
+            let numQ = UInt32(cfg.numHeads)
+            let numKV = UInt32(cfg.numFullKVHeads)
+            let qRows = numQ * headDim
+            let rotaryDim = UInt32(Double(cfg.fullHeadDim) * cfg.partialRotaryFactor)
+
+            let gProj: (MTLCommandBuffer) -> Void = { [self] cb in
+                int4.encode(commandBuffer: cb,
+                            weights: qP.buffer, weightsOffset: Int(qP.offset),
+                            scales: qP.buffer, scalesOffset: Int(qP.scaleOffset),
+                            biases: qP.buffer, biasesOffset: Int(qP.biasOffset),
+                            x: normed,
+                            y: qGateBuf,
+                            m: 2 * qRows, n: D)
+                int4.encode(commandBuffer: cb,
+                            weights: kP.buffer, weightsOffset: Int(kP.offset),
+                            scales: kP.buffer, scalesOffset: Int(kP.scaleOffset),
+                            biases: kP.buffer, biasesOffset: Int(kP.biasOffset),
+                            x: normed,
+                            y: kSlot.buffer, yOffset: kSlot.offset,
+                            m: numKV * headDim, n: D)
+                int4.encode(commandBuffer: cb,
+                            weights: vP.buffer, weightsOffset: Int(vP.offset),
+                            scales: vP.buffer, scalesOffset: Int(vP.scaleOffset),
+                            biases: vP.buffer, biasesOffset: Int(vP.biasOffset),
+                            x: normed,
+                            y: vSlot.buffer, yOffset: vSlot.offset,
+                            m: numKV * headDim, n: D)
+            }
+            let gEpilogue: (MTLCommandBuffer) -> Void = { [self] cb in
+                qwenFusions.encodeFullAttnEpilogue(
+                    commandBuffer: cb,
+                    qProj: qGateBuf,
+                    qOut: qScratch,
+                    gateOut: gateBuf,
+                    k: kSlot.buffer, kOffset: kSlot.offset,
+                    qWeight: qN.buffer, qWeightOffset: Int(qN.offset),
+                    kWeight: kN.buffer, kWeightOffset: Int(kN.offset),
+                    headDim: headDim,
+                    numQHeads: numQ,
+                    numKVHeads: numKV,
+                    position: UInt32(position),
+                    theta: Float(cfg.fullRopeTheta),
+                    rotaryDim: rotaryDim,
+                    eps: eps)
+            }
+            let gAttention: (MTLCommandBuffer) -> Void = { [self] cb in
+                attention.encodeFull(commandBuffer: cb,
+                                     q: qScratch,
+                                     k: kSlot.buffer, kOffset: 0,
+                                     v: vSlot.buffer, vOffset: 0,
+                                     out: attnOut,
+                                     headDim: headDim,
+                                     numQHeads: numQ,
+                                     numKVHeads: numKV,
+                                     seqLen: seqLen,
+                                     scale: nil)   // rsqrt(head_dim) — Qwen's scaling
+            }
+            let gGate: (MTLCommandBuffer) -> Void = { [self] cb in
+                qwenFusions.encodeAttnOutputGate(commandBuffer: cb,
+                                                 attn: attnOut,
+                                                 gate: gateBuf,
+                                                 n: qRows)
+            }
+            let gOProj: (MTLCommandBuffer) -> Void = { [self] cb in
+                int4.encode(commandBuffer: cb,
+                            weights: oP.buffer, weightsOffset: Int(oP.offset),
+                            scales: oP.buffer, scalesOffset: Int(oP.scaleOffset),
+                            biases: oP.buffer, biasesOffset: Int(oP.biasOffset),
+                            x: attnOut,
+                            y: oOut,
+                            m: D, n: qRows)
+            }
+            gAttnMix(cb)
+            gProj(cb)
+            gEpilogue(cb)
+            gAttention(cb)
+            gGate(cb)
+            gOProj(cb)
+            gAttnCombine(cb)
+            gFfnMix(cb)
+        } else {
+            // GDN (linear-attention) layer: identical to the Qwen 3.6 body
+            // except the output norm's z-gate — sigmoid here, silu there
+            // (qwen4exp `build_norm_gated` :411-421).
+            let si = gdnStateIndexByLayer[L]
+            precondition(si >= 0, "GDN layer \(L) without state")
+            let qkvP = try model.gdnInProjQKV(layer: L)
+            let zP = try model.gdnInProjZ(layer: L)
+            let outP = try model.gdnOutProj(layer: L)
+            let convW = try model.gdnConv1D(layer: L)
+            let aLog = try model.gdnALog(layer: L)
+            let dt = try model.gdnDtBias(layer: L)
+            let normW = try model.gdnNormWeight(layer: L)
+            let recState = gdnRecurrentState[si]
+            let convState = gdnConvState[si]
+            let aP = linearAttnBits == 8 ? try model.gdnInProjA(layer: L) : nil
+            let bP = linearAttnBits == 8 ? try model.gdnInProjB(layer: L) : nil
+            let keyDim = UInt32(cfg.linearNumKeyHeads * cfg.linearKeyHeadDim)
+            let valueDim = UInt32(cfg.linearNumValueHeads * cfg.linearValueHeadDim)
+            let qkvDim = 2 * keyDim + valueDim
+            let numV = cfg.linearNumValueHeads
+            let headDim = UInt32(cfg.linearValueHeadDim)
+            let scale = 1.0 / Float(cfg.linearKeyHeadDim).squareRoot()
+            let betaByteOffset = numV * MemoryLayout<Float>.size
+
+            let gProj: (MTLCommandBuffer) -> Void = { [self] cb in
+                if linearAttnBits == 8 {
+                    int8GEMV!.encode(commandBuffer: cb,
+                                     weights: qkvP.buffer, weightsOffset: Int(qkvP.offset),
+                                     scales: qkvP.buffer, scalesOffset: Int(qkvP.scaleOffset),
+                                     biases: qkvP.buffer, biasesOffset: Int(qkvP.biasOffset),
+                                     x: normed,
+                                     y: qkvConv,
+                                     m: qkvDim, n: D)
+                    int8GEMV!.encode(commandBuffer: cb,
+                                     weights: zP.buffer, weightsOffset: Int(zP.offset),
+                                     scales: zP.buffer, scalesOffset: Int(zP.scaleOffset),
+                                     biases: zP.buffer, biasesOffset: Int(zP.biasOffset),
+                                     x: normed,
+                                     y: zBuf,
+                                     m: valueDim, n: D)
+                } else {
+                    int4.encode(commandBuffer: cb,
+                                weights: qkvP.buffer, weightsOffset: Int(qkvP.offset),
+                                scales: qkvP.buffer, scalesOffset: Int(qkvP.scaleOffset),
+                                biases: qkvP.buffer, biasesOffset: Int(qkvP.biasOffset),
+                                x: normed,
+                                y: qkvConv,
+                                m: qkvDim, n: D)
+                    int4.encode(commandBuffer: cb,
+                                weights: zP.buffer, weightsOffset: Int(zP.offset),
+                                scales: zP.buffer, scalesOffset: Int(zP.scaleOffset),
+                                biases: zP.buffer, biasesOffset: Int(zP.biasOffset),
+                                x: normed,
+                                y: zBuf,
+                                m: valueDim, n: D)
+                }
+            }
+            let gConv: (MTLCommandBuffer) -> Void = { [self] cb in
+                gdn.encodeCausalConvUpdate(commandBuffer: cb,
+                                           w: convW.buffer, wOffset: Int(convW.offset),
+                                           state: convState,
+                                           x: qkvConv,
+                                           out: qkvConv,
+                                           newState: convState,
+                                           channels: Int(qkvDim))
+            }
+            let gGateGEMV: (MTLCommandBuffer) -> Void = { [self] cb in
+                if linearAttnBits == 8 {
+                    // Two int8 GEMVs (in_proj_a then in_proj_b) into the fp16
+                    // [2V] ab scratch, then the batched gate formula at T=1 —
+                    // g at offset 0, beta at +V floats, the same layout and
+                    // math as the 4-bit fused kernel.
+                    guard let gemv = int8GEMV, let ab = gateAB,
+                          let aView = aP, let bView = bP else { return }
+                    gemv.encode(commandBuffer: cb,
+                                weights: aView.buffer, weightsOffset: Int(aView.offset),
+                                scales: aView.buffer, scalesOffset: Int(aView.scaleOffset),
+                                biases: aView.buffer, biasesOffset: Int(aView.biasOffset),
+                                x: normed,
+                                y: ab,
+                                m: UInt32(numV), n: D)
+                    gemv.encode(commandBuffer: cb,
+                                weights: bView.buffer, weightsOffset: Int(bView.offset),
+                                scales: bView.buffer, scalesOffset: Int(bView.scaleOffset),
+                                biases: bView.buffer, biasesOffset: Int(bView.biasOffset),
+                                x: normed,
+                                y: ab,
+                                yOffset: numV * MemoryLayout<Float16>.size,
+                                m: UInt32(numV), n: D)
+                    gdnPrefill.encodeGateBatch(commandBuffer: cb,
+                                               ab: ab,
+                                               A_log: aLog.buffer, A_logOffset: Int(aLog.offset),
+                                               dt_bias: dt.buffer, dt_biasOffset: Int(dt.offset),
+                                               g: gBeta,
+                                               beta: gBeta, betaOffset: betaByteOffset,
+                                               numValueHeads: numV,
+                                               tokens: 1)
+                } else {
+                    let gateW = gdnGateWeights[si]
+                    gdn.encodeGateGEMV(commandBuffer: cb,
+                                       weights: gateW.weights,
+                                       scales: gateW.scales,
+                                       biases: gateW.biases,
+                                       x: normed,
+                                       A_log: aLog.buffer, A_logOffset: Int(aLog.offset),
+                                       dt_bias: dt.buffer, dt_biasOffset: Int(dt.offset),
+                                       g: gBeta,
+                                       beta: gBeta, betaOffset: betaByteOffset,
+                                       numValueHeads: numV,
+                                       n: D)
+                }
+            }
+            let gRecurrent: (MTLCommandBuffer) -> Void = { [self] cb in
+                gdn.encodeRecurrent(commandBuffer: cb,
+                                    state: recState,
+                                    q: qkvConv,
+                                    k: qkvConv, kOffset: Int(keyDim) * 2,
+                                    v: qkvConv, vOffset: Int(keyDim) * 4,
+                                    g: gBeta,
+                                    beta: gBeta, betaOffset: betaByteOffset,
+                                    out: attnOut,
+                                    numValueHeads: numV,
+                                    headDim: headDim,
+                                    scale: scale,
+                                    l2eps: 1e-6)
+            }
+            let gNormGated: (MTLCommandBuffer) -> Void = { [self] cb in
+                gdn.encodeRMSNormGated(commandBuffer: cb,
+                                       x: attnOut,
+                                       z: zBuf,
+                                       weight: normW.buffer, weightOffset: Int(normW.offset),
+                                       out: attnOut,
+                                       numValueHeads: numV,
+                                       headDim: headDim,
+                                       eps: eps,
+                                       activation: .sigmoid)
+            }
+            let gOProj: (MTLCommandBuffer) -> Void = { [self] cb in
+                if linearAttnBits == 8 {
+                    int8GEMV!.encode(commandBuffer: cb,
+                                     weights: outP.buffer, weightsOffset: Int(outP.offset),
+                                     scales: outP.buffer, scalesOffset: Int(outP.scaleOffset),
+                                     biases: outP.buffer, biasesOffset: Int(outP.biasOffset),
+                                     x: attnOut,
+                                     y: oOut,
+                                     m: D, n: valueDim)
+                } else {
+                    int4.encode(commandBuffer: cb,
+                                weights: outP.buffer, weightsOffset: Int(outP.offset),
+                                scales: outP.buffer, scalesOffset: Int(outP.scaleOffset),
+                                biases: outP.buffer, biasesOffset: Int(outP.biasOffset),
+                                x: attnOut,
+                                y: oOut,
+                                m: D, n: valueDim)
+                }
+            }
+            gAttnMix(cb)
+            gProj(cb)
+            gConv(cb)
+            gGateGEMV(cb)
+            gRecurrent(cb)
+            gNormGated(cb)
+            gOProj(cb)
+            gAttnCombine(cb)
+            gFfnMix(cb)
+        }
+
+        // Router (both layer types): plain softmax over all experts, top-8
+        // renormalized — mathematically identical to the kernel's top-8
+        // softmax, so the Gemma kernel is reused with ones-filled scales.
+        moe.encodeRouterGemma4(commandBuffer: cb,
+                               weights: routerW.buffer, weightsOffset: Int(routerW.offset),
+                               scales: routerW.buffer, scalesOffset: Int(routerW.scaleOffset),
+                               biases: routerW.buffer, biasesOffset: Int(routerW.biasOffset),
+                               hidden: denseX,
+                               effectiveScale: onesEffective,
+                               perExpertScale: onesExpert,
+                               outIndices: outIndices, outWeights: outWeights,
+                               numExperts: UInt32(cfg.numExperts), d: D,
+                               topK: UInt32(cfg.topKExperts))
+        cb.commit()
+        let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        waitForCompletion(cb)
+        let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
+        if let previous = pending {
+            // The debug hook snapshots read shared buffers on the CPU — wait
+            // out the deferred tail so the snapshots are race-free. Without a
+            // hook, the tail completes in CB order before the next layer.
+            finishPendingRoutedCommand(previous,
+                                       waitIfNeeded: qwenLayerDebugHook != nil)
+            pending = nil
+        }
+        totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
+
+        if let hook = qwenLayerDebugHook {
+            func snap(_ name: String, _ buf: MTLBuffer, _ count: Int) {
+                let ptr = buf.contents().bindMemory(to: Float16.self, capacity: count)
+                hook(L, name, Array(UnsafeBufferPointer(start: ptr, count: count)))
+            }
+            snap("attnBlockIn", normed, cfg.hiddenSize)
+            snap("attnBlockOut", oOut, cfg.hiddenSize)
+            // hc.mid: the plane after the attn combine, before the ffn mix.
+            snap("hc.mid", hcPlane, hcDim)
+            snap("ffnBlockIn", denseX, cfg.hiddenSize)
+            snap("qkvConv", qkvConv, 2 * Int(cfg.linearNumKeyHeads * cfg.linearKeyHeadDim)
+                + cfg.linearNumValueHeads * cfg.linearValueHeadDim)
+            snap("recurrentOut", attnOut,
+                 cfg.linearNumValueHeads * cfg.linearValueHeadDim)
+            do {
+                let n = 2 * cfg.linearNumValueHeads
+                let ptr = gBeta.contents().bindMemory(to: Float.self, capacity: n)
+                hook(L, "gFloat", Array(UnsafeBufferPointer(start: ptr, count: n))
+                    .map { Float16($0) })
+            }
+            if isFull, let kv {
+                let n = cfg.numHeads * cfg.fullHeadDim
+                let qPtr = qScratch.contents().bindMemory(to: Float16.self, capacity: n)
+                hook(L, "qOutF", Array(UnsafeBufferPointer(start: qPtr, count: n)))
+                let gPtr = gateBuf.contents().bindMemory(to: Float16.self, capacity: n)
+                hook(L, "gateF", Array(UnsafeBufferPointer(start: gPtr, count: n)))
+                let slot = kv.kSlot(layer: L, position: position)
+                let kn = cfg.numFullKVHeads * cfg.fullHeadDim
+                let kPtr = slot.buffer.contents().advanced(by: slot.offset)
+                    .bindMemory(to: Float16.self, capacity: kn)
+                hook(L, "kF", Array(UnsafeBufferPointer(start: kPtr, count: kn)))
+                let vSlot = kv.vSlot(layer: L, position: position)
+                let vPtr = vSlot.buffer.contents().advanced(by: vSlot.offset)
+                    .bindMemory(to: Float16.self, capacity: kn)
+                hook(L, "vF", Array(UnsafeBufferPointer(start: vPtr, count: kn)))
+            }
+            let si = gdnStateIndexByLayer[L]
+            if si >= 0 {
+                let n = cfg.linearNumValueHeads * cfg.linearValueHeadDim
+                    * cfg.linearValueHeadDim
+                let ptr = gdnRecurrentState[si].contents()
+                    .bindMemory(to: Float.self, capacity: n)
+                hook(L, "recState", Array(UnsafeBufferPointer(start: ptr, count: n))
+                    .map { Float16($0) })
+            }
+        }
+
+        // Shared expert post stage: sigmoid(shared_expert_gate · x) scales h1.
+        let sharedPost: (MTLCommandBuffer) -> Void = { [self] cb in
+            qwenFusions.encodeSharedGate(commandBuffer: cb,
+                                         weights: sharedGate.buffer,
+                                         weightsOffset: Int(sharedGate.offset),
+                                         scales: sharedGate.buffer,
+                                         scalesOffset: Int(sharedGate.scaleOffset),
+                                         biases: sharedGate.buffer,
+                                         biasesOffset: Int(sharedGate.biasOffset),
+                                         x: denseX,
+                                         h1: h1Buf,
+                                         n: D, d: D)
+        }
+        // Qwen 3.8 tail: phase-2 writes h2 = shared + routed (residual =
+        // h1Buf); the layer closes with the MLP combine scattering h2 into the
+        // wide plane. No hidden write, no layer_scalar, no sandwich.
+        let tail = gMlpCombine
+        try await encodeRoutedTail(
+            layer: L,
+            position: position,
+            routedX: denseX,
+            denseX: denseX,
+            sharedProj: sharedProj,
+            activation: .silu,
+            routedResidual: h1Buf,
+            sharedPostEncoder: sharedPost,
+            tailEncoder: tail,
+            pending: &pending)
+
+        if let hook = qwenLayerDebugHook {
+            // The just-committed tail (plane += h2·w) is in flight — wait it
+            // out so the hc.post snapshot is race-free.
+            if let p = pending {
+                finishPendingRoutedCommand(p, waitIfNeeded: true)
+                pending = nil
+            }
+            let ptr = hcPlane.contents().bindMemory(to: Float16.self,
+                                                    capacity: hcDim)
+            hook(L, "hc.post", Array(UnsafeBufferPointer(start: ptr,
+                                                         count: hcDim)))
+        }
+    }
+
     private func produceToken(token: Int32,
                               position: Int,
                               into logits: MTLBuffer,
@@ -3010,13 +3612,30 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  tokenId: UInt32(bitPattern: token),
                                  d: D,
                                  outScale: sqrtHidden)
+                if cfg.isQwen3_8 {
+                    // Qwen 3.8: the decode-step residual is the wide
+                    // hyper-connection plane, seeded with hc copies of the
+                    // embedding (llama `hc_init`, qwen4exp.cpp :329-331).
+                    // Same CB — no extra wait; the first layer's attn mix
+                    // reads the plane from the next command buffer.
+                    hyperConnection.encodePlaneInit(commandBuffer: cb,
+                                                    hidden: hidden,
+                                                    plane: hcPlane,
+                                                    d: D,
+                                                    hc: UInt32(cfg.hyperConnectionCount))
+                }
             }
         }
 
         for L in 0..<cfg.numLayers {
-            if cfg.isQwen3_6 {
-                try await encodeQwenDecodeLayer(L, position: position,
-                                                pending: &pendingRoutedCommand)
+            if cfg.isQwenHybrid {
+                if cfg.isQwen3_6 {
+                    try await encodeQwenDecodeLayer(L, position: position,
+                                                    pending: &pendingRoutedCommand)
+                } else {
+                    try await encodeQwen38DecodeLayer(L, position: position,
+                                                      pending: &pendingRoutedCommand)
+                }
                 continue
             }
             let isFull = cfg.fullAttentionLayerMask[L] != 0
@@ -3238,17 +3857,36 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         // The fused head skips the vocab buffer and leaves a greedy token in
         // greedyTokenBuf; the logits path writes the complete vector.
-        guard let fNorm = model.finalNorm else {
-            // Qwen3.8 has no model.norm — the M3 head path collapses the
-            // root hyper_connection_mixer instead of RMSNorm here.
-            throw ModelError.tensorNotFound(
-                name: "language_model.model.norm.weight (qwen3_8 head path = root hyper_connection_mixer, M3)")
+        //
+        // Qwen 3.8: there is no model.norm. The terminal is the root
+        // hyper_connection_mixer — the same mix stages as a layer mixer with
+        // no block_inject — collapsing the wide plane into the [D] lm_head
+        // input (llama `result_norm` callback, qwen4exp.cpp :380-390).
+        let rootMixer = cfg.isQwen3_8 ? try model.hyperConnectionMixer() : nil
+        let fNorm     = model.finalNorm     // nil on Qwen 3.8 by design
+        guard cfg.isQwen3_8 || fNorm != nil else {
+            throw ModelError.tensorNotFound(name: "language_model.model.norm.weight")
         }
         let lm    = model.lmHead   // untied lm_head for Qwen 3.6; tied for Gemma 4
         let gFinalNorm: (MTLCommandBuffer) -> Void = { cb in
-            self.rms.encodeBF16W(commandBuffer: cb, x: self.hidden,
-                                 weight: fNorm.buffer, weightOffset: Int(fNorm.offset),
-                                 out: self.normed, d: D, eps: eps)
+            if let root = rootMixer {
+                self.encodeQwen38Mix(commandBuffer: cb,
+                                     norm: root.hcNorm,
+                                     down: root.mixDown,
+                                     up: root.mixUp,
+                                     blockInject: nil,
+                                     blockOut: self.normed,
+                                     inject: nil,
+                                     d: D,
+                                     hc: UInt32(self.cfg.hyperConnectionCount),
+                                     lowrank: UInt32(self.cfg.hyperConnectionLowrank),
+                                     invHc: 1.0 / Float(self.cfg.hyperConnectionCount),
+                                     eps: eps)
+            } else if let f = fNorm {
+                self.rms.encodeBF16W(commandBuffer: cb, x: self.hidden,
+                                     weight: f.buffer, weightOffset: Int(f.offset),
+                                     out: self.normed, d: D, eps: eps)
+            }
         }
         let gLmHead: (MTLCommandBuffer) -> Void = { cb in
             self.int4.encode(commandBuffer: cb,
@@ -3258,10 +3896,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                              x: self.normed, y: logits, m: UInt32(self.cfg.vocabSize), n: D)
         }
         let gFusionHead: (MTLCommandBuffer) -> Void = { cb in
+            // Only reachable with a fused head — i.e. never on Qwen 3.8 (the
+            // gate above excludes it), where fNorm is nil by design.
+            guard let f = fNorm else { return }
             self.fusionHead.encodeGreedyDecode(
                 commandBuffer: cb,
                 hidden: self.hidden,
-                normWeight: fNorm.buffer, normOffset: Int(fNorm.offset),
+                normWeight: f.buffer, normOffset: Int(f.offset),
                 weights: lm.buffer, weightsOffset: Int(lm.offset),
                 scales: lm.buffer, scalesOffset: Int(lm.scaleOffset),
                 biases: lm.buffer, biasesOffset: Int(lm.biasOffset),
@@ -3270,7 +3911,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 rmsEps: eps)
         }
         if emitHead {
-            let useFusedHeadForThisToken = useFusedGreedyHead && outputMode == .greedyIfAvailable
+            // The fused greedy head folds RMSNorm + lm_head into one kernel —
+            // unavailable on Qwen 3.8, whose head input is the root HC mixer
+            // collapse (a data-dependent gate, not a plain norm).
+            let useFusedHeadForThisToken = useFusedGreedyHead
+                && outputMode == .greedyIfAvailable
+                && !cfg.isQwen3_8
             let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             if useFusedHeadForThisToken {
                 runSync(gFusionHead)
