@@ -92,7 +92,21 @@ enum FQTurboJSON {
             linearNumValueHeads: arch.linearNumValueHeads,
             linearKeyHeadDim: arch.linearKeyHeadDim,
             linearValueHeadDim: arch.linearValueHeadDim,
-            linearConvKernelDim: arch.linearConvKernelDim)
+            linearConvKernelDim: arch.linearConvKernelDim,
+            hyperConnectionCount: arch.hyperConnectionCount,
+            hyperConnectionLowrank: arch.hyperConnectionLowrank,
+            indexerNumHeads: arch.indexerNumHeads,
+            indexerKVHeads: arch.indexerKVHeads,
+            indexerHeadDim: arch.indexerHeadDim,
+            indexerBudget: arch.indexerBudget,
+            indexerCompressRatio: arch.indexerCompressRatio,
+            ngramSize: arch.ngramSize,
+            headsPerNgram: arch.headsPerNgram,
+            ngramRowDim: arch.ngramRowDim,
+            ngramPartCount: arch.ngramPartCount,
+            ngramPartRows: arch.ngramPartRows,
+            pleLayerIndexes: arch.pleLayerIndexes,
+            pleConvKernelSize: arch.pleConvKernelSize)
         func slot(_ name: String) throws -> FQTurboManifestQuantSlotV1 {
             guard let weightBits = bitWidthsByQuantSlot[name] else {
                 throw RepackError.configurationInvalid(

@@ -35,7 +35,9 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
                 routedPairMicrobatchRows: Int = 32) {
         self.chunkTokens = max(1, min(chunkTokens, 128))
         self.hiddenSize = config.hiddenSize
-        let isQwen = config.modelFamily == "qwen3_6"
+        // Doubled q_proj (per-head q|gate pairs) + GDN recurrent scratch are
+        // shared by both Qwen hybrid families; Gemma leaves them empty.
+        let isQwen = config.isQwenHybrid
         // Qwen's q_proj is doubled (per-head q|gate pairs), so the q scratch
         // holds 2 * numHeads * fullHeadDim per token.
         self.maxQElementsPerToken = isQwen

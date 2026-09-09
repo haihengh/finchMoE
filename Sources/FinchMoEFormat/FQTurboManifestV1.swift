@@ -41,6 +41,24 @@ package struct FQTurboManifestArchV1: Codable, Equatable, Sendable {
     package let linearKeyHeadDim: Int?
     package let linearValueHeadDim: Int?
     package let linearConvKernelDim: Int?
+    // Qwen3.8-Flash-Next (hyper-connection / QSA indexer / PLE n-gram)
+    // fields — additive at format minor 0 (see FQTurboFormatV1.versionMinor).
+    // Optional; nil on Gemma and Qwen3.6 manifests so those files stay
+    // byte-identical.
+    package let hyperConnectionCount: Int?
+    package let hyperConnectionLowrank: Int?
+    package let indexerNumHeads: Int?
+    package let indexerKVHeads: Int?
+    package let indexerHeadDim: Int?
+    package let indexerBudget: Int?
+    package let indexerCompressRatio: Int?
+    package let ngramSize: Int?
+    package let headsPerNgram: Int?
+    package let ngramRowDim: Int?
+    package let ngramPartCount: Int?
+    package let ngramPartRows: Int?
+    package let pleLayerIndexes: [Int]?
+    package let pleConvKernelSize: Int?
 
     package init(hiddenSize: Int, ffnIntermediate: Int, moeIntermediateSize: Int,
                  numHeads: Int, numKVHeads: Int, numFullKVHeads: Int,
@@ -53,7 +71,21 @@ package struct FQTurboManifestArchV1: Codable, Equatable, Sendable {
                  modelFamily: String? = nil, attnOutputGate: Bool? = nil,
                  linearNumKeyHeads: Int? = nil, linearNumValueHeads: Int? = nil,
                  linearKeyHeadDim: Int? = nil, linearValueHeadDim: Int? = nil,
-                 linearConvKernelDim: Int? = nil) {
+                 linearConvKernelDim: Int? = nil,
+                 hyperConnectionCount: Int? = nil,
+                 hyperConnectionLowrank: Int? = nil,
+                 indexerNumHeads: Int? = nil,
+                 indexerKVHeads: Int? = nil,
+                 indexerHeadDim: Int? = nil,
+                 indexerBudget: Int? = nil,
+                 indexerCompressRatio: Int? = nil,
+                 ngramSize: Int? = nil,
+                 headsPerNgram: Int? = nil,
+                 ngramRowDim: Int? = nil,
+                 ngramPartCount: Int? = nil,
+                 ngramPartRows: Int? = nil,
+                 pleLayerIndexes: [Int]? = nil,
+                 pleConvKernelSize: Int? = nil) {
         self.hiddenSize = hiddenSize
         self.ffnIntermediate = ffnIntermediate
         self.moeIntermediateSize = moeIntermediateSize
@@ -82,6 +114,20 @@ package struct FQTurboManifestArchV1: Codable, Equatable, Sendable {
         self.linearKeyHeadDim = linearKeyHeadDim
         self.linearValueHeadDim = linearValueHeadDim
         self.linearConvKernelDim = linearConvKernelDim
+        self.hyperConnectionCount = hyperConnectionCount
+        self.hyperConnectionLowrank = hyperConnectionLowrank
+        self.indexerNumHeads = indexerNumHeads
+        self.indexerKVHeads = indexerKVHeads
+        self.indexerHeadDim = indexerHeadDim
+        self.indexerBudget = indexerBudget
+        self.indexerCompressRatio = indexerCompressRatio
+        self.ngramSize = ngramSize
+        self.headsPerNgram = headsPerNgram
+        self.ngramRowDim = ngramRowDim
+        self.ngramPartCount = ngramPartCount
+        self.ngramPartRows = ngramPartRows
+        self.pleLayerIndexes = pleLayerIndexes
+        self.pleConvKernelSize = pleConvKernelSize
     }
 }
 
@@ -119,6 +165,22 @@ extension FQTurboManifestArchV1 {
         if let v = linearKeyHeadDim { try c.encode(v, forKey: .linearKeyHeadDim) }
         if let v = linearValueHeadDim { try c.encode(v, forKey: .linearValueHeadDim) }
         if let v = linearConvKernelDim { try c.encode(v, forKey: .linearConvKernelDim) }
+        // Qwen3.8-Flash-Next — omitted while nil so Gemma / Qwen3.6
+        // manifests remain byte-identical.
+        if let v = hyperConnectionCount { try c.encode(v, forKey: .hyperConnectionCount) }
+        if let v = hyperConnectionLowrank { try c.encode(v, forKey: .hyperConnectionLowrank) }
+        if let v = indexerNumHeads { try c.encode(v, forKey: .indexerNumHeads) }
+        if let v = indexerKVHeads { try c.encode(v, forKey: .indexerKVHeads) }
+        if let v = indexerHeadDim { try c.encode(v, forKey: .indexerHeadDim) }
+        if let v = indexerBudget { try c.encode(v, forKey: .indexerBudget) }
+        if let v = indexerCompressRatio { try c.encode(v, forKey: .indexerCompressRatio) }
+        if let v = ngramSize { try c.encode(v, forKey: .ngramSize) }
+        if let v = headsPerNgram { try c.encode(v, forKey: .headsPerNgram) }
+        if let v = ngramRowDim { try c.encode(v, forKey: .ngramRowDim) }
+        if let v = ngramPartCount { try c.encode(v, forKey: .ngramPartCount) }
+        if let v = ngramPartRows { try c.encode(v, forKey: .ngramPartRows) }
+        if let v = pleLayerIndexes { try c.encode(v, forKey: .pleLayerIndexes) }
+        if let v = pleConvKernelSize { try c.encode(v, forKey: .pleConvKernelSize) }
     }
 }
 

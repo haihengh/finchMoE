@@ -1,4 +1,5 @@
 import Foundation
+import FinchMoEFormat
 
 /// Architecture facts mirrored into `manifest.json -> arch`. Cross-checked by
 /// the runtime loader at startup. Carries enough to describe either the Gemma
@@ -36,20 +37,122 @@ struct ArchInfo: Sendable, Equatable {
     let linearKeyHeadDim: Int?
     let linearValueHeadDim: Int?
     let linearConvKernelDim: Int?
+    // Qwen3.8-Flash-Next fields (hyper-connection / QSA indexer / PLE n-gram).
+    // Defaulted so direct constructions (tests, fixture builders) compile
+    // unchanged; `load` fills them from the config when family == qwen3_8.
+    let hyperConnectionCount: Int?
+    let hyperConnectionLowrank: Int?
+    let indexerNumHeads: Int?
+    let indexerKVHeads: Int?
+    let indexerHeadDim: Int?
+    let indexerBudget: Int?
+    let indexerCompressRatio: Int?
+    let ngramSize: Int?
+    let headsPerNgram: Int?
+    let ngramRowDim: Int?
+    let ngramPartCount: Int?
+    let ngramPartRows: Int?
+    let pleLayerIndexes: [Int]?
+    let pleConvKernelSize: Int?
+
+    init(hiddenSize: Int, intermediateSize: Int, moeIntermediateSize: Int,
+         numHeads: Int, numKVHeads: Int, numFullKVHeads: Int,
+         headDim: Int, fullHeadDim: Int, vocabSize: Int,
+         slidingWindow: Int, finalLogitSoftcap: Double,
+         ropeTheta: Double, fullRopeTheta: Double,
+         partialRotaryFactor: Double, numLayers: Int, numExperts: Int,
+         topKExperts: Int, tieWordEmbeddings: Bool, attentionKEqV: Bool,
+         fullAttentionLayerMask: [UInt8], hiddenActivation: String,
+         modelFamily: String? = nil, attnOutputGate: Bool? = nil,
+         linearNumKeyHeads: Int? = nil, linearNumValueHeads: Int? = nil,
+         linearKeyHeadDim: Int? = nil, linearValueHeadDim: Int? = nil,
+         linearConvKernelDim: Int? = nil,
+         // Qwen3.8-Flash-Next fields, defaulted so direct constructions
+         // compile unchanged; `load` fills them for family == qwen3_8.
+         hyperConnectionCount: Int? = nil,
+         hyperConnectionLowrank: Int? = nil,
+         indexerNumHeads: Int? = nil,
+         indexerKVHeads: Int? = nil,
+         indexerHeadDim: Int? = nil,
+         indexerBudget: Int? = nil,
+         indexerCompressRatio: Int? = nil,
+         ngramSize: Int? = nil,
+         headsPerNgram: Int? = nil,
+         ngramRowDim: Int? = nil,
+         ngramPartCount: Int? = nil,
+         ngramPartRows: Int? = nil,
+         pleLayerIndexes: [Int]? = nil,
+         pleConvKernelSize: Int? = nil) {
+        self.hiddenSize = hiddenSize
+        self.intermediateSize = intermediateSize
+        self.moeIntermediateSize = moeIntermediateSize
+        self.numHeads = numHeads
+        self.numKVHeads = numKVHeads
+        self.numFullKVHeads = numFullKVHeads
+        self.headDim = headDim
+        self.fullHeadDim = fullHeadDim
+        self.vocabSize = vocabSize
+        self.slidingWindow = slidingWindow
+        self.finalLogitSoftcap = finalLogitSoftcap
+        self.ropeTheta = ropeTheta
+        self.fullRopeTheta = fullRopeTheta
+        self.partialRotaryFactor = partialRotaryFactor
+        self.numLayers = numLayers
+        self.numExperts = numExperts
+        self.topKExperts = topKExperts
+        self.tieWordEmbeddings = tieWordEmbeddings
+        self.attentionKEqV = attentionKEqV
+        self.fullAttentionLayerMask = fullAttentionLayerMask
+        self.hiddenActivation = hiddenActivation
+        self.modelFamily = modelFamily
+        self.attnOutputGate = attnOutputGate
+        self.linearNumKeyHeads = linearNumKeyHeads
+        self.linearNumValueHeads = linearNumValueHeads
+        self.linearKeyHeadDim = linearKeyHeadDim
+        self.linearValueHeadDim = linearValueHeadDim
+        self.linearConvKernelDim = linearConvKernelDim
+        self.hyperConnectionCount = hyperConnectionCount
+        self.hyperConnectionLowrank = hyperConnectionLowrank
+        self.indexerNumHeads = indexerNumHeads
+        self.indexerKVHeads = indexerKVHeads
+        self.indexerHeadDim = indexerHeadDim
+        self.indexerBudget = indexerBudget
+        self.indexerCompressRatio = indexerCompressRatio
+        self.ngramSize = ngramSize
+        self.headsPerNgram = headsPerNgram
+        self.ngramRowDim = ngramRowDim
+        self.ngramPartCount = ngramPartCount
+        self.ngramPartRows = ngramPartRows
+        self.pleLayerIndexes = pleLayerIndexes
+        self.pleConvKernelSize = pleConvKernelSize
+    }
 
     /// Model discriminator derived from the config. Used by the runtime to
     /// pick the right kernel family and by the manifest validator.
+    /// Family strings single-source from `FQTurboFormatV1` so the repacker
+    /// can never write a family the runtime does not recognize.
+    static let qwen36Family = FQTurboFormatV1.qwen36Family
+    static let qwen38Family = FQTurboFormatV1.qwen38Family
+    static let gemma4Family = FQTurboFormatV1.gemma4Family
+
     static func family(from tc: [String: Any]) -> String {
         let mt = (tc["model_type"] as? String) ?? ""
         if mt.contains("qwen3_5_moe") || mt.contains("qwen3.6") || mt.contains("qwen3_6") {
-            return "qwen3_6"
+            return qwen36Family
         }
-        if mt.contains("gemma") { return "gemma4" }
+        // Qwen3.8-Flash-Next (text config model_type qwen4_exp_text; the root
+        // config of the hybrid checkpoint says qwen4_exp). Must come before
+        // the GDN-field heuristic below — qwen4_exp_text carries
+        // linear_num_key_heads too and would otherwise misclassify as 3.6.
+        if mt.contains("qwen4_exp") {
+            return qwen38Family
+        }
+        if mt.contains("gemma") { return gemma4Family }
         // Heuristic: presence of GDN fields means a linear-attention hybrid.
         if tc["linear_num_key_heads"] != nil || tc["linear_attn"] != nil {
-            return "qwen3_6"
+            return qwen36Family
         }
-        return "gemma4"
+        return gemma4Family
     }
 
     static func load(configPath: String) throws -> ArchInfo {
@@ -103,7 +206,34 @@ struct ArchInfo: Sendable, Equatable {
         let linearKeyDim = optInt("linear_key_head_dim")
         let linearValDim = optInt("linear_value_head_dim")
         let linearConvK = optInt("linear_conv_kernel_dim")
+        // Qwen3.6 declares the doubled-q gate with attn_output_gate; Qwen3.8
+        // expresses it as output_gate_type ("sigmoid" / "silu") instead — both
+        // mean the full-attention q_proj carries a per-head gate half.
         let attnGate = optBool("attn_output_gate")
+            ?? ((tc["output_gate_type"] as? String) != nil ? true : nil)
+
+        // Qwen3.8-Flash-Next fields; nil for every other family. The n-gram
+        // table geometry (row width 160, 2_500_012 rows per shard) does not
+        // exist in the config — it is frozen from the BF16 snapshot tensor
+        // shape (census of ngram_embedding.shard_*). M5's repack re-verifies
+        // against the live source shape before writing.
+        let is38 = family == Self.qwen38Family
+        let hcCount = optInt("hc_count")
+        let hcLowrank = optInt("hc_lowrank")
+        let indexerHeads = optInt("indexer_n_heads")
+        let indexerKVHeads = optInt("indexer_kv_heads")
+        let indexerHeadDim = optInt("indexer_head_dim")
+        let indexerBudget = optInt("indexer_budget")
+        let indexerCompress = optInt("indexer_compress_ratio")
+        let ngramSize = optInt("ngram_size")
+        let headsPerNgram = optInt("heads_per_ngram")
+        let ngramParts = optInt("split_ngram_parts")
+        let pleConvK = optInt("ple_conv_kernel_size")
+        // ple_layer_ids in the HF config are 1-based (the snapshot census
+        // finds the PLE tensors under layers.1 when the config says [2]);
+        // the engine indexes layers from 0.
+        let ple1Based = (tc["ple_layer_ids"] as? [Int]) ?? []
+        let pleLayers = ple1Based.map { $0 - 1 }
 
         return ArchInfo(
             hiddenSize: try reqInt("hidden_size"),
@@ -137,6 +267,20 @@ struct ArchInfo: Sendable, Equatable {
             linearNumValueHeads: linearValHeads,
             linearKeyHeadDim: linearKeyDim,
             linearValueHeadDim: linearValDim,
-            linearConvKernelDim: linearConvK)
+            linearConvKernelDim: linearConvK,
+            hyperConnectionCount: is38 ? hcCount : nil,
+            hyperConnectionLowrank: is38 ? hcLowrank : nil,
+            indexerNumHeads: is38 ? indexerHeads : nil,
+            indexerKVHeads: is38 ? indexerKVHeads : nil,
+            indexerHeadDim: is38 ? indexerHeadDim : nil,
+            indexerBudget: is38 ? indexerBudget : nil,
+            indexerCompressRatio: is38 ? indexerCompress : nil,
+            ngramSize: is38 ? ngramSize : nil,
+            headsPerNgram: is38 ? headsPerNgram : nil,
+            ngramRowDim: is38 ? 160 : nil,
+            ngramPartCount: is38 ? ngramParts : nil,
+            ngramPartRows: is38 ? 2_500_012 : nil,
+            pleLayerIndexes: is38 ? (pleLayers.isEmpty ? [1] : pleLayers) : nil,
+            pleConvKernelSize: is38 ? pleConvK : nil)
     }
 }

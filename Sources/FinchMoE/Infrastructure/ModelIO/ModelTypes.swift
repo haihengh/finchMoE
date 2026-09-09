@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import FinchMoEFormat
 
 /// Compile-time architecture baseline. `manifest.json -> arch` must match this
 /// field-by-field at load time; mismatches throw `ModelError.archMismatch`.
@@ -37,6 +38,49 @@ public struct ArchConfig: Sendable, Equatable {
     public let linearKeyHeadDim: Int
     public let linearValueHeadDim: Int
     public let linearConvKernelDim: Int
+    // MARK: Qwen3.8 / Flash-Next (hyper-connection + QSA indexer + PLE
+    // n-gram) fields. Zero/nil-ish defaults so the Gemma and Qwen3.6 presets
+    // are untouched; only the qwen3_8 preset sets them. A field's exact
+    // meaning is documented in docs/QWEN38_PORT.md (math locked against
+    // llama.cpp qwen4exp.cpp — no transformers qwen4_exp module exists).
+    /// Wide-residual stream count (`hc_count`, 4 on Flash-Next): the block
+    /// input is the mean over streams and block outputs are injected back
+    /// per-stream. 0 = plain RMSNorm blocks (Gemma / Qwen3.6).
+    public let hyperConnectionCount: Int
+    /// Mix down/up low rank (`hc_lowrank`, 320).
+    public let hyperConnectionLowrank: Int
+    /// QSA sparse-attention indexer query heads (`indexer_n_heads`, 4).
+    public let indexerNumHeads: Int
+    /// QSA indexer key heads (`indexer_kv_heads`, 1).
+    public let indexerKVHeads: Int
+    /// QSA indexer head width (`indexer_head_dim`, 128).
+    public let indexerHeadDim: Int
+    /// QSA token budget (`indexer_budget`, 2048): at n_kv above
+    /// budget + compress_ratio − 1 the layer attends to the top-k selected
+    /// cells only; below that the selection is the full set (dense).
+    public let indexerBudget: Int
+    /// QSA block size (`indexer_compress_ratio`, 4): keys are pooled into
+    /// blocks of this many consecutive tokens before scoring.
+    public let indexerCompressRatio: Int
+    /// PLE n-gram order (`ngram_size`, 3: bigram + trigram heads).
+    public let ngramSize: Int
+    /// PLE heads per n-gram order (`heads_per_ngram`, 8); total heads =
+    /// (ngramSize − 1) × headsPerNgram.
+    public let headsPerNgram: Int
+    /// Raw n-gram embedding row width (160 columns on this snapshot); the
+    /// disk codec pads rows to a multiple of the quantization group size.
+    public let ngramRowDim: Int
+    /// N-gram embedding part count (`split_ngram_parts`, 128 shard files).
+    public let ngramPartCount: Int
+    /// Rows in one n-gram part shard (2,500,012 on this snapshot; the repack
+    /// freezes it from the source tensor shape — config only gives the base
+    /// vocab 20,000,000, not the final padded row count).
+    public let ngramPartRows: Int
+    /// 0-based layer indexes hosting the PLE block (config `ple_layer_ids`
+    /// is 1-based → [2] becomes [1]).
+    public let pleLayerIndexes: [Int]
+    /// PLE causal convolution kernel width (`ple_conv_kernel_size`, 4).
+    public let pleConvKernelSize: Int
 
     public init(
         hiddenSize: Int,
@@ -66,7 +110,21 @@ public struct ArchConfig: Sendable, Equatable {
         linearNumValueHeads: Int,
         linearKeyHeadDim: Int,
         linearValueHeadDim: Int,
-        linearConvKernelDim: Int
+        linearConvKernelDim: Int,
+        hyperConnectionCount: Int = 0,
+        hyperConnectionLowrank: Int = 0,
+        indexerNumHeads: Int = 0,
+        indexerKVHeads: Int = 0,
+        indexerHeadDim: Int = 0,
+        indexerBudget: Int = 0,
+        indexerCompressRatio: Int = 0,
+        ngramSize: Int = 0,
+        headsPerNgram: Int = 0,
+        ngramRowDim: Int = 0,
+        ngramPartCount: Int = 0,
+        ngramPartRows: Int = 0,
+        pleLayerIndexes: [Int] = [],
+        pleConvKernelSize: Int = 0
     ) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
@@ -96,7 +154,47 @@ public struct ArchConfig: Sendable, Equatable {
         self.linearKeyHeadDim = linearKeyHeadDim
         self.linearValueHeadDim = linearValueHeadDim
         self.linearConvKernelDim = linearConvKernelDim
+        self.hyperConnectionCount = hyperConnectionCount
+        self.hyperConnectionLowrank = hyperConnectionLowrank
+        self.indexerNumHeads = indexerNumHeads
+        self.indexerKVHeads = indexerKVHeads
+        self.indexerHeadDim = indexerHeadDim
+        self.indexerBudget = indexerBudget
+        self.indexerCompressRatio = indexerCompressRatio
+        self.ngramSize = ngramSize
+        self.headsPerNgram = headsPerNgram
+        self.ngramRowDim = ngramRowDim
+        self.ngramPartCount = ngramPartCount
+        self.ngramPartRows = ngramPartRows
+        self.pleLayerIndexes = pleLayerIndexes
+        self.pleConvKernelSize = pleConvKernelSize
     }
+
+    /// Canonical family strings written to `manifest.json -> arch.modelFamily`
+    /// and compared at dispatch sites. All family decisions go through these
+    /// constants or `isQwen3_6`/`isQwen3_8`/`isQwenHybrid`; never compare
+    /// against a bare literal outside this file.
+    /// Values single-source from `FQTurboFormatV1` (shared with the repacker).
+    public static let gemma4Family = FQTurboFormatV1.gemma4Family
+    public static let qwen3_6Family = FQTurboFormatV1.qwen36Family
+    public static let qwen3_8Family = FQTurboFormatV1.qwen38Family
+
+    public var isQwen3_6: Bool { modelFamily == Self.qwen3_6Family }
+    public var isQwen3_8: Bool { modelFamily == Self.qwen3_8Family }
+    /// Qwen hybrid layers (Gated DeltaNet + full-attention) share the
+    /// `linear_attn.*` / doubled-q-proj machinery; a site that is GDN-family
+    /// rather than 3.6-specific should test this.
+    public var isQwenHybrid: Bool { isQwen3_6 || isQwen3_8 }
+
+    /// Hyper-connection wide-stream width (hc_count × hidden). 0 when the
+    /// family has no hyper-connections (Gemma / Qwen3.6 use plain RMSNorm).
+    public var hyperConnectionDim: Int { hyperConnectionCount * hiddenSize }
+
+    /// Total PLE n-gram embedding rows (all 128 part shards).
+    public var ngramTotalRows: Int { ngramPartCount * ngramPartRows }
+
+    /// PLE attention heads: (ngram_size − 1) orders × heads per ngram.
+    public var pleHeadCount: Int { ngramSize > 1 ? (ngramSize - 1) * headsPerNgram : 0 }
 
     /// Canonical Gemma 4 26B-A4B baseline, checked against the installed
     /// model manifest.
@@ -104,7 +202,11 @@ public struct ArchConfig: Sendable, Equatable {
     /// The built-in preset for a manifest-declared model family. Loaders use
     /// this (via `ManifestReader.detectPreset`) instead of hardcoding Gemma.
     public static func preset(forModelFamily family: String?) -> ArchConfig {
-        family == "qwen3_6" ? .qwen3_6_35B_A3B : .gemma4_26B_A4B
+        switch family {
+        case Self.qwen3_6Family: return .qwen3_6_35B_A3B
+        case Self.qwen3_8Family: return .qwen3_8_flashNext_125B
+        default:                 return .gemma4_26B_A4B
+        }
     }
 
     public static let gemma4_26B_A4B = ArchConfig(
@@ -162,7 +264,7 @@ public struct ArchConfig: Sendable, Equatable {
         topKExperts: 8,
         tieWordEmbeddings: false,
         attentionKEqV: false,
-        fullAttentionLayerMask: Self.qwen36LayerMask(),
+        fullAttentionLayerMask: Self.qwenLayerMask(numLayers: 40),
         hiddenActivation: "silu",
         modelFamily: "qwen3_6",
         attnOutputGate: true,
@@ -173,16 +275,74 @@ public struct ArchConfig: Sendable, Equatable {
         linearConvKernelDim: 4
     )
 
+    /// Qwen3.8-Flash-Next text model: 48 hybrid layers (36 Gated-DeltaNet
+    /// linear-attention + 12 full attention every 4th layer), where the full
+    /// layers are QSA sparse attention with a 4-head × 128 indexer
+    /// (budget 2048 tokens / blocks of 4). Hyper-connections (4 streams,
+    /// low rank 320) replace every RMSNorm — there is no `model.norm`; a
+    /// final shared `hyper_connection_mixer` collapses the wide stream to the
+    /// lm_head input. Layer 1 (0-based) additionally hosts the PLE n-gram
+    /// block (16 heads over a 20M-base × 16 subrange embedding split into
+    /// 128 part files of 2,500,012 × 160). 512 experts top-10 + shared,
+    /// GDN 48 value heads, untied lm_head. All values frozen from
+    /// `Qwen3.8-Flash-Next-bf16/config.json` + shard-header census
+    /// (2026-09-08); math authority is llama.cpp `qwen4exp.cpp`.
+    public static let qwen3_8_flashNext_125B = ArchConfig(
+        hiddenSize: 2560,
+        intermediateSize: 640,          // shared expert FFN width
+        moeIntermediateSize: 640,       // per-expert FFN width
+        numHeads: 24,
+        numKVHeads: 2,
+        numFullKVHeads: 2,
+        headDim: 128,                   // nominal; GDN layers use linearKey/ValueHeadDim
+        fullHeadDim: 256,               // full-attention (QSA) head_dim
+        vocabSize: 248320,
+        slidingWindow: 0,
+        finalLogitSoftcap: 0.0,
+        ropeTheta: 10_000_000.0,
+        fullRopeTheta: 10_000_000.0,
+        partialRotaryFactor: 0.25,
+        numLayers: 48,
+        numExperts: 512,
+        topKExperts: 10,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.qwenLayerMask(numLayers: 48),
+        hiddenActivation: "silu",
+        modelFamily: "qwen3_8",
+        attnOutputGate: true,           // q_proj carries a gate half per head
+        linearNumKeyHeads: 16,
+        linearNumValueHeads: 48,
+        linearKeyHeadDim: 128,
+        linearValueHeadDim: 128,
+        linearConvKernelDim: 4,
+        hyperConnectionCount: 4,
+        hyperConnectionLowrank: 320,
+        indexerNumHeads: 4,
+        indexerKVHeads: 1,
+        indexerHeadDim: 128,
+        indexerBudget: 2048,
+        indexerCompressRatio: 4,
+        ngramSize: 3,
+        headsPerNgram: 8,
+        ngramRowDim: 160,
+        ngramPartCount: 128,
+        ngramPartRows: 2_500_012,
+        pleLayerIndexes: [1],
+        pleConvKernelSize: 4
+    )
+
     private static func gemma4LayerMask() -> [UInt8] {
         var mask = [UInt8](repeating: 0, count: 30)
         for i in stride(from: 5, to: 30, by: 6) { mask[i] = 1 }
         return mask
     }
 
-    /// 40 layers; full attention at 0-indexed 3,7,11,...,39 (every 4th).
-    private static func qwen36LayerMask() -> [UInt8] {
-        var mask = [UInt8](repeating: 0, count: 40)
-        for i in stride(from: 3, to: 40, by: 4) { mask[i] = 1 }
+    /// Qwen hybrid layout: full attention at 0-indexed 3,7,11,... (every
+    /// 4th). Shared by 3.6 (40 layers) and 3.8 Flash-Next (48 layers).
+    private static func qwenLayerMask(numLayers: Int) -> [UInt8] {
+        var mask = [UInt8](repeating: 0, count: numLayers)
+        for i in stride(from: 3, to: numLayers, by: 4) { mask[i] = 1 }
         return mask
     }
 }

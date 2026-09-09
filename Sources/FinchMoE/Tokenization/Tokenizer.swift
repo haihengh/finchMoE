@@ -42,7 +42,10 @@ public enum GFTokenizerFamily: String, Sendable, Equatable {
         let root = configJSON
         let tc = (root["text_config"] as? [String: Any]) ?? root
         let mt = (tc["model_type"] as? String) ?? ""
-        if mt.contains("qwen3_5_moe") || mt.contains("qwen3.6") || mt.contains("qwen3_6") {
+        // Qwen3.8-Flash-Next (qwen4_exp_text) shares the 3.6 tokenizer
+        // byte-for-byte, so it lands in the same qwen3_6 handling family.
+        if mt.contains("qwen3_5_moe") || mt.contains("qwen3.6") || mt.contains("qwen3_6")
+            || mt.contains("qwen4_exp") {
             return .qwen3_6
         }
         return .gemma4

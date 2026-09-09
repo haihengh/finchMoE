@@ -2,7 +2,21 @@ import Foundation
 
 package enum FQTurboFormatV1 {
     package static let magic = "FQTURBO"
+    // Canonical model-family strings written to manifest.arch.modelFamily.
+    // Single home for the runtime (ArchConfig.qwen*Family) and the repacker
+    // (ArchInfo) so a family can never drift between writer and reader.
+    package static let gemma4Family = "gemma4"
+    package static let qwen36Family = "qwen3_6"
+    package static let qwen38Family = "qwen3_8"
     package static let versionMajor = 1
+    /// Optional arch-key groups (Qwen3.6 GDN keys, then Qwen3.8-Flash-Next's
+    /// `hyperConnection*`/`indexer*`/`ngram*`/`ple*`) are additive at minor 0
+    /// by precedent: encode omits nil keys so old byte streams are unchanged,
+    /// decode synthesizes missing keys to nil, and old readers ignore unknown
+    /// JSON keys. versionMinor stays 0 — it is embedded in repacked layer
+    /// files (`RangeCopyPlanner`), so bumping it would change every artifact
+    /// for every family. A *breaking* wire change (required key, semantic
+    /// reinterpretation) is what bumps minor, with fixture regeneration.
     package static let versionMinor = 0
     package static let alignmentBytes: UInt64 = 16_384
     package static let residentHeaderBytes = 24
