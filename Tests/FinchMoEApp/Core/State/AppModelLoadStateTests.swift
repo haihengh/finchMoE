@@ -14,7 +14,7 @@ import Testing
         #expect(!model.canRun)
         model.loadState = .failed(.modelLoadFailed("boom"))
         #expect(!model.canRun)
-        model.loadState = .ready(modelDirectory: URL(fileURLWithPath: "/tmp/m.fqturbo"), loadSeconds: 1.2)
+        model.loadState = .ready(modelDirectory: URL(fileURLWithPath: "/tmp/m.finch"), loadSeconds: 1.2)
         #expect(model.canRun)
     }
 
@@ -29,7 +29,7 @@ import Testing
         #expect(model.canLoadModel)
         model.loadState = .loading(.tokenizer)
         #expect(!model.canLoadModel)
-        model.loadState = .ready(modelDirectory: URL(fileURLWithPath: "/tmp/m.fqturbo"), loadSeconds: 1.2)
+        model.loadState = .ready(modelDirectory: URL(fileURLWithPath: "/tmp/m.finch"), loadSeconds: 1.2)
         #expect(!model.canLoadModel)
     }
 
@@ -223,8 +223,8 @@ import Testing
     @MainActor
     @Test func staleReadyStateForOldModelPathIsIgnored() {
         let model = AppModel(client: MockInferenceClient())
-        let oldURL = URL(fileURLWithPath: "/tmp/old.fqturbo")
-        let newURL = URL(fileURLWithPath: "/tmp/new.fqturbo")
+        let oldURL = URL(fileURLWithPath: "/tmp/old.finch")
+        let newURL = URL(fileURLWithPath: "/tmp/new.finch")
         model.modelPathText = oldURL.path
 
         model.setModelURL(newURL)

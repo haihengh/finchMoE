@@ -1,7 +1,7 @@
 import Foundation
 
 /// Options for the local Qwen 3.6 quantizing repack: reads a bf16 safetensors
-/// snapshot from disk and writes the `.fqturbo` install (int4-affine weights,
+/// snapshot from disk and writes the `.finch` install (int4-affine weights,
 /// int8 router, raw fp16/fp32 GDN entries). The Gemma remote-streaming path
 /// is untouched.
 public struct LocalQwenRepackOptions: Sendable {
@@ -124,12 +124,12 @@ public final class LocalQwenRepacker {
             .appendingPathComponent("packed_experts") as NSString)
             .appendingPathComponent("layout.json")
         let expertStride = plan.layers.first(where: { $0.expertsPerLayer > 0 })?.expertStride ?? 0
-        let layoutData = try FQTurboJSON.encodeLayout(
+        let layoutData = try FinchJSON.encodeLayout(
             layers: plan.layers,
             numLayers: plan.arch.numLayers,
             expertStride: expertStride)
         try writeSmall(path: layoutPath, data: layoutData)
-        try FQTurboLayoutValidator.validate(path: layoutPath, layers: plan.layers)
+        try FinchLayoutValidator.validate(path: layoutPath, layers: plan.layers)
         try recordOutputFile(relativePath: "packed_experts/layout.json",
                              path: layoutPath,
                              progress: progress)
@@ -246,13 +246,13 @@ public final class LocalQwenRepacker {
         // shared/routed int4 affine, router int8 affine, group 64. The GDN
         // linear_attn projections are int8 — int4 noise on them amplifies
         // through the recurrent state and drowns the final logits.
-        let bits = FQTurboJSON.QuantBitWidths(
+        let bits = FinchJSON.QuantBitWidths(
             embedding: 4, attention: 4, linearAttention: 8, router: 8,
             sharedExpert: 4, routedExpert: 4)
         let files = audit.outputFiles.map {
-            ($0.relativePath, FQTurboJSON.FileEntry(size: $0.size, sha256: $0.sha256))
+            ($0.relativePath, FinchJSON.FileEntry(size: $0.size, sha256: $0.sha256))
         }
-        let data = try FQTurboJSON.encodeManifest(
+        let data = try FinchJSON.encodeManifest(
             arch: plan.arch,
             baseMode: "affine",
             baseGroupSize: 64,

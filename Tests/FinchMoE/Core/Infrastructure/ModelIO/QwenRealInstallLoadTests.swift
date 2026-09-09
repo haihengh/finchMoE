@@ -4,7 +4,7 @@ import Metal
 @testable import FinchMoE
 
 /// Loads the REAL repacked Qwen 3.6 35B-A3B install
-/// (`models/Qwen3.6-35B-A3B-4bit.fqturbo`, gitignored) with the real preset —
+/// (`models/Qwen3.6-35B-A3B-4bit.finch`, gitignored) with the real preset —
 /// the same gate the toy repack test exercises, at production shapes:
 /// validateArch against `ArchConfig.qwen3_6_35B_A3B`, then
 /// validateRuntimeSchema over all 613 resident entries, plus accessor
@@ -12,7 +12,7 @@ import Metal
 @Suite struct QwenRealInstallLoadTests {
 
     private static let installPath =
-        "/Volumes/samsung 2t/code/finchmoe/models/Qwen3.6-35B-A3B-4bit.fqturbo"
+        "/Volumes/samsung 2t/code/finchmoe/models/Qwen3.6-35B-A3B-4bit.finch"
 
     private static var installExists: Bool {
         FileManager.default.fileExists(

@@ -4,7 +4,7 @@ import Testing
 
 @Suite struct MacAppSettingsTests {
     @Test func settingsFileLivesBesideModelDirectory() {
-        let model = URL(fileURLWithPath: "/tmp/FinchMoE/gemma4.fqturbo",
+        let model = URL(fileURLWithPath: "/tmp/FinchMoE/gemma4.finch",
                         isDirectory: true)
         #expect(MacAppSettingsFileStore.fileURL(forModelDirectory: model).path
             == "/tmp/FinchMoE/mac-app-settings.json")
@@ -13,7 +13,7 @@ import Testing
     @Test func missingFileCreatesReadableDefaults() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = root.appendingPathComponent("gemma4.fqturbo", isDirectory: true)
+        let model = root.appendingPathComponent("gemma4.finch", isDirectory: true)
 
         let settings = MacAppSettingsFileStore.loadOrCreate(forModelDirectory: model)
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
@@ -29,7 +29,7 @@ import Testing
     @Test func malformedFileIsReplacedWithDefaults() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = root.appendingPathComponent("gemma4.fqturbo", isDirectory: true)
+        let model = root.appendingPathComponent("gemma4.finch", isDirectory: true)
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
         try Data("not json".utf8).write(to: fileURL)
 
@@ -45,7 +45,7 @@ import Testing
     @Test func invalidValuesAreReplacedWithDefaults() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = root.appendingPathComponent("gemma4.fqturbo", isDirectory: true)
+        let model = root.appendingPathComponent("gemma4.finch", isDirectory: true)
         let invalid = MacAppSettings(contextTokens: 123)
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
         try JSONEncoder().encode(invalid).write(to: fileURL)
@@ -124,7 +124,7 @@ import Testing
     @Test func invalidNewlineShortcutIsReplacedWithDefaults() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = root.appendingPathComponent("gemma4.fqturbo", isDirectory: true)
+        let model = root.appendingPathComponent("gemma4.finch", isDirectory: true)
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
         let invalid = Data("""
         {
@@ -151,7 +151,7 @@ import Testing
     @Test func appModelLoadsAndSavesPersistedSettings() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let modelDirectory = root.appendingPathComponent("gemma4.fqturbo", isDirectory: true)
+        let modelDirectory = root.appendingPathComponent("gemma4.finch", isDirectory: true)
         try FileManager.default.createDirectory(
             at: modelDirectory,
             withIntermediateDirectories: true)
@@ -209,7 +209,7 @@ import Testing
     @Test func newlineShortcutPersistsImmediately() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let modelDirectory = root.appendingPathComponent("gemma4.fqturbo", isDirectory: true)
+        let modelDirectory = root.appendingPathComponent("gemma4.finch", isDirectory: true)
         let model = AppModel(
             modelDirectory: modelDirectory,
             settingsPersistenceEnabled: true)
@@ -225,7 +225,7 @@ import Testing
     @Test func showPromptExamplesPersistsImmediately() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let modelDirectory = root.appendingPathComponent("gemma4.fqturbo", isDirectory: true)
+        let modelDirectory = root.appendingPathComponent("gemma4.finch", isDirectory: true)
         let model = AppModel(
             modelDirectory: modelDirectory,
             settingsPersistenceEnabled: true)
@@ -241,7 +241,7 @@ import Testing
     @Test func sentPromptBehaviorPersistsImmediately() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let modelDirectory = root.appendingPathComponent("gemma4.fqturbo", isDirectory: true)
+        let modelDirectory = root.appendingPathComponent("gemma4.finch", isDirectory: true)
         let model = AppModel(
             modelDirectory: modelDirectory,
             settingsPersistenceEnabled: true)
@@ -257,8 +257,8 @@ import Testing
     @Test func changingModelDirectoryLoadsItsNewlineShortcut() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let first = root.appendingPathComponent("first/model.fqturbo", isDirectory: true)
-        let second = root.appendingPathComponent("second/model.fqturbo", isDirectory: true)
+        let first = root.appendingPathComponent("first/model.finch", isDirectory: true)
+        let second = root.appendingPathComponent("second/model.finch", isDirectory: true)
         try MacAppSettingsFileStore.save(
             MacAppSettings(newlineShortcut: .return, showPromptExamples: true),
             forModelDirectory: first)

@@ -128,7 +128,7 @@ enum SyntheticQwenSnapshot {
             state = state &* 6364136223846793005 &+ 1442695040888963407
             let fraction = Float(state >> 40) / Float(UInt64(1) << 24)
             let value = -2.0 + 4.0 * fraction
-            out[i] = FQTurboQuantization.bf16Bits(value)
+            out[i] = FinchQuantization.bf16Bits(value)
         }
         return out
     }

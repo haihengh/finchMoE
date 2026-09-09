@@ -8,7 +8,7 @@ func makeCompleteModelInstall(_ tag: String,
                               modelID: String = "test/gemma-4-26b-a4b",
                               descriptor: AppModelInstallDescriptor = .default) throws -> URL {
     let directory = FileManager.default.temporaryDirectory
-        .appendingPathComponent("finchmoe-complete-\(tag)-\(UUID().uuidString).fqturbo")
+        .appendingPathComponent("finchmoe-complete-\(tag)-\(UUID().uuidString).finch")
     let experts = directory.appendingPathComponent("packed_experts", isDirectory: true)
     try FileManager.default.createDirectory(at: experts, withIntermediateDirectories: true)
     try Data("{}".utf8).write(to: experts.appendingPathComponent("layout.json"))
@@ -58,7 +58,7 @@ func makeCompleteModelInstall(_ tag: String,
         archFields["linearConvKernelDim"] = arch.linearConvKernelDim
     }
     let manifest: [String: Any] = [
-        "magic": "FQTURBO",
+        "magic": "FINCH",
         "versionMajor": 1,
         "versionMinor": 0,
         "flags": ["streamingPresent": true],

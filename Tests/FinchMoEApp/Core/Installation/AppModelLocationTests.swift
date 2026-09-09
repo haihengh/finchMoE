@@ -5,12 +5,12 @@ import Testing
 @Suite struct AppModelLocationTests {
     @Test func explicitURLWins() {
         let result = AppModelLocation.resolve(
-            explicitURL: URL(fileURLWithPath: "/models/explicit.fqturbo"),
+            explicitURL: URL(fileURLWithPath: "/models/explicit.finch"),
             executableURL: nil,
             currentDirectoryURL: URL(fileURLWithPath: "/repo"),
             applicationSupportURL: URL(fileURLWithPath: "/support"),
             fileExists: { _ in false })
-        #expect(result.path == "/models/explicit.fqturbo")
+        #expect(result.path == "/models/explicit.finch")
     }
 
     @Test func executableAncestorFindsPackageRootOutsideCWD() {
@@ -21,7 +21,7 @@ import Testing
             currentDirectoryURL: URL(fileURLWithPath: "/elsewhere"),
             applicationSupportURL: URL(fileURLWithPath: "/support"),
             fileExists: files.contains)
-        #expect(result.path == "/repo/scratch/gemma4.fqturbo")
+        #expect(result.path == "/repo/scratch/gemma4.finch")
     }
 
     @Test func currentDirectoryCanBePackageRoot() {
@@ -32,11 +32,11 @@ import Testing
             currentDirectoryURL: URL(fileURLWithPath: "/repo"),
             applicationSupportURL: URL(fileURLWithPath: "/support"),
             fileExists: files.contains)
-        #expect(result.path == "/repo/scratch/gemma4.fqturbo")
+        #expect(result.path == "/repo/scratch/gemma4.finch")
     }
 
     @Test func qwenInstallInPackageIsPreferredWhenPresent() {
-        let qwenManifest = "/repo/models/Qwen3.6-35B-A3B-4bit.fqturbo/manifest.json"
+        let qwenManifest = "/repo/models/Qwen3.6-35B-A3B-4bit.finch/manifest.json"
         let files: Set<String> = [
             "/repo/Package.swift",
             "/repo/Sources/FinchMoEApp/Mac",
@@ -48,7 +48,7 @@ import Testing
             currentDirectoryURL: URL(fileURLWithPath: "/elsewhere"),
             applicationSupportURL: URL(fileURLWithPath: "/support"),
             fileExists: files.contains)
-        #expect(result.path == "/repo/models/Qwen3.6-35B-A3B-4bit.fqturbo")
+        #expect(result.path == "/repo/models/Qwen3.6-35B-A3B-4bit.finch")
     }
 
     @Test func absentQwenManifestKeepsGemmaTargetEvenWhenModelsDirExists() {
@@ -63,7 +63,7 @@ import Testing
             currentDirectoryURL: URL(fileURLWithPath: "/repo"),
             applicationSupportURL: URL(fileURLWithPath: "/support"),
             fileExists: files.contains)
-        #expect(result.path == "/repo/scratch/gemma4.fqturbo")
+        #expect(result.path == "/repo/scratch/gemma4.finch")
     }
 
     @Test func standaloneAppFallsBackToApplicationSupport() {
@@ -73,6 +73,6 @@ import Testing
             currentDirectoryURL: URL(fileURLWithPath: "/"),
             applicationSupportURL: URL(fileURLWithPath: "/support"),
             fileExists: { _ in false })
-        #expect(result.path == "/support/FinchMoE/gemma4.fqturbo")
+        #expect(result.path == "/support/FinchMoE/gemma4.finch")
     }
 }

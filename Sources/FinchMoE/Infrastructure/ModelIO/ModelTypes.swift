@@ -174,10 +174,10 @@ public struct ArchConfig: Sendable, Equatable {
     /// and compared at dispatch sites. All family decisions go through these
     /// constants or `isQwen3_6`/`isQwen3_8`/`isQwenHybrid`; never compare
     /// against a bare literal outside this file.
-    /// Values single-source from `FQTurboFormatV1` (shared with the repacker).
-    public static let gemma4Family = FQTurboFormatV1.gemma4Family
-    public static let qwen3_6Family = FQTurboFormatV1.qwen36Family
-    public static let qwen3_8Family = FQTurboFormatV1.qwen38Family
+    /// Values single-source from `FinchFormatV1` (shared with the repacker).
+    public static let gemma4Family = FinchFormatV1.gemma4Family
+    public static let qwen3_6Family = FinchFormatV1.qwen36Family
+    public static let qwen3_8Family = FinchFormatV1.qwen38Family
 
     public var isQwen3_6: Bool { modelFamily == Self.qwen3_6Family }
     public var isQwen3_8: Bool { modelFamily == Self.qwen3_8Family }
@@ -350,7 +350,7 @@ public struct ArchConfig: Sendable, Equatable {
 /// Failure modes for the validation gates in `Model.load`.
 enum ModelError: Error, CustomStringConvertible, Equatable {
     case partialInstall(path: String)
-    case notAFQTurboDirectory
+    case notAFinchDirectory
     case unsupportedVersion(major: Int, minor: Int)
     case unknownFlag(name: String)
     case archMismatch(field: String, expected: String, actual: String)
@@ -367,9 +367,9 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
     public var description: String {
         switch self {
         case .partialInstall(let p):
-            return "model.fqturbo directory at \(p) is missing manifest.json"
-        case .notAFQTurboDirectory:
-            return "manifest.json magic does not equal \"FQTURBO\""
+            return "model.finch directory at \(p) is missing manifest.json"
+        case .notAFinchDirectory:
+            return "manifest.json magic does not equal \"FINCH\""
         case .unsupportedVersion(let maj, let min):
             return "manifest version \(maj).\(min) is not supported (need 1.x)"
         case .unknownFlag(let n):
@@ -379,7 +379,7 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
         case .expertStrideNotPageAligned(let s, let p):
             return "expertStride \(s) is not a multiple of page size \(p)"
         case .missingFile(let n):
-            return "model.fqturbo is missing required file \(n)"
+            return "model.finch is missing required file \(n)"
         case .checksumMismatch(let f):
             return "SHA-256 of \(f) does not match manifest.files[\(f)].sha256"
         case .tensorNotFound(let n):

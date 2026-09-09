@@ -16,7 +16,7 @@ import FinchMoEValidationSupport
 @Suite struct QwenLayer0DebugTests {
 
     private static let installPath =
-        "/Volumes/samsung 2t/code/finchmoe/models/Qwen3.6-35B-A3B-4bit.fqturbo"
+        "/Volumes/samsung 2t/code/finchmoe/models/Qwen3.6-35B-A3B-4bit.finch"
 
     private static var installExists: Bool {
         FileManager.default.fileExists(atPath: installPath + "/manifest.json")
@@ -43,8 +43,8 @@ import FinchMoEValidationSupport
         for r in 0..<rows {
             var row = [Float](repeating: 0, count: cols)
             for g in 0..<groups {
-                let scale = FQTurboQuantization.bf16ToFloat(sWords[r * groups + g])
-                let bias = FQTurboQuantization.bf16ToFloat(bWords[r * groups + g])
+                let scale = FinchQuantization.bf16ToFloat(sWords[r * groups + g])
+                let bias = FinchQuantization.bf16ToFloat(bWords[r * groups + g])
                 let byteBase = r * (cols / 2) + g * 32
                 for k in 0..<64 {
                     let byte = wBytes.load(fromByteOffset: byteBase + k / 2,
@@ -70,8 +70,8 @@ import FinchMoEValidationSupport
         for r in 0..<rows {
             var row = [Float](repeating: 0, count: cols)
             for g in 0..<groups {
-                let scale = FQTurboQuantization.bf16ToFloat(sWords[r * groups + g])
-                let bias = FQTurboQuantization.bf16ToFloat(bWords[r * groups + g])
+                let scale = FinchQuantization.bf16ToFloat(sWords[r * groups + g])
+                let bias = FinchQuantization.bf16ToFloat(bWords[r * groups + g])
                 for k in 0..<64 {
                     let q = wBytes.load(fromByteOffset: r * cols + g * 64 + k,
                                         as: UInt8.self)
@@ -86,7 +86,7 @@ import FinchMoEValidationSupport
     private static func bf16Values(_ view: TensorView, count: Int) -> [Float] {
         let words = view.buffer.contents().advanced(by: Int(view.offset))
             .assumingMemoryBound(to: UInt16.self)
-        return (0..<count).map { FQTurboQuantization.bf16ToFloat(words[$0]) }
+        return (0..<count).map { FinchQuantization.bf16ToFloat(words[$0]) }
     }
 
     private static func fp16Values(_ view: TensorView, count: Int) -> [Float] {
@@ -573,8 +573,8 @@ import FinchMoEValidationSupport
                 for row in 0..<r {
                     var vals = [Float](repeating: 0, count: c)
                     for g in 0..<groups {
-                        let scale = FQTurboQuantization.bf16ToFloat(sVals[row * groups + g])
-                        let bias = FQTurboQuantization.bf16ToFloat(bVals[row * groups + g])
+                        let scale = FinchQuantization.bf16ToFloat(sVals[row * groups + g])
+                        let bias = FinchQuantization.bf16ToFloat(bVals[row * groups + g])
                         let byteBase = row * (c / 2) + g * 32
                         for k in 0..<64 {
                             let byte = wBytes[byteBase + k / 2]
@@ -1216,8 +1216,8 @@ extension QwenLayer0DebugTests {
             for r in 0..<vocab {
                 var acc: Float = 0
                 for g in 0..<groups {
-                    let scale = FQTurboQuantization.bf16ToFloat(sWords[r * groups + g])
-                    let bias = FQTurboQuantization.bf16ToFloat(bWords[r * groups + g])
+                    let scale = FinchQuantization.bf16ToFloat(sWords[r * groups + g])
+                    let bias = FinchQuantization.bf16ToFloat(bWords[r * groups + g])
                     let byteBase = r * (D / 2) + g * 32
                     for k in 0..<64 {
                         let byte = wBytes.load(fromByteOffset: byteBase + k / 2,
@@ -1695,8 +1695,8 @@ extension QwenLayer0DebugTests {
                 for row in 0..<r {
                     var vals = [Float](repeating: 0, count: c)
                     for g in 0..<groups {
-                        let scl = FQTurboQuantization.bf16ToFloat(sVals[row * groups + g])
-                        let bias = FQTurboQuantization.bf16ToFloat(bVals[row * groups + g])
+                        let scl = FinchQuantization.bf16ToFloat(sVals[row * groups + g])
+                        let bias = FinchQuantization.bf16ToFloat(bVals[row * groups + g])
                         let byteBase = row * (c / 2) + g * 32
                         for k in 0..<64 {
                             let byte = wBytes[byteBase + k / 2]
@@ -1949,8 +1949,8 @@ extension QwenLayer0DebugTests {
                     for r in 0..<vocab {
                         var acc: Float = 0
                         for g in 0..<groups {
-                            let scl = FQTurboQuantization.bf16ToFloat(sWords[r * groups + g])
-                            let bias = FQTurboQuantization.bf16ToFloat(bWords[r * groups + g])
+                            let scl = FinchQuantization.bf16ToFloat(sWords[r * groups + g])
+                            let bias = FinchQuantization.bf16ToFloat(bWords[r * groups + g])
                             let byteBase = r * (D / 2) + g * 32
                             for k in 0..<64 {
                                 let byte = wBytes.load(fromByteOffset: byteBase + k / 2,
@@ -2060,7 +2060,7 @@ extension QwenLayer0DebugTests {
             return raw.withUnsafeBytes { ptr in
                 let words = ptr.bindMemory(to: UInt16.self)
                 return (0..<(raw.count / 2)).map {
-                    FQTurboQuantization.bf16ToFloat(words[$0])
+                    FinchQuantization.bf16ToFloat(words[$0])
                 }
             }
         }
@@ -2226,8 +2226,8 @@ extension QwenLayer0DebugTests {
                 let groups = c / 64
                 for row in 0..<r {
                     for g in 0..<groups {
-                        let scale = FQTurboQuantization.bf16ToFloat(sVals[row * groups + g])
-                        let bias = FQTurboQuantization.bf16ToFloat(bVals[row * groups + g])
+                        let scale = FinchQuantization.bf16ToFloat(sVals[row * groups + g])
+                        let bias = FinchQuantization.bf16ToFloat(bVals[row * groups + g])
                         let byteBase = row * (c / 2) + g * 32
                         for k in 0..<64 {
                             let byte = wBytes[byteBase + k / 2]
@@ -2710,8 +2710,8 @@ extension QwenLayer0DebugTests {
                     for row in 0..<r {
                         var vals = [Float](repeating: 0, count: c)
                         for g in 0..<groups {
-                            let scale = FQTurboQuantization.bf16ToFloat(sVals[row * groups + g])
-                            let bias = FQTurboQuantization.bf16ToFloat(bVals[row * groups + g])
+                            let scale = FinchQuantization.bf16ToFloat(sVals[row * groups + g])
+                            let bias = FinchQuantization.bf16ToFloat(bVals[row * groups + g])
                             let byteBase = row * (c / 2) + g * 32
                             for k in 0..<64 {
                                 let byte = wBytes[byteBase + k / 2]
@@ -3280,7 +3280,7 @@ extension QwenLayer0DebugTests {
             let data = try! fh.read(upToCount: n * 2) ?? Data()
             return data.withUnsafeBytes { raw in
                 let words = raw.bindMemory(to: UInt16.self)
-                return (0..<n).map { FQTurboQuantization.bf16ToFloat(words[$0]) }
+                return (0..<n).map { FinchQuantization.bf16ToFloat(words[$0]) }
             }
         }
 
@@ -3337,8 +3337,8 @@ extension QwenLayer0DebugTests {
             out.reserveCapacity(rows * cols)
             for r in sampleRows(rows) {
                 for g in 0..<groups {
-                    let scale = FQTurboQuantization.bf16ToFloat(sWords[r * groups + g])
-                    let bias = FQTurboQuantization.bf16ToFloat(bWords[r * groups + g])
+                    let scale = FinchQuantization.bf16ToFloat(sWords[r * groups + g])
+                    let bias = FinchQuantization.bf16ToFloat(bWords[r * groups + g])
                     let byteBase = int8 ? r * cols + g * 64 : r * (cols / 2) + g * 32
                     for k in 0..<64 {
                         if int8 {
@@ -3370,7 +3370,7 @@ extension QwenLayer0DebugTests {
                 out += data.withUnsafeBytes { raw in
                     let words = raw.bindMemory(to: UInt16.self)
                     return (0..<loc.cols).map {
-                        FQTurboQuantization.bf16ToFloat(words[$0])
+                        FinchQuantization.bf16ToFloat(words[$0])
                     }
                 }
             }
@@ -3554,7 +3554,7 @@ extension QwenLayer0DebugTests {
             return data.withUnsafeBytes { raw in
                 let words = raw.bindMemory(to: UInt16.self)
                 return (0..<loc.cols).map {
-                    FQTurboQuantization.bf16ToFloat(words[$0])
+                    FinchQuantization.bf16ToFloat(words[$0])
                 }
             }
         }
@@ -3571,8 +3571,8 @@ extension QwenLayer0DebugTests {
             let groups = D / 64
             var row = [Float](repeating: 0, count: D)
             for g in 0..<groups {
-                let scale = FQTurboQuantization.bf16ToFloat(sWords[r * groups + g])
-                let bias = FQTurboQuantization.bf16ToFloat(bWords[r * groups + g])
+                let scale = FinchQuantization.bf16ToFloat(sWords[r * groups + g])
+                let bias = FinchQuantization.bf16ToFloat(bWords[r * groups + g])
                 let byteBase = r * (D / 2) + g * 32
                 for k in 0..<64 {
                     let byte = wBytes.load(fromByteOffset: byteBase + k / 2,

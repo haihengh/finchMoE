@@ -4,10 +4,10 @@ import Testing
 @testable import FinchMoEFormat
 @testable import FinchMoERepackCore
 
-@Suite struct FQTurboFormatCompatibilityTests {
+@Suite struct FinchFormatCompatibilityTests {
     @Test func productionWritersMatchPreRefactorV1Fixtures() throws {
         let fixture = makeFixture()
-        let manifestData = try FQTurboJSON.encodeManifest(
+        let manifestData = try FinchJSON.encodeManifest(
             plan: fixture.plan,
             modelID: "fixture/model",
             sourceSnapshotHash: "fixture-snapshot",
@@ -15,14 +15,14 @@ import Testing
             expertsPerLayer: fixture.config.numExperts,
             numLayers: fixture.config.numLayers,
             expertStride: fixture.expertStride,
-            bitWidths: FQTurboJSON.QuantBitWidths(
+            bitWidths: FinchJSON.QuantBitWidths(
                 embedding: 4,
                 attention: 4,
                 linearAttention: 4,
                 router: 8,
                 sharedExpert: 4,
                 routedExpert: 4))
-        let layoutData = try FQTurboJSON.encodeLayout(
+        let layoutData = try FinchJSON.encodeLayout(
             plan: fixture.plan, expertStride: fixture.expertStride)
         let indexData = try ResidentWriter.encodeIndex(plan: fixture.plan.resident)
 
@@ -45,13 +45,13 @@ import Testing
         #expect(manifestRoot["bitWidthOverridesHonored"] as? Int == 120)
 
         let temp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-index-fixture-\(UUID().uuidString).bin")
+            .appendingPathComponent("finch-index-fixture-\(UUID().uuidString).bin")
         defer { try? FileManager.default.removeItem(at: temp) }
         try frozenIndex.write(to: temp)
         let index = try ResidentIndexReader.load(fileURL: temp)
         #expect(index.header.indexSize == fixture.plan.resident.indexSize)
         #expect(index.entries[fixture.plan.resident.entries[0].name]?.dtype
-                == FQTurboFormatV1.DType.u32.rawValue)
+                == FinchFormatV1.DType.u32.rawValue)
 
         let hashes = [
             hash(frozenManifest),
@@ -59,25 +59,25 @@ import Testing
             hash(frozenIndex),
         ]
         #expect(hashes == [
-            // Manifest hash changed when the linearAttention quant slot
-            // became a required wire key (fixture regenerated).
-            "1de997f6e819687c4951d415579575890f3b3a520c7d0909f27a0e6498ab8e02",
+            // Manifest hash changed when the format magic became FINCH
+            // (FQTURBO -> FINCH rename, fixture regenerated).
+            "4836c997b06f8f8bf6447dfe7cb10bdbf137b601ea3d784bfee6ad536a0110e2",
             "acf57a355128d1d8afb1d09b75dc1aa7fef98687871b1ff9f738dd511cb6e341",
             "aa705246112c17d4b60422a2705bda53e96553f7ff96e09b00e6fbb5a4ffa594",
         ], "fixture hashes: \(hashes)")
     }
 
     @Test func sharedConstantsMatchExistingFacades() {
-        #expect(FQTurboJSON.magic == FQTurboFormatV1.magic)
-        #expect(FQTurboJSON.versionMajor == FQTurboFormatV1.versionMajor)
-        #expect(FQTurboBinary.indexHeaderBytes == FQTurboFormatV1.residentHeaderBytes)
-        #expect(FQTurboBinary.indexEntryBytes == FQTurboFormatV1.residentEntryBytes)
+        #expect(FinchJSON.magic == FinchFormatV1.magic)
+        #expect(FinchJSON.versionMajor == FinchFormatV1.versionMajor)
+        #expect(FinchBinary.indexHeaderBytes == FinchFormatV1.residentHeaderBytes)
+        #expect(FinchBinary.indexEntryBytes == FinchFormatV1.residentEntryBytes)
     }
 
     private func makeFixture() -> (
         config: ArchConfig,
         plan: RepackPlan,
-        files: [(relativePath: String, info: FQTurboJSON.FileEntry)],
+        files: [(relativePath: String, info: FinchJSON.FileEntry)],
         expertStride: UInt64
     ) {
         let config = ArchConfig(
@@ -124,10 +124,10 @@ import Testing
         let source = SourceTensor(
             name: "fixture.weight", shardPath: "/dev/null", dtype: .u32,
             shape: [1, 1], absoluteOffset: 0, sizeBytes: 16)
-        let indexSize = FQTurboFormatV1.alignmentBytes
+        let indexSize = FinchFormatV1.alignmentBytes
         let residentEntry = ResidentEntry(
             name: "language_model.model.embed_tokens.weight",
-            dtype: FQTurboFormatV1.DType.u32.rawValue,
+            dtype: FinchFormatV1.DType.u32.rawValue,
             logicalShape4: [1, 1, 0, 0],
             fileOffset: indexSize, sizeBytes: 16,
             scaleOffset: indexSize + 16, scaleSize: 8,
@@ -142,10 +142,10 @@ import Testing
             stringTableOffsets: [0],
             indexSize: indexSize,
             residentSize: 32)
-        let expertStride = FQTurboFormatV1.alignmentBytes
+        let expertStride = FinchFormatV1.alignmentBytes
         let slice = PerExpertTensorSlice(
             role: "gate", component: "weights",
-            dtype: FQTurboFormatV1.DType.u32.rawValue,
+            dtype: FinchFormatV1.DType.u32.rawValue,
             logicalShape: [8, 8], offsetInExpertBlob: 0,
             sizeInExpertBlob: 32, sourceOffsetPerExpert: 32,
             sourceTensor: source, bitsForWeights: 4)
@@ -158,7 +158,7 @@ import Testing
             bitsOverrideCount: 120, resident: resident, layers: [layer],
             matchedModelID: nil, excludedMultimodalTensorNames: [])
         let zeroSHA = String(repeating: "0", count: 64)
-        let files: [(relativePath: String, info: FQTurboJSON.FileEntry)] = [
+        let files: [(relativePath: String, info: FinchJSON.FileEntry)] = [
             ("model_weights.bin", .init(size: resident.totalSize, sha256: zeroSHA)),
             ("packed_experts/layout.json", .init(size: 1, sha256: zeroSHA)),
             ("packed_experts/layer_00.bin", .init(

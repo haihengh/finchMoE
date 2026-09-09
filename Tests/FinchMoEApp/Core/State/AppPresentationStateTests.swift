@@ -5,7 +5,7 @@ import Testing
 @Suite struct AppPresentationStateTests {
     @Test func staleReadyPrecedesLastRun() {
         var snapshot = Self.installedSnapshot(loadState: .ready(
-            modelDirectory: URL(fileURLWithPath: "/tmp/model.fqturbo"), loadSeconds: 1))
+            modelDirectory: URL(fileURLWithPath: "/tmp/model.finch"), loadSeconds: 1))
         snapshot.hasStaleRuntime = true
         snapshot.lastStopReason = .maxTokens
         let state = AppPresentationState.resolve(snapshot)
@@ -45,7 +45,7 @@ import Testing
         var state = AppPresentationState.resolve(snapshot)
         #expect(state.label == "Installed · Not loaded")
 
-        snapshot.loadState = .ready(modelDirectory: URL(fileURLWithPath: "/tmp/model.fqturbo"),
+        snapshot.loadState = .ready(modelDirectory: URL(fileURLWithPath: "/tmp/model.finch"),
                                     loadSeconds: 1)
         state = AppPresentationState.resolve(snapshot)
         #expect(state.label == "Ready")
@@ -59,7 +59,7 @@ import Testing
         #expect(AppPresentationState.resolve(snapshot).conversationAction == .retryLoad)
 
         snapshot.loadState = .ready(
-            modelDirectory: URL(fileURLWithPath: "/tmp/model.fqturbo"),
+            modelDirectory: URL(fileURLWithPath: "/tmp/model.finch"),
             loadSeconds: 1)
         snapshot.hasStaleRuntime = true
         #expect(AppPresentationState.resolve(snapshot).conversationAction == .reload)
@@ -76,7 +76,7 @@ import Testing
 
     @Test func lifecyclePriorityTable() {
         let ready = AppModelLoadState.ready(
-            modelDirectory: URL(fileURLWithPath: "/tmp/model.fqturbo"), loadSeconds: 1)
+            modelDirectory: URL(fileURLWithPath: "/tmp/model.finch"), loadSeconds: 1)
         var cases: [(AppPresentationSnapshot, String, Bool)] = []
 
         var snapshot = Self.installedSnapshot(loadState: .notLoaded)
@@ -113,7 +113,7 @@ import Testing
 
     @Test func prefillProgressUsesCompactFractionLabel() {
         let ready = AppModelLoadState.ready(
-            modelDirectory: URL(fileURLWithPath: "/tmp/model.fqturbo"),
+            modelDirectory: URL(fileURLWithPath: "/tmp/model.finch"),
             loadSeconds: 1)
         var snapshot = Self.installedSnapshot(loadState: ready)
         snapshot.isRunning = true

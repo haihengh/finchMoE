@@ -11,7 +11,7 @@ import Metal
                      shape: [1024, 64], absoluteOffset: 0, sizeBytes: 0)
     }
 
-    /// Build a minimal valid `model.fqturbo/` directory in a temp dir and
+    /// Build a minimal valid `model.finch/` directory in a temp dir and
     /// return the URL. Uses the toy ArchConfig `gemma4Toy()`: 2 layers,
     /// 8 experts, hidden 64, vocab 1024. Resident contains the embedding
     /// (alias: lmHead), final norm, and the tiny layer-resident tensors needed
@@ -19,7 +19,7 @@ import Metal
     static func writeToySynthetic(includeQuant: Bool = true) throws -> URL {
         let toy = ArchConfig.gemma4Toy()
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-toy-\(UUID().uuidString)")
+            .appendingPathComponent("finch-toy-\(UUID().uuidString)")
         let exp = dir.appendingPathComponent("packed_experts")
         try FileManager.default.createDirectory(at: exp, withIntermediateDirectories: true)
 
@@ -262,8 +262,8 @@ import Metal
 
         let names = specs.map(\.name)
         let stringTable = names.joined().data(using: .utf8)!
-        let headerBytes = FQTurboBinary.indexHeaderBytes
-        let entryBytes  = FQTurboBinary.indexEntryBytes
+        let headerBytes = FinchBinary.indexHeaderBytes
+        let entryBytes  = FinchBinary.indexEntryBytes
         let entriesBase = headerBytes
         let stringTableBase = entriesBase + names.count * entryBytes
         var nameAbsOffsets: [UInt32] = []
@@ -273,7 +273,7 @@ import Metal
             cursor += n.utf8.count
         }
         let rawIndexBytes = UInt64(stringTableBase + stringTable.count)
-        let alignment = FQTurboFormatV1.alignmentBytes
+        let alignment = FinchFormatV1.alignmentBytes
         let indexBytes = ((rawIndexBytes + alignment - 1) / alignment) * alignment
 
         var entries: [ResidentEntry] = []
@@ -310,13 +310,13 @@ import Metal
         var fileBuf = [UInt8](repeating: 0, count: totalBytes)
         fileBuf.withUnsafeMutableBytes { raw in
             let base = raw.baseAddress!
-            FQTurboBinary.writeIndexHeader(into: base,
+            FinchBinary.writeIndexHeader(into: base,
                                           indexSize: indexBytes,
                                           residentSize: residentSize,
                                           entryCount: UInt64(entries.count))
             for (i, e) in entries.enumerated() {
                 let dst = base.advanced(by: entriesBase + i * entryBytes)
-                FQTurboBinary.writeIndexEntry(into: dst, entry: e,
+                FinchBinary.writeIndexEntry(into: dst, entry: e,
                                              nameOffset: nameAbsOffsets[i])
             }
             _ = stringTable.withUnsafeBytes { sb in
@@ -449,7 +449,7 @@ import Metal
             ]
         }
         var manifestRoot: [String: Any] = [
-            "magic": "FQTURBO",
+            "magic": "FINCH",
             "versionMajor": 1,
             "versionMinor": 0,
             "flags": ["streamingPresent": true, "quantKV": false, "aneSharedExpert": false],
@@ -467,6 +467,7 @@ import Metal
                 "router": quantSlot(8),
                 "sharedExpert": quantSlot(4),
                 "routedExpert": quantSlot(4),
+                "linearAttention": quantSlot(4),
             ]
         }
         let manifestData = try JSONSerialization.data(withJSONObject: manifestRoot,

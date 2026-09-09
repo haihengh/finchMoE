@@ -18,7 +18,7 @@ public enum GFTokenizerError: Error, CustomStringConvertible {
 
 /// Gemma 4 / Qwen 3.6 tokenizer wrapper.
 ///
-/// Prefers tokenizer sidecars in a completed `.fqturbo/tokenizer/` directory,
+/// Prefers tokenizer sidecars in a completed `.finch/tokenizer/` directory,
 /// then falls back to the IT variant's Hugging Face Hub tokenizer cache. Exposes
 /// typed accessors for the IDs the generator actually needs (BOS / EOS / pad /
 /// end-of-turn) and adapts encode/decode to Int32 to match the buffer types

@@ -125,7 +125,7 @@ extension ModelLoaderTests {
     defer { try? FileManager.default.removeItem(at: dir) }
     let weightsURL = dir.appendingPathComponent("model_weights.bin")
     var weights = try Data(contentsOf: weightsURL)
-    let firstEntry = FQTurboFormatV1.residentHeaderBytes
+    let firstEntry = FinchFormatV1.residentHeaderBytes
     weights.replaceSubrange((firstEntry + 8)..<(firstEntry + 24),
                             with: repeatElement(UInt8(0), count: 16))
     try weights.write(to: weightsURL)

@@ -73,7 +73,7 @@ extension Args {
     usage: FinchMoECLI --model <dir> (--prompt <string> | --messages-file <path>) [options]
 
     required:
-      --model <dir>             Path to a .fqturbo model directory.
+      --model <dir>             Path to a .finch model directory.
       --prompt <string>         Raw-completion prompt.
       --messages-file <path>    JSON chat messages with role and content fields.
 

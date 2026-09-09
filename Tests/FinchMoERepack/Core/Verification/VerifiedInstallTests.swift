@@ -7,7 +7,7 @@ import Testing
 @Suite struct VerifiedInstallTests {
     @Test func acceptsRootSymlinkAndBindsAlias() throws {
         let root = try makeInstall()
-        let alias = temporaryURL("verified-install-link.fqturbo")
+        let alias = temporaryURL("verified-install-link.finch")
         defer {
             try? FileManager.default.removeItem(at: alias)
             try? FileManager.default.removeItem(at: root)
@@ -15,7 +15,7 @@ import Testing
         try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: root)
 
         let result = try VerifiedInstallTool.run(
-            options: VerifyInstallOptions(inputFQTurbo: alias.path))
+            options: VerifyInstallOptions(inputFinch: alias.path))
         let receipt = try #require(JSONSerialization.jsonObject(
             with: Data(contentsOf: URL(fileURLWithPath: result.receiptPath)))
             as? [String: Any])
@@ -32,7 +32,7 @@ import Testing
             for _ in 0..<2 {
                 group.addTask {
                     _ = try VerifiedInstallTool.run(
-                        options: VerifyInstallOptions(inputFQTurbo: root.path))
+                        options: VerifyInstallOptions(inputFinch: root.path))
                 }
             }
             try await group.waitForAll()
@@ -42,7 +42,7 @@ import Testing
         _ = try JSONSerialization.jsonObject(with: Data(contentsOf: receipt))
         #expect(try Data(contentsOf: oldTemporary) == Data("sentinel".utf8))
         let names = try FileManager.default.contentsOfDirectory(atPath: root.path)
-        #expect(!names.contains { $0.hasPrefix(".fqturbo-") && $0.hasSuffix(".tmp") })
+        #expect(!names.contains { $0.hasPrefix(".finch-") && $0.hasSuffix(".tmp") })
     }
 
     @Test func verifiedByteAccountingRejectsOverflow() {
@@ -57,7 +57,7 @@ import Testing
         try Data("stray".utf8).write(to: root.appendingPathComponent("stray.txt"))
 
         let result = try VerifiedInstallTool.run(
-            options: VerifyInstallOptions(inputFQTurbo: root.path))
+            options: VerifyInstallOptions(inputFinch: root.path))
 
         #expect(result.fileCount == 4)
         #expect(result.unexpectedEntries == ["stray.txt"])
@@ -71,7 +71,7 @@ import Testing
         defer { try? FileManager.default.removeItem(at: root) }
 
         let result = try VerifiedInstallTool.run(
-            options: VerifyInstallOptions(inputFQTurbo: root.path))
+            options: VerifyInstallOptions(inputFinch: root.path))
         #expect(result.fileCount == 4)
     }
 
@@ -83,7 +83,7 @@ import Testing
 
         #expect(throws: RepackError.self) {
             try VerifiedInstallTool.run(
-                options: VerifyInstallOptions(inputFQTurbo: root.path))
+                options: VerifyInstallOptions(inputFinch: root.path))
         }
     }
 
@@ -95,7 +95,7 @@ import Testing
 
         #expect(throws: RepackError.self) {
             try VerifiedInstallTool.run(
-                options: VerifyInstallOptions(inputFQTurbo: root.path))
+                options: VerifyInstallOptions(inputFinch: root.path))
         }
     }
 
@@ -113,7 +113,7 @@ import Testing
 
         #expect(throws: RepackError.self) {
             try VerifiedInstallTool.run(
-                options: VerifyInstallOptions(inputFQTurbo: root.path))
+                options: VerifyInstallOptions(inputFinch: root.path))
         }
     }
 
@@ -131,7 +131,7 @@ import Testing
 
         #expect(throws: RepackError.self) {
             try VerifiedInstallTool.run(
-                options: VerifyInstallOptions(inputFQTurbo: root.path))
+                options: VerifyInstallOptions(inputFinch: root.path))
         }
     }
 
@@ -149,7 +149,7 @@ import Testing
 
         #expect(throws: RepackError.self) {
             try VerifiedInstallTool.run(
-                options: VerifyInstallOptions(inputFQTurbo: root.path))
+                options: VerifyInstallOptions(inputFinch: root.path))
         }
     }
 
@@ -167,7 +167,7 @@ import Testing
                                                    withDestinationURL: outside)
 
         _ = try VerifiedInstallTool.run(
-            options: VerifyInstallOptions(inputFQTurbo: root.path))
+            options: VerifyInstallOptions(inputFinch: root.path))
 
         #expect(try Data(contentsOf: outside) == sentinel)
         let values = try receipt.resourceValues(
@@ -187,33 +187,33 @@ import Testing
 
         #expect(throws: RepackError.self) {
             try VerifiedInstallTool.run(
-                options: VerifyInstallOptions(inputFQTurbo: root.path))
+                options: VerifyInstallOptions(inputFinch: root.path))
         }
     }
 
     private func makeInstall(manifestBytes: UInt64? = nil,
                              layoutBytes: UInt64? = nil) throws -> URL {
-        let root = temporaryURL("verified-install.fqturbo")
+        let root = temporaryURL("verified-install.finch")
         try FileManager.default.createDirectory(
             at: root.appendingPathComponent("packed_experts"),
             withIntermediateDirectories: true)
-        let stride = FQTurboFormatV1.alignmentBytes
+        let stride = FinchFormatV1.alignmentBytes
         let modelData = Data([0])
         let layerData = Data(repeating: 0, count: Int(stride))
-        var layoutData = try FQTurboPackedExpertsLayoutCodec.encode(
-            FQTurboPackedExpertsLayoutV1(
+        var layoutData = try FinchPackedExpertsLayoutCodec.encode(
+            FinchPackedExpertsLayoutV1(
                 expertStride: stride,
                 numLayers: 1,
                 expertsPerLayer: 1,
-                layers: [FQTurboLayerV1(
+                layers: [FinchLayerV1(
                     layer: 0,
                     file: "layer_00.bin",
-                    experts: [FQTurboExpertV1(
+                    experts: [FinchExpertV1(
                         expert: 0,
                         physicalRank: nil,
                         offset: 0,
                         size: stride,
-                        tensors: ["gate": FQTurboSubTensorV1(
+                        tensors: ["gate": FinchSubTensorV1(
                             offset: 0,
                             size: 32,
                             dtype: "U32",
@@ -222,14 +222,14 @@ import Testing
         if let layoutBytes { try pad(&layoutData, to: layoutBytes) }
 
         let files = [
-            "model_weights.bin": FQTurboManifestFileV1(
+            "model_weights.bin": FinchManifestFileV1(
                 size: UInt64(modelData.count), sha256: hash(modelData)),
-            "packed_experts/layout.json": FQTurboManifestFileV1(
+            "packed_experts/layout.json": FinchManifestFileV1(
                 size: UInt64(layoutData.count), sha256: hash(layoutData)),
-            "packed_experts/layer_00.bin": FQTurboManifestFileV1(
+            "packed_experts/layer_00.bin": FinchManifestFileV1(
                 size: UInt64(layerData.count), sha256: hash(layerData)),
         ]
-        var manifestData = try FQTurboManifestCodec.encode(FQTurboManifestV1(
+        var manifestData = try FinchManifestCodec.encode(FinchManifestV1(
             flags: [
                 "streamingPresent": true,
                 "quantKV": false,
@@ -255,8 +255,8 @@ import Testing
         return root
     }
 
-    private func fixtureArch() -> FQTurboManifestArchV1 {
-        FQTurboManifestArchV1(
+    private func fixtureArch() -> FinchManifestArchV1 {
+        FinchManifestArchV1(
             hiddenSize: 64,
             ffnIntermediate: 128,
             moeIntermediateSize: 32,
@@ -301,6 +301,6 @@ import Testing
 
     private func temporaryURL(_ suffix: String) -> URL {
         FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-\(UUID().uuidString)-\(suffix)")
+            .appendingPathComponent("finch-\(UUID().uuidString)-\(suffix)")
     }
 }

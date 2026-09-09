@@ -89,7 +89,7 @@ public enum ManifestReader {
     public static let defaultMaxBytes: UInt64 = 4 * 1024 * 1024
 
     /// Recognized flag keys. Anything else in `manifest.flags` is an error.
-    public static let knownFlags: Set<String> = FQTurboFormatV1.knownFlags
+    public static let knownFlags: Set<String> = FinchFormatV1.knownFlags
 
     /// Fixed required entries. Packed-layer filenames come from layout.json and
     /// are cross-validated only after that document is decoded.
@@ -101,7 +101,7 @@ public enum ManifestReader {
     public static func load(directoryURL: URL,
                             expecting: ArchConfig,
                             maxBytes: UInt64 = defaultMaxBytes) throws -> Manifest {
-        let directory = try FQTurboModelDirectory(rootURL: directoryURL)
+        let directory = try FinchModelDirectory(rootURL: directoryURL)
         let data: Data
         do {
             data = try directory.readMetadata("manifest.json", maxBytes: maxBytes)
@@ -116,14 +116,14 @@ public enum ManifestReader {
     /// instead of hardcoding one. Unknown/nil families fall back to Gemma.
     public static func detectPreset(directoryURL: URL,
                                     maxBytes: UInt64 = defaultMaxBytes) throws -> ArchConfig {
-        let directory = try FQTurboModelDirectory(rootURL: directoryURL)
+        let directory = try FinchModelDirectory(rootURL: directoryURL)
         let data: Data
         do {
             data = try directory.readMetadata("manifest.json", maxBytes: maxBytes)
         } catch ModelError.missingFile {
             throw ModelError.partialInstall(path: directoryURL.path)
         }
-        let wire = try FQTurboManifestCodec.decodeUnchecked(data)
+        let wire = try FinchManifestCodec.decodeUnchecked(data)
         return ArchConfig.preset(forModelFamily: wire.arch.modelFamily)
     }
 
@@ -131,24 +131,24 @@ public enum ManifestReader {
                                expecting: ArchConfig) throws -> Manifest {
         let manifest: Manifest
         do {
-            let wire = try FQTurboManifestCodec.decodeUnchecked(data)
-            guard wire.magic == FQTurboFormatV1.magic else {
-                throw ModelError.notAFQTurboDirectory
+            let wire = try FinchManifestCodec.decodeUnchecked(data)
+            guard wire.magic == FinchFormatV1.magic else {
+                throw ModelError.notAFinchDirectory
             }
-            guard wire.versionMajor == FQTurboFormatV1.versionMajor,
+            guard wire.versionMajor == FinchFormatV1.versionMajor,
                   wire.versionMinor >= 0 else {
                 throw ModelError.unsupportedVersion(major: wire.versionMajor,
                                                     minor: wire.versionMinor)
             }
-            for key in wire.flags.keys where !FQTurboFormatV1.knownFlags.contains(key) {
+            for key in wire.flags.keys where !FinchFormatV1.knownFlags.contains(key) {
                 throw ModelError.unknownFlag(name: key)
             }
-            if wire.expertStride % FQTurboFormatV1.alignmentBytes != 0 {
+            if wire.expertStride % FinchFormatV1.alignmentBytes != 0 {
                 throw ModelError.expertStrideNotPageAligned(
                     stride: wire.expertStride,
-                    pageSize: Int(FQTurboFormatV1.alignmentBytes))
+                    pageSize: Int(FinchFormatV1.alignmentBytes))
             }
-            try FQTurboManifestCodec.validate(wire)
+            try FinchManifestCodec.validate(wire)
             manifest = Manifest(wire: wire)
         } catch let error as ModelError {
             throw error
@@ -266,13 +266,13 @@ public enum ManifestReader {
 }
 
 private extension ManifestFileEntry {
-    init(wire: FQTurboManifestFileV1) {
+    init(wire: FinchManifestFileV1) {
         self.init(size: wire.size, sha256: wire.sha256)
     }
 }
 
 private extension ManifestArch {
-    init(wire: FQTurboManifestArchV1) {
+    init(wire: FinchManifestArchV1) {
         self.init(hiddenSize: wire.hiddenSize,
                   ffnIntermediate: wire.ffnIntermediate,
                   moeIntermediateSize: wire.moeIntermediateSize,
@@ -319,7 +319,7 @@ private extension ManifestArch {
 }
 
 private extension ManifestQuantSlot {
-    init(wire: FQTurboManifestQuantSlotV1) {
+    init(wire: FinchManifestQuantSlotV1) {
         self.init(weightBits: wire.weightBits, scheme: wire.scheme,
                   scaleType: wire.scaleType, biasType: wire.biasType,
                   groupSize: wire.groupSize)
@@ -327,7 +327,7 @@ private extension ManifestQuantSlot {
 }
 
 private extension ManifestQuant {
-    init(wire: FQTurboManifestQuantV1) {
+    init(wire: FinchManifestQuantV1) {
         self.init(embedding: ManifestQuantSlot(wire: wire.embedding),
                   attention: ManifestQuantSlot(wire: wire.attention),
                   linearAttention: ManifestQuantSlot(wire: wire.linearAttention),
@@ -338,7 +338,7 @@ private extension ManifestQuant {
 }
 
 private extension Manifest {
-    init(wire: FQTurboManifestV1) {
+    init(wire: FinchManifestV1) {
         self.init(magic: wire.magic,
                   versionMajor: wire.versionMajor,
                   versionMinor: wire.versionMinor,

@@ -63,7 +63,7 @@ import FinchMoE
     }
 
     @Test func loadedRuntimeKeyTracksOnlyLoadTimeChoices() {
-        let directory = URL(fileURLWithPath: "/tmp/model.fqturbo")
+        let directory = URL(fileURLWithPath: "/tmp/model.finch")
         let base = AppRuntimeOptions()
         let baseline = AppLoadedRuntimeKey(
             modelDirectory: directory, maxContextTokens: 4096, options: base)

@@ -6,7 +6,7 @@ import FinchMoEFormat
 @testable import FinchMoE
 
 /// End-to-end proof of the Qwen quantizing repack: a tiny synthetic bf16
-/// checkpoint is repacked into `.fqturbo`, then the real runtime
+/// checkpoint is repacked into `.finch`, then the real runtime
 /// `Model.load(expecting:)` loads it and `validateRuntimeSchema` +
 /// `validateArch` pass against the matching toy preset. This is the gate the
 /// real 35B install must pass before it can run.
@@ -160,7 +160,7 @@ import FinchMoEFormat
                     state = state &* 6364136223846793005 &+ 1442695040888963407
                     let fraction = Float(state >> 40) / Float(UInt64(1) << 24)
                     let value = -2.0 + 4.0 * fraction
-                    let bits = FQTurboQuantization.bf16Bits(value)
+                    let bits = FinchQuantization.bf16Bits(value)
                     bytes.append(UInt8(truncatingIfNeeded: bits & 0xFF))
                     bytes.append(UInt8(truncatingIfNeeded: bits >> 8))
                 }

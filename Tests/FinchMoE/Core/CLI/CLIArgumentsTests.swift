@@ -4,8 +4,8 @@ import Testing
 
 @Suite struct CLIArgumentsTests {
     @Test func defaultsUseProductionGenerationValues() throws {
-        let arguments = try Args.parse(["--model", "m.fqturbo", "--prompt", "hi"])
-        #expect(arguments.model == "m.fqturbo")
+        let arguments = try Args.parse(["--model", "m.finch", "--prompt", "hi"])
+        #expect(arguments.model == "m.finch")
         #expect(arguments.prompt == "hi")
         #expect(arguments.messagesFile == nil)
         #expect(arguments.maxNew == 1_024)
@@ -22,7 +22,7 @@ import Testing
 
     @Test func generationOptionsParseAndStopsRepeat() throws {
         let arguments = try Args.parse([
-            "--model", "m.fqturbo", "--prompt", "hi",
+            "--model", "m.finch", "--prompt", "hi",
             "--max-new", "32", "--max-context", "512",
             "--temperature", "0", "--top-k", "40", "--top-p", "0.95",
             "--repetition-penalty", "1.1", "--seed", "42",
@@ -41,7 +41,7 @@ import Testing
 
     @Test func topKZeroRequiresTopPToBeDisabled() throws {
         let disabled = try Args.parse([
-            "--model", "m.fqturbo", "--prompt", "hi",
+            "--model", "m.finch", "--prompt", "hi",
             "--top-k", "0", "--top-p", "1",
         ])
         #expect(disabled.topK == nil)
@@ -49,7 +49,7 @@ import Testing
 
         #expect(throws: ArgsError.self) {
             _ = try Args.parse([
-                "--model", "m.fqturbo", "--prompt", "hi", "--top-k", "0",
+                "--model", "m.finch", "--prompt", "hi", "--top-k", "0",
             ])
         }
     }
@@ -57,7 +57,7 @@ import Testing
     @Test func topKAboveKernelLimitRejected() {
         #expect(throws: ArgsError.invalidValue(flag: "--top-k", value: "257")) {
             _ = try Args.parse([
-                "--model", "m.fqturbo", "--prompt", "hi", "--top-k", "257",
+                "--model", "m.finch", "--prompt", "hi", "--top-k", "257",
             ])
         }
     }
@@ -76,7 +76,7 @@ import Testing
     @Test func unsupportedSelectorsAreRejected() {
         for flag in ["--runtime-profile", "--experiment-id", "-h"] {
             #expect(throws: ArgsError.unknownFlag(flag)) {
-                _ = try Args.parse(["--model", "m.fqturbo", "--prompt", "hi", flag])
+                _ = try Args.parse(["--model", "m.finch", "--prompt", "hi", flag])
             }
         }
     }
@@ -86,27 +86,27 @@ import Testing
             _ = try Args.parse(["--prompt", "hi"])
         }
         #expect(throws: ArgsError.modeMissing) {
-            _ = try Args.parse(["--model", "m.fqturbo"])
+            _ = try Args.parse(["--model", "m.finch"])
         }
     }
 
     @Test func verifyPolicyParsesAndRejectsUnknownModes() throws {
-        let full = try Args.parse(["--model", "m.fqturbo", "--prompt", "hi",
+        let full = try Args.parse(["--model", "m.finch", "--prompt", "hi",
                                     "--verify", "full-sha256"])
         #expect(full.verify == .fullSha256)
-        let trusted = try Args.parse(["--model", "m.fqturbo", "--prompt", "hi",
+        let trusted = try Args.parse(["--model", "m.finch", "--prompt", "hi",
                                       "--verify", "trusted-install"])
         #expect(trusted.verify == .sizeCheckTrustedReceipt)
 
         #expect(throws: ArgsError.invalidValue(flag: "--verify", value: "size-only")) {
-            _ = try Args.parse(["--model", "m.fqturbo", "--prompt", "hi",
+            _ = try Args.parse(["--model", "m.finch", "--prompt", "hi",
                                 "--verify", "size-only"])
         }
     }
 
     @Test func messagesFileSelectsChatMode() throws {
         let arguments = try Args.parse([
-            "--model", "m.fqturbo", "--messages-file", "chat.json",
+            "--model", "m.finch", "--messages-file", "chat.json",
         ])
         #expect(arguments.prompt == nil)
         #expect(arguments.messagesFile == "chat.json")
@@ -115,7 +115,7 @@ import Testing
     @Test func promptAndMessagesFileAreMutuallyExclusive() {
         #expect(throws: ArgsError.mutuallyExclusive("--prompt", "--messages-file")) {
             _ = try Args.parse([
-                "--model", "m.fqturbo", "--prompt", "hi",
+                "--model", "m.finch", "--prompt", "hi",
                 "--messages-file", "chat.json",
             ])
         }

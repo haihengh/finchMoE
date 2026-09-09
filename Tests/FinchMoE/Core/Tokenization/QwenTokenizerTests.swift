@@ -12,7 +12,7 @@ import Foundation
 struct QwenTokenizerTests {
 
     private static let installPath =
-        "/Volumes/samsung 2t/code/finchmoe/models/Qwen3.6-35B-A3B-4bit.fqturbo"
+        "/Volumes/samsung 2t/code/finchmoe/models/Qwen3.6-35B-A3B-4bit.finch"
 
     private static var installExists: Bool {
         FileManager.default.fileExists(atPath: installPath + "/manifest.json")
