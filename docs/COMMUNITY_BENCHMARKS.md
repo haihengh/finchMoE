@@ -1,6 +1,6 @@
 # Contribute a benchmark result
 
-TurboFieldfare's community benchmark uses three chat-framed generation cases:
+FinchMoE's community benchmark uses three chat-framed generation cases:
 a short explanation, a medium design review, and a long document synthesis.
 They exercise different prompt lengths and require coherent text that reaches
 the end of the model turn. A repeating calibration prompt is not a valid speed
@@ -21,13 +21,13 @@ connect a laptop to power, turn off Low Power Mode, quit other demanding apps,
 and build the release CLI:
 
 ```bash
-swift build -c release --product TurboFieldfareCLI
+swift build -c release --product FinchMoECLI
 ```
 
 Confirm that no other model process is running:
 
 ```bash
-pgrep -fl 'TurboFieldfareServer|TurboFieldfareMac|TurboFieldfareDecodeService|TurboFieldfareCLI|TurboFieldfarePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
+pgrep -fl 'FinchMoEServer|FinchMoEMac|FinchMoEDecodeService|FinchMoECLI|FinchMoEPackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
 ```
 
 Continue only when that command prints nothing.
@@ -43,7 +43,7 @@ mkdir -p benchmark-results/system benchmark-results/warmup benchmark-results/mea
   swift --version
   system_profiler SPHardwareDataType |
     awk -F': ' '/Model Name|Model Identifier|Chip|Total Number of Cores|Memory/ { print $1 ": " $2 }'
-  shasum -a 256 scratch/gemma4.gturbo/manifest.json
+  shasum -a 256 scratch/gemma4.finch/manifest.json
   shasum -a 256 docs/benchmark-prompts/real-generation-v1/*.json
 } 2>&1 | tee benchmark-results/system/system.txt
 ```
@@ -65,8 +65,8 @@ for case_seed in \
   long-synthesis:20260723; do
   case_id="${case_seed%%:*}"
   seed="${case_seed##*:}"
-  .build/release/TurboFieldfareCLI \
-    --model scratch/gemma4.gturbo \
+  .build/release/FinchMoECLI \
+    --model scratch/gemma4.finch \
     --messages-file "docs/benchmark-prompts/real-generation-v1/${case_id}.json" \
     --max-new 1024 \
     --max-context 4096 \
@@ -88,8 +88,8 @@ for case_seed in \
   long-synthesis:20260723; do
   case_id="${case_seed%%:*}"
   seed="${case_seed##*:}"
-  .build/release/TurboFieldfareCLI \
-    --model scratch/gemma4.gturbo \
+  .build/release/FinchMoECLI \
+    --model scratch/gemma4.finch \
     --messages-file "docs/benchmark-prompts/real-generation-v1/${case_id}.json" \
     --max-new 1024 \
     --max-context 4096 \
