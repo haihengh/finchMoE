@@ -9,9 +9,12 @@ struct SourceTensor: Sendable, Hashable {
         case bf16 = 1
         case fp16 = 2
         case fp32 = 3
+        /// Raw little-endian int64 (Qwen3.8 PLE hash metadata tensors; rawValue
+        /// matches FinchFormatV1.DType.i64 so entry bytes round-trip exactly).
+        case i64  = 4
 
         var elementBytes: Int {
-            switch self { case .u32: 4; case .bf16: 2; case .fp16: 2; case .fp32: 4 }
+            switch self { case .u32: 4; case .bf16: 2; case .fp16: 2; case .fp32: 4; case .i64: 8 }
         }
     }
 

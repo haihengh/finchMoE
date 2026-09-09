@@ -10,9 +10,13 @@ import FinchMoEFormat
 /// batch, never whole-tensor buffers.
 enum QwenQuantizedWriter {
 
-    /// Widest source row in the model (4096 elements, bf16 — the GDN
-    /// out_proj row, valueDim = 4096).
-    static let maxRowElements = 4096
+    /// Widest single-buffer row in the model (elements, bf16). Qwen3.6's
+    /// widest is 4096 (the GDN out_proj row); Qwen3.8's hyper-connection
+    /// plane and PLE norms are 10240-element rows (hc_norm / norm_key /
+    /// norm_query / norm_conv / in_proj_qkv). 16384 covers both with headroom
+    /// and bounds scratch at ~96 KB. Wider 1-D entries (conv1d squeezes up to
+    /// 40960 elements) are streamed in `maxRowElements`-sized chunks.
+    static let maxRowElements = 16384
 
     // MARK: - Resident file
 
@@ -116,6 +120,14 @@ enum QwenQuantizedWriter {
                             fd: fd, path: plan.path,
                             dstOffset: entry.fileOffset,
                             scratch: &scratch, audit: audit)
+        case .rawInt64(let n):
+            // PLE hash metadata (int64 elements) — byte-exact copy, never
+            // through a float representation.
+            try writeRawBytes(byteCount: n * 8,
+                              source: shard, srcBase: srcBase,
+                              fd: fd, path: plan.path,
+                              dstOffset: entry.fileOffset,
+                              audit: audit)
         }
     }
 
@@ -261,15 +273,29 @@ enum QwenQuantizedWriter {
                                      fd: Int32, path: String,
                                      dstOffset: UInt64,
                                      audit: RepackAudit) throws {
-        let src = source.slice(at: srcBase, count: count * 2)
-        audit.recordRead(bytes: count * 2)
+        try writeRawBytes(byteCount: count * 2,
+                          source: source, srcBase: srcBase,
+                          fd: fd, path: path,
+                          dstOffset: dstOffset,
+                          audit: audit)
+    }
+
+    /// Raw byte copy of `byteCount` source bytes (shared by the bf16 norm
+    /// rows and the int64 PLE hash metadata).
+    private static func writeRawBytes(byteCount: Int,
+                                      source: MmapHandle, srcBase: UInt64,
+                                      fd: Int32, path: String,
+                                      dstOffset: UInt64,
+                                      audit: RepackAudit) throws {
+        let src = source.slice(at: srcBase, count: byteCount)
+        audit.recordRead(bytes: byteCount)
         try src.withUnsafeBytes { raw in
             try Posix.pwriteAll(fd: fd, path: path,
                                 buf: raw.baseAddress!, count: raw.count,
                                 offset: dstOffset)
         }
-        audit.recordWrite(bytes: count * 2)
-        source.adviseDontNeed(offset: srcBase, count: count * 2)
+        audit.recordWrite(bytes: byteCount)
+        source.adviseDontNeed(offset: srcBase, count: byteCount)
     }
 
     /// Raw conversion (bf16 → fp16, or bf16 → fp32) for conv1d / A_log /
@@ -367,9 +393,54 @@ enum QwenQuantizedWriter {
         return outFile
     }
 
+    // MARK: - PLE n-gram part files
+
+    /// One PLE n-gram table part: verbatim raw-BF16 copy of the source part
+    /// tensor to `ple_shards/shard_NNN.bin`. Real parts are ~800 MB each
+    /// (2,500,012 × 160 × 2 B); the stream is copied straight from the mapped
+    /// source in bounded chunks with per-chunk eviction, so the 102.4 GB
+    /// table never materializes in memory or page cache at once.
+    static func writePLEPart(plan: QwenPLEPartFilePlan,
+                             audit: RepackAudit,
+                             cancellationCheck: () throws -> Void = {}) throws -> RepackAudit.OutputFile {
+        try Posix.mkdirP(((plan.path as NSString).deletingLastPathComponent))
+        let fd = try Posix.openCreateRW(plan.path)
+        defer { close(fd) }
+        let totalBytes = UInt64(plan.rows) * UInt64(plan.cols) * 2
+        try Posix.ftruncate(fd, path: plan.path, size: totalBytes)
+
+        let shard = try MmapHandle(path: plan.source.shardPath)
+        let srcBase = plan.source.absoluteOffset
+        let chunkBytes = 8 << 20
+        var done: UInt64 = 0
+        while done < totalBytes {
+            try cancellationCheck()
+            let chunk = Int(min(UInt64(chunkBytes), totalBytes - done))
+            let src = shard.slice(at: srcBase + done, count: chunk)
+            try Posix.pwriteAll(fd: fd, path: plan.path,
+                                buf: src.baseAddress!, count: chunk,
+                                offset: done)
+            audit.recordRead(bytes: chunk)
+            audit.recordWrite(bytes: chunk)
+            shard.adviseDontNeed(offset: srcBase + done, count: chunk)
+            done += UInt64(chunk)
+        }
+
+        try Posix.fsync(fd, path: plan.path)
+        let size = try Posix.fileSize(fd: fd, path: plan.path)
+        let sha = try WriterCore.hashEntireFile(path: plan.path, size: size,
+                                                audit: audit,
+                                                cancellationCheck: cancellationCheck)
+        let outFile = RepackAudit.OutputFile(relativePath: plan.relativePath,
+                                             size: size, sha256: sha)
+        audit.outputFiles.append(outFile)
+        return outFile
+    }
+
     // MARK: - Scratch
 
-    /// Reusable per-row scratch: a heap float buffer (max row = 2048) and a
+    /// Reusable per-row scratch: a heap float buffer (max row =
+    /// `maxRowElements` — 10240-wide Qwen3.8 HC/PLE norm rows included) and a
     /// word buffer for conversions. Never grows past the widest row.
     struct QwenRowScratch {
         var floats = [Float](repeating: 0, count: QwenQuantizedWriter.maxRowElements)

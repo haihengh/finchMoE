@@ -1,9 +1,10 @@
 import Foundation
 
-/// Options for the local Qwen 3.6 quantizing repack: reads a bf16 safetensors
-/// snapshot from disk and writes the `.finch` install (int4-affine weights,
-/// int8 router, raw fp16/fp32 GDN entries). The Gemma remote-streaming path
-/// is untouched.
+/// Options for the local Qwen 3.6 / 3.8 quantizing repack: reads a bf16
+/// safetensors snapshot from disk and writes the `.finch` install (int4-affine
+/// weights, int8 router, raw fp16/fp32 GDN entries). Qwen3.8 additionally
+/// emits the PLE n-gram table as raw-BF16 part files under `ple_shards/`. The
+/// Gemma remote-streaming path is untouched.
 public struct LocalQwenRepackOptions: Sendable {
     public let snapshotDir: String
     public let outputDir: String
@@ -82,8 +83,12 @@ public final class LocalQwenRepacker {
                                               arch: snapshot.arch,
                                               shardHeaders: snapshot.shardHeaders,
                                               outputDir: paths.partialDirectory)
+        let pleBytes = plan.pleParts.reduce(UInt64(0)) {
+            $0 + UInt64($1.rows) * UInt64($1.cols) * 2
+        }
         let outputBytes = plan.resident.totalSize
             + plan.layers.reduce(UInt64(0)) { $0 + $1.fileSize }
+            + pleBytes
         progress(.planning(downloadBytes: 0, outputBytes: outputBytes))
 
         let diskRequirement = try DiskSpaceChecker.requireAvailable(
@@ -106,7 +111,7 @@ public final class LocalQwenRepacker {
 
         progress(.copyingPayload(
             reusedBytes: 0, downloadedThisRunBytes: 0, totalBytes: outputBytes))
-        try QwenQuantizedWriter.writeResident(
+        _ = try QwenQuantizedWriter.writeResident(
             plan: plan.resident,
             audit: audit,
             cancellationCheck: Task.checkCancellation)
@@ -115,6 +120,14 @@ public final class LocalQwenRepacker {
             progress(.hashingOutput("packed_experts/" + (layer.path as NSString).lastPathComponent))
             _ = try QwenQuantizedWriter.writeLayer(
                 plan: layer,
+                audit: audit,
+                cancellationCheck: Task.checkCancellation)
+        }
+        for part in plan.pleParts {
+            try Task.checkCancellation()
+            progress(.hashingOutput(part.relativePath))
+            _ = try QwenQuantizedWriter.writePLEPart(
+                plan: part,
                 audit: audit,
                 cancellationCheck: Task.checkCancellation)
         }
@@ -252,12 +265,15 @@ public final class LocalQwenRepacker {
         let files = audit.outputFiles.map {
             ($0.relativePath, FinchJSON.FileEntry(size: $0.size, sha256: $0.sha256))
         }
+        let modelID = plan.arch.modelFamily == ArchInfo.qwen38Family
+            ? "local/Qwen3.8-Flash-Next-125B"
+            : "local/Qwen3.6-35B-A3B"
         let data = try FinchJSON.encodeManifest(
             arch: plan.arch,
             baseMode: "affine",
             baseGroupSize: 64,
             bitsOverrideCount: 0,
-            modelID: "local/Qwen3.6-35B-A3B",
+            modelID: modelID,
             sourceSnapshotHash: "sha256:" + metadata.indexSha256Hex,
             files: files,
             expertsPerLayer: plan.layers.first(where: { $0.expertsPerLayer > 0 })?.expertsPerLayer ?? 0,

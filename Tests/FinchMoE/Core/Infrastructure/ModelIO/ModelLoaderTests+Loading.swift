@@ -16,7 +16,7 @@ extension ModelLoaderTests {
     let embed = model.embedding
     #expect(embed.length == UInt64(1024 * 64 / 2))
     #expect(embed.shape.0 == 1024 && embed.shape.1 == 64)
-    let norm = model.finalNorm
+    let norm = try #require(model.finalNorm)
     #expect(norm.length == UInt64(64 * 2))
     // Tied lm_head returns the same view as embedding.
     #expect(model.lmHead.offset == model.embedding.offset)
@@ -75,7 +75,7 @@ extension ModelLoaderTests {
     let model = try Model.load(
       directoryURL: dir, device: device,
       expecting: .gemma4Toy())
-    let norm = model.finalNorm
+    let norm = try #require(model.finalNorm)
     let contents = norm.buffer.contents()
     // Norm region was patterned 0xC0 | (i & 0x3F).
     for i in 0..<Int(norm.length) {

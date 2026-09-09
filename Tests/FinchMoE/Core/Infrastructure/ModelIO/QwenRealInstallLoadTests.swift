@@ -30,7 +30,8 @@ import Metal
         // Global entries.
         #expect(model.embedding.shape == (248_320, 2_048, 0, 0))
         #expect(model.lmHead.shape == (248_320, 2_048, 0, 0))
-        #expect(model.finalNorm.shape == (2_048, 0, 0, 0))
+        let finalNorm = try #require(model.finalNorm)
+        #expect(finalNorm.shape == (2_048, 0, 0, 0))
 
         // GDN layer 0 (mask[0] == 0).
         #expect(try model.gdnInProjQKV(layer: 0).shape == (8_192, 2_048, 0, 0))

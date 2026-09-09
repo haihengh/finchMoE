@@ -226,4 +226,180 @@ import FinchMoEFormat
             #expect(written[i] == expected)
         }
     }
+
+    // MARK: - Qwen3.8-Flash-Next
+
+    private static func runRepack38(snapshotDir: String) async throws -> LocalQwenRepackResult {
+        let out = makeOutputDir()
+        let options = LocalQwenRepackOptions(
+            snapshotDir: snapshotDir, outputDir: out,
+            minFreeReserveBytes: 0)
+        return try await LocalQwenRepacker(options: options).run()
+    }
+
+    /// Raw source bytes of one checkpoint tensor (from the snapshot load).
+    private static func readSourceTensor(
+        _ snapshot: QwenLocalSnapshot.Snapshot, name: String
+    ) throws -> Data {
+        let srcTensor = try #require(snapshot.shardHeaders.flatMap(\.tensors)
+            .first { $0.name == name })
+        let srcFD = try Posix.openRead(srcTensor.shardPath)
+        defer { close(srcFD) }
+        var bytes = Data(count: Int(srcTensor.sizeBytes))
+        try bytes.withUnsafeMutableBytes { buf in
+            try Posix.preadAll(fd: srcFD, path: srcTensor.shardPath,
+                               buf: buf.baseAddress!, count: Int(srcTensor.sizeBytes),
+                               offset: srcTensor.absoluteOffset)
+        }
+        return bytes
+    }
+
+    @Test func qwen38RepackWritesPLEPartsAndFamilyManifest() async throws {
+        let dir = NSTemporaryDirectory() + "qwen38-repack-src-\(UUID().uuidString)"
+        try SyntheticQwenSnapshot.write38(into: dir)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        let result = try await Self.runRepack38(snapshotDir: dir)
+        defer { try? FileManager.default.removeItem(atPath: result.outputDir) }
+        let t = SyntheticQwenSnapshot.Toy38.self
+        let fm = FileManager.default
+        let out = result.outputDir
+
+        // Expected file list for a qwen3_8 install: resident + manifest +
+        // receipt + packed experts (one layer file per layer) + the 4 PLE
+        // shard files + tokenizer sidecars.
+        #expect(fm.fileExists(atPath: out + "/model_weights.bin"))
+        #expect(fm.fileExists(atPath: out + "/manifest.json"))
+        #expect(fm.fileExists(atPath: out + "/verified-install.json"))
+        for L in 0..<t.numLayers {
+            #expect(fm.fileExists(atPath: out + String(format: "/packed_experts/layer_%02d.bin", L)))
+        }
+        let partBytes = t.ngramPartRows * t.ngramRowDim * 2
+        for i in 0..<t.ngramPartCount {
+            let p = out + String(format: "/ple_shards/shard_%03d.bin", i)
+            #expect(fm.fileExists(atPath: p))
+            #expect((try? fm.attributesOfItem(atPath: p)[.size] as? Int) ?? 0 == partBytes)
+        }
+        #expect(fm.fileExists(atPath: out + "/tokenizer/config.json"))
+
+        // Parts are verbatim raw-BF16 copies of their source tensors.
+        let snapshot = try QwenLocalSnapshot.load(snapshotDir: dir)
+        for i in [0, 3] {
+            let source = try Self.readSourceTensor(
+                snapshot,
+                name: "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_\(i).weight")
+            let written = try Data(contentsOf: URL(fileURLWithPath:
+                out + String(format: "/ple_shards/shard_%03d.bin", i)))
+            #expect(source == written)
+        }
+
+        // Manifest: qwen3_8 identity, census-corrected PLE geometry, parts in
+        // manifest.files, locked quant slots unchanged from qwen3_6.
+        let manifestData = try Data(contentsOf: URL(fileURLWithPath: out + "/manifest.json"))
+        let manifest = try FinchManifestCodec.decode(manifestData)
+        #expect(manifest.modelID == "local/Qwen3.8-Flash-Next-125B")
+        #expect(manifest.arch.modelFamily == "qwen3_8")
+        #expect(manifest.arch.hyperConnectionCount == 4)
+        #expect(manifest.arch.hyperConnectionLowrank == t.hcLowrank)
+        #expect(manifest.arch.indexerNumHeads == t.indexerNumHeads)
+        #expect(manifest.arch.indexerBudget == t.indexerBudget)
+        #expect(manifest.arch.ngramSize == t.ngramSize)
+        #expect(manifest.arch.pleConvKernelSize == t.pleConvKernel)
+        #expect(manifest.arch.pleLayerIndexes == [1])
+        #expect(manifest.arch.ngramPartCount == t.ngramPartCount)
+        #expect(manifest.arch.ngramPartRows == t.ngramPartRows)
+        #expect(manifest.arch.fullAttentionLayerMask == [0, 0, 0, 1])
+        for i in 0..<t.ngramPartCount {
+            let entry = manifest.files[String(format: "ple_shards/shard_%03d.bin", i)]
+            #expect(entry?.size == UInt64(partBytes))
+        }
+        let quant = try #require(manifest.quant)
+        #expect(quant.embedding.weightBits == 4 && quant.router.weightBits == 8)
+
+        // Resident index: family identity + the I64 PLE metadata rides raw.
+        let weightsData = try Data(contentsOf: URL(fileURLWithPath: out + "/model_weights.bin"))
+        let (_, entries) = try weightsData.withUnsafeBytes { raw -> (
+            FinchResidentIndexHeaderV1, [FinchResidentIndexEntryV1]
+        ) in
+            let h = try FinchResidentIndexCodec.decodeHeader(raw)
+            return (h, try FinchResidentIndexCodec.decodeRegion(raw, header: h))
+        }
+        #expect(entries.count == t.residentEntryCount)
+        let byName = Dictionary(uniqueKeysWithValues: entries.map { ($0.name, $0) })
+        let hcNorm = try #require(
+            byName["language_model.layers.1.attn_hyper_connection.hc_norm.weight"])
+        #expect(hcNorm.dtype == 1 && hcNorm.shape == [UInt32(t.plane), 0, 0, 0])
+        let i64Offsets = try #require(
+            byName["language_model.layers.1.ple.ple_embedding.ngram_heads_offsets"])
+        #expect(i64Offsets.dtype == 4)          // DType.i64 raw byte copy
+        #expect(i64Offsets.shape == [UInt32(t.pleHeads), 0, 0, 0])
+        #expect(i64Offsets.sizeBytes == UInt64(t.pleHeads * 8))
+        let conv = try #require(byName["language_model.layers.1.ple.conv1d.weight"])
+        #expect(conv.dtype == 2)                // fp16 squeezed
+        #expect(conv.shape == [UInt32(t.plane * t.pleConvKernel), 0, 0, 0])
+        let indexQK = try #require(
+            byName["language_model.layers.3.self_attn.indexer.index_qk_proj.weight"])
+        let indexRows = (t.indexerNumHeads + t.indexerKVHeads) * t.indexerHeadDim
+        #expect(indexQK.dtype == 0 && indexQK.shape == [UInt32(indexRows), UInt32(t.D), 0, 0])
+        #expect(byName["language_model.hyper_connection_mixer.hc_norm.weight"] != nil)
+        // The 3.8 family has no model.norm / no inner model. stage.
+        #expect(byName["language_model.model.norm.weight"] == nil)
+    }
+
+    @Test func qwen38RawNormMetadataAndBakedNormPayloads() async throws {
+        let dir = NSTemporaryDirectory() + "qwen38-repack-bytes-\(UUID().uuidString)"
+        try SyntheticQwenSnapshot.write38(into: dir)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        let result = try await Self.runRepack38(snapshotDir: dir)
+        defer { try? FileManager.default.removeItem(atPath: result.outputDir) }
+        let snapshot = try QwenLocalSnapshot.load(snapshotDir: dir)
+
+        let weightsData = try Data(contentsOf: URL(fileURLWithPath: result.outputDir + "/model_weights.bin"))
+        let (_, entries) = try weightsData.withUnsafeBytes { raw -> (
+            FinchResidentIndexHeaderV1, [FinchResidentIndexEntryV1]
+        ) in
+            let h = try FinchResidentIndexCodec.decodeHeader(raw)
+            return (h, try FinchResidentIndexCodec.decodeRegion(raw, header: h))
+        }
+        let byName = Dictionary(uniqueKeysWithValues: entries.map { ($0.name, $0) })
+        func payloadBytes(_ entry: FinchResidentIndexEntryV1) -> Data {
+            weightsData.subdata(
+                in: Data.Index(entry.fileOffset)
+                    ..< Data.Index(entry.fileOffset + entry.sizeBytes))
+        }
+
+        // hc_norm.weight is a grouped-RMS gate multiplied RAW (GatedNorm
+        // convention, like linear_attn.norm.weight) — its payload must be the
+        // source bf16 bytes verbatim, with no (1 + w) bake.
+        let hcSource = try Self.readSourceTensor(
+            snapshot, name: "model.language_model.hyper_connection_mixer.hc_norm.weight")
+        let hcEntry = try #require(
+            byName["language_model.hyper_connection_mixer.hc_norm.weight"])
+        #expect(hcEntry.sizeBytes == UInt64(hcSource.count))
+        #expect(payloadBytes(hcEntry) == hcSource)
+
+        // Indexer layernorms ARE (1 + w) baked (Qwen RMSNorm form).
+        let lnSource = try Self.readSourceTensor(
+            snapshot, name: "model.language_model.layers.3.self_attn.indexer.k_layernorm.weight")
+        let lnEntry = try #require(
+            byName["language_model.layers.3.self_attn.indexer.k_layernorm.weight"])
+        let written = payloadBytes(lnEntry).withUnsafeBytes { raw -> [UInt16] in
+            Array(raw.bindMemory(to: UInt16.self))
+        }
+        for i in 0..<(Int(lnSource.count) / 2) {
+            let srcBits = UInt16(lnSource[2 * i]) | UInt16(lnSource[2 * i + 1]) << 8
+            #expect(written[i] == FinchQuantization.bf16Bits(
+                1.0 + FinchQuantization.bf16ToFloat(srcBits)))
+        }
+
+        // PLE I64 hash metadata round-trips byte-exact (dtype 4, raw copy).
+        let i64Source = try Self.readSourceTensor(
+            snapshot,
+            name: "model.language_model.layers.1.ple.ple_embedding.ngram_heads_offsets")
+        let i64Entry = try #require(
+            byName["language_model.layers.1.ple.ple_embedding.ngram_heads_offsets"])
+        #expect(i64Entry.dtype == 4)
+        #expect(payloadBytes(i64Entry) == i64Source)
+    }
 }

@@ -20,9 +20,10 @@ public struct VerifyInstallResult: Sendable {
 public enum VerifiedInstallTool {
     public static let metadataMaxBytes: UInt64 = 16 * 1024 * 1024
     public static let manifestMaxBytes: UInt64 = 4 * 1024 * 1024
-    // Qwen 3.6 (256 experts x 40 layers) produces a ~22 MB layout.json; keep
-    // this in sync with PackedExpertsLayoutReader.defaultMaxBytes.
-    public static let layoutMaxBytes: UInt64 = 64 * 1024 * 1024
+    // Qwen 3.6 (256 experts x 40 layers) produces a ~22 MB layout.json and
+    // Qwen 3.8 (512 experts x 48 layers) near 55 MB; keep this in sync with
+    // PackedExpertsLayoutReader.defaultMaxBytes.
+    public static let layoutMaxBytes: UInt64 = 128 * 1024 * 1024
 
     public static func run(options: VerifyInstallOptions) throws -> VerifyInstallResult {
         let root = URL(fileURLWithPath: options.inputFinch).standardizedFileURL

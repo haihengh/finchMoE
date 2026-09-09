@@ -3,14 +3,17 @@ import FinchMoEFormat
 
 // MARK: - Qwen repack plan types
 //
-// The Qwen 3.6 bf16 checkpoint has no pre-quantized tensors and no
+// The Qwen 3.6 / 3.8 bf16 checkpoints have no pre-quantized tensors and no
 // `config.json -> quantization` slot, so the Gemma byte-copy planner cannot
-// describe it. This planner instead assigns every source tensor a WRITE
+// describe them. This planner instead assigns every source tensor a WRITE
 // TRANSFORM (bf16 rows → int4/int8 affine, norm (1+w) baking, bf16 → fp16 /
-// fp32 raw conversions) and lays the quantized payloads out in the resident
-// file. The expert layers reuse `LayerFilePlan`/`PerExpertTensorSlice` with
-// the fused `gate_up_proj` source split into the separate gate/up role
-// slices the engine's streamed-expert kernels read.
+// fp32 raw conversions, I64 byte copy) and lays the quantized payloads out
+// in the resident file. The expert layers reuse
+// `LayerFilePlan`/`PerExpertTensorSlice` with the fused `gate_up_proj`
+// source split into the separate gate/up role slices the engine's streamed
+// expert kernels read. Qwen3.8's PLE n-gram table parts (128 × 2.5M × 160
+// BF16, layer 1) bypass the resident file entirely: each part tensor is
+// copied verbatim to its own `ple_shards/shard_NNN.bin`.
 
 /// What the writer does with one resident entry's source bytes.
 enum QwenWriteTransform: Sendable, Equatable {
@@ -30,6 +33,11 @@ enum QwenWriteTransform: Sendable, Equatable {
     case bf16ToFp16(Int)
     /// bf16 `[n]` → raw fp32 (linear_attn.A_log / dt_bias).
     case bf16ToFp32(Int)
+    /// int64 `[n]` → raw little-endian byte copy (Qwen3.8 PLE hash metadata:
+    /// layer_multipliers / ngram_heads_offsets / ngram_heads_vocab_sizes).
+    /// These 45-bit multipliers and 20M-scale offsets must round-trip
+    /// exactly — no float representation is lossless here.
+    case rawInt64(Int)
 
     /// Quantization bits of the emitted weights (nil for raw entries).
     var weightBits: Int? {
@@ -47,6 +55,7 @@ enum QwenWriteTransform: Sendable, Equatable {
         case .int8Affine: UInt64(rows) * UInt64(cols)
         case .normOnePlusW(let n), .normRawBf16(let n), .bf16ToFp16(let n): UInt64(n) * 2
         case .bf16ToFp32(let n): UInt64(n) * 4
+        case .rawInt64(let n): UInt64(n) * 8
         }
     }
 
@@ -61,7 +70,8 @@ enum QwenWriteTransform: Sendable, Equatable {
 /// resident-index encoder needs, plus the transform the writer applies.
 struct QwenResidentEntry: Sendable {
     let name: String
-    /// dtype byte for IndexEntry: 0 = U32, 1 = BF16, 2 = FP16, 3 = FP32.
+    /// dtype byte for IndexEntry: 0 = U32, 1 = BF16, 2 = FP16, 3 = FP32,
+    /// 4 = I64 (raw PLE metadata).
     let dtype: UInt8
     /// Logical shape after dequant (max rank 4; trailing zeros).
     let logicalShape4: [UInt32]
@@ -85,10 +95,31 @@ struct QwenResidentFilePlan: Sendable {
     var totalSize: UInt64 { indexSize + residentSize }
 }
 
+/// One PLE n-gram table part: the part's source tensor copied verbatim
+/// (raw BF16, row-major) to its own file. The real model writes 128 parts of
+/// 2,500,012 × 160 rows (~800 MB each, 102.4 GB total); synthetic snapshots
+/// write fewer, smaller parts and the planner census-corrects
+/// `arch.ngramPartCount/ngramPartRows` to match.
+struct QwenPLEPartFilePlan: Sendable {
+    let partIndex: Int
+    /// Absolute write target under the install's `ple_shards/` directory.
+    let path: String
+    /// `ple_shards/shard_%03d.bin` — the manifest.files relative path.
+    let relativePath: String
+    let rows: Int
+    let cols: Int
+    let source: SourceTensor
+}
+
 struct QwenRepackPlan: Sendable {
+    /// Census-corrected arch: for a qwen3_8 source the PLE part geometry
+    /// (part count, rows per part) is taken from the live shard headers, so
+    /// the manifest always matches what was actually written.
     let arch: ArchInfo
     let resident: QwenResidentFilePlan
     let layers: [LayerFilePlan]
+    /// Empty for every non-qwen3_8 source.
+    let pleParts: [QwenPLEPartFilePlan]
     let excludedTensorNames: [String]
 }
 
@@ -96,14 +127,31 @@ struct QwenRepackPlan: Sendable {
 
 enum QwenRepackPlanner {
 
-    /// Remaps a qwen3_5_moe checkpoint name to the resident entry name the
-    /// engine resolves. The checkpoint nests the text model as
+    /// Remaps a qwen checkpoint name to the resident entry name the engine
+    /// resolves. The checkpoint nests the text model as
     /// `model.language_model.*`; the engine (shared with Gemma) expects
-    /// `language_model.model.*`. `lm_head.weight` passes through.
-    static func residentName(for source: String) -> String? {
+    /// `language_model.model.*` for qwen3_6. Qwen3.8 has NO inner `model.`
+    /// stage (hyper-connection replaced the final norm, so there is nothing
+    /// left under a `model.` grouping): its entries are the shallow
+    /// `language_model.*`. `lm_head.weight` passes through.
+    static func residentName(for source: String,
+                             family: String = ArchInfo.qwen36Family) -> String? {
         if source == "lm_head.weight" { return source }
         guard source.hasPrefix("model.language_model.") else { return nil }
-        return "language_model.model." + source.dropFirst("model.language_model.".count)
+        let tail = source.dropFirst("model.language_model.".count)
+        if family == ArchInfo.qwen38Family {
+            return "language_model." + tail
+        }
+        return "language_model.model." + tail
+    }
+
+    /// Parses the part index from `...ngram_embedding.shard_<n>.weight`
+    /// (lexical order is NOT numeric: `shard_10` < `shard_2`).
+    private static func plePartIndex(in name: String) -> Int? {
+        guard let r = name.range(of: ".ngram_embedding.shard_") else { return nil }
+        let digits = name[r.upperBound...].dropLast(".weight".count)
+        guard !digits.isEmpty, digits.allSatisfy(\.isNumber) else { return nil }
+        return Int(digits)
     }
 
     private static func layerIndex(in name: String) -> Int? {
@@ -124,13 +172,25 @@ enum QwenRepackPlanner {
             for t in h.tensors { registry[t.name] = t }
         }
 
-        let fullMask = arch.fullAttentionLayerMask
+        // The qwen3_8 family has different resident names (shallow
+        // `language_model.*`, no inner `model.`) and extra tensor classes;
+        // every family-dependent call goes through this value so qwen3_6
+        // planning is bit-for-bit what it was before the family parameter.
+        let family = arch.modelFamily ?? ArchInfo.qwen36Family
         var excluded: [String] = []
         var residentSources: [String] = []     // checkpoint names, sorted
         var routedSources: [Int: (gateUp: String, down: String)] = [:]
+        // PLE n-gram part tensors keyed by shard index. Checkpoint name order
+        // is lexical, NOT numeric (shard_10 < shard_2), so the index is parsed
+        // from the suffix. Parts bypass the resident file entirely.
+        var plePartsByIndex: [Int: String] = [:]
 
         for (name, _) in registry {
-            guard let mapped = residentName(for: name) else {
+            if family == ArchInfo.qwen38Family, let partIndex = plePartIndex(in: name) {
+                plePartsByIndex[partIndex] = name
+                continue
+            }
+            guard residentName(for: name, family: family) != nil else {
                 // Vision tower / MTP / other non-text tensors: dropped for
                 // the text-only install.
                 if !name.hasPrefix("model.language_model.") && name != "lm_head.weight" {
@@ -139,8 +199,8 @@ enum QwenRepackPlanner {
                 continue
             }
             guard let layer = layerIndex(in: name) else {
-                residentSources.append(name)     // embed_tokens, norm, lm_head
-                continue
+                residentSources.append(name)     // embed_tokens, norm / root
+                continue                         // hyper-connection mixer, lm_head
             }
             if name.hasSuffix(".mlp.experts.gate_up_proj") {
                 routedSources[layer, default: (gateUp: "", down: "")].gateUp = name
@@ -164,10 +224,77 @@ enum QwenRepackPlanner {
             }
         }
 
+        // PLE n-gram part validation + census correction. The part geometry
+        // (count, rows per part) is read from the live shard headers: the
+        // real snapshot's 128 × 2,500,012 agrees with the config/frozen
+        // values, a synthetic snapshot's parts are whatever it wrote, and the
+        // manifest arch must match what was actually written in both cases.
+        var planArch = arch
+        var plePartPlans: [QwenPLEPartFilePlan] = []
+        if family == ArchInfo.qwen38Family {
+            let count = plePartsByIndex.count
+            guard count > 0 else {
+                throw RepackError.configurationInvalid(
+                    detail: "qwen3_8 snapshot carries no PLE n-gram part tensors "
+                        + "(expected \(arch.ngramPartCount ?? 128) parts of "
+                        + "\(arch.ngramPartRows ?? 2_500_012) rows)")
+            }
+            for i in 0..<count where plePartsByIndex[i] == nil {
+                throw RepackError.configurationInvalid(
+                    detail: "PLE part index gap at \(i) (found \(count) parts, not contiguous)")
+            }
+            if let configured = arch.ngramPartCount, configured != count {
+                throw RepackError.configurationInvalid(
+                    detail: "config split_ngram_parts \(configured) != live part count \(count)")
+            }
+            let cols = arch.ngramRowDim ?? 160
+            var rows: Int?
+            for i in 0..<count {
+                guard let tensor = registry[plePartsByIndex[i]!] else {
+                    throw RepackError.missingTensor(name: plePartsByIndex[i]!)
+                }
+                guard tensor.dtype == .bf16, tensor.shape.count == 2,
+                      Int(tensor.shape[1]) == cols else {
+                    throw RepackError.shapeMismatch(
+                        name: plePartsByIndex[i]!,
+                        detail: "expected BF16 [_, \(cols)] n-gram part, got \(tensor.shape)")
+                }
+                let r = Int(tensor.shape[0])
+                if let seen = rows, seen != r {
+                    throw RepackError.shapeMismatch(
+                        name: plePartsByIndex[i]!,
+                        detail: "part rows \(r) differ from other parts (\(seen))")
+                }
+                rows = r
+            }
+            guard let uniformRows = rows else {
+                throw RepackError.configurationInvalid(detail: "empty PLE part set")
+            }
+            planArch.ngramPartCount = count
+            planArch.ngramPartRows = uniformRows
+
+            let pleDir = (outputDir as NSString).appendingPathComponent("ple_shards")
+            plePartPlans.reserveCapacity(count)
+            for i in 0..<count {
+                let source = registry[plePartsByIndex[i]!]!
+                let rel = String(format: "ple_shards/shard_%03d.bin", i)
+                plePartPlans.append(QwenPLEPartFilePlan(
+                    partIndex: i,
+                    path: (pleDir as NSString).appendingPathComponent(
+                        String(format: "shard_%03d.bin", i)),
+                    relativePath: rel,
+                    rows: uniformRows, cols: cols, source: source))
+            }
+        } else if !plePartsByIndex.isEmpty {
+            throw RepackError.configurationInvalid(
+                detail: "non-qwen3_8 snapshot carries PLE n-gram part tensors")
+        }
+
         let residentPath = (outputDir as NSString).appendingPathComponent("model_weights.bin")
         let resident = try planResidentFile(path: residentPath,
                                             sourceNames: residentSources,
-                                            registry: registry)
+                                            registry: registry,
+                                            family: family)
 
         let layersDir = (outputDir as NSString).appendingPathComponent("packed_experts")
         var layerPlans: [LayerFilePlan] = []
@@ -187,9 +314,10 @@ enum QwenRepackPlanner {
                                                 registry: registry, arch: arch))
         }
 
-        return QwenRepackPlan(arch: arch,
+        return QwenRepackPlan(arch: planArch,
                               resident: resident,
                               layers: layerPlans,
+                              pleParts: plePartPlans,
                               excludedTensorNames: excluded)
     }
 
@@ -197,7 +325,8 @@ enum QwenRepackPlanner {
 
     private static func planResidentFile(path: String,
                                          sourceNames: [String],
-                                         registry: [String: SourceTensor]) throws
+                                         registry: [String: SourceTensor],
+                                         family: String = ArchInfo.qwen36Family) throws
                                         -> QwenResidentFilePlan {
         // Pass 1: resolve transforms + string table (no offsets yet).
         struct Proto {
@@ -216,17 +345,17 @@ enum QwenRepackPlanner {
             guard let tensor = registry[source] else {
                 throw RepackError.missingTensor(name: source)
             }
-            guard let name = residentName(for: source) else {
+            guard let name = residentName(for: source, family: family) else {
                 throw RepackError.unknownTensorPrefix(name: source)
             }
-            let transform = try transform(for: source, tensor: tensor)
+            let transform = try transform(for: source, tensor: tensor, family: family)
             let rows: Int
             let cols: Int
             switch transform {
             case .int4Affine(let r, let c), .int8Affine(let r, let c):
                 rows = r; cols = c
             case .normOnePlusW(let n), .normRawBf16(let n),
-                 .bf16ToFp16(let n), .bf16ToFp32(let n):
+                 .bf16ToFp16(let n), .bf16ToFp32(let n), .rawInt64(let n):
                 rows = n; cols = 0
             }
             let wSize = transform.weightBytes(rows: rows, cols: cols)
@@ -275,13 +404,110 @@ enum QwenRepackPlanner {
     }
 
     /// The transform for one checkpoint tensor, validated against its shape.
+    /// `family` defaults to qwen3_6 so every legacy call site — and every
+    /// qwen3_6 source name, which none of the qwen3_8 clauses below can
+    /// match — classifies exactly as before.
     private static func transform(for source: String,
-                                  tensor: SourceTensor) throws -> QwenWriteTransform {
+                                  tensor: SourceTensor,
+                                  family: String = ArchInfo.qwen36Family) throws -> QwenWriteTransform {
+        let shape = tensor.shape
+
+        // Qwen3.8 PLE hash metadata is int64 — admitted before the BF16-only
+        // guard. The 45-bit multipliers and 20M-scale per-head vocab offsets
+        // must round-trip byte-exact; no float transform is lossless.
+        if family == ArchInfo.qwen38Family, tensor.dtype == .i64 {
+            guard shape.count == 1,
+                  source.hasSuffix(".ple_embedding.layer_multipliers")
+                    || source.hasSuffix(".ple_embedding.ngram_heads_offsets")
+                    || source.hasSuffix(".ple_embedding.ngram_heads_vocab_sizes") else {
+                throw RepackError.shapeMismatch(name: source,
+                                                detail: "unexpected I64 tensor \(shape)")
+            }
+            return .rawInt64(Int(shape[0]))
+        }
         guard tensor.dtype == .bf16 else {
             throw RepackError.dtypeMismatch(name: source,
                 detail: "expected BF16 source, got \(tensor.dtype)")
         }
-        let shape = tensor.shape
+
+        // ---- Qwen3.8-Flash-Next classifications ----
+        // Runs before the qwen3_6 chain below, which stays byte-identical
+        // (none of these suffixes exist in qwen3_6 snapshots). Without the
+        // block, every qwen3_8-only tensor would misclassify: hc_norm and the
+        // indexer/PLE norms are 1-D (generic throw / wrong bake), PLE
+        // key/value are 8-bit head projections (generic int4), PLE conv1d is
+        // 3-D (generic throw).
+        if family == ArchInfo.qwen38Family {
+            if source.hasSuffix(".hc_norm.weight") {
+                // Hyper-connection grouped-RMS gate (per-mixer and the root
+                // mixer): the torch module multiplies its weight raw
+                // (GatedNorm-style, like the GDN norm) — no (1 + w) bake.
+                guard shape.count == 1 else {
+                    throw RepackError.shapeMismatch(name: source, detail: "\(shape)")
+                }
+                return .normRawBf16(Int(shape[0]))
+            }
+            if source.contains(".self_attn.indexer.") {
+                if source.hasSuffix(".q_layernorm.weight")
+                    || source.hasSuffix(".k_layernorm.weight") {
+                    guard shape.count == 1 else {
+                        throw RepackError.shapeMismatch(name: source, detail: "\(shape)")
+                    }
+                    return .normOnePlusW(Int(shape[0]))
+                }
+                guard source.hasSuffix(".index_qk_proj.weight"), shape.count == 2,
+                      shape[1] % 64 == 0 else {
+                    throw RepackError.configurationInvalid(
+                        detail: "unclassifiable Qwen3.8 indexer tensor \(source) shape \(shape)")
+                }
+                return .int4Affine(rows: Int(shape[0]), cols: Int(shape[1]))
+            }
+            if source.contains(".ple.") {
+                if source.hasSuffix(".conv1d.weight") {
+                    // Checkpoint stores [C, 1, kernel]; the writer emits the
+                    // squeezed [C * kernel] rows as raw FP16 (GDN conv policy).
+                    guard shape.count == 3, shape[1] == 1 else {
+                        throw RepackError.shapeMismatch(name: source, detail: "\(shape)")
+                    }
+                    return .bf16ToFp16(Int(shape[0] * shape[2]))
+                }
+                if source.hasSuffix(".key_proj.weight")
+                    || source.hasSuffix(".value_proj.weight") {
+                    // PLE head projections feed per-token key/value rows that
+                    // persist into the n-gram memory state — int8 like the
+                    // GDN linear-attention projections (int4 dequant noise
+                    // on those was measured to amplify ~16x downstream).
+                    guard shape.count == 2, shape[1] % 64 == 0 else {
+                        throw RepackError.shapeMismatch(name: source, detail: "\(shape)")
+                    }
+                    return .int8Affine(rows: Int(shape[0]), cols: Int(shape[1]))
+                }
+                if source.hasSuffix(".norm_key.weight")
+                    || source.hasSuffix(".norm_query.weight")
+                    || source.hasSuffix(".norm_conv.weight") {
+                    guard shape.count == 1 else {
+                        throw RepackError.shapeMismatch(name: source, detail: "\(shape)")
+                    }
+                    return .normOnePlusW(Int(shape[0]))
+                }
+                // The n-gram part tensors are routed to pleParts in plan();
+                // anything else under ple. is unclassifiable.
+                throw RepackError.configurationInvalid(
+                    detail: "unclassifiable Qwen3.8 ple tensor \(source) shape \(shape)")
+            }
+            if source.hasSuffix(".input_mix_weight_down.weight")
+                || source.hasSuffix(".input_mix_weight_up.weight")
+                || source.hasSuffix(".block_inject_weight.weight") {
+                // Hyper-connection mix projections (per-mixer bundles and the
+                // root mixer) are plain 2-D projections → int4, named
+                // explicitly so they never depend on the generic fallthrough.
+                guard shape.count == 2, shape[1] % 64 == 0 else {
+                    throw RepackError.shapeMismatch(name: source, detail: "\(shape)")
+                }
+                return .int4Affine(rows: Int(shape[0]), cols: Int(shape[1]))
+            }
+        }
+
         let isFull = source.contains(".self_attn.")
         if source.hasSuffix(".mlp.gate.weight") {
             guard shape.count == 2, shape[0] > 0, shape[1] % 64 == 0 else {
@@ -352,6 +578,7 @@ enum QwenRepackPlanner {
         case .normOnePlusW, .normRawBf16: return FinchFormatV1.DType.bf16.rawValue
         case .bf16ToFp16:              return FinchFormatV1.DType.fp16.rawValue
         case .bf16ToFp32:              return FinchFormatV1.DType.fp32.rawValue
+        case .rawInt64:                return FinchFormatV1.DType.i64.rawValue
         }
     }
 
@@ -361,7 +588,7 @@ enum QwenRepackPlanner {
         case .int4Affine(let r, let c), .int8Affine(let r, let c):
             return [UInt64(r), UInt64(c)]
         case .normOnePlusW(let n), .normRawBf16(let n),
-             .bf16ToFp16(let n), .bf16ToFp32(let n):
+             .bf16ToFp16(let n), .bf16ToFp32(let n), .rawInt64(let n):
             return [UInt64(n)]
         }
     }
@@ -518,12 +745,19 @@ enum QwenRepackPlanner {
     }
 
     /// Stable resident order: embedding, per-layer groups in layer order
-    /// (norms → mixer → shared expert → router), then lm_head + final norm.
+    /// (norms → mixer → shared expert → router), then lm_head + final norm
+    /// (qwen3_6) or the root hyper-connection mixer (qwen3_8, which replaces
+    /// the final norm). Only source names are compared — the qwen3_8 mixer
+    /// prefix can never match a qwen3_6 name, so qwen3_6 ordering is
+    /// unchanged.
     private static func qwenResidentOrdering() -> (String, String) -> Bool {
         func key(_ n: String) -> (Int, Int, Int, String) {
             if n == "model.language_model.embed_tokens.weight" { return (0, 0, 0, n) }
             if n == "lm_head.weight"                            { return (3, 0, 0, n) }
-            if n == "model.language_model.norm.weight"          { return (3, 1, 0, n) }
+            if n == "model.language_model.norm.weight"
+                || n.hasPrefix("model.language_model.hyper_connection_mixer.") {
+                return (3, 1, 0, n)
+            }
             if let li = layerIndex(in: n) {
                 return (1, li, slotRank(in: n), n)
             }
@@ -562,6 +796,31 @@ enum QwenRepackPlanner {
         if n.hasSuffix(".mlp.shared_expert.down_proj.weight") { return 14 }
         if n.hasSuffix(".mlp.shared_expert_gate.weight")      { return 15 }
         if n.hasSuffix(".mlp.gate.weight")                    { return 16 }
+        // Qwen3.8-Flash-Next slots (17+). These suffixes cannot appear in a
+        // qwen3_6 snapshot, so qwen3_6 ordering is unchanged; they give the
+        // qwen3_8 layer files a stable order: attention/HC bodies first, then
+        // the per-layer hyper-connection bundles, the QSA indexer (full
+        // layers), and the layer-1 PLE block.
+        if n.hasSuffix(".attn_hyper_connection.hc_norm.weight")             { return 17 }
+        if n.hasSuffix(".attn_hyper_connection.input_mix_weight_down.weight") { return 18 }
+        if n.hasSuffix(".attn_hyper_connection.input_mix_weight_up.weight")   { return 19 }
+        if n.hasSuffix(".attn_hyper_connection.block_inject_weight.weight")   { return 20 }
+        if n.hasSuffix(".mlp_hyper_connection.hc_norm.weight")              { return 21 }
+        if n.hasSuffix(".mlp_hyper_connection.input_mix_weight_down.weight") { return 22 }
+        if n.hasSuffix(".mlp_hyper_connection.input_mix_weight_up.weight")   { return 23 }
+        if n.hasSuffix(".mlp_hyper_connection.block_inject_weight.weight")   { return 24 }
+        if n.hasSuffix(".self_attn.indexer.index_qk_proj.weight")           { return 25 }
+        if n.hasSuffix(".self_attn.indexer.q_layernorm.weight")             { return 26 }
+        if n.hasSuffix(".self_attn.indexer.k_layernorm.weight")             { return 27 }
+        if n.hasSuffix(".ple.conv1d.weight")                                { return 28 }
+        if n.hasSuffix(".ple.key_proj.weight")                              { return 29 }
+        if n.hasSuffix(".ple.value_proj.weight")                            { return 30 }
+        if n.hasSuffix(".ple.norm_query.weight")                            { return 31 }
+        if n.hasSuffix(".ple.norm_key.weight")                              { return 32 }
+        if n.hasSuffix(".ple.norm_conv.weight")                             { return 33 }
+        if n.hasSuffix(".ple_embedding.layer_multipliers")                  { return 34 }
+        if n.hasSuffix(".ple_embedding.ngram_heads_offsets")                { return 35 }
+        if n.hasSuffix(".ple_embedding.ngram_heads_vocab_sizes")            { return 36 }
         return 100
     }
 }

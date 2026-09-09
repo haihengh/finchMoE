@@ -1200,7 +1200,7 @@ extension QwenLayer0DebugTests {
         // ---- LM head reference: argmax over all lm_head rows.
         do {
             let hidden = try #require(phases["postLayer.39"]).map { Self.toF32($0) }
-            let normW = Self.bf16Values(model.finalNorm, count: D)
+            let normW = Self.bf16Values(model.finalNorm!, count: D)
             let normed = Self.f16(Self.rms(hidden, weight: normW))
             let lmView = model.lmHead
             let base = lmView.buffer.contents()
@@ -1930,7 +1930,7 @@ extension QwenLayer0DebugTests {
                 // row-4 hidden and compare against the engine's logits buffer.
                 if chained && L == cfg.numLayers - 1 && t == T - 1
                     && ProcessInfo.processInfo.environment["FQ_HEAD"] != nil {
-                    let fNormW = Self.bf16Values(model.finalNorm, count: D)
+                    let fNormW = Self.bf16Values(model.finalNorm!, count: D)
                     let xh = Self.f16(Self.rms(hiddenRefRow, weight: fNormW))
                     let lm = model.lmHead
                     let base = lm.buffer.contents()
@@ -2113,7 +2113,7 @@ extension QwenLayer0DebugTests {
         do {
             let ref = try readBF16("model-00026-of-00026.safetensors",
                                    "model.language_model.norm.weight")
-            let view = model.finalNorm
+            let view = model.finalNorm!
             let got = Self.bf16Values(view, count: ref.count)
             compare("finalNorm (vs raw)", got, ref)
             compare("finalNorm (vs 1+w)", got, ref.map { 1.0 + $0 })
@@ -3475,7 +3475,7 @@ extension QwenLayer0DebugTests {
 
         // Final norm + embed (embed re-checked here at sampled rows only).
         try check("final norm", "model.language_model.norm.weight",
-                  model.finalNorm, kind: "onePlusW")
+                  model.finalNorm!, kind: "onePlusW")
         try check("embed", "model.language_model.embed_tokens.weight",
                   model.embedding, kind: "i4")
         print("layer-integrity sweep rows: \(cfg.hiddenSize) hidden, "
