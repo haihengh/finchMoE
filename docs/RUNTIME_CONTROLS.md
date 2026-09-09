@@ -45,9 +45,10 @@ each request and do not require a reload.
    token over repeated runs.
 6. Restore the production defaults when the experiment ends.
 
-Use the [community benchmark protocol](COMMUNITY_BENCHMARKS.md) for a standard
-production result. A run with changed runtime controls is experimental and must
-name the changed setting.
+A production result uses the default runtime controls; the
+[community benchmark protocol](COMMUNITY_BENCHMARKS.md) is the standard way to
+record one. A run with changed runtime controls is experimental and must name
+the changed setting.
 
 ## Read the results
 
