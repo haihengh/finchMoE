@@ -28,7 +28,7 @@ import Darwin
                                  config: ArchConfig = .gemma4Toy()) throws
                                  -> (URL, ArchConfig) {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-manifest-test-\(UUID().uuidString)")
+            .appendingPathComponent("finch-manifest-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(
             at: dir.appendingPathComponent("packed_experts"),
@@ -74,7 +74,7 @@ import Darwin
         }
 
         var root: [String: Any] = [
-            "magic": "FQTURBO",
+            "magic": "FINCH",
             "versionMajor": 1,
             "versionMinor": 0,
             "flags": flags,
@@ -110,6 +110,7 @@ import Darwin
             "router": slot(routerBits),
             "sharedExpert": slot(sharedExpertBits),
             "routedExpert": slot(4),
+            "linearAttention": slot(4),
         ]
     }
 
@@ -117,14 +118,14 @@ import Darwin
         let (dir, toy) = try Self.writeToyManifest()
         defer { try? FileManager.default.removeItem(at: dir) }
         let m = try ManifestReader.load(directoryURL: dir, expecting: toy)
-        #expect(m.magic == "FQTURBO")
+        #expect(m.magic == "FINCH")
         #expect(m.numLayers == toy.numLayers)
         #expect(m.expertStride == 16384)
     }
 
     @Test func missingManifestThrowsPartialInstall() throws {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-empty-\(UUID().uuidString)")
+            .appendingPathComponent("finch-empty-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         #expect {
@@ -153,10 +154,10 @@ import Darwin
         }
     }
 
-    @Test func wrongMagicThrowsNotAFQTurboDirectory() throws {
-        let (dir, toy) = try Self.writeToyManifest(["magic": "NOT_FQTURBO"])
+    @Test func wrongMagicThrowsNotAFinchDirectory() throws {
+        let (dir, toy) = try Self.writeToyManifest(["magic": "NOT_FINCH"])
         defer { try? FileManager.default.removeItem(at: dir) }
-        #expect(throws: ModelError.notAFQTurboDirectory) {
+        #expect(throws: ModelError.notAFinchDirectory) {
             _ = try ManifestReader.load(directoryURL: dir, expecting: toy)
         }
     }

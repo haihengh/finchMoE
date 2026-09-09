@@ -7,7 +7,7 @@ import Foundation
     /// SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
     @Test func hashesEmptyFile() throws {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-sha-empty-\(UUID().uuidString).bin")
+            .appendingPathComponent("finch-sha-empty-\(UUID().uuidString).bin")
         try Data().write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
         let h = try Sha256Verifier.hashFile(at: url)
@@ -16,7 +16,7 @@ import Foundation
 
     @Test func chunkSizeDoesNotAffectDigest() throws {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-sha-2m-\(UUID().uuidString).bin")
+            .appendingPathComponent("finch-sha-2m-\(UUID().uuidString).bin")
         // Two chunks at the default 1 MB chunkBytes — exercises the loop.
         var data = Data(count: 2 << 20)
         for i in 0..<data.count { data[i] = UInt8(i & 0xFF) }
@@ -30,7 +30,7 @@ import Foundation
 
     @Test func verifyMatches() throws {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-sha-match-\(UUID().uuidString).bin")
+            .appendingPathComponent("finch-sha-match-\(UUID().uuidString).bin")
         let payload = Data("hello world".utf8)
         try payload.write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -40,7 +40,7 @@ import Foundation
 
     @Test func verifyMismatchThrowsChecksumMismatch() throws {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-sha-bad-\(UUID().uuidString).bin")
+            .appendingPathComponent("finch-sha-bad-\(UUID().uuidString).bin")
         try Data("hello world".utf8).write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
         let wrong = String(repeating: "0", count: 64)

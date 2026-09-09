@@ -40,7 +40,7 @@ import FinchMoERepackCore
   @Test func checkAgainDetectsModelInstalledAfterLaunch() throws {
     let directory = try makeCompleteModelInstall("external-install")
     let stagedDirectory = directory.deletingLastPathComponent()
-      .appendingPathComponent("staged-\(UUID().uuidString).fqturbo")
+      .appendingPathComponent("staged-\(UUID().uuidString).finch")
     try FileManager.default.moveItem(at: directory, to: stagedDirectory)
     let model = AppModel(
       modelDirectory: directory,
@@ -353,7 +353,7 @@ import FinchMoERepackCore
 
   private func temporaryInstallPath(_ tag: String) -> URL {
     FileManager.default.temporaryDirectory
-      .appendingPathComponent("finchmoe-app-install-\(tag)-\(UUID().uuidString).fqturbo")
+      .appendingPathComponent("finchmoe-app-install-\(tag)-\(UUID().uuidString).finch")
   }
 
   private func makeSavedDownload(at directory: URL) throws -> RemoteInstallPaths {

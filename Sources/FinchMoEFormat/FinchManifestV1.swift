@@ -1,6 +1,6 @@
 import Foundation
 
-package struct FQTurboManifestFileV1: Codable, Equatable, Sendable {
+package struct FinchManifestFileV1: Codable, Equatable, Sendable {
     package let size: UInt64
     package let sha256: String
 
@@ -10,7 +10,7 @@ package struct FQTurboManifestFileV1: Codable, Equatable, Sendable {
     }
 }
 
-package struct FQTurboManifestArchV1: Codable, Equatable, Sendable {
+package struct FinchManifestArchV1: Codable, Equatable, Sendable {
     package let hiddenSize: Int
     package let ffnIntermediate: Int
     package let moeIntermediateSize: Int
@@ -42,7 +42,7 @@ package struct FQTurboManifestArchV1: Codable, Equatable, Sendable {
     package let linearValueHeadDim: Int?
     package let linearConvKernelDim: Int?
     // Qwen3.8-Flash-Next (hyper-connection / QSA indexer / PLE n-gram)
-    // fields — additive at format minor 0 (see FQTurboFormatV1.versionMinor).
+    // fields — additive at format minor 0 (see FinchFormatV1.versionMinor).
     // Optional; nil on Gemma and Qwen3.6 manifests so those files stay
     // byte-identical.
     package let hyperConnectionCount: Int?
@@ -134,7 +134,7 @@ package struct FQTurboManifestArchV1: Codable, Equatable, Sendable {
 // Encode only non-nil Gated DeltaNet fields so that pre-Qwen (Gemma)
 // manifests remain byte-identical to the original V1 wire format; Qwen fields
 // appear only when present. Decoding stays synthesized (missing key -> nil).
-extension FQTurboManifestArchV1 {
+extension FinchManifestArchV1 {
     package func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(hiddenSize, forKey: .hiddenSize)
@@ -184,7 +184,7 @@ extension FQTurboManifestArchV1 {
     }
 }
 
-package struct FQTurboManifestQuantSlotV1: Codable, Equatable, Sendable {
+package struct FinchManifestQuantSlotV1: Codable, Equatable, Sendable {
     package let weightBits: Int
     package let scheme: String
     package let scaleType: String
@@ -201,24 +201,24 @@ package struct FQTurboManifestQuantSlotV1: Codable, Equatable, Sendable {
     }
 }
 
-package struct FQTurboManifestQuantV1: Codable, Equatable, Sendable {
-    package let embedding: FQTurboManifestQuantSlotV1
-    package let attention: FQTurboManifestQuantSlotV1
+package struct FinchManifestQuantV1: Codable, Equatable, Sendable {
+    package let embedding: FinchManifestQuantSlotV1
+    package let attention: FinchManifestQuantSlotV1
     /// Qwen GDN (`linear_attn.in_proj_qkv/z/a/b`, `out_proj`) — 8-bit on the
     /// production build: int4 noise on these amplifies ~16x through the
     /// recurrent state (see docs/QWEN36_PORT.md), so the slot is distinct
     /// from `attention` (full-attention q/k/v/o stay at 4).
-    package let linearAttention: FQTurboManifestQuantSlotV1
-    package let router: FQTurboManifestQuantSlotV1
-    package let sharedExpert: FQTurboManifestQuantSlotV1
-    package let routedExpert: FQTurboManifestQuantSlotV1
+    package let linearAttention: FinchManifestQuantSlotV1
+    package let router: FinchManifestQuantSlotV1
+    package let sharedExpert: FinchManifestQuantSlotV1
+    package let routedExpert: FinchManifestQuantSlotV1
 
-    package init(embedding: FQTurboManifestQuantSlotV1,
-                 attention: FQTurboManifestQuantSlotV1,
-                 linearAttention: FQTurboManifestQuantSlotV1,
-                 router: FQTurboManifestQuantSlotV1,
-                 sharedExpert: FQTurboManifestQuantSlotV1,
-                 routedExpert: FQTurboManifestQuantSlotV1) {
+    package init(embedding: FinchManifestQuantSlotV1,
+                 attention: FinchManifestQuantSlotV1,
+                 linearAttention: FinchManifestQuantSlotV1,
+                 router: FinchManifestQuantSlotV1,
+                 sharedExpert: FinchManifestQuantSlotV1,
+                 routedExpert: FinchManifestQuantSlotV1) {
         self.embedding = embedding
         self.attention = attention
         self.linearAttention = linearAttention
@@ -228,28 +228,28 @@ package struct FQTurboManifestQuantV1: Codable, Equatable, Sendable {
     }
 }
 
-package struct FQTurboManifestV1: Codable, Equatable, Sendable {
+package struct FinchManifestV1: Codable, Equatable, Sendable {
     package let magic: String
     package let versionMajor: Int
     package let versionMinor: Int
     package let flags: [String: Bool]
     package let modelID: String
     package let sourceSnapshotHash: String?
-    package let arch: FQTurboManifestArchV1
-    package let quant: FQTurboManifestQuantV1?
-    package let files: [String: FQTurboManifestFileV1]
+    package let arch: FinchManifestArchV1
+    package let quant: FinchManifestQuantV1?
+    package let files: [String: FinchManifestFileV1]
     package let expertsPerLayer: Int
     package let numLayers: Int
     package let expertStride: UInt64
     package let bitWidthOverridesHonored: Int?
 
-    package init(magic: String = FQTurboFormatV1.magic,
-                 versionMajor: Int = FQTurboFormatV1.versionMajor,
-                 versionMinor: Int = FQTurboFormatV1.versionMinor,
+    package init(magic: String = FinchFormatV1.magic,
+                 versionMajor: Int = FinchFormatV1.versionMajor,
+                 versionMinor: Int = FinchFormatV1.versionMinor,
                  flags: [String: Bool], modelID: String,
-                 sourceSnapshotHash: String?, arch: FQTurboManifestArchV1,
-                 quant: FQTurboManifestQuantV1?,
-                 files: [String: FQTurboManifestFileV1],
+                 sourceSnapshotHash: String?, arch: FinchManifestArchV1,
+                 quant: FinchManifestQuantV1?,
+                 files: [String: FinchManifestFileV1],
                  expertsPerLayer: Int, numLayers: Int, expertStride: UInt64,
                  bitWidthOverridesHonored: Int?) {
         self.magic = magic
@@ -268,21 +268,21 @@ package struct FQTurboManifestV1: Codable, Equatable, Sendable {
     }
 }
 
-package enum FQTurboManifestCodec {
-    package static func decode(_ data: Data) throws -> FQTurboManifestV1 {
+package enum FinchManifestCodec {
+    package static func decode(_ data: Data) throws -> FinchManifestV1 {
         let manifest = try decodeUnchecked(data)
         try validate(manifest)
         return manifest
     }
 
-    package static func decodeUnchecked(_ data: Data) throws -> FQTurboManifestV1 {
-        let manifest: FQTurboManifestV1
-        do { manifest = try JSONDecoder().decode(FQTurboManifestV1.self, from: data) }
-        catch { throw FQTurboFormatError.invalid(field: "manifest.json", reason: "\(error)") }
+    package static func decodeUnchecked(_ data: Data) throws -> FinchManifestV1 {
+        let manifest: FinchManifestV1
+        do { manifest = try JSONDecoder().decode(FinchManifestV1.self, from: data) }
+        catch { throw FinchFormatError.invalid(field: "manifest.json", reason: "\(error)") }
         return manifest
     }
 
-    package static func encode(_ manifest: FQTurboManifestV1) throws -> Data {
+    package static func encode(_ manifest: FinchManifestV1) throws -> Data {
         try validate(manifest)
         let encoder = JSONEncoder()
         do {
@@ -291,30 +291,30 @@ package enum FQTurboManifestCodec {
                 withJSONObject: object,
                 options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
         } catch {
-            throw FQTurboFormatError.invalid(field: "manifest.json", reason: "\(error)")
+            throw FinchFormatError.invalid(field: "manifest.json", reason: "\(error)")
         }
     }
 
-    package static func validate(_ manifest: FQTurboManifestV1) throws {
-        guard manifest.magic == FQTurboFormatV1.magic else {
-            throw FQTurboFormatError.invalid(field: "manifest.magic", reason: "expected FQTURBO")
+    package static func validate(_ manifest: FinchManifestV1) throws {
+        guard manifest.magic == FinchFormatV1.magic else {
+            throw FinchFormatError.invalid(field: "manifest.magic", reason: "expected FINCH")
         }
-        guard manifest.versionMajor == FQTurboFormatV1.versionMajor,
+        guard manifest.versionMajor == FinchFormatV1.versionMajor,
               manifest.versionMinor >= 0 else {
-            throw FQTurboFormatError.invalid(field: "manifest.version", reason: "unsupported version")
+            throw FinchFormatError.invalid(field: "manifest.version", reason: "unsupported version")
         }
-        for flag in manifest.flags.keys where !FQTurboFormatV1.knownFlags.contains(flag) {
-            throw FQTurboFormatError.invalid(field: "manifest.flags.\(flag)", reason: "unknown v1 flag")
+        for flag in manifest.flags.keys where !FinchFormatV1.knownFlags.contains(flag) {
+            throw FinchFormatError.invalid(field: "manifest.flags.\(flag)", reason: "unknown v1 flag")
         }
         guard !manifest.modelID.isEmpty,
               manifest.numLayers > 0, manifest.expertsPerLayer > 0,
               manifest.expertStride > 0,
-              manifest.expertStride % FQTurboFormatV1.alignmentBytes == 0 else {
-            throw FQTurboFormatError.invalid(field: "manifest", reason: "invalid dimensions or stride")
+              manifest.expertStride % FinchFormatV1.alignmentBytes == 0 else {
+            throw FinchFormatError.invalid(field: "manifest", reason: "invalid dimensions or stride")
         }
         guard manifest.arch.numLayers == manifest.numLayers,
               manifest.arch.numExperts == manifest.expertsPerLayer else {
-            throw FQTurboFormatError.invalid(
+            throw FinchFormatError.invalid(
                 field: "manifest.arch", reason: "dimensions disagree with streaming metadata")
         }
         let arch = manifest.arch
@@ -332,7 +332,7 @@ package enum FQTurboManifestCodec {
               !arch.hiddenActivation.isEmpty,
               arch.fullAttentionLayerMask.count == arch.numLayers,
               arch.fullAttentionLayerMask.allSatisfy({ $0 == 0 || $0 == 1 }) else {
-            throw FQTurboFormatError.invalid(
+            throw FinchFormatError.invalid(
                 field: "manifest.arch", reason: "invalid architecture values")
         }
         if let quant = manifest.quant {
@@ -347,7 +347,7 @@ package enum FQTurboManifestCodec {
                       slot.groupSize > 0,
                       !slot.scheme.isEmpty, !slot.scaleType.isEmpty,
                       !slot.biasType.isEmpty else {
-                    throw FQTurboFormatError.invalid(
+                    throw FinchFormatError.invalid(
                         field: "manifest.quant.\(name)", reason: "invalid quantization values")
                 }
             }
@@ -356,16 +356,16 @@ package enum FQTurboManifestCodec {
         let filePaths = manifest.files.keys.sorted()
         var canonicalPaths: [String: String] = [:]
         for path in filePaths {
-            try FQTurboPathValidator.validateRelativePath(path, field: "manifest.files.\(path)")
-            let key = FQTurboPathValidator.appleFilesystemKey(path)
+            try FinchPathValidator.validateRelativePath(path, field: "manifest.files.\(path)")
+            let key = FinchPathValidator.appleFilesystemKey(path)
             guard canonicalPaths.updateValue(path, forKey: key) == nil else {
-                throw FQTurboFormatError.invalid(
+                throw FinchFormatError.invalid(
                     field: "manifest.files.\(path)", reason: "filesystem-equivalent duplicate path")
             }
             guard key != "tokenizer",
                   !reservedFiles.contains(key),
                   !reservedFiles.contains(where: { key.hasPrefix("\($0)/") }) else {
-                throw FQTurboFormatError.invalid(
+                throw FinchFormatError.invalid(
                     field: "manifest.files.\(path)", reason: "reserved artifact filename")
             }
             let entry = manifest.files[path]!
@@ -375,7 +375,7 @@ package enum FQTurboManifestCodec {
                           || ("a"..."f").contains(Character(String(scalar)))
                           || ("A"..."F").contains(Character(String(scalar)))
                   }) else {
-                throw FQTurboFormatError.invalid(
+                throw FinchFormatError.invalid(
                     field: "manifest.files.\(path).sha256", reason: "expected 64 hexadecimal characters")
             }
         }
@@ -385,7 +385,7 @@ package enum FQTurboManifestCodec {
                 _ = components.removeLast()
                 let ancestor = components.joined(separator: "/")
                 if canonicalPaths[ancestor] != nil {
-                    throw FQTurboFormatError.invalid(
+                    throw FinchFormatError.invalid(
                         field: "manifest.files.\(path)",
                         reason: "file path collides with a directory prefix")
                 }

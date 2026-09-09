@@ -9,7 +9,7 @@ import Darwin
     @Test func wrapsResidentRegionAndReadsBytes() throws {
         let device = try #require(MTLCreateSystemDefaultDevice())
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-resident-\(UUID().uuidString).bin")
+            .appendingPathComponent("finch-resident-\(UUID().uuidString).bin")
         defer { try? FileManager.default.removeItem(at: url) }
 
         // 24-byte fake header (zeros) followed by 16-byte fake index region
@@ -35,7 +35,7 @@ import Darwin
     @Test func unalignedFileOffsetStillExposesPayloadAtOffsetZero() throws {
         let device = try #require(MTLCreateSystemDefaultDevice())
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-resident-unaligned-\(UUID().uuidString).bin")
+            .appendingPathComponent("finch-resident-unaligned-\(UUID().uuidString).bin")
         defer { try? FileManager.default.removeItem(at: url) }
 
         // Offset that is not a multiple of getpagesize() — say 137.
@@ -58,7 +58,7 @@ import Darwin
     @Test func followsCallerSelectedSymlinkToRegularFile() throws {
         let device = try #require(MTLCreateSystemDefaultDevice())
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-resident-symlink-\(UUID().uuidString)")
+            .appendingPathComponent("finch-resident-symlink-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let target = directory.appendingPathComponent("target.bin")

@@ -63,7 +63,7 @@ struct RepackCLITests {
 
     private func temporaryOutput(_ tag: String) -> String {
         (NSTemporaryDirectory() as NSString)
-            .appendingPathComponent("finchmoe-cli-\(tag)-\(UUID().uuidString).fqturbo")
+            .appendingPathComponent("finchmoe-cli-\(tag)-\(UUID().uuidString).finch")
     }
 
     private func clean(_ output: String) {

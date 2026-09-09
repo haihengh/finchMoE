@@ -9,7 +9,7 @@ public struct ServerArguments: Equatable, Sendable {
     public let promptCacheMode: ServerPromptCacheMode
 
     public static let usage = """
-    usage: FinchMoEServer --model <completed .fqturbo directory> [options]
+    usage: FinchMoEServer --model <completed .finch directory> [options]
 
       --model <dir>          Required model directory.
       --port <1...65535>     Loopback port (default 8080).

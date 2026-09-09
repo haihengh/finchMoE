@@ -129,11 +129,11 @@ struct ArchInfo: Sendable, Equatable {
 
     /// Model discriminator derived from the config. Used by the runtime to
     /// pick the right kernel family and by the manifest validator.
-    /// Family strings single-source from `FQTurboFormatV1` so the repacker
+    /// Family strings single-source from `FinchFormatV1` so the repacker
     /// can never write a family the runtime does not recognize.
-    static let qwen36Family = FQTurboFormatV1.qwen36Family
-    static let qwen38Family = FQTurboFormatV1.qwen38Family
-    static let gemma4Family = FQTurboFormatV1.gemma4Family
+    static let qwen36Family = FinchFormatV1.qwen36Family
+    static let qwen38Family = FinchFormatV1.qwen38Family
+    static let gemma4Family = FinchFormatV1.gemma4Family
 
     static func family(from tc: [String: Any]) -> String {
         let mt = (tc["model_type"] as? String) ?? ""

@@ -8,9 +8,9 @@ extension ModelLoaderTests {
     @Test func acceptsRootSymlinkAndRetainsOpenedDirectory() throws {
         let target = try Self.writeToySynthetic()
         let alias = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-root-\(UUID().uuidString)")
+            .appendingPathComponent("finch-root-\(UUID().uuidString)")
         let replacement = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-replacement-\(UUID().uuidString)")
+            .appendingPathComponent("finch-replacement-\(UUID().uuidString)")
         defer {
             try? FileManager.default.removeItem(at: alias)
             try? FileManager.default.removeItem(at: target)
@@ -29,9 +29,13 @@ extension ModelLoaderTests {
     }
 
     @Test func trustedReceiptKeepsRootSymlinkPathBinding() throws {
+        // A receipt written through a symlink alias binds the resolved real
+        // directory, so both the alias and the real path keep the binding
+        // (the models/ install symlink relies on this). Path-mismatch
+        // rejection is covered by trustedReceiptModeRejectsDifferentModelDirectoryBinding.
         let target = try Self.writeToySynthetic()
         let alias = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-receipt-root-\(UUID().uuidString)")
+            .appendingPathComponent("finch-receipt-root-\(UUID().uuidString)")
         defer {
             try? FileManager.default.removeItem(at: alias)
             try? FileManager.default.removeItem(at: target)
@@ -43,17 +47,15 @@ extension ModelLoaderTests {
         _ = try Model.load(
             directoryURL: alias, device: device, expecting: .gemma4Toy(),
             integrityPolicy: .sizeCheckTrustedReceipt)
-        #expect(throws: ModelError.self) {
-            try Model.load(
-                directoryURL: target, device: device, expecting: .gemma4Toy(),
-                integrityPolicy: .sizeCheckTrustedReceipt)
-        }
+        _ = try Model.load(
+            directoryURL: target, device: device, expecting: .gemma4Toy(),
+            integrityPolicy: .sizeCheckTrustedReceipt)
     }
 
     @Test func rejectsManifestLeafSymlink() throws {
         let dir = try Self.writeToySynthetic()
         let outside = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-manifest-\(UUID().uuidString).json")
+            .appendingPathComponent("finch-manifest-\(UUID().uuidString).json")
         defer {
             try? FileManager.default.removeItem(at: dir)
             try? FileManager.default.removeItem(at: outside)
@@ -71,7 +73,7 @@ extension ModelLoaderTests {
     @Test func rejectsPackedExpertsParentSymlink() throws {
         let dir = try Self.writeToySynthetic()
         let outside = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-packed-\(UUID().uuidString)")
+            .appendingPathComponent("finch-packed-\(UUID().uuidString)")
         defer {
             try? FileManager.default.removeItem(at: dir)
             try? FileManager.default.removeItem(at: outside)
@@ -90,7 +92,7 @@ extension ModelLoaderTests {
         let dir = try Self.writeToySynthetic()
         try Self.writeVerifiedInstallReceipt(directoryURL: dir)
         let outside = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-receipt-\(UUID().uuidString).json")
+            .appendingPathComponent("finch-receipt-\(UUID().uuidString).json")
         defer {
             try? FileManager.default.removeItem(at: dir)
             try? FileManager.default.removeItem(at: outside)
@@ -110,7 +112,7 @@ extension ModelLoaderTests {
     @Test func rejectsRoutedLayerLeafSymlinkOnLazyOpen() throws {
         let dir = try Self.writeToySynthetic()
         let outside = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fqturbo-layer-\(UUID().uuidString).bin")
+            .appendingPathComponent("finch-layer-\(UUID().uuidString).bin")
         defer {
             try? FileManager.default.removeItem(at: dir)
             try? FileManager.default.removeItem(at: outside)

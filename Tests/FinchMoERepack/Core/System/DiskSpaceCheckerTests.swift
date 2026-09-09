@@ -8,7 +8,7 @@ import Testing
             .appendingPathComponent("finchmoe-space-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let target = root.appendingPathComponent("nested/model.fqturbo", isDirectory: true)
+        let target = root.appendingPathComponent("nested/model.finch", isDirectory: true)
 
         let result = try DiskSpaceChecker.assess(path: target.path, bytes: 100, reserveBytes: 20)
 
@@ -22,7 +22,7 @@ import Testing
             .appendingPathComponent("finchmoe-space-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let target = root.appendingPathComponent("model.fqturbo", isDirectory: true)
+        let target = root.appendingPathComponent("model.finch", isDirectory: true)
 
         let assessed = try DiskSpaceChecker.assess(path: target.path, bytes: 100, reserveBytes: 20)
         let required = try DiskSpaceChecker.requireAvailable(path: target.path,
@@ -36,7 +36,7 @@ import Testing
             .appendingPathComponent("finchmoe-space-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let target = root.appendingPathComponent("model.fqturbo", isDirectory: true)
+        let target = root.appendingPathComponent("model.finch", isDirectory: true)
         let required = UInt64.max
 
         #expect {

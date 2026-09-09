@@ -5,25 +5,25 @@ import FinchMoEFormat
 /// `IndexEntry` records. Used by the resident writer and the
 /// matching loader-side parsers; kept in one place so the on-disk layout
 /// changes only here.
-enum FQTurboBinary {
+enum FinchBinary {
 
-    static let indexHeaderBytes = FQTurboFormatV1.residentHeaderBytes
-    static let indexEntryBytes = FQTurboFormatV1.residentEntryBytes
+    static let indexHeaderBytes = FinchFormatV1.residentHeaderBytes
+    static let indexEntryBytes = FinchFormatV1.residentEntryBytes
 
     /// Write `IndexHeader { indexSize, residentSize, entryCount }` (24 bytes, LE).
     static func writeIndexHeader(into buf: UnsafeMutableRawPointer,
                                         indexSize: UInt64,
                                         residentSize: UInt64,
                                         entryCount: UInt64) {
-        FQTurboResidentIndexCodec.writeHeader(
+        FinchResidentIndexCodec.writeHeader(
             into: buf,
-            header: FQTurboResidentIndexHeaderV1(
+            header: FinchResidentIndexHeaderV1(
                 indexSize: indexSize,
                 residentSize: residentSize,
                 entryCount: entryCount))
     }
 
-    /// Write one `IndexEntry` (72 bytes, LE) at `dst`. See fqturbo-format.md.
+    /// Write one `IndexEntry` (72 bytes, LE) at `dst`. See finch-format.md.
     static func writeIndexEntry(into dst: UnsafeMutableRawPointer,
                                        entry: ResidentEntry,
                                        nameOffset: UInt32) {
@@ -40,9 +40,9 @@ enum FQTurboBinary {
     static func writeIndexEntry(into dst: UnsafeMutableRawPointer,
                                        entry: ResidentIndexRecord,
                                        nameOffset: UInt32) {
-        FQTurboResidentIndexCodec.writeEntry(
+        FinchResidentIndexCodec.writeEntry(
             into: dst,
-            entry: FQTurboResidentIndexEntryV1(
+            entry: FinchResidentIndexEntryV1(
                 name: entry.name,
                 dtype: entry.dtype,
                 fileOffset: entry.fileOffset,

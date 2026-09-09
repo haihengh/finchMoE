@@ -15,8 +15,8 @@ import FinchMoEFormat
 
     /// Wire arch carrying every Qwen3.8-Flash-Next field, mirroring
     /// `ArchConfig.qwen3_8_flashNext_125B` values (1:1 with the preset test).
-    private static func qwen38Arch() -> FQTurboManifestArchV1 {
-        FQTurboManifestArchV1(
+    private static func qwen38Arch() -> FinchManifestArchV1 {
+        FinchManifestArchV1(
             hiddenSize: 2560, ffnIntermediate: 640, moeIntermediateSize: 640,
             numHeads: 24, numKVHeads: 2, numFullKVHeads: 2,
             headDim: 128, fullHeadDim: 256, vocabSize: 248320,
@@ -39,31 +39,31 @@ import FinchMoEFormat
             pleLayerIndexes: [1], pleConvKernelSize: 4)
     }
 
-    private static func manifest() -> FQTurboManifestV1 {
-        FQTurboManifestV1(
+    private static func manifest() -> FinchManifestV1 {
+        FinchManifestV1(
             flags: ["streamingPresent": true],
             modelID: "Qwen/Qwen3.8-Flash-Next-test",
             sourceSnapshotHash: "snapshot",
             arch: qwen38Arch(),
             quant: nil,
             files: [
-                "model_weights.bin": FQTurboManifestFileV1(
+                "model_weights.bin": FinchManifestFileV1(
                     size: 16_384, sha256: zeroSHA),
-                "packed_experts/layout.json": FQTurboManifestFileV1(
+                "packed_experts/layout.json": FinchManifestFileV1(
                     size: 1, sha256: zeroSHA),
             ],
             expertsPerLayer: 512,
             numLayers: 48,
-            expertStride: FQTurboFormatV1.alignmentBytes,
+            expertStride: FinchFormatV1.alignmentBytes,
             bitWidthOverridesHonored: nil)
     }
 
     @Test func qwen38WireRoundTripsWithAllNewKeysPresent() throws {
         let m = Self.manifest()
-        let encoded = try FQTurboManifestCodec.encode(m)
-        // Minor stays 0: the new keys are additive (see FQTurboFormatV1).
-        #expect(try FQTurboManifestCodec.decodeUnchecked(encoded) == m)
-        #expect(try FQTurboManifestCodec.decode(encoded) == m)
+        let encoded = try FinchManifestCodec.encode(m)
+        // Minor stays 0: the new keys are additive (see FinchFormatV1).
+        #expect(try FinchManifestCodec.decodeUnchecked(encoded) == m)
+        #expect(try FinchManifestCodec.decode(encoded) == m)
 
         let root = try #require(
             JSONSerialization.jsonObject(with: encoded) as? [String: Any])
@@ -85,7 +85,7 @@ import FinchMoEFormat
         // path): the encoded JSON must not contain the keys at all, keeping
         // pre-3.8 manifests byte-identical.
         let base = Self.manifest()
-        let arch = FQTurboManifestArchV1(
+        let arch = FinchManifestArchV1(
             hiddenSize: 2560, ffnIntermediate: 640, moeIntermediateSize: 640,
             numHeads: 24, numKVHeads: 2, numFullKVHeads: 2,
             headDim: 128, fullHeadDim: 256, vocabSize: 248320,
@@ -100,14 +100,14 @@ import FinchMoEFormat
             linearNumKeyHeads: 16, linearNumValueHeads: 32,
             linearKeyHeadDim: 128, linearValueHeadDim: 128,
             linearConvKernelDim: 4)
-        let m = FQTurboManifestV1(
+        let m = FinchManifestV1(
             flags: base.flags, modelID: base.modelID,
             sourceSnapshotHash: base.sourceSnapshotHash, arch: arch,
             quant: nil, files: base.files,
             expertsPerLayer: base.expertsPerLayer,
             numLayers: base.numLayers, expertStride: base.expertStride,
             bitWidthOverridesHonored: nil)
-        let encoded = try FQTurboManifestCodec.encode(m)
+        let encoded = try FinchManifestCodec.encode(m)
         let root = try #require(
             JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         let wireArch = try #require(root["arch"] as? [String: Any])
@@ -119,7 +119,7 @@ import FinchMoEFormat
     }
 
     @Test func qwen38ManifestDecodesAgainstPresetAndRejectsOthers() throws {
-        let encoded = try FQTurboManifestCodec.encode(Self.manifest())
+        let encoded = try FinchManifestCodec.encode(Self.manifest())
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("qwen38-wire-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

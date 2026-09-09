@@ -35,7 +35,7 @@ enum AppModelLocation {
         }
         return applicationSupportURL
             .appendingPathComponent("FinchMoE", isDirectory: true)
-            .appendingPathComponent("gemma4.fqturbo", isDirectory: true)
+            .appendingPathComponent("gemma4.finch", isDirectory: true)
             .standardizedFileURL
     }
 
@@ -47,12 +47,12 @@ enum AppModelLocation {
     private static func preferredInstallURL(inPackageRoot root: URL,
                                             fileExists: (String) -> Bool) -> URL {
         let qwen = root
-            .appendingPathComponent("models/Qwen3.6-35B-A3B-4bit.fqturbo", isDirectory: true)
+            .appendingPathComponent("models/Qwen3.6-35B-A3B-4bit.finch", isDirectory: true)
         let qwenManifest = qwen.appendingPathComponent("manifest.json").path
         if fileExists(qwenManifest) {
             return qwen.standardizedFileURL
         }
-        return root.appendingPathComponent("scratch/gemma4.fqturbo", isDirectory: true)
+        return root.appendingPathComponent("scratch/gemma4.finch", isDirectory: true)
             .standardizedFileURL
     }
 

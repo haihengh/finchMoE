@@ -2,10 +2,10 @@ import Foundation
 import Darwin
 import FinchMoEFormat
 
-/// Writes the Qwen `.fqturbo` payloads: the resident `model_weights.bin`
+/// Writes the Qwen `.finch` payloads: the resident `model_weights.bin`
 /// (index + quantized entries) and the per-layer expert blobs. Every source
 /// tensor is bf16; the writer transforms row by row — int4/int8 affine via
-/// the canonical `FQTurboQuantization`, `(1 + w)` norm baking, and bf16 →
+/// the canonical `FinchQuantization`, `(1 + w)` norm baking, and bf16 →
 /// fp16 / fp32 raw conversions — with scratch bounded by the widest row
 /// batch, never whole-tensor buffers.
 enum QwenQuantizedWriter {
@@ -134,7 +134,7 @@ enum QwenQuantizedWriter {
                                     scaleOffset: UInt64,
                                     biasOffset: UInt64,
                                     audit: RepackAudit) throws {
-        let groups = cols / FQTurboQuantization.groupSize
+        let groups = cols / FinchQuantization.groupSize
         let packedRowBytes = cols / (8 / bits)
         let auxRowBytes = groups * 2
 
@@ -161,11 +161,11 @@ enum QwenQuantizedWriter {
                 for k in 0..<cols {
                     let bits16 = UInt16(src[rowBase + 2 * k])
                         | UInt16(src[rowBase + 2 * k + 1]) << 8
-                    floats[k] = FQTurboQuantization.bf16ToFloat(bits16)
+                    floats[k] = FinchQuantization.bf16ToFloat(bits16)
                 }
                 if bits == 4 {
                     let q = floats.withUnsafeBufferPointer {
-                        FQTurboQuantization.quantizeInt4Affine($0, count: cols)
+                        FinchQuantization.quantizeInt4Affine($0, count: cols)
                     }
                     q.packed.withUnsafeBytes { raw in
                         packedBatch.withUnsafeMutableBytes { dst in
@@ -187,7 +187,7 @@ enum QwenQuantizedWriter {
                     }
                 } else {
                     let q = floats.withUnsafeBufferPointer {
-                        FQTurboQuantization.quantizeInt8Affine($0, count: cols)
+                        FinchQuantization.quantizeInt8Affine($0, count: cols)
                     }
                     q.packed.withUnsafeBytes { raw in
                         packedBatch.withUnsafeMutableBytes { dst in
@@ -395,14 +395,14 @@ enum QwenQuantizedWriter {
             }
             for i in 0..<count {
                 let bits = UInt16(bytes[2 * i]) | UInt16(bytes[2 * i + 1]) << 8
-                floats[i] = FQTurboQuantization.bf16ToFloat(bits)
+                floats[i] = FinchQuantization.bf16ToFloat(bits)
             }
             return Array(floats[0..<count])
         }
 
         mutating func encodeBf16OnePlusW(_ values: [Float]) -> [UInt16] {
             for (i, v) in values.enumerated() {
-                words[i] = FQTurboQuantization.bf16Bits(1.0 + v)
+                words[i] = FinchQuantization.bf16Bits(1.0 + v)
             }
             return Array(words[0..<values.count])
         }

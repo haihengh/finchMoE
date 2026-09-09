@@ -328,8 +328,8 @@ import Testing
         let model = AppModel(
             client: MockInferenceClient(),
             installer: MockModelInstallerClient())
-        let oldURL = FileManager.default.temporaryDirectory.appendingPathComponent("old.fqturbo")
-        let newURL = FileManager.default.temporaryDirectory.appendingPathComponent("new.fqturbo")
+        let oldURL = FileManager.default.temporaryDirectory.appendingPathComponent("old.finch")
+        let newURL = FileManager.default.temporaryDirectory.appendingPathComponent("new.finch")
         model.modelPathText = oldURL.path
         model.loadState = .ready(modelDirectory: oldURL, loadSeconds: 1)
         model.diagnostics = AppDiagnostics(

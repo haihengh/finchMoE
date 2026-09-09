@@ -1,7 +1,7 @@
 import Foundation
 
-package enum FQTurboFormatV1 {
-    package static let magic = "FQTURBO"
+package enum FinchFormatV1 {
+    package static let magic = "FINCH"
     // Canonical model-family strings written to manifest.arch.modelFamily.
     // Single home for the runtime (ArchConfig.qwen*Family) and the repacker
     // (ArchInfo) so a family can never drift between writer and reader.
@@ -35,7 +35,7 @@ package enum FQTurboFormatV1 {
     }
 }
 
-package enum FQTurboFormatError: Error, Equatable, CustomStringConvertible, Sendable {
+package enum FinchFormatError: Error, Equatable, CustomStringConvertible, Sendable {
     case invalid(field: String, reason: String)
     case overflow(field: String)
     case truncated(field: String)
@@ -50,20 +50,20 @@ package enum FQTurboFormatError: Error, Equatable, CustomStringConvertible, Send
 }
 
 @inline(__always)
-package func fqturboCheckedAdd(_ lhs: UInt64, _ rhs: UInt64, field: String) throws -> UInt64 {
+package func finchCheckedAdd(_ lhs: UInt64, _ rhs: UInt64, field: String) throws -> UInt64 {
     let (value, overflow) = lhs.addingReportingOverflow(rhs)
-    guard !overflow else { throw FQTurboFormatError.overflow(field: field) }
+    guard !overflow else { throw FinchFormatError.overflow(field: field) }
     return value
 }
 
 @inline(__always)
-package func fqturboCheckedMultiply(_ lhs: UInt64, _ rhs: UInt64, field: String) throws -> UInt64 {
+package func finchCheckedMultiply(_ lhs: UInt64, _ rhs: UInt64, field: String) throws -> UInt64 {
     let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
-    guard !overflow else { throw FQTurboFormatError.overflow(field: field) }
+    guard !overflow else { throw FinchFormatError.overflow(field: field) }
     return value
 }
 
-package enum FQTurboPathValidator {
+package enum FinchPathValidator {
     package static func appleFilesystemKey(_ path: String) -> String {
         path.precomposedStringWithCanonicalMapping
             .lowercased(with: Locale(identifier: "en_US_POSIX"))
@@ -71,22 +71,22 @@ package enum FQTurboPathValidator {
 
     package static func validateRelativePath(_ path: String, field: String) throws {
         guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("\0") else {
-            throw FQTurboFormatError.invalid(field: field, reason: "unsafe relative path")
+            throw FinchFormatError.invalid(field: field, reason: "unsafe relative path")
         }
         let components = path.components(separatedBy: "/")
         guard components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
-            throw FQTurboFormatError.invalid(field: field, reason: "non-canonical path")
+            throw FinchFormatError.invalid(field: field, reason: "non-canonical path")
         }
         let normalized = NSString.path(withComponents: components)
         guard normalized == path else {
-            throw FQTurboFormatError.invalid(field: field, reason: "non-normalized path")
+            throw FinchFormatError.invalid(field: field, reason: "non-normalized path")
         }
     }
 
     package static func validateBasename(_ name: String, field: String) throws {
         try validateRelativePath(name, field: field)
         guard !name.contains("/") else {
-            throw FQTurboFormatError.invalid(field: field, reason: "expected basename")
+            throw FinchFormatError.invalid(field: field, reason: "expected basename")
         }
     }
 }

@@ -248,8 +248,8 @@ public enum RangeCopyPlanner {
         expectedOutputs: [RemoteExpectedOutput]
     ) throws -> String {
         var writer = FingerprintWriter(domain: "FinchMoE.RemoteInstallPlan.v1")
-        writer.append(UInt64(FQTurboJSON.versionMajor))
-        writer.append(UInt64(FQTurboJSON.versionMinor))
+        writer.append(UInt64(FinchJSON.versionMajor))
+        writer.append(UInt64(FinchJSON.versionMinor))
         writer.append(UInt64(rangeChunkBytes))
         writer.append(layoutMode)
         writer.append(layoutOrderSha256 ?? "")

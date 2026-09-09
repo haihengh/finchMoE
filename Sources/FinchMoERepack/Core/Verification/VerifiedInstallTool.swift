@@ -3,10 +3,10 @@ import Darwin
 import FinchMoEFormat
 
 public struct VerifyInstallOptions: Sendable {
-    public let inputFQTurbo: String
+    public let inputFinch: String
 
-    public init(inputFQTurbo: String) {
-        self.inputFQTurbo = inputFQTurbo
+    public init(inputFinch: String) {
+        self.inputFinch = inputFinch
     }
 }
 
@@ -20,11 +20,13 @@ public struct VerifyInstallResult: Sendable {
 public enum VerifiedInstallTool {
     public static let metadataMaxBytes: UInt64 = 16 * 1024 * 1024
     public static let manifestMaxBytes: UInt64 = 4 * 1024 * 1024
-    public static let layoutMaxBytes: UInt64 = 16 * 1024 * 1024
+    // Qwen 3.6 (256 experts x 40 layers) produces a ~22 MB layout.json; keep
+    // this in sync with PackedExpertsLayoutReader.defaultMaxBytes.
+    public static let layoutMaxBytes: UInt64 = 64 * 1024 * 1024
 
     public static func run(options: VerifyInstallOptions) throws -> VerifyInstallResult {
-        let root = URL(fileURLWithPath: options.inputFQTurbo).standardizedFileURL
-        let access = try FQTurboDirectoryAccess(rootPath: root.path)
+        let root = URL(fileURLWithPath: options.inputFinch).standardizedFileURL
+        let access = try FinchDirectoryAccess(rootPath: root.path)
         let manifestFD = try access.openFile("manifest.json")
         defer { close(manifestFD) }
         _ = fcntl(manifestFD, F_NOCACHE, 1)
@@ -108,7 +110,7 @@ public enum VerifiedInstallTool {
         return hasher.finalizeHexString()
     }
 
-    private static func inspectFile(access: FQTurboDirectoryAccess,
+    private static func inspectFile(access: FinchDirectoryAccess,
                                     relativePath: String) throws -> (UInt64, String) {
         let fd = try access.openFile(relativePath)
         defer { close(fd) }
@@ -129,25 +131,25 @@ public enum VerifiedInstallTool {
         return result
     }
 
-    private static func loadManifest(data: Data) throws -> FQTurboManifestV1 {
+    private static func loadManifest(data: Data) throws -> FinchManifestV1 {
         do {
-            return try FQTurboManifestCodec.decode(data)
+            return try FinchManifestCodec.decode(data)
         } catch {
             throw RepackError.configurationInvalid(detail: "manifest.json invalid: \(error)")
         }
     }
 
-    private static func loadLayout(data: Data) throws -> FQTurboPackedExpertsLayoutV1 {
+    private static func loadLayout(data: Data) throws -> FinchPackedExpertsLayoutV1 {
         do {
-            return try FQTurboPackedExpertsLayoutCodec.decode(data)
+            return try FinchPackedExpertsLayoutCodec.decode(data)
         } catch {
             throw RepackError.configurationInvalid(detail: "packed_experts/layout.json invalid: \(error)")
         }
     }
 
-    private static func validatePackedExpertLayout(manifest: FQTurboManifestV1,
-                                                   layout: FQTurboPackedExpertsLayoutV1) throws {
-        do { try FQTurboV1StructuralValidator.crossValidate(manifest: manifest, layout: layout) }
+    private static func validatePackedExpertLayout(manifest: FinchManifestV1,
+                                                   layout: FinchPackedExpertsLayoutV1) throws {
+        do { try FinchV1StructuralValidator.crossValidate(manifest: manifest, layout: layout) }
         catch {
             throw RepackError.configurationInvalid(
                 detail: "packed expert layout does not match manifest: \(error)")
@@ -173,8 +175,8 @@ public enum VerifiedInstallTool {
         }
     }
 
-    private static func findUnexpectedEntries(access: FQTurboDirectoryAccess,
-                                              manifest: FQTurboManifestV1) throws -> [String] {
+    private static func findUnexpectedEntries(access: FinchDirectoryAccess,
+                                              manifest: FinchManifestV1) throws -> [String] {
         let declaredFiles = Set(manifest.files.keys)
             .union(["manifest.json", VerifiedInstallReceiptWriter.fileName])
         var allowed = declaredFiles

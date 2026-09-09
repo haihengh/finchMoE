@@ -47,7 +47,7 @@ struct TokenizerLoadCoordinatorTests {
     @Test("Model tokenizer sidecar is discovered")
     func modelTokenizerSidecarIsDiscovered() throws {
         let root = try temporaryDirectory()
-        let model = root.appendingPathComponent("model.fqturbo", isDirectory: true)
+        let model = root.appendingPathComponent("model.finch", isDirectory: true)
         let modelTokenizer = model.appendingPathComponent("tokenizer", isDirectory: true)
         try FileManager.default.createDirectory(at: modelTokenizer, withIntermediateDirectories: true)
         try Data("{}".utf8).write(to: modelTokenizer.appendingPathComponent("tokenizer.json"))
@@ -60,7 +60,7 @@ struct TokenizerLoadCoordinatorTests {
     @Test("Missing model tokenizer sidecar returns nil")
     func missingModelTokenizerSidecarReturnsNil() throws {
         let root = try temporaryDirectory()
-        let model = root.appendingPathComponent("model.fqturbo", isDirectory: true)
+        let model = root.appendingPathComponent("model.finch", isDirectory: true)
         try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
 
         let resolved = GFTokenizer.tokenizerFolder(forModelDirectory: model)

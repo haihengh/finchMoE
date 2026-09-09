@@ -1,10 +1,10 @@
 import Foundation
 import FinchMoEFormat
 
-/// On-disk page alignment unit for `.fqturbo` files. Fixed at 16 KB regardless
+/// On-disk page alignment unit for `.finch` files. Fixed at 16 KB regardless
 /// of host page size — the format is the contract, not the kernel.
 enum Layout {
-    static let pageBytes = FQTurboFormatV1.alignmentBytes
+    static let pageBytes = FinchFormatV1.alignmentBytes
 }
 
 // MARK: - Plan data types
@@ -271,8 +271,8 @@ enum RepackPlanner {
 
         // Index size includes the fixed header, fixed-width entries, and the
         // string table, padded to a 16 KB page boundary.
-        let rawIdx = UInt64(FQTurboBinary.indexHeaderBytes
-            + entryCount * FQTurboBinary.indexEntryBytes
+        let rawIdx = UInt64(FinchBinary.indexHeaderBytes
+            + entryCount * FinchBinary.indexEntryBytes
             + stringTable.count)
         let indexSize = roundUpToPage(rawIdx)
 
@@ -311,7 +311,7 @@ enum RepackPlanner {
                 fileCursor = bOff + bSize
 
                 entries.append(ResidentEntry(
-                    name: name, dtype: FQTurboFormatV1.DType.u32.rawValue,
+                    name: name, dtype: FinchFormatV1.DType.u32.rawValue,
                     logicalShape4: padTo4(logical),
                     fileOffset: wOff, sizeBytes: wSize,
                     scaleOffset: sOff, scaleSize: sSize,
@@ -391,21 +391,21 @@ enum RepackPlanner {
             let biasesLogical = Array(b.shape.dropFirst())
 
             let wSlice = PerExpertTensorSlice(
-                role: role, component: "weights", dtype: FQTurboFormatV1.DType.u32.rawValue,
+                role: role, component: "weights", dtype: FinchFormatV1.DType.u32.rawValue,
                 logicalShape: logicalPerExpert,
                 offsetInExpertBlob: blobCursor, sizeInExpertBlob: perExpertWeightSize,
                 sourceOffsetPerExpert: perExpertWeightSize, sourceTensor: w,
                 bitsForWeights: spec.bits)
             blobCursor += perExpertWeightSize
             let sSlice = PerExpertTensorSlice(
-                role: role, component: "scales", dtype: FQTurboFormatV1.DType.bf16.rawValue,
+                role: role, component: "scales", dtype: FinchFormatV1.DType.bf16.rawValue,
                 logicalShape: scalesLogical,
                 offsetInExpertBlob: blobCursor, sizeInExpertBlob: perExpertScaleSize,
                 sourceOffsetPerExpert: perExpertScaleSize, sourceTensor: s,
                 bitsForWeights: nil)
             blobCursor += perExpertScaleSize
             let bSlice = PerExpertTensorSlice(
-                role: role, component: "biases", dtype: FQTurboFormatV1.DType.bf16.rawValue,
+                role: role, component: "biases", dtype: FinchFormatV1.DType.bf16.rawValue,
                 logicalShape: biasesLogical,
                 offsetInExpertBlob: blobCursor, sizeInExpertBlob: perExpertBiasSize,
                 sourceOffsetPerExpert: perExpertBiasSize, sourceTensor: b,

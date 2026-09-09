@@ -51,7 +51,7 @@ public enum VerifiedInstallReceiptReader {
     public static func load(directoryURL: URL,
                             maxBytes: UInt64 = defaultMaxBytes) throws -> VerifiedInstallReceipt {
         do {
-            let directory = try FQTurboModelDirectory(rootURL: directoryURL)
+            let directory = try FinchModelDirectory(rootURL: directoryURL)
             let data = try directory.readMetadata(fileName, maxBytes: maxBytes)
             return try decode(data: data)
         } catch ModelError.missingFile {
