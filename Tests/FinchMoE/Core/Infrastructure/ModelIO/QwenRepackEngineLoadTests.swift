@@ -228,7 +228,8 @@ import FinchMoEFormat
         let embed = model.embedding
         #expect(embed.shape == (UInt32(Toy.vocab), UInt32(Toy.D), 0, 0))
         #expect(model.lmHead.shape == (UInt32(Toy.vocab), UInt32(Toy.D), 0, 0))
-        #expect(model.finalNorm.shape == (UInt32(Toy.D), 0, 0, 0))
+        let finalNorm = try #require(model.finalNorm)   // qwen3_6: always present
+        #expect(finalNorm.shape == (UInt32(Toy.D), 0, 0, 0))
 
         let qkv = try model.gdnInProjQKV(layer: 0)
         #expect(qkv.shape == (UInt32(Toy.qkvDim), UInt32(Toy.D), 0, 0))

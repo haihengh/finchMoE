@@ -51,6 +51,11 @@ public struct Model {
     /// while still letting accessors mutate layer state via a serial queue.
     let streamersBox: StreamersBox
     let streamersQueue: DispatchQueue
+    /// Lazy PLE n-gram part-file state (qwen3_8 only; `count == 0` for the
+    /// other families). Mirrors the layer streamers: one cached streamer per
+    /// part file, opened + SHA-verified on first touch.
+    let plePartsBox: PLEPartsBox
+    let plePartsQueue: DispatchQueue
 
     final class StreamersBox: @unchecked Sendable {
         var streamers: [PreadExpertStreamer?]
@@ -58,6 +63,15 @@ public struct Model {
         init(numLayers: Int) {
             self.streamers = Array(repeating: nil, count: numLayers)
             self.layerVerified = Array(repeating: false, count: numLayers)
+        }
+    }
+
+    final class PLEPartsBox: @unchecked Sendable {
+        var streamers: [PLEPartStreamer?]
+        var verified: [Bool]
+        init(count: Int) {
+            self.streamers = Array(repeating: nil, count: count)
+            self.verified = Array(repeating: false, count: count)
         }
     }
 
@@ -85,6 +99,8 @@ public struct Model {
         self.modelDirectory = modelDirectory
         self.streamersBox = StreamersBox(numLayers: packedExpertsLayout.numLayers)
         self.streamersQueue = DispatchQueue(label: "finchmoe.expert-streamers")
+        self.plePartsBox = PLEPartsBox(count: config.ngramPartCount)
+        self.plePartsQueue = DispatchQueue(label: "finchmoe.ple-parts")
     }
 
     // MARK: - Resident accessors
@@ -110,17 +126,27 @@ public struct Model {
         }
     }
 
+    /// Resolve one tensor under a transformer layer, on the family prefix
+    /// (3.8 shallow `language_model.layers.<L>`, Gemma/Qwen3.6 deep
+    /// `language_model.model.layers.<L>`). The per-family tensor SETS still
+    /// differ (a 3.8 layer has no `input_layernorm.weight` and a Gemma layer
+    /// has no `linear_attn.*`); the name lookup throws `tensorNotFound` when
+    /// the family does not carry the requested tensor.
+    private func residentLayer(_ suffix: String, layer L: Int) throws -> TensorView {
+        try resident(name: "\(layerPrefix).\(L).\(suffix)")
+    }
+
     public func qProj(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.q_proj.weight")
+        try residentLayer("self_attn.q_proj.weight", layer: L)
     }
     public func kProj(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.k_proj.weight")
+        try residentLayer("self_attn.k_proj.weight", layer: L)
     }
     public func vProj(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.v_proj.weight")
+        try residentLayer("self_attn.v_proj.weight", layer: L)
     }
     public func oProj(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.o_proj.weight")
+        try residentLayer("self_attn.o_proj.weight", layer: L)
     }
     /// Router weight. Gemma writer emits `.router.proj.weight` (no `.mlp.`
     /// segment); Qwen 3.6/3.8 use `.mlp.gate.weight` on the family layer
@@ -212,14 +238,22 @@ public struct Model {
     public func sharedExpertGateProj(layer L: Int) throws -> TensorView {
         try qwenResident("mlp.shared_expert_gate.weight", layer: L)
     }
+    /// Block input norm (RMSNorm). Qwen3.8-Flash-Next replaces both block
+    /// norms with hyper-connections — these lookups throw `tensorNotFound`
+    /// there (the M3.1 3.8 layer bodies consume the HC mixers instead).
     public func inputNorm(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).input_layernorm.weight")
+        try residentLayer("input_layernorm.weight", layer: L)
     }
     public func postAttnNorm(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).post_attention_layernorm.weight")
+        try residentLayer("post_attention_layernorm.weight", layer: L)
     }
-    public var finalNorm: TensorView {
-        try! resident(name: "language_model.model.norm.weight")
+    /// Final RMSNorm before lm_head. Qwen3.8-Flash-Next has no `model.norm`:
+    /// the root `hyper_connection_mixer` collapses the 4-stream plane into the
+    /// lm_head input (see `hyperConnectionMixer()`), so this is nil there.
+    /// Gemma and Qwen3.6 keep the shared `language_model.model.norm.weight`.
+    public var finalNorm: TensorView? {
+        guard !config.isQwen3_8 else { return nil }
+        return try! resident(name: "language_model.model.norm.weight")
     }
 
     // MARK: - Per-head attention norms (Q/K only)
@@ -230,10 +264,197 @@ public struct Model {
     // explicit no-scale variant rather than consuming a unit-weight buffer.
 
     public func qNorm(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.q_norm.weight")
+        try residentLayer("self_attn.q_norm.weight", layer: L)
     }
     public func kNorm(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.k_norm.weight")
+        try residentLayer("self_attn.k_norm.weight", layer: L)
+    }
+
+    // MARK: - Qwen3.8-Flash-Next: hyper-connections
+    //
+    // Flash-Next replaces every block RMSNorm (and the final `model.norm`)
+    // with hyper-connections: 4 parallel residual streams fused into one
+    // `hyperConnectionDim`-wide plane. Each per-layer mixer reads its 4-tuple
+    // (grouped-RMS gate + int4 down/up mix + per-stream block injection);
+    // the root mixer (3 tensors, no inject) collapses the plane at the head.
+    // All are 3.8-only — the guard throws `tensorNotFound` otherwise.
+    // Math locked in docs/QWEN38_PORT.md §hyper-connection.
+
+    private func qwen38Resident(_ name: String) throws -> TensorView {
+        guard config.isQwen3_8 else {
+            throw ModelError.tensorNotFound(name: name)
+        }
+        return try resident(name: name)
+    }
+
+    /// The per-layer attention-branch mixer bundle (`attn_hyper_connection`):
+    /// `hc_norm` raw-BF16 grouped-RMS gate, int4 `input_mix_weight_down` /
+    /// `input_mix_weight_up` mix, and the per-stream `block_inject_weight`.
+    public func attnHyperConnection(layer L: Int) throws
+        -> (hcNorm: TensorView, mixDown: TensorView, mixUp: TensorView,
+            blockInject: TensorView) {
+        let p = "\(layerPrefix).\(L).attn_hyper_connection."
+        return (
+            hcNorm:      try qwen38Resident(p + "hc_norm.weight"),
+            mixDown:     try qwen38Resident(p + "input_mix_weight_down.weight"),
+            mixUp:       try qwen38Resident(p + "input_mix_weight_up.weight"),
+            blockInject: try qwen38Resident(p + "block_inject_weight.weight"))
+    }
+
+    /// The per-layer MLP-branch mixer bundle (`mlp_hyper_connection`), same
+    /// shape as `attnHyperConnection`.
+    public func mlpHyperConnection(layer L: Int) throws
+        -> (hcNorm: TensorView, mixDown: TensorView, mixUp: TensorView,
+            blockInject: TensorView) {
+        let p = "\(layerPrefix).\(L).mlp_hyper_connection."
+        return (
+            hcNorm:      try qwen38Resident(p + "hc_norm.weight"),
+            mixDown:     try qwen38Resident(p + "input_mix_weight_down.weight"),
+            mixUp:       try qwen38Resident(p + "input_mix_weight_up.weight"),
+            blockInject: try qwen38Resident(p + "block_inject_weight.weight"))
+    }
+
+    /// The root `hyper_connection_mixer` (3 tensors — no `block_inject`): the
+    /// terminal collapse from the wide plane to the lm_head input.
+    public func hyperConnectionMixer() throws
+        -> (hcNorm: TensorView, mixDown: TensorView, mixUp: TensorView) {
+        let p = "language_model.hyper_connection_mixer."
+        return (
+            hcNorm:  try qwen38Resident(p + "hc_norm.weight"),
+            mixDown: try qwen38Resident(p + "input_mix_weight_down.weight"),
+            mixUp:   try qwen38Resident(p + "input_mix_weight_up.weight"))
+    }
+
+    // MARK: - Qwen3.8-Flash-Next: QSA indexer (full layers only)
+
+    /// Sparse-block indexer projections on a full layer:
+    /// `index_qk_proj` (int4) + the 1+w-baked per-head `q_layernorm` /
+    /// `k_layernorm` RMS scales. GDN layers carry no indexer — the lookup
+    /// throws `tensorNotFound` there.
+    public func indexerQKProj(layer L: Int) throws -> TensorView {
+        try qwen38Resident("\(layerPrefix).\(L).self_attn.indexer.index_qk_proj.weight")
+    }
+    public func indexerQLayernorm(layer L: Int) throws -> TensorView {
+        try qwen38Resident("\(layerPrefix).\(L).self_attn.indexer.q_layernorm.weight")
+    }
+    public func indexerKLayernorm(layer L: Int) throws -> TensorView {
+        try qwen38Resident("\(layerPrefix).\(L).self_attn.indexer.k_layernorm.weight")
+    }
+
+    // MARK: - Qwen3.8-Flash-Next: PLE n-gram head (pleLayerIndexes only)
+
+    /// The 0-based layer hosting the PLE n-gram block (`ple_layer_ids`,
+    /// config-1-based → minus 1). nil when the family carries no PLE.
+    public var pleLayerIndex: Int? {
+        config.isQwen3_8 ? config.pleLayerIndexes.first : nil
+    }
+
+    private func pleResident(_ suffix: String) throws -> TensorView {
+        guard config.isQwen3_8, let L = config.pleLayerIndexes.first else {
+            throw ModelError.tensorNotFound(name: "language_model.layers.?.ple.\(suffix)")
+        }
+        return try resident(name: "\(layerPrefix).\(L).ple.\(suffix)")
+    }
+
+    /// PLE depthwise conv1d — checkpoint [plane, 1, kernel], emitted squeezed
+    /// [plane * kernel] as raw FP16 (GDN conv policy).
+    public func pleConv1D() throws -> TensorView {
+        try pleResident("conv1d.weight")
+    }
+    /// PLE key/value projections from the gathered n-gram rows (int8).
+    public func pleKeyProj() throws -> TensorView {
+        try pleResident("key_proj.weight")
+    }
+    public func pleValueProj() throws -> TensorView {
+        try pleResident("value_proj.weight")
+    }
+    /// PLE grouped-RMS norms (1+w baked).
+    public func pleNormQuery() throws -> TensorView {
+        try pleResident("norm_query.weight")
+    }
+    public func pleNormKey() throws -> TensorView {
+        try pleResident("norm_key.weight")
+    }
+    public func pleNormConv() throws -> TensorView {
+        try pleResident("norm_conv.weight")
+    }
+    /// PLE host-hash metadata, raw I64 resident tensors: per-gram-position
+    /// multipliers, and per-head vocab offsets / vocab sizes (all
+    /// byte-exact — consumed CPU-side by the host hash, see docs).
+    public func pleLayerMultipliers() throws -> TensorView {
+        try pleResident("ple_embedding.layer_multipliers")
+    }
+    public func pleHeadsOffsets() throws -> TensorView {
+        try pleResident("ple_embedding.ngram_heads_offsets")
+    }
+    public func pleHeadsVocabSizes() throws -> TensorView {
+        try pleResident("ple_embedding.ngram_heads_vocab_sizes")
+    }
+
+    // MARK: - Qwen3.8-Flash-Next: PLE n-gram part files (lazy)
+
+    /// First touch of part file `part` opens it + verifies SHA-256; the
+    /// returned streamer is cached for the model lifetime (mirrors the
+    /// per-layer routed-expert streamers). Parts are raw BF16 row-major
+    /// `[ngramPartRows, ngramRowDim]`; row addressing/hash layout is the M3.3
+    /// PLE gather's job.
+    public func openPLEPart(_ part: Int) throws -> PLEPartStreamer {
+        try plePartsQueue.sync {
+            try openPLEPartLocked(part)
+        }
+    }
+
+    /// Best-effort overlap hook (mirrors `beginOpeningRoutedExpertStreamer`).
+    public func beginOpeningPLEPart(_ part: Int) {
+        nonisolated(unsafe) let model = self
+        plePartsQueue.async {
+            _ = try? model.openPLEPartLocked(part)
+        }
+    }
+
+    /// Test hook: how many part files have been opened so far.
+    public func plePartOpenCount() -> Int {
+        plePartsQueue.sync { plePartsBox.streamers.compactMap { $0 }.count }
+    }
+
+    private func openPLEPartLocked(_ part: Int) throws -> PLEPartStreamer {
+        guard config.isQwen3_8, part >= 0, part < plePartsBox.streamers.count else {
+            throw ModelError.indexCorrupt(
+                detail: "PLE part \(part) out of 0..<\(plePartsBox.streamers.count) (qwen3_8-only)")
+        }
+        if let existing = plePartsBox.streamers[part] {
+            return existing
+        }
+        let name = String(format: "ple_shards/shard_%03d.bin", part)
+        let partFD = try modelDirectory.openFile(name)
+        defer { close(partFD) }
+        guard let entry = manifest.files[name] else {
+            throw ModelError.missingFile(name: name)
+        }
+        let actualSize = try modelDirectory.fileSize(
+            fileDescriptor: partFD, relativePath: name)
+        guard actualSize == entry.size else {
+            throw ModelError.tensorSizeMismatch(
+                name: name, expected: entry.size, actual: actualSize)
+        }
+        if !plePartsBox.verified[part] {
+            switch integrityPolicy {
+            case .fullSha256:
+                try Sha256Verifier.verifyFile(fileDescriptor: partFD,
+                                              named: name,
+                                              expectedHex: entry.sha256)
+            case .sizeCheckTrustedReceipt:
+                break
+            }
+        }
+        let streamer = try PLEPartStreamer(
+            partIndex: part,
+            rows: config.ngramPartRows,
+            columns: config.ngramRowDim,
+            fileDescriptor: partFD)
+        plePartsBox.streamers[part] = streamer
+        plePartsBox.verified[part] = true
+        return streamer
     }
 
     // MARK: - Feed-forward norms
@@ -676,6 +897,31 @@ extension Model {
             }
         }
 
+        /// Raw (unquantized) 1-D resident tensor at fixed I64 — the Qwen3.8
+        /// PLE hash metadata (per-gram-position layer multipliers + per-head
+        /// vocab offsets/sizes, up to 45 bits) must round-trip byte-exact, so
+        /// it rides the resident file raw (dtype byte 4) rather than through a
+        /// float transform.
+        func requireInt64(_ name: String, count: Int) throws {
+            guard let entry = residentIndex.entries[name] else {
+                throw ModelError.indexCorrupt(detail: "missing required resident tensor \(name)")
+            }
+            guard let logicalCount = UInt32(exactly: count), logicalCount > 0 else {
+                throw ModelError.indexCorrupt(detail: "\(name) has invalid dimensions")
+            }
+            let expectedBytes = try checkedMultiply(
+                UInt64(logicalCount), UInt64(MemoryLayout<Int64>.size), field: name)
+            guard entry.dtype == FinchFormatV1.DType.i64.rawValue,
+                  entry.shape.0 == logicalCount,
+                  entry.shape.1 == 0, entry.shape.2 == 0, entry.shape.3 == 0,
+                  entry.sizeBytes == expectedBytes,
+                  entry.scaleOffset == 0, entry.scaleSize == 0,
+                  entry.biasOffset == 0, entry.biasSize == 0,
+                  entry.fileOffset % UInt64(MemoryLayout<Int64>.alignment) == 0 else {
+                throw ModelError.indexCorrupt(detail: "\(name) does not match the required I64 schema")
+            }
+        }
+
         func affineSizes(rows: Int,
                          columns: Int,
                          slot: ManifestQuantSlot,
@@ -751,18 +997,45 @@ extension Model {
                                      requireRaw: requireRaw,
                                      checkedIntMultiply: checkedIntMultiply)
         case ArchConfig.qwen3_8Family:
-            // A qwen3_8 manifest cannot pass schema validation until the M2
-            // engine milestone ships `validateQwen38Layers` (hyper-connection
-            // + QSA indexer + PLE resident set, no model.norm, embedding on
-            // the shallow prefix). Fail loudly instead of mis-running the
-            // Gemma validator.
-            throw ModelError.indexCorrupt(
-                detail: "qwen3_8 installs need the Flash-Next engine (M2); validateQwen38Layers is not implemented yet")
+            try validateQwen38Layers(config: config, quant: quant,
+                                     requireBF16: requireBF16,
+                                     requireAffine: requireAffine,
+                                     requireRaw: requireRaw,
+                                     requireInt64: requireInt64,
+                                     checkedIntMultiply: checkedIntMultiply)
         default:
             try validateGemma4Layers(config: config, quant: quant,
                                      requireBF16: requireBF16,
                                      requireAffine: requireAffine,
                                      checkedIntMultiply: checkedIntMultiply)
+        }
+
+        // PLE n-gram part files (qwen3_8): every `ple_shards/shard_%03d.bin`
+        // must be a manifest.files entry of exactly [ngramPartRows, 160] raw
+        // BF16. The parts have no resident-index slots — they stream from
+        // their own files via `openPLEPart` (schema documented in
+        // `validateQwen38Layers`).
+        if config.isQwen3_8 {
+            let partRows = config.ngramPartRows
+            let partColumns = config.ngramRowDim
+            guard partRows > 0, partColumns > 0 else {
+                throw ModelError.indexCorrupt(
+                    detail: "qwen3_8 preset must set the n-gram part geometry")
+            }
+            let expectedPartBytes = try checkedMultiply(
+                UInt64(partRows),
+                UInt64(partColumns * MemoryLayout<UInt16>.size),
+                field: "PLE part file")
+            for part in 0..<config.ngramPartCount {
+                let name = String(format: "ple_shards/shard_%03d.bin", part)
+                guard let entry = manifest.files[name] else {
+                    throw ModelError.missingFile(name: name)
+                }
+                guard entry.size == expectedPartBytes else {
+                    throw ModelError.tensorSizeMismatch(
+                        name: name, expected: expectedPartBytes, actual: entry.size)
+                }
+            }
         }
 
         let routedShapes: [(String, Int, Int)] = [
@@ -982,6 +1255,183 @@ extension Model {
                               config.numExperts, config.hiddenSize,
                               quant.router)
         }
+    }
+
+    /// Qwen3.8-Flash-Next resident schema — hyper-connection mixers in every
+    /// layer (they replace the block norms AND `model.norm`), full layers
+    /// (3,7,…) additionally carrying the QSA indexer, and layer 1 (0-based,
+    /// `pleLayerIndexes`) the PLE n-gram head. Names live on the shallow
+    /// `language_model.layers.<L>` prefix; every formula below mirrors the M1
+    /// repack transforms (docs/QWEN38_PORT.md + QwenRepackPlannerTests):
+    ///
+    ///   - `hc_norm` (per-layer + root mixer): raw BF16, `hyperConnectionDim`.
+    ///   - down/up mix + `block_inject`: int4 affine (`quant.attention`),
+    ///     [lowrank, plane] / [plane, lowrank] / [hc_count, plane].
+    ///   - full self-attn: doubled q [2·heads·headDim], k/v [kv·headDim], o
+    ///     [D, heads·headDim], q/k_norm [headDim] (1+w-baked payload, BF16
+    ///     wire) — the 3.6 full-layer set on the 3.8 prefix.
+    ///   - indexer: `index_qk_proj` int4 [(n+kv)·headDim, D], q/k_layernorm
+    ///     BF16 [headDim] (1+w-baked).
+    ///   - GDN: the 3.6-shaped nine (int8 five-projection set, raw fp32
+    ///     A_log/dt_bias, fp16 squeezed conv).
+    ///   - PLE head: key/value_proj int8 [plane|D, totalHeads·160], grouped
+    ///     norms BF16 [plane], conv fp16 squeezed [plane·kernel], I64
+    ///     multipliers [ngramSize] + offsets/vocab sizes [totalHeads] — plus
+    ///     the `ple_shards/shard_%03d.bin` manifest entries (raw BF16 parts,
+    ///     no resident slots).
+    private static func validateQwen38Layers(
+        config: ArchConfig,
+        quant: ManifestQuant,
+        requireBF16: (String, Int) throws -> Void,
+        requireAffine: (String, Int, Int, ManifestQuantSlot) throws -> Void,
+        requireRaw: (String, Int, FinchFormatV1.DType) throws -> Void,
+        requireInt64: (String, Int) throws -> Void,
+        checkedIntMultiply: (Int, Int, String) throws -> Int
+    ) throws {
+        let D = config.hiddenSize
+        let plane = config.hyperConnectionDim
+        let lowrank = config.hyperConnectionLowrank
+        let streamCount = config.hyperConnectionCount
+        guard plane > 0, lowrank > 0, streamCount > 0 else {
+            throw ModelError.indexCorrupt(
+                detail: "qwen3_8 preset must set the hyper-connection geometry")
+        }
+        let keyDim = try checkedIntMultiply(
+            config.linearNumKeyHeads, config.linearKeyHeadDim, "GDN key dim")
+        let valueDim = try checkedIntMultiply(
+            config.linearNumValueHeads, config.linearValueHeadDim, "GDN value dim")
+        let qkvDim = try checkedIntMultiply(keyDim, 2, "GDN q+k dim")
+            + valueDim
+        let convCount = try checkedIntMultiply(
+            qkvDim, config.linearConvKernelDim, "GDN conv weight")
+        // PLE gathered width: one 160-wide row per head, all heads:
+        // (ngramSize − 1) orders × headsPerNgram (16 × 160 = 2560 real).
+        let pleHeads = try checkedIntMultiply(
+            config.ngramSize - 1, config.headsPerNgram, "PLE head count")
+        let gatheredWidth = try checkedIntMultiply(
+            pleHeads, config.ngramRowDim, "PLE gathered width")
+
+        for layer in 0..<config.numLayers {
+            let prefix = "language_model.layers.\(layer)"
+            let isFull = config.fullAttentionLayerMask[layer] != 0
+
+            // Hyper-connection mixers (attn + mlp branches) on every layer.
+            for bundle in ["attn_hyper_connection", "mlp_hyper_connection"] {
+                try requireBF16("\(prefix).\(bundle).hc_norm.weight", plane)
+                try requireAffine("\(prefix).\(bundle).input_mix_weight_down.weight",
+                                  lowrank, plane, quant.attention)
+                try requireAffine("\(prefix).\(bundle).input_mix_weight_up.weight",
+                                  plane, lowrank, quant.attention)
+                try requireAffine("\(prefix).\(bundle).block_inject_weight.weight",
+                                  streamCount, plane, quant.attention)
+            }
+
+            if isFull {
+                // Full attention: doubled q (output gate), shared per-head
+                // q/k_norm scales [fullHeadDim] — the 3.6 full-layer set.
+                let queryRows = try checkedIntMultiply(
+                    config.numHeads, config.fullHeadDim, "layer \(layer) query")
+                let doubledQuery = try checkedIntMultiply(
+                    queryRows, 2, "layer \(layer) doubled query")
+                let kvRows = try checkedIntMultiply(
+                    config.numFullKVHeads, config.fullHeadDim,
+                    "layer \(layer) key/value")
+                let indexRows = try checkedIntMultiply(
+                    config.indexerNumHeads + config.indexerKVHeads,
+                    config.indexerHeadDim, "layer \(layer) indexer")
+
+                try requireAffine("\(prefix).self_attn.q_proj.weight",
+                                  doubledQuery, D, quant.attention)
+                try requireAffine("\(prefix).self_attn.k_proj.weight",
+                                  kvRows, D, quant.attention)
+                try requireAffine("\(prefix).self_attn.v_proj.weight",
+                                  kvRows, D, quant.attention)
+                try requireAffine("\(prefix).self_attn.o_proj.weight",
+                                  D, queryRows, quant.attention)
+                try requireBF16("\(prefix).self_attn.q_norm.weight", config.fullHeadDim)
+                try requireBF16("\(prefix).self_attn.k_norm.weight", config.fullHeadDim)
+
+                // QSA indexer (full layers only).
+                try requireAffine("\(prefix).self_attn.indexer.index_qk_proj.weight",
+                                  indexRows, D, quant.attention)
+                try requireBF16("\(prefix).self_attn.indexer.q_layernorm.weight",
+                                config.indexerHeadDim)
+                try requireBF16("\(prefix).self_attn.indexer.k_layernorm.weight",
+                                config.indexerHeadDim)
+            } else {
+                // GDN (linear-attention) layer, the 3.6-shaped nine.
+                try requireAffine("\(prefix).linear_attn.in_proj_qkv.weight",
+                                  qkvDim, D, quant.linearAttention)
+                try requireAffine("\(prefix).linear_attn.in_proj_z.weight",
+                                  valueDim, D, quant.linearAttention)
+                try requireAffine("\(prefix).linear_attn.in_proj_a.weight",
+                                  config.linearNumValueHeads, D,
+                                  quant.linearAttention)
+                try requireAffine("\(prefix).linear_attn.in_proj_b.weight",
+                                  config.linearNumValueHeads, D,
+                                  quant.linearAttention)
+                try requireAffine("\(prefix).linear_attn.out_proj.weight",
+                                  D, valueDim, quant.linearAttention)
+                try requireBF16("\(prefix).linear_attn.norm.weight",
+                                config.linearValueHeadDim)
+                try requireRaw("\(prefix).linear_attn.A_log",
+                               config.linearNumValueHeads, .fp32)
+                try requireRaw("\(prefix).linear_attn.dt_bias",
+                               config.linearNumValueHeads, .fp32)
+                try requireRaw("\(prefix).linear_attn.conv1d.weight",
+                               convCount, .fp16)
+            }
+
+            // Shared expert + sigmoid gate + router (both layer types).
+            try requireAffine("\(prefix).mlp.shared_expert.gate_proj.weight",
+                              config.intermediateSize, D,
+                              quant.sharedExpert)
+            try requireAffine("\(prefix).mlp.shared_expert.up_proj.weight",
+                              config.intermediateSize, D,
+                              quant.sharedExpert)
+            try requireAffine("\(prefix).mlp.shared_expert.down_proj.weight",
+                              D, config.intermediateSize,
+                              quant.sharedExpert)
+            try requireAffine("\(prefix).mlp.shared_expert_gate.weight",
+                              1, D, quant.sharedExpert)
+            try requireAffine("\(prefix).mlp.gate.weight",
+                              config.numExperts, D, quant.router)
+        }
+
+        // Root `hyper_connection_mixer` (no block_inject at the root — the
+        // terminal collapse feeds lm_head directly; there is no model.norm).
+        let root = "language_model.hyper_connection_mixer."
+        try requireBF16("\(root)hc_norm.weight", plane)
+        try requireAffine("\(root)input_mix_weight_down.weight",
+                          lowrank, plane, quant.attention)
+        try requireAffine("\(root)input_mix_weight_up.weight",
+                          plane, lowrank, quant.attention)
+
+        // PLE n-gram block on `pleLayerIndexes` only.
+        let pleConvElements = try checkedIntMultiply(
+            plane, config.pleConvKernelSize, "PLE conv weight")
+        for L in config.pleLayerIndexes {
+            guard L >= 0, L < config.numLayers else {
+                throw ModelError.indexCorrupt(
+                    detail: "pleLayerIndexes \(L) is outside 0..<\(config.numLayers)")
+            }
+            let prefix = "language_model.layers.\(L).ple."
+            try requireAffine("\(prefix)key_proj.weight",
+                              plane, gatheredWidth, quant.linearAttention)
+            try requireAffine("\(prefix)value_proj.weight",
+                              D, gatheredWidth, quant.linearAttention)
+            try requireBF16("\(prefix)norm_query.weight", plane)
+            try requireBF16("\(prefix)norm_key.weight", plane)
+            try requireBF16("\(prefix)norm_conv.weight", plane)
+            try requireRaw("\(prefix)conv1d.weight", pleConvElements, .fp16)
+            try requireInt64("\(prefix)ple_embedding.layer_multipliers",
+                             config.ngramSize)
+            try requireInt64("\(prefix)ple_embedding.ngram_heads_offsets",
+                             pleHeads)
+            try requireInt64("\(prefix)ple_embedding.ngram_heads_vocab_sizes",
+                             pleHeads)
+        }
+
     }
 
 }

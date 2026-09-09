@@ -11,8 +11,10 @@ enum FinchLayoutValidator {
     static func validate(path: String,
                                 layers: [LayerFilePlan],
                                 audit: RepackAudit? = nil) throws {
-        // Qwen 3.6 (256 experts × 40 layers) produces a ~22 MB layout.json.
-        let data = try Posix.readBoundedData(path, maximumBytes: 64 * 1024 * 1024)
+        // Qwen 3.6 (256 experts × 40 layers) produces a ~22 MB layout.json;
+        // Qwen 3.8 (512 experts × 48 layers) lands near 55 MB. 128 MiB keeps
+        // the bound generous without allowing unbounded reads.
+        let data = try Posix.readBoundedData(path, maximumBytes: 128 * 1024 * 1024)
         let layout: FinchPackedExpertsLayoutV1
         do { layout = try FinchPackedExpertsLayoutCodec.decode(data) }
         catch {

@@ -50,8 +50,12 @@ struct ArchInfo: Sendable, Equatable {
     let ngramSize: Int?
     let headsPerNgram: Int?
     let ngramRowDim: Int?
-    let ngramPartCount: Int?
-    let ngramPartRows: Int?
+    /// `split_ngram_parts` from the config, and `ngramPartRows` frozen from
+    /// the real snapshot's part-tensor rows. `var` because the planner
+    /// census-corrects both from the live shard headers (a synthetic snapshot
+    /// writes 4 parts × 32 rows, which no config key can express).
+    var ngramPartCount: Int?
+    var ngramPartRows: Int?
     let pleLayerIndexes: [Int]?
     let pleConvKernelSize: Int?
 

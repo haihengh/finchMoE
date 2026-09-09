@@ -32,6 +32,11 @@ package enum FinchFormatV1 {
         case bf16 = 1
         case fp16 = 2
         case fp32 = 3
+        /// Raw little-endian int64 (Qwen3.8 PLE hash constants — 45-bit
+        /// multipliers / per-head vocab metadata must survive byte-exact).
+        /// Never quantized; host-side reads only. Additive at minor 0: only
+        /// qwen3_8 installs carry byte 4, so older readers never see it.
+        case i64 = 4
     }
 }
 

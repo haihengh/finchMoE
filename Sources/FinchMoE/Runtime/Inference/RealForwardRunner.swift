@@ -1266,7 +1266,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         if writeFinalHead {
-            let finalNorm = model.finalNorm
+            guard let finalNorm = model.finalNorm else {
+                // Qwen3.8 has no model.norm — the M3 head path collapses the
+                // root hyper_connection_mixer instead of RMSNorm here.
+                throw ModelError.tensorNotFound(
+                    name: "language_model.model.norm.weight (qwen3_8 head path = root hyper_connection_mixer, M3)")
+            }
             let lm = model.lmHead
             guard let finalCB = ctx.queue.makeCommandBuffer() else {
                 throw ModelError.residentBufferWrapFailed
@@ -3233,7 +3238,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         // The fused head skips the vocab buffer and leaves a greedy token in
         // greedyTokenBuf; the logits path writes the complete vector.
-        let fNorm = model.finalNorm
+        guard let fNorm = model.finalNorm else {
+            // Qwen3.8 has no model.norm — the M3 head path collapses the
+            // root hyper_connection_mixer instead of RMSNorm here.
+            throw ModelError.tensorNotFound(
+                name: "language_model.model.norm.weight (qwen3_8 head path = root hyper_connection_mixer, M3)")
+        }
         let lm    = model.lmHead   // untied lm_head for Qwen 3.6; tied for Gemma 4
         let gFinalNorm: (MTLCommandBuffer) -> Void = { cb in
             self.rms.encodeBF16W(commandBuffer: cb, x: self.hidden,
