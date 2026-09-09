@@ -36,6 +36,21 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let linearKeyHeadDim: Int?
     public let linearValueHeadDim: Int?
     public let linearConvKernelDim: Int?
+    // Qwen3.8-Flash-Next fields (additive at minor 0; absent in Gemma / 3.6).
+    public let hyperConnectionCount: Int?
+    public let hyperConnectionLowrank: Int?
+    public let indexerNumHeads: Int?
+    public let indexerKVHeads: Int?
+    public let indexerHeadDim: Int?
+    public let indexerBudget: Int?
+    public let indexerCompressRatio: Int?
+    public let ngramSize: Int?
+    public let headsPerNgram: Int?
+    public let ngramRowDim: Int?
+    public let ngramPartCount: Int?
+    public let ngramPartRows: Int?
+    public let pleLayerIndexes: [Int]?
+    public let pleConvKernelSize: Int?
 }
 
 public struct ManifestQuantSlot: Decodable, Equatable, Sendable {
@@ -218,8 +233,9 @@ public enum ManifestReader {
                   actualMask.description,
                   e.fullAttentionLayerMask.description)
         // Gated DeltaNet / linear-attention fields are only present (and only
-        // required) for the Qwen3.6 family.
-        if e.modelFamily == "qwen3_6" {
+        // required) for the Qwen hybrid families (3.6 and 3.8-Flash-Next
+        // share the `linear_attn.*` machinery).
+        if e.isQwenHybrid {
             try check("modelFamily",       a.modelFamily ?? "",              e.modelFamily)
             try check("attnOutputGate",    a.attnOutputGate ?? false,        e.attnOutputGate)
             try check("linearNumKeyHeads", a.linearNumKeyHeads ?? 0,         e.linearNumKeyHeads)
@@ -227,6 +243,24 @@ public enum ManifestReader {
             try check("linearKeyHeadDim",  a.linearKeyHeadDim ?? 0,          e.linearKeyHeadDim)
             try check("linearValueHeadDim", a.linearValueHeadDim ?? 0,       e.linearValueHeadDim)
             try check("linearConvKernelDim", a.linearConvKernelDim ?? 0,     e.linearConvKernelDim)
+        }
+        // Qwen3.8-Flash-Next fields (hyper-connection / QSA indexer / PLE
+        // n-gram): required when (and only when) the family is qwen3_8.
+        if e.modelFamily == ArchConfig.qwen3_8Family {
+            try check("hyperConnectionCount",  a.hyperConnectionCount ?? 0,  e.hyperConnectionCount)
+            try check("hyperConnectionLowrank", a.hyperConnectionLowrank ?? 0, e.hyperConnectionLowrank)
+            try check("indexerNumHeads",       a.indexerNumHeads ?? 0,       e.indexerNumHeads)
+            try check("indexerKVHeads",        a.indexerKVHeads ?? 0,        e.indexerKVHeads)
+            try check("indexerHeadDim",        a.indexerHeadDim ?? 0,        e.indexerHeadDim)
+            try check("indexerBudget",         a.indexerBudget ?? 0,         e.indexerBudget)
+            try check("indexerCompressRatio",  a.indexerCompressRatio ?? 0,  e.indexerCompressRatio)
+            try check("ngramSize",             a.ngramSize ?? 0,             e.ngramSize)
+            try check("headsPerNgram",         a.headsPerNgram ?? 0,         e.headsPerNgram)
+            try check("ngramRowDim",           a.ngramRowDim ?? 0,           e.ngramRowDim)
+            try check("ngramPartCount",        a.ngramPartCount ?? 0,        e.ngramPartCount)
+            try check("ngramPartRows",         a.ngramPartRows ?? 0,         e.ngramPartRows)
+            try check("pleLayerIndexes",       a.pleLayerIndexes ?? [],      e.pleLayerIndexes)
+            try check("pleConvKernelSize",     a.pleConvKernelSize ?? 0,     e.pleConvKernelSize)
         }
     }
 }
@@ -266,7 +300,21 @@ private extension ManifestArch {
                   linearNumValueHeads: wire.linearNumValueHeads,
                   linearKeyHeadDim: wire.linearKeyHeadDim,
                   linearValueHeadDim: wire.linearValueHeadDim,
-                  linearConvKernelDim: wire.linearConvKernelDim)
+                  linearConvKernelDim: wire.linearConvKernelDim,
+                  hyperConnectionCount: wire.hyperConnectionCount,
+                  hyperConnectionLowrank: wire.hyperConnectionLowrank,
+                  indexerNumHeads: wire.indexerNumHeads,
+                  indexerKVHeads: wire.indexerKVHeads,
+                  indexerHeadDim: wire.indexerHeadDim,
+                  indexerBudget: wire.indexerBudget,
+                  indexerCompressRatio: wire.indexerCompressRatio,
+                  ngramSize: wire.ngramSize,
+                  headsPerNgram: wire.headsPerNgram,
+                  ngramRowDim: wire.ngramRowDim,
+                  ngramPartCount: wire.ngramPartCount,
+                  ngramPartRows: wire.ngramPartRows,
+                  pleLayerIndexes: wire.pleLayerIndexes,
+                  pleConvKernelSize: wire.pleConvKernelSize)
     }
 }
 

@@ -381,7 +381,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  rows: rows,
                                  cols: cols)
         }
-        let isQwen = cfg.modelFamily == "qwen3_6"
+        // Qwen hybrid (3.6 + 3.8): no post-FFN1 norm tensor, the router
+        // 1/sqrt(D) fold already happened at repack, and GDN recurrent state
+        // is runner-side. Gemma paths leave all of these empty / 1.0.
+        let isQwen = cfg.isQwenHybrid
         var sharedViews: [LayerSharedExpertProjections] = []
         sharedViews.reserveCapacity(cfg.numLayers)
         for L in 0..<cfg.numLayers {
@@ -777,7 +780,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         // Gemma-only tensor views; the Qwen branch fetches its own per layer.
-        let layerViews: [LayerPrefillQKVViews] = cfg.modelFamily == "qwen3_6"
+        let layerViews: [LayerPrefillQKVViews] = cfg.isQwenHybrid
             ? []
             : try (0..<cfg.numLayers).map { L in
             let isFull = cfg.fullAttentionLayerMask[L] != 0
@@ -807,11 +810,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         let D = cfg.hiddenSize
         let eps: Float = 1e-6
-        // Gemma scales embeddings by sqrt(hidden); Qwen 3.6 does NOT
-        // (qwen3_5_moe feeds embed_tokens straight into the layers — the
+        // Gemma scales embeddings by sqrt(hidden); the Qwen hybrid families do
+        // NOT (qwen3_5_moe and qwen4_exp feed embed_tokens straight into the
+        // layers — llama's build_inp_embd applies no scale for QWEN4EXP — the
         // residual would otherwise stay embed-dominated and the layer
         // contributions would be attenuated by 1/sqrt(D) every residual add).
-        let sqrtHidden = cfg.modelFamily == "qwen3_6" ? 1.0 : Float(D).squareRoot()
+        let sqrtHidden = cfg.isQwenHybrid ? 1.0 : Float(D).squareRoot()
         let t = tokens.count
         let emb = model.embedding
 
@@ -835,7 +839,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         for L in 0..<cfg.numLayers {
             model.beginOpeningRoutedExpertStreamer(layer: L)
-            if cfg.modelFamily == "qwen3_6" {
+            if cfg.isQwen3_6 {
                 cb = try await encodeQwenPrefillLayer(L, scratch: scratch,
                                                       startPosition: startPosition,
                                                       tokenCount: t, cb: cb)
@@ -2985,8 +2989,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         let D    = UInt32(cfg.hiddenSize)
         let eps: Float = 1e-6
-        // Qwen 3.6 does not scale embeddings (see prefillChunked).
-        let sqrtHidden = cfg.modelFamily == "qwen3_6" ? 1.0 : Float(cfg.hiddenSize).squareRoot()
+        // Qwen hybrid families do not scale embeddings (see prefillChunked).
+        let sqrtHidden = cfg.isQwenHybrid ? 1.0 : Float(cfg.hiddenSize).squareRoot()
         var pendingRoutedCommand: PendingRoutedCommand?
 
         // Embed lookup + sqrt(H) fused.
@@ -3005,7 +3009,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         for L in 0..<cfg.numLayers {
-            if cfg.modelFamily == "qwen3_6" {
+            if cfg.isQwen3_6 {
                 try await encodeQwenDecodeLayer(L, position: position,
                                                 pending: &pendingRoutedCommand)
                 continue

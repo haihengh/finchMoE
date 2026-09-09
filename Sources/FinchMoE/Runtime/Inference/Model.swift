@@ -90,15 +90,23 @@ public struct Model {
     // MARK: - Resident accessors
 
     public var embedding: TensorView {
-        try! resident(name: "language_model.model.embed_tokens.weight")
+        // Manifest names drop the HF root "model." prefix. Qwen3.6 nests the
+        // transformer under `model.language_model.model.*` (hence
+        // "language_model.model.embed_tokens.weight"); Qwen3.8-Flash-Next
+        // hangs the layer stack directly off the language model
+        // ("language_model.embed_tokens.weight").
+        try! resident(name: config.isQwen3_8
+            ? "language_model.embed_tokens.weight"
+            : "language_model.model.embed_tokens.weight")
     }
 
     /// Gemma 4 ties lm_head to the embedding (the transpose for the GEMV path
-    /// is the kernel's job). Qwen 3.6 has an untied `lm_head.weight`.
+    /// is the kernel's job). Qwen 3.6/3.8 have an untied root `lm_head.weight`.
     public var lmHead: TensorView {
         switch config.modelFamily {
-        case "qwen3_6": return try! resident(name: "lm_head.weight")
-        default:        return embedding
+        case ArchConfig.qwen3_6Family, ArchConfig.qwen3_8Family:
+            return try! resident(name: "lm_head.weight")
+        default: return embedding
         }
     }
 
@@ -115,55 +123,63 @@ public struct Model {
         try resident(name: "language_model.model.layers.\(L).self_attn.o_proj.weight")
     }
     /// Router weight. Gemma writer emits `.router.proj.weight` (no `.mlp.`
-    /// segment); Qwen 3.6 uses `.mlp.gate.weight`.
+    /// segment); Qwen 3.6/3.8 use `.mlp.gate.weight` on the family layer
+    /// prefix.
     public func router(layer L: Int) throws -> TensorView {
         switch config.modelFamily {
-        case "qwen3_6":
-            return try resident(name: "language_model.model.layers.\(L).mlp.gate.weight")
+        case ArchConfig.qwen3_6Family, ArchConfig.qwen3_8Family:
+            return try resident(name: "\(layerPrefix).\(L).mlp.gate.weight")
         default:
             return try resident(name: "language_model.model.layers.\(L).router.proj.weight")
         }
     }
     /// Shared-expert FFN. Gemma writer emits `.mlp.{gate,up,down}_proj.weight`
-    /// without a `.shared_expert.` segment; Qwen 3.6 keeps the full
+    /// without a `.shared_expert.` segment; Qwen 3.6/3.8 keep the full
     /// `.mlp.shared_expert.{gate,up,down}_proj.weight` names.
     public func sharedExpertGate(layer L: Int) throws -> TensorView {
         switch config.modelFamily {
-        case "qwen3_6":
-            return try resident(name: "language_model.model.layers.\(L).mlp.shared_expert.gate_proj.weight")
+        case ArchConfig.qwen3_6Family, ArchConfig.qwen3_8Family:
+            return try resident(name: "\(layerPrefix).\(L).mlp.shared_expert.gate_proj.weight")
         default:
             return try resident(name: "language_model.model.layers.\(L).mlp.gate_proj.weight")
         }
     }
     public func sharedExpertUp(layer L: Int) throws -> TensorView {
         switch config.modelFamily {
-        case "qwen3_6":
-            return try resident(name: "language_model.model.layers.\(L).mlp.shared_expert.up_proj.weight")
+        case ArchConfig.qwen3_6Family, ArchConfig.qwen3_8Family:
+            return try resident(name: "\(layerPrefix).\(L).mlp.shared_expert.up_proj.weight")
         default:
             return try resident(name: "language_model.model.layers.\(L).mlp.up_proj.weight")
         }
     }
     public func sharedExpertDown(layer L: Int) throws -> TensorView {
         switch config.modelFamily {
-        case "qwen3_6":
-            return try resident(name: "language_model.model.layers.\(L).mlp.shared_expert.down_proj.weight")
+        case ArchConfig.qwen3_6Family, ArchConfig.qwen3_8Family:
+            return try resident(name: "\(layerPrefix).\(L).mlp.shared_expert.down_proj.weight")
         default:
             return try resident(name: "language_model.model.layers.\(L).mlp.down_proj.weight")
         }
     }
 
-    // MARK: - Qwen 3.6 GDN (linear-attention) accessors
+    // MARK: - Qwen hybrid GDN (linear-attention) accessors
     //
     // GDN layers replace `self_attn.*` with `linear_attn.*`; the shared
     // expert gate is the sigmoid scalar `mlp.shared_expert_gate.weight` [1, D].
     // All are Qwen-only — touching them on a Gemma install throws
-    // `tensorNotFound`.
+    // `tensorNotFound`. Qwen3.8-Flash-Next keeps the 3.6 tensor names on a
+    // shallower prefix (`language_model.layers` vs `language_model.model.layers`).
+
+    /// Manifest prefix for one transformer layer's tensors, family-dependent
+    /// (see `embedding`). Shared by the GDN/self-attn/mlp accessors.
+    private var layerPrefix: String {
+        config.isQwen3_8 ? "language_model.layers" : "language_model.model.layers"
+    }
 
     private func qwenResident(_ suffix: String, layer L: Int) throws -> TensorView {
-        guard config.modelFamily == "qwen3_6" else {
-            throw ModelError.tensorNotFound(name: "language_model.model.layers.\(L).\(suffix) (qwen3_6-only)")
+        guard config.isQwenHybrid else {
+            throw ModelError.tensorNotFound(name: "\(layerPrefix).\(L).\(suffix) (qwen-only)")
         }
-        return try resident(name: "language_model.model.layers.\(L).\(suffix)")
+        return try resident(name: "\(layerPrefix).\(L).\(suffix)")
     }
 
     public func gdnInProjQKV(layer L: Int) throws -> TensorView {
@@ -710,24 +726,38 @@ extension Model {
         }
 
         try requireAffine(
-            "language_model.model.embed_tokens.weight",
+            config.isQwen3_8
+                ? "language_model.embed_tokens.weight"
+                : "language_model.model.embed_tokens.weight",
             rows: config.vocabSize,
             columns: config.hiddenSize,
             slot: quant.embedding)
-        try requireBF16("language_model.model.norm.weight", count: config.hiddenSize)
+        // Qwen3.8-Flash-Next has no `model.norm`: the shared final
+        // `hyper_connection_mixer` replaces the last RMSNorm.
+        if !config.isQwen3_8 {
+            try requireBF16("language_model.model.norm.weight", count: config.hiddenSize)
+        }
 
         // Per-layer tensor sets diverge by family: Gemma 4 has the
-        // q/k/v sandwich norms + router auxiliaries; Qwen 3.6 has GDN
+        // q/k/v sandwich norms + router auxiliaries; Qwen hybrid has GDN
         // (linear_attn.*) on the non-full layers, a doubled q_proj + output
         // gate on the full layers, and a sigmoid-gated shared expert. The
         // routed-expert packed layout below is family-independent.
         switch config.modelFamily {
-        case "qwen3_6":
+        case ArchConfig.qwen3_6Family:
             try validateQwen36Layers(config: config, quant: quant,
                                      requireBF16: requireBF16,
                                      requireAffine: requireAffine,
                                      requireRaw: requireRaw,
                                      checkedIntMultiply: checkedIntMultiply)
+        case ArchConfig.qwen3_8Family:
+            // A qwen3_8 manifest cannot pass schema validation until the M2
+            // engine milestone ships `validateQwen38Layers` (hyper-connection
+            // + QSA indexer + PLE resident set, no model.norm, embedding on
+            // the shallow prefix). Fail loudly instead of mis-running the
+            // Gemma validator.
+            throw ModelError.indexCorrupt(
+                detail: "qwen3_8 installs need the Flash-Next engine (M2); validateQwen38Layers is not implemented yet")
         default:
             try validateGemma4Layers(config: config, quant: quant,
                                      requireBF16: requireBF16,

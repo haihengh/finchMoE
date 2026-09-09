@@ -97,9 +97,10 @@ public final class KVCacheManager {
 
         for layer in 0..<config.numLayers {
             let isFull = config.fullAttentionLayerMask[layer] != 0
-            // Qwen 3.6 gated-delta-net layers store no KV: their recurrent
-            // state is runner-side. Skip the (large) allocation entirely.
-            let isLinear = !isFull && config.modelFamily == "qwen3_6"
+            // Qwen hybrid (3.6/3.8) gated-delta-net layers store no KV:
+            // their recurrent state is runner-side. Skip the (large)
+            // allocation entirely.
+            let isLinear = !isFull && config.isQwenHybrid
             let stride = isLinear ? 0 : (isFull ? fullStride : swaStride)
             let capacity = isLinear ? 0 : (ringEnabled && !isFull ? swaCapacity : maxContext)
             let length = max(1, capacity * stride)
