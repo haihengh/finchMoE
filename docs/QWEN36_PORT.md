@@ -6,7 +6,7 @@ runtime for Gemma 4 26B-A4B. This fork's goal is to run
 **Qwen 3.6 35B-A3B** (`model_type: qwen3_5_moe`) on the same engine. The
 engine has since been rebranded to **FinchMoE** (upstream TurboFieldfare
 base archived in `reference/`); the inherited docs in this directory describe
-its runtime (`.fqturbo` layout, expert streaming, prefill/decode phases) and
+its runtime (`.finch` layout, expert streaming, prefill/decode phases) and
 remain the reference for the engine mechanics. This document covers the Qwen
 3.6 model side and the port plan.
 
@@ -17,12 +17,12 @@ anything in this codebase.
 Status: **port complete through end-to-end quality + benchmarks
 (2026-09-05).** The engine is rebranded to **FinchMoE** — all
 `TurboFieldfare`/`Fieldfare`/`.gturbo` identifiers, module/target names, and
-the on-disk format are renamed (binary magic `FQTURBO`, extension `.fqturbo`);
+the on-disk format are renamed (binary magic `FINCH`, extension `.finch`);
 the pristine upstream TurboFieldfare base is archived in `reference/`
 (gitignored, like `models/`). The original `QwenFieldfare*` sources were
 deleted; the bf16 Qwen 3.6 checkpoint is present at
 `models/Qwen3.6-35B-A3B-bf16/` and the repacked int4 install at
-`models/Qwen3.6-35B-A3B-4bit.fqturbo/` (19.5 GB, load-validated). The
+`models/Qwen3.6-35B-A3B-4bit.finch/` (19.5 GB, load-validated). The
 Gated-DeltaNet unit is reference-checked against the `qwen3_5_moe`
 transformers source, the full Qwen decode-layer path and the chunked Qwen
 prefill path are wired into the forward pass (Gemma paths untouched), and
@@ -281,7 +281,7 @@ order that unblocks an end-to-end Qwen 3.6 run.
     `gate_up_proj [E, 2F, D]` split into the gate/up role slices
     (per-expert source base offset f·d·2 for the up half).
   - `Writing/QwenQuantizedWriter.swift` — row-by-row transforms through the
-    canonical `FQTurboQuantization` with scratch bounded by the widest row
+    canonical `FinchQuantization` with scratch bounded by the widest row
     (2048 elements); `ResidentWriter.encodeIndex` was refactored to a shared
     record-based core (Gemma behavior identical; `PerExpertTensorSlice`
     gained a defaulted `sourceBaseOffset`).
@@ -301,14 +301,14 @@ order that unblocks an end-to-end Qwen 3.6 run.
     green (only the pre-existing environment-driven AppModelTests flake
     fails).
   - **Real dry run DONE (2026-09-04):** `FinchMoERepack --input-snapshot
-    models/Qwen3.6-35B-A3B-bf16 --output models/Qwen3.6-35B-A3B-4bit.fqturbo`
+    models/Qwen3.6-35B-A3B-bf16 --output models/Qwen3.6-35B-A3B-4bit.finch`
     → **19.5 GB install** (`model_weights.bin`, 40 packed-expert layer files,
     layout.json, tokenizer sidecars, manifest, receipt). Three real-shape
     issues found and fixed by the run: the per-row scratch cap was 2048
     (widest real row is the 4096-column out_proj); per-row 1 KB pwrites were
     USB-bound (rows are now quantized in 64-row batches — three contiguous
     pwrites per batch — plus buffer-based quantizer overloads in
-    `FQTurboQuantization`); and the 16 MB `layout.json` read caps (repack
+    `FinchQuantization`); and the 16 MB `layout.json` read caps (repack
     validator + engine `PackedExpertsLayoutReader`) were raised to 64 MB (the
     256-expert × 40-layer layout is 22.5 MB). The run must use the
     **release** binary — debug Swift numeric loops are ~50× slower.
@@ -406,7 +406,7 @@ family, sampling softcap, and stop tokens are wired (see below).
   `Int()` conversion trapped (deterministic SIGTRAP mid-repack at ~289 MiB,
   int8-only because `/15` keeps int4 scales in normal range). Both codecs now
   quantize with direct `(w − bias) / scale` division (`scale == 0 → q = 0`).
-  Regression tests in `Tests/FinchMoEFormat/FQTurboQuantizationTests.swift`
+  Regression tests in `Tests/FinchMoEFormat/FinchQuantizationTests.swift`
   (3, passing). **Repack: exit 0, 20 014 114 816 bytes** (19.5 GiB install,
   `linearAttention` 8). Engine-load tests green on the fresh install
   (`QwenRealInstallLoadTests`, `QwenRepackEngineLoadTests`).
@@ -620,7 +620,7 @@ family, sampling softcap, and stop tokens are wired (see below).
      install's manifest hash (`sha256:41b93561…`, the bf16 snapshot's
      index hash); `.default` (Gemma) untouched. Added `shortDisplayName`/
      `shortName` for the status badge.
-   - `AppModelLocation` now prefers `models/Qwen3.6-35B-A3B-4bit.fqturbo`
+   - `AppModelLocation` now prefers `models/Qwen3.6-35B-A3B-4bit.finch`
      inside a package checkout when its `manifest.json` exists; otherwise
      behavior is unchanged (scratch/Gemma target, Application Support
      fallback, Gemma download flow intact).
@@ -644,6 +644,21 @@ family, sampling softcap, and stop tokens are wired (see below).
      the fixture now writes the slot. Two existing cancel-timing tests
      (`AppModelTests`) flake under load on this machine and pass isolated —
      pre-existing, untouched.
+
+8. **Reproduced end-to-end on a second machine — DONE (2026-09-08).**
+   Downloaded the public [`Qwen/Qwen3.6-35B-A3B`](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)
+   bf16 checkpoint (67 GB, 26 shards) fresh, repacked it with
+   `FinchMoERepack --input-snapshot` (19 GB `.finch` install, 352 non-text
+   tensors dropped), and ran the release CLI on a 24 GiB Apple M4 Pro
+   (macOS 26.6.2). Fixed a real bug this surfaced: `--verify-install` capped
+   `packed_experts/layout.json` at the old 16 MB Gemma-era limit, but Qwen's
+   256-expert/40-layer layout.json is ~22 MB — the runtime loader
+   (`PackedExpertsLayoutReader`) had already been raised to 64 MB for this,
+   `VerifiedInstallTool` had not; fixed to match. Post-fix, `--verify-install`
+   passes (49 files, 20,059,530,793 bytes). Benchmarks (greedy, `--verify
+   trusted-install`): decode **17.2-18.4 tok/s** at 256 new tokens, prefill
+   **43.8 tok/s** at 1,020 tokens, peak resident **~1.22 GiB**. Output
+   coherent. Numbers recorded in the README "At a glance" table.
 
 Known toolchain quirk (this machine, Xcode 26.6 / Swift 6.3.3): `swift test
 -c release` discovers 0 tests under `-O` (the swift-testing section is linked
@@ -685,7 +700,7 @@ side). Protocol that has kept this box alive since:
 - `Sources/FinchMoE*/`, `Tests/FinchMoE*/` — the working engine, rebranded
   from the TurboFieldfare base (upstream `drumih/turbo-fieldfare`). Modules,
   targets, product/binary names, and the on-disk format are all `FinchMoE`
-  / `FQTurbo` / `.fqturbo` now.
+  / `Finch` / `.finch` now.
 - `reference/` — a pristine snapshot of the upstream TurboFieldfare source
   taken before the rebrand (gitignored, like `models/`), kept for reference.
 - `Sources/QwenFieldfare*/` — the earlier Qwen3-30B-A3B engine, deleted.
@@ -713,7 +728,7 @@ side). Protocol that has kept this box alive since:
   `transformers/models/qwen3_5_moe/`). Do **not** use `models/qwen3_next/`
   as the reference — it is a different model family with similar-looking
   code.
-- [System design](SYSTEM_DESIGN.md) — `.fqturbo` layout, streaming,
+- [System design](SYSTEM_DESIGN.md) — `.finch` layout, streaming,
   prefill/decode phases, Metal conventions the new kernels must follow.
 - Kernel templates for the GDN unit:
   `Sources/FinchMoE/Metal/Primitives/rmsnorm.metal` (function-constant

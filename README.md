@@ -54,7 +54,7 @@ both from the same binary.
 - The engine ships as **FinchMoE** (renamed from FlashQwen when the two
   generations consolidated under this name, 2026-09-07): the module, target,
   product, and binary names all use `FinchMoE`, and the on-disk model format is
-  **`.fqturbo`** (binary magic `FQTURBO`) in place of the upstream `.gturbo`.
+  **`.finch`** (binary magic `FINCH`) in place of the upstream `.gturbo`.
 - The Gated-DeltaNet (linear-attention) decode unit — the piece with no Gemma
   analogue — is implemented and reference-checked against the
   `qwen3_5_moe` Transformers source (**Phase 1 of the port, done**).
@@ -67,7 +67,7 @@ both from the same binary.
   suite stays green. Every new kernel is reference-checked before wiring.
 - The port is **complete and closed (2026-09-07)**: Qwen chunked prefill
   (GDN conv + recurrent + full-attention chunk kernels), the bf16 →
-  `.fqturbo` quantizing repack, the interface surface (tokenizer family,
+  `.finch` quantizing repack, the interface surface (tokenizer family,
   ChatML, dual stop set, softcap-0 sampling), end-to-end quality (degenerate
   output resolved), benchmarks, a long-form quality pass, and a 4096-token
   context soak have all landed. The Qwen 3.6 install built and validated
@@ -106,18 +106,21 @@ press **Generate**.
 
 Measured 2026-09-05 on a 16 GB Apple Silicon Mac mini (macOS 26, Metal 4)
 with the engine's release CLI, greedy decode, on the local Qwen install
-(page cache warm).
+(page cache warm). Reproduced 2026-09-08 on a 24 GiB Apple M4 Pro
+(macOS 26.6.2) against a freshly repacked install from the public
+[`Qwen/Qwen3.6-35B-A3B`](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) bf16
+checkpoint.
 
-| Metric          | Qwen 3.6 35B-A3B (`qwen3_5_moe`) install                                    |
-| --------------- | --------------------------------------------------------------------------- |
-| Model           | 35B total parameters, ~3B active per token; 30 Gated-DeltaNet linear-attention layers + 10 full-attention; MoE 256 experts top-8 + shared |
-| Weights         | GDN projections int8; router int8; shared/routed experts affine 4-bit group 64; fp16 activations, fp32 Metal accumulators |
-| Storage         | ~20.0 GB installed text-only `.fqturbo` (streamed from disk during decode)   |
-| Memory          | ~1.1 GiB peak resident while decoding (out-of-core expert streaming; OS page cache additional) |
-| Decode          | ~10.5 tok/s greedy, flat over 200–300 tokens                                |
-| Prefill         | ~20 tok/s on long prompts (705 tok); short prompts pay SHA-256 verification unless `--verify trusted-install` (~1 s vs ~8 s) |
-| Hardware        | Apple Silicon Mac (validated on 16 GB RAM)                                   |
-| Platform        | macOS 26, Metal 4, Swift 6.3                                                |
+| Metric   | Qwen 3.6 35B-A3B (`qwen3_5_moe`) install                                                                                                |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Model    | 35B total parameters, ~3B active per token; 30 Gated-DeltaNet linear-attention layers + 10 full-attention; MoE 256 experts top-8 + shared |
+| Weights  | GDN projections int8; router int8; shared/routed experts affine 4-bit group 64; fp16 activations, fp32 Metal accumulators                 |
+| Storage  | ~20.0 GB installed text-only `.finch` (streamed from disk during decode)                                                           |
+| Memory   | ~1.1-1.2 GiB peak resident while decoding (out-of-core expert streaming; OS page cache additional)                                            |
+| Decode   | ~10.5 tok/s (16 GB Mac mini) / ~17-19 tok/s (24 GiB M4 Pro), greedy, flat over 100-300 tokens                                                                                             |
+| Prefill  | ~20 tok/s on long prompts (705 tok, Mac mini) / ~44 tok/s (1,020 tok, M4 Pro); short prompts pay SHA-256 verification unless `--verify trusted-install` (~1 s vs ~8 s)            |
+| Hardware | Apple Silicon Mac (validated on 16 GB and 24 GiB RAM)                                                                                                |
+| Platform | macOS 26, Metal 4, Swift 6.3                                                                                                              |
 
 Prompt length, generated length, page-cache state, and hardware all affect
 throughput. See [benchmarks](docs/BENCHMARKS.md) for the upstream Gemma
@@ -138,7 +141,7 @@ linear-attention layer.
 | 2  | Full-attention path for the 10 `F` layers (partial RoPE, output gate, chunked prefill) | done |
 | 3  | MoE: 256-expert routing and streamed execution (top-8, silu experts, shared expert 512, sigmoid gate) — decode and prefill | done |
 | 4  | Embedding + untied `lm_head` (vocab 248320), sampling, stop on 248044 | done |
-| 5  | Repack writer: bf16 shards → `.fqturbo` (int8 linear-attention + int4 affine experts + int8 router), Qwen manifest, SHA-256s | done |
+| 5  | Repack writer: bf16 shards → `.finch` (int8 linear-attention + int4 affine experts + int8 router), Qwen manifest, SHA-256s | done |
 | 6  | `ArchConfig` preset for Qwen3.6-35B-A3B; wire `fullAttentionLayerMask` and the GDN dims        | done   |
 | 7  | End-to-end: load → prefill → decode → sample; coherent generation vs the bf16 reference      | done   |
 
@@ -153,7 +156,7 @@ math, and the target-model spec live in
 
 FinchMoE provides a native Mac app, a command-line interface, and an
 experimental loopback OpenAI-compatible server. They share the same
-`.fqturbo` model directory, but only one model-owning product should run at a
+`.finch` model directory, but only one model-owning product should run at a
 time.
 
 The Swift package exposes six products:
@@ -190,8 +193,8 @@ swift build -c release
 
 Build the complete package so the app and its sibling decode service are both
 available. When launched from this checkout, the app prefers the repack-made
-Qwen 3.6 install at `models/Qwen3.6-35B-A3B-4bit.fqturbo` when it is present;
-otherwise it targets `scratch/gemma4.fqturbo`.
+Qwen 3.6 install at `models/Qwen3.6-35B-A3B-4bit.finch` when it is present;
+otherwise it targets `scratch/gemma4.finch`.
 
 #### Install the model
 
@@ -202,7 +205,7 @@ only ever *loaded* by the app — in-app download is Gemma-only.)
 
 The installer never materializes the full source checkpoint. It streams the
 required byte ranges from the pinned Hugging Face revision and repacks them
-directly into the `.fqturbo` layout as they arrive, which avoids a second full
+directly into the `.finch` layout as they arrive, which avoids a second full
 checkpoint on disk and keeps scratch memory bounded. The completed
 installation is accepted only after its manifest and file hashes validate.
 
@@ -221,13 +224,13 @@ and defaults.
 
 ### Command-line interface
 
-The CLI uses an existing `.fqturbo` installation. If you installed through the
-Mac app it is already at `scratch/gemma4.fqturbo`; otherwise install it from
+The CLI uses an existing `.finch` installation. If you installed through the
+Mac app it is already at `scratch/gemma4.finch`; otherwise install it from
 the command line:
 
 ```bash
 swift run -c release FinchMoERepack \
-  --output scratch/gemma4.fqturbo \
+  --output scratch/gemma4.finch \
   --overwrite
 ```
 
@@ -235,13 +238,13 @@ Continue a cancelled or interrupted download, or remove saved download state:
 
 ```bash
 swift run -c release FinchMoERepack \
-  --output scratch/gemma4.fqturbo \
+  --output scratch/gemma4.finch \
   --overwrite \
   --resume
 
 swift run -c release FinchMoERepack \
   --discard-partial \
-  --output scratch/gemma4.fqturbo
+  --output scratch/gemma4.finch
 ```
 
 Verify an existing installation without loading the model:
@@ -249,10 +252,10 @@ Verify an existing installation without loading the model:
 ```bash
 swift run -c release FinchMoERepack \
   --verify-install \
-  --input-fqturbo scratch/gemma4.fqturbo
+  --input-finch scratch/gemma4.finch
 ```
 
-The runtime accepts only a completed `.fqturbo` directory with a final
+The runtime accepts only a completed `.finch` directory with a final
 `manifest.json`.
 
 #### Instruction chat
@@ -267,7 +270,7 @@ Put chat messages in a JSON array and pass it with `--messages-file`:
 
 ```bash
 swift run -c release FinchMoECLI \
-  --model scratch/gemma4.fqturbo \
+  --model scratch/gemma4.finch \
   --messages-file messages.json
 ```
 
@@ -295,7 +298,7 @@ Build the server and point it at an installed model:
 ```bash
 swift build -c release --product FinchMoEServer
 .build/release/FinchMoEServer \
-  --model scratch/gemma4.fqturbo
+  --model scratch/gemma4.finch
 ```
 
 It listens on `http://127.0.0.1:8080/v1` and supports Chat Completions,
@@ -316,7 +319,7 @@ branch while those reads run, then combines the shared and routed outputs.
 Prompt prefill uses chunks of up to 128 tokens so one fetched expert can serve
 multiple rows. Generation repeats the routed layer loop one token at a time.
 The installer applies the same bounded-memory rule: it repacks remote ranges
-directly into `.fqturbo` without staging a full shard or tensor.
+directly into `.finch` without staging a full shard or tensor.
 
 The Qwen 3.6 GDN layers replace the KV cache on 30 of the 40 layers with a
 per-value-head recurrent state (a 2 MiB device buffer per layer, updated each
@@ -326,7 +329,7 @@ decode step). The decode path for both Qwen layer types —
 `RealForwardRunner` by `modelFamily` — is wired in and reference-checked
 against the `qwen3_5_moe` Transformers source.
 
-[System design](docs/SYSTEM_DESIGN.md) explains the `.fqturbo` layout, memory
+[System design](docs/SYSTEM_DESIGN.md) explains the `.finch` layout, memory
 ownership, prefill, router handoff, the `cb1`/`io`/`cb2` phases, the Metal
 kernels, and the correctness invariants.
 
@@ -334,8 +337,8 @@ kernels, and the correctness invariants.
 
 FinchMoE currently includes:
 
-- Remote streaming repack into the `.fqturbo` model format
-- The Qwen 3.6 35B-A3B `.fqturbo` install as the working reference model
+- Remote streaming repack into the `.finch` model format
+- The Qwen 3.6 35B-A3B `.finch` install as the working reference model
   (the upstream Gemma 4 26B-A4B path stays intact and runnable)
 - 4-bit MLX affine embedding, attention, shared-expert, and routed-expert
   weights, with an 8-bit router
