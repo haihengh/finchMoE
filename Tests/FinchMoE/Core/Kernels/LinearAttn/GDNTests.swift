@@ -262,13 +262,17 @@ import FinchMoEValidationSupport
 
     // MARK: - Gated RMSNorm (per value head)
     //
-    //   y[i] = x[i] * rsqrt(mean(x^2) + eps) * weight[i] * silu(z[i])
+    //   y[i] = x[i] * rsqrt(mean(x^2) + eps) * weight[i] * act(z[i])
     //
-    // `weight` is a single bf16 vector of length headDim shared across the V
-    // heads (Qwen3_5MoeRMSNormGated(head_v_dim)). The reference is a naive
-    // per-head fp32 loop — a different op-tree than the kernel's block reduce.
+    // act = silu on Qwen 3.5/3.6, sigmoid on Qwen 3.8 Flash-Next (`qwen4exp`
+    // `build_norm_gated` — the sigmoid is a function-constant PSO variant of
+    // the same kernel). `weight` is a single bf16 vector of length headDim
+    // shared across the V heads (Qwen3_5MoeRMSNormGated(head_v_dim)). The
+    // reference is a naive per-head fp32 loop — a different op-tree than the
+    // kernel's block reduce.
 
-    private static func runRMSNormGated(numValueHeads V: Int, headDim D: Int, seed: UInt64) throws {
+    private static func runRMSNormGated(numValueHeads V: Int, headDim D: Int,
+                                        seed: UInt64, sigmoidGate: Bool = false) throws {
         var rng = SeedTree(seed).key("gdn-norm-V\(V)-D\(D)")
         let xF32 = (0..<(V*D)).map { _ in rng.uniform(-2.0, 2.0) }
         let zF32 = (0..<(V*D)).map { _ in rng.uniform(-2.0, 2.0) }
@@ -295,15 +299,27 @@ import FinchMoEValidationSupport
         kernel.encodeRMSNormGated(
             commandBuffer: cb,
             x: xBuf, z: zBuf, weight: wBuf, out: oBuf,
-            numValueHeads: V, headDim: UInt32(D))
+            numValueHeads: V, headDim: UInt32(D),
+            activation: sigmoidGate ? .sigmoid : .silu)
         cb.commit(); cb.waitUntilCompleted()
 
         var ref = [Float](repeating: 0, count: V*D)
         for h in 0..<V {
             let xs = Array(xRef[(h*D)..<(h*D+D)])
             let zs = Array(zRef[(h*D)..<(h*D+D)])
-            let y = GDNRef.rmsNormGated(xs, weight: wRef, z: zs)
-            ref.replaceSubrange((h*D)..<(h*D+D), with: y)
+            if sigmoidGate {
+                let n = xs.count
+                var ss: Float = 0
+                for v in xs { ss += v * v }
+                let inv = 1.0 / (ss / Float(n) + 1e-6).squareRoot()
+                let y = (0..<n).map { i in
+                    xs[i] * inv * wRef[i] * (1.0 / (1.0 + exp(-zs[i])))
+                }
+                ref.replaceSubrange((h*D)..<(h*D+D), with: y)
+            } else {
+                let y = GDNRef.rmsNormGated(xs, weight: wRef, z: zs)
+                ref.replaceSubrange((h*D)..<(h*D+D), with: y)
+            }
         }
 
         let outActual = Fp16Buffer.read(oBuf, count: V*D)
@@ -317,6 +333,14 @@ import FinchMoEValidationSupport
     }
     @Test func gdn_rmsnorm_gated_smallShape() throws {
         try Self.runRMSNormGated(numValueHeads: 8, headDim: 32, seed: 0x402)
+    }
+    @Test func gdn_rmsnorm_gated_sigmoid_fullShape() throws {
+        try Self.runRMSNormGated(numValueHeads: 32, headDim: 128, seed: 0x411,
+                                 sigmoidGate: true)
+    }
+    @Test func gdn_rmsnorm_gated_sigmoid_smallShape() throws {
+        try Self.runRMSNormGated(numValueHeads: 8, headDim: 32, seed: 0x412,
+                                 sigmoidGate: true)
     }
 
     // MARK: - fp32 buffer helpers (state, g, beta are fp32)

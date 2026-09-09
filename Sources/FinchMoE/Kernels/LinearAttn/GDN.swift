@@ -11,10 +11,23 @@ import Metal
 ///   conv:  w `[C,4]`, state `[C,3]`, x/out `[C]`, newState `[C,3]`
 final class GDN {
 
+    /// The gated output norm's z-activation. Qwen 3.5/3.6 use silu; Qwen 3.8
+    /// Flash-Next uses sigmoid (`qwen4exp build_norm_gated`) — the sole GDN
+    /// numerical delta between the families.
+    enum RMSNormGateActivation {
+        case silu
+        case sigmoid
+    }
+
+    /// Function-constant index selecting the sigmoid gate (see gdn.metal).
+    /// 66 is free in the merged library — 60 is FC_ATTN_HEAD_DIM.
+    private static let sigmoidGateConstantIndex = 66
+
     private let psoConv: MTLComputePipelineState
     private let psoRecurrent: MTLComputePipelineState
     private let psoGate: MTLComputePipelineState
     private let psoNormGated: MTLComputePipelineState
+    private let psoNormGatedSigmoid: MTLComputePipelineState
     private let psoGateGEMV: MTLComputePipelineState
 
     init(context: MetalContext) throws {
@@ -22,6 +35,10 @@ final class GDN {
         self.psoRecurrent = try context.pipeline("gdn_recurrent")
         self.psoGate      = try context.pipeline("gdn_gate")
         self.psoNormGated = try context.pipeline("gdn_rmsnorm_gated")
+        self.psoNormGatedSigmoid = try context.pipeline(
+            "gdn_rmsnorm_gated",
+            constants: [MetalFunctionConstant(
+                index: Self.sigmoidGateConstantIndex, value: .bool(true))])
         self.psoGateGEMV  = try context.pipeline("gdn_gate_gemv")
     }
 
@@ -159,7 +176,8 @@ final class GDN {
     }
 
     /// Gated RMSNorm over each value head's vector:
-    /// `y = x * rsqrt(mean(x^2) + eps) * weight * silu(z)`. `x`/`z` are
+    /// `y = x * rsqrt(mean(x^2) + eps) * weight * act(z)` with act = silu
+    /// (`.silu`, 3.5/3.6) or sigmoid (`.sigmoid`, Qwen 3.8). `x`/`z` are
     /// `[numValueHeads * headDim]` fp16; `weight` is `[headDim]` bf16 shared
     /// across heads; `out` is `[numValueHeads * headDim]` fp16.
     func encodeRMSNormGated(
@@ -170,10 +188,12 @@ final class GDN {
         out: MTLBuffer,    outOffset: Int = 0,
         numValueHeads: Int,
         headDim: UInt32,
-        eps: Float = 1e-6
+        eps: Float = 1e-6,
+        activation: RMSNormGateActivation = .silu
     ) {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
-        enc.setComputePipelineState(psoNormGated)
+        enc.setComputePipelineState(
+            activation == .sigmoid ? psoNormGatedSigmoid : psoNormGated)
         enc.setBuffer(x,      offset: xOffset,      index: 0)
         enc.setBuffer(z,      offset: zOffset,      index: 1)
         enc.setBuffer(weight, offset: weightOffset, index: 2)

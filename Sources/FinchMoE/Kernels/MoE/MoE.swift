@@ -29,7 +29,11 @@ public struct MoEExpertOffsets {
 }
 
 final class MoE {
-    static let maxStreamedExperts = 8
+    /// Routed-expert streaming cap (select winners + arg-buffer blob slots).
+    /// Keep in lockstep with `kMaxStreamedExperts` in Metal/MoE/moe.metal:
+    /// 8 covers Gemma 4 / Qwen 3.6 (top-8); Qwen 3.8 Flash-Next routes
+    /// top-10 over 512 experts.
+    static let maxStreamedExperts = 10
 
     private static let realDecodeD: UInt32 = 2816
     private static let realDecodeF: UInt32 = 704
@@ -111,8 +115,10 @@ final class MoE {
             "moe_phase2_down_reduce_k8",
             constants: Self.realDecodeMoEConstants)
 
+        // One fp32 logit per expert; 512 = the largest expert count in the
+        // fleet (Qwen 3.8 Flash-Next, 512 experts top-10).
         guard let logits = context.device.makeBuffer(
-            length: 256 * MemoryLayout<Float>.stride,
+            length: 512 * MemoryLayout<Float>.stride,
             options: .storageModeShared),
               let phase1Function = context.library.makeFunction(
                 name: "moe_phase1_gate_up_act_u16load") else {
@@ -141,8 +147,9 @@ final class MoE {
                                    d: UInt32,
                                    topK: UInt32) {
         precondition(d.isMultiple(of: UInt32(Quantization.groupSize)))
-        precondition(numExperts <= 256)
-        precondition(topK == UInt32(Self.maxStreamedExperts))
+        precondition(numExperts <= 512, "router logits buffer holds 512 entries")
+        precondition(topK <= UInt32(Self.maxStreamedExperts))
+        precondition(topK <= numExperts)
 
         var expertCount = numExperts
         var dimension = d
@@ -165,6 +172,7 @@ final class MoE {
             encoder.endEncoding()
         }
 
+        var topKVar = topK
         if let encoder = commandBuffer.makeComputeCommandEncoder() {
             encoder.setComputePipelineState(
                 useSpecialized ? routerSelectK8SpecializedPSO : routerSelectK8PSO)
@@ -173,6 +181,7 @@ final class MoE {
             encoder.setBuffer(outIndices, offset: 0, index: 2)
             encoder.setBuffer(outWeights, offset: 0, index: 3)
             encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 4)
+            encoder.setBytes(&topKVar, length: MemoryLayout<UInt32>.stride, index: 5)
             encoder.dispatchThreadgroups(
                 MTLSize(width: 1, height: 1, depth: 1),
                 threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
@@ -313,6 +322,7 @@ final class MoE {
         validate(routedBlobs: routedBlobs, topK: topK)
         var dimension = d
         var intermediate = f
+        var topKVar = topK
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(
             useRealDecodeConstants(d: d, f: f)
@@ -328,6 +338,7 @@ final class MoE {
         encoder.setBuffer(y, offset: 0, index: 5)
         encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 6)
         encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 7)
+        encoder.setBytes(&topKVar, length: MemoryLayout<UInt32>.stride, index: 8)
         encoder.dispatchThreadgroups(
             MTLSize(width: Int(d), height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
@@ -335,7 +346,7 @@ final class MoE {
     }
 
     private func validate(routedBlobs: [MTLBuffer], topK: UInt32) {
-        precondition(topK == UInt32(Self.maxStreamedExperts))
+        precondition(topK <= UInt32(Self.maxStreamedExperts))
         precondition(routedBlobs.count == Int(topK))
     }
 

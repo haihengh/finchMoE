@@ -304,12 +304,19 @@ void gdn_gate_gemv(
     }
 }
 
+// The Qwen 3.8 Flash-Next delta (qwen4exp `build_norm_gated`): the gated
+// output norm's activation is a SIGMOID, not Qwen 3.5/3.6's silu. Function
+// constant FC_GDN_RMSNORM_GATE_SIGMOID selects sigmoid at pipeline build;
+// absent (the default 3.6 decode PSO) keeps the silu path bit-identical.
+constant bool FC_GDN_RMSNORM_GATE_SIGMOID [[function_constant(66)]];
+
 // ----------------------------------------------------------------------------
 // Gated RMSNorm over each value head's vector:
-//   y[i] = x[i] * rsqrt(mean(x[i]^2) + eps) * weight[i] * silu(z[i])
-// One 256-thread threadgroup per value head. `weight` is shared across the V
-// heads (Qwen3_5MoeRMSNormGated(head_v_dim)); x/z are [V][D] fp16. Mean-based
-// (not sum), matching `Qwen3_5MoeRMSNormGated.forward`.
+//   y[i] = x[i] * rsqrt(mean(x[i]^2) + eps) * weight[i] * act(z[i])
+// where act = silu (Qwen 3.5/3.6) or sigmoid (Qwen 3.8, per the constant
+// above). One 256-thread threadgroup per value head. `weight` is shared across
+// the V heads (Qwen3_5MoeRMSNormGated(head_v_dim)); x/z are [V][D] fp16.
+// Mean-based (not sum), matching `Qwen3_5MoeRMSNormGated.forward`.
 // ----------------------------------------------------------------------------
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void gdn_rmsnorm_gated(
@@ -339,10 +346,17 @@ void gdn_rmsnorm_gated(
     gdn_block_sum(acc, simd_lane, simd_group, simdgroups, partial);
     const float inv = rsqrt(partial[0] / float(D) + eps);
 
+    // Uniform per-pipeline branch: the 3.8 sigmoid delta never perturbs the
+    // 3.6 decode path (the constant is absent there).
+    const bool sigmoidGate =
+        is_function_constant_defined(FC_GDN_RMSNORM_GATE_SIGMOID) &&
+        FC_GDN_RMSNORM_GATE_SIGMOID;
+
     for (uint i = lid; i < D; i += lsize) {
         float xv = float(xh[i]);
         float wv = float(weight[i]);
         float zv = float(zh[i]);
-        oh[i] = half(xv * inv * wv * gdn_silu(zv));
+        float act = sigmoidGate ? 1.0f / (1.0f + exp(-zv)) : gdn_silu(zv);
+        oh[i] = half(xv * inv * wv * act);
     }
 }

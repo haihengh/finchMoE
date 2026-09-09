@@ -102,9 +102,22 @@ res_c += b * 2*sigmoid(inject_c / 4)        # inject divided by hc before sigmoi
 
 - Residual starts as **4 identical copies of the embedding** (`:324-326`); no
   embedding scale (`f_embd_norm` absent, same convention as 3.6).
-- Root `hyper_connection_mixer` (`hc_head_norm/down/up`, `:380-390`) is the
-  same mixer **without** inject: mean over streams → wide 10240 → `lm_head`.
-  There is **no `model.norm`** anywhere in 3.8.
+- Root `hyper_connection_mixer` (`hc_head_norm/down/up`, `:380-393`) is the
+  same mixer **without** inject (`nullptr` w_inject, `:382`): gate the normed
+  10240 plane exactly as a per-layer mix does, then collapse to the **mean
+  over the 4 streams → [2560]** — the collapsed vector *is* the mixer output
+  (`result_norm` `:385`, comment `:380` "the final mixer is the output norm")
+  and feeds `lm_head` directly. There is **no `model.norm`** anywhere in 3.8.
+- The RMS eps is the model's `f_norm_rms_eps` (`:232`) — the same 1e-6 the
+  GDN norms use (real `config.json` `text_config.rms_norm_eps` = 1e-6).
+- Norm-bake caveat: llama's in-file comment at `:231` ("the converter folded
+  each gamma to (1 + w)") is misleading for the HC norms — `qwen4exp.py`
+  bakes `+1` **only** for the five zero-centred gammas
+  (`ple.norm_key/query/conv`, `indexer.q_layernorm/k_layernorm`,
+  `qwen4exp.py:134-136`); `hc_norm`/`hc_head_norm` are copied plain. The
+  engine repack mirrors that exactly (raw BF16 hc_norm, `normOnePlusW` on
+  the five), so GGUF-side llama and engine-side Metal multiply the same
+  stored values.
 - 2·sigmoid centres the scatter weights on 1: a zero injection is a plain
   residual add (`:274` comment).
 - Weight shapes per mixer: `hc_norm` [10240], down [320,10240] row-major

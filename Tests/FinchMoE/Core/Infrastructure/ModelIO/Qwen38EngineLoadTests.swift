@@ -22,7 +22,7 @@ import FinchMoEFormat
 
     // MARK: - Toy model (mirrors SyntheticQwenSnapshot.Toy38, engine-valid)
 
-    private enum Toy38 {
+    fileprivate enum Toy38 {
         static let D = 64
         static let plane = 4 * D                        // hc_count 4
         static let hcLowrank = 64
@@ -336,7 +336,7 @@ import FinchMoEFormat
     // MARK: - Harness
 
     /// Repacks a fresh toy snapshot and returns the install directory.
-    private func makeInstall() async throws -> String {
+    fileprivate static func makeInstall() async throws -> String {
         let base = NSTemporaryDirectory() + "qwen38-engine-\(UUID().uuidString)"
         let src = base + "-src"
         let out = base + "-out"
@@ -349,8 +349,8 @@ import FinchMoEFormat
         return out
     }
 
-    private func loadToy38() async throws -> Model {
-        let directory = try await makeInstall()
+    fileprivate static func loadToy38() async throws -> Model {
+        let directory = try await Self.makeInstall()
         let device = try #require(MTLCreateSystemDefaultDevice())
         return try Model.load(directoryURL: URL(fileURLWithPath: directory),
                               device: device,
@@ -360,7 +360,7 @@ import FinchMoEFormat
     // MARK: - Load smoke + accessors
 
     @Test func toy38InstallLoadsAndValidates() async throws {
-        let out = try await makeInstall()
+        let out = try await Self.makeInstall()
         defer { try? FileManager.default.removeItem(atPath: out) }
 
         // The manifest family selects the BUILT-IN preset (production dims).
@@ -447,7 +447,7 @@ import FinchMoEFormat
     // MARK: - PLE part streaming
 
     @Test func plePartsStreamVerifiedRows() async throws {
-        let model = try await loadToy38()
+        let model = try await Self.loadToy38()
 
         let part = try model.openPLEPart(2)
         #expect(part.partIndex == 2)
@@ -490,7 +490,7 @@ import FinchMoEFormat
     }
 
     @Test func plePartsRejectInvalidRanges() async throws {
-        let model = try await loadToy38()
+        let model = try await Self.loadToy38()
         let part = try model.openPLEPart(1)
 
         // Row ranges outside 0..<rows throw the streamer's range error.
@@ -506,7 +506,7 @@ import FinchMoEFormat
     // MARK: - Load/stream negatives against the install on disk
 
     @Test func missingPartFileSurvivesLoadButFailsFirstOpen() async throws {
-        let out = try await makeInstall()
+        let out = try await Self.makeInstall()
         defer { try? FileManager.default.removeItem(atPath: out) }
         try FileManager.default.removeItem(
             atPath: out + "/ple_shards/shard_000.bin")
@@ -522,7 +522,7 @@ import FinchMoEFormat
     }
 
     @Test func truncatedPartFileFailsOnFirstOpen() async throws {
-        let out = try await makeInstall()
+        let out = try await Self.makeInstall()
         defer { try? FileManager.default.removeItem(atPath: out) }
         // One byte short of the manifest size; the schema (metadata) passes.
         let partPath = out + "/ple_shards/shard_001.bin"
@@ -538,7 +538,7 @@ import FinchMoEFormat
     }
 
     @Test func corruptedPartManifestSizeRejectedAtLoad() async throws {
-        let out = try await makeInstall()
+        let out = try await Self.makeInstall()
         defer { try? FileManager.default.removeItem(atPath: out) }
         // Patch the manifest's recorded size for one shard; validateRuntimeSchema
         // checks every ple_shards entry against ngramPartRows × 160 × 2.
@@ -564,7 +564,7 @@ import FinchMoEFormat
     // MARK: - Runtime-schema negatives (validateQwen38Layers paths)
 
     @Test func rejectsMissingRootMixerTensor() async throws {
-        let model = try await loadToy38()
+        let model = try await Self.loadToy38()
         var entries = model.residentIndex.entries
         entries.removeValue(forKey: "language_model.hyper_connection_mixer.hc_norm.weight")
         let index = ResidentIndex(header: model.residentIndex.header, entries: entries)
@@ -578,7 +578,7 @@ import FinchMoEFormat
     }
 
     @Test func rejectsCorruptPleMetadataAndAffineEntries() async throws {
-        let model = try await loadToy38()
+        let model = try await Self.loadToy38()
         let entries = model.residentIndex.entries
 
         // I64 hash metadata: wrong count, wrong dtype, and misaligned sizes
@@ -653,5 +653,167 @@ import FinchMoEFormat
             scaleSize: scaleSize ?? entry.scaleSize,
             biasOffset: entry.biasOffset,
             biasSize: entry.biasSize)
+    }
+}
+
+/// M3.1c decode-wiring gate: runs one decode step (position 0 — no prefill is
+/// required for the first token) through the REAL hybrid decode dispatch on
+/// the toy 3.8 install with the production kernels and the `qwenLayerDebugHook`,
+/// then checks the hyper-connection mechanics end to end:
+///   * plane init — hc.pre at layer 0 is hc exact copies of the embedding;
+///   * attn/ffn mixer stages — hc.mid/attnBlockOut/ffnBlockIn snapshots land
+///     and the attn combine mutated the plane (hc.mid ≠ hc.pre);
+///   * cross-layer persistence — hc.pre of layer L+1 == hc.post of layer L
+///     (the deferred-tail ffn combine is the only plane writer between);
+///   * the GDN sigmoid-gated body (layers 0-2) and the full-attention body
+///     (layer 3) both stay finite through the routed tail;
+///   * the head collapses the root hyper_connection_mixer over the plane and
+///     lm_head produces finite logits.
+/// A second test asserts chunked prefill is gated to an explicit error until
+/// M3.4 wires the 3.8 prefill bodies.
+@Suite struct Qwen38DecodeWiringTests {
+
+    private static let hc = 4
+
+    private static func makeRunner(_ model: Model) throws -> RealForwardRunner {
+        let context = try MetalContext()
+        return try RealForwardRunner(model: model, context: context,
+                                     maxContext: 256)
+    }
+
+    @Test func decodeStepWiring() async throws {
+        let model = try await Qwen38EngineLoadTests.loadToy38()
+        let D = Qwen38EngineLoadTests.Toy38.D
+        let hcDim = D * Self.hc
+        let vocab = Qwen38EngineLoadTests.Toy38.vocab
+        let valueDim = Qwen38EngineLoadTests.Toy38.valueDim   // 256
+        let qkvDim = Qwen38EngineLoadTests.Toy38.qkvDim       // 512
+        let numV = Qwen38EngineLoadTests.Toy38.linearValueHeads
+
+        let runner = try Self.makeRunner(model)
+        var captured: [String: [Float16]] = [:]
+        runner.qwenLayerDebugHook = { L, name, values in
+            captured["\(L)|\(name)"] = values
+        }
+        defer { runner.qwenLayerDebugHook = nil }
+
+        guard let logits = model.device.makeBuffer(
+            length: vocab * MemoryLayout<Float16>.size,
+            options: .storageModeShared) else {
+            Issue.record("logits alloc failed"); return
+        }
+        try await runner.produce(token: 7, position: 0, into: logits)
+
+        func snap(_ layer: Int, _ name: String) -> [Float16]? {
+            captured["\(layer)|\(name)"]
+        }
+
+        // --- Layer 0 (GDN): plane init == hc copies of the embedding. ---
+        let preL0 = try #require(snap(0, "preLayer"), "L0 preLayer hook")
+        let planeL0 = try #require(snap(0, "hc.pre"), "L0 hc.pre hook")
+        #expect(preL0.count == D && planeL0.count == hcDim,
+                "L0 snapshot sizes: preLayer \(preL0.count) plane \(planeL0.count)")
+        var planeIsReplicatedEmbedding = true
+        for c in 0..<Self.hc where planeIsReplicatedEmbedding {
+            for i in 0..<D where planeIsReplicatedEmbedding {
+                if planeL0[c * D + i] != preL0[i] {
+                    planeIsReplicatedEmbedding = false
+                }
+            }
+        }
+        #expect(planeIsReplicatedEmbedding,
+                "hc.pre(L0) must be hc exact copies of the embedding")
+
+        // --- Mixer stages land with the right widths. ---
+        for (name, count) in [("attnBlockIn", D), ("attnBlockOut", D),
+                              ("ffnBlockIn", D)] {
+            #expect(snap(0, name)?.count == count, "L0 \(name) snapshot")
+        }
+        #expect(snap(0, "hc.mid")?.count == hcDim, "L0 hc.mid snapshot")
+        #expect(snap(0, "qkvConv")?.count == qkvDim, "L0 qkvConv snapshot")
+        #expect(snap(0, "recurrentOut")?.count == valueDim,
+                "L0 recurrentOut snapshot")
+        #expect(snap(0, "gFloat")?.count == 2 * numV, "L0 gFloat snapshot")
+        #expect(snap(0, "recState")?.count
+                == numV * Qwen38EngineLoadTests.Toy38.linearValueHeadDim
+                * Qwen38EngineLoadTests.Toy38.linearValueHeadDim,
+                "L0 recState snapshot")
+
+        // The attn combine scattered oOut into the plane (hc.mid reads the
+        // plane between the two combines of layer 0).
+        let midL0 = try #require(snap(0, "hc.mid"), "L0 hc.mid hook")
+        #expect(zip(planeL0, midL0).contains(where: { $0 != $1 }),
+                "attn combine must mutate the plane (hc.mid ≠ hc.pre)")
+
+        // --- Cross-layer plane persistence: tail(L) == pre(L+1), exactly. ---
+        for L in 0..<3 {
+            let post = try #require(snap(L, "hc.post"), "L\(L) hc.post hook")
+            let nextPre = try #require(snap(L + 1, "hc.pre"),
+                                       "L\(L+1) hc.pre hook")
+            #expect(post == nextPre,
+                    "hc.pre(L+1) must equal hc.post(L): plane persists across the deferred tail")
+        }
+
+        // --- Full layer 3: dense body + per-head snapshots stay finite. ---
+        let fullLayer = 3
+        let qRows = Qwen38EngineLoadTests.Toy38.numHeads
+            * Qwen38EngineLoadTests.Toy38.fullHeadDim
+        for (name, count) in [("attnBlockIn", D), ("attnBlockOut", D),
+                              ("ffnBlockIn", D)] {
+            #expect(snap(fullLayer, name)?.count == count,
+                    "L\(fullLayer) \(name) snapshot")
+        }
+        #expect(snap(fullLayer, "qOutF")?.count == qRows,
+                "L3 qOutF snapshot")
+        #expect(snap(fullLayer, "gateF")?.count == qRows,
+                "L3 gateF snapshot")
+        // kF/vF land when an FP16 KV cache exists for the hybrid decode.
+
+        // --- Everything the layer loop and the routed tail wrote is finite. ---
+        var finiteCount = 0
+        for (key, values) in captured where !values.isEmpty {
+            if values.allSatisfy({ $0.isFinite }) { finiteCount += 1 } else {
+                Issue.record("non-finite snapshot at \(key)")
+            }
+        }
+        #expect(finiteCount == captured.count,
+                "all \(captured.count) snapshots must be finite")
+
+        // --- Root-mixer head: logits finite, argmax in range. ---
+        let lPtr = logits.contents().bindMemory(to: Float16.self,
+                                                capacity: vocab)
+        let lLogits = Array(UnsafeBufferPointer(start: lPtr, count: vocab))
+        #expect(lLogits.allSatisfy { $0.isFinite }, "head logits finite")
+        guard let best = lLogits.indices.max(by: { lLogits[$0] < lLogits[$1] })
+        else {
+            Issue.record("logits empty"); return
+        }
+        #expect((0..<vocab).contains(best), "argmax \(best) in vocab range")
+    }
+
+    @Test func prefillGateBlocksQwen38() async throws {
+        let model = try await Qwen38EngineLoadTests.loadToy38()
+        let runner = try Self.makeRunner(model)
+        let vocab = Qwen38EngineLoadTests.Toy38.vocab
+        guard let logits = model.device.makeBuffer(
+            length: vocab * MemoryLayout<Float16>.size,
+            options: .storageModeShared) else {
+            Issue.record("logits alloc failed"); return
+        }
+        let tokens = [Int32(3), Int32(4)]
+        do {
+            _ = try await runner.prefillChunked(
+                tokens: tokens[...],
+                startPosition: 0,
+                outputMode: .greedyIfAvailable,
+                config: .defaultChunked,
+                into: logits,
+                onProgress: { _ in })
+            Issue.record("expected qwen3_8 prefill to throw until M3.4")
+        } catch let e {
+            guard case PrefillError.modelFamilyUnsupported = e else {
+                Issue.record("unexpected prefill error: \(e)"); return
+            }
+        }
     }
 }
