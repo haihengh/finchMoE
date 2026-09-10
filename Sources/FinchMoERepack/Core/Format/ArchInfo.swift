@@ -58,6 +58,11 @@ struct ArchInfo: Sendable, Equatable {
     var ngramPartRows: Int?
     let pleLayerIndexes: [Int]?
     let pleConvKernelSize: Int?
+    /// The PLE n-gram hash's cut token (`eos_token_id`, 248044 on the real
+    /// config). Distinct from the *generation* stop set: it is what the hash
+    /// substitutes for a predecessor behind an EOS or before the sequence
+    /// start, so it must be the value the oracle hashes with.
+    let pleEosTokenId: Int?
 
     init(hiddenSize: Int, intermediateSize: Int, moeIntermediateSize: Int,
          numHeads: Int, numKVHeads: Int, numFullKVHeads: Int,
@@ -86,7 +91,8 @@ struct ArchInfo: Sendable, Equatable {
          ngramPartCount: Int? = nil,
          ngramPartRows: Int? = nil,
          pleLayerIndexes: [Int]? = nil,
-         pleConvKernelSize: Int? = nil) {
+         pleConvKernelSize: Int? = nil,
+         pleEosTokenId: Int? = nil) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
         self.moeIntermediateSize = moeIntermediateSize
@@ -129,6 +135,7 @@ struct ArchInfo: Sendable, Equatable {
         self.ngramPartRows = ngramPartRows
         self.pleLayerIndexes = pleLayerIndexes
         self.pleConvKernelSize = pleConvKernelSize
+        self.pleEosTokenId = pleEosTokenId
     }
 
     /// Model discriminator derived from the config. Used by the runtime to
@@ -238,6 +245,11 @@ struct ArchInfo: Sendable, Equatable {
         // the engine indexes layers from 0.
         let ple1Based = (tc["ple_layer_ids"] as? [Int]) ?? []
         let pleLayers = ple1Based.map { $0 - 1 }
+        // The converter takes `eos_token_id[-1]` when the config gives a list
+        // (`qwen4exp.py:_eos_token_id`), so a list must not silently read as
+        // nil here — that would disable the PLE cut instead of failing.
+        let pleEos = optInt("eos_token_id")
+            ?? (tc["eos_token_id"] as? [Int])?.last
 
         return ArchInfo(
             hiddenSize: try reqInt("hidden_size"),
@@ -285,6 +297,7 @@ struct ArchInfo: Sendable, Equatable {
             ngramPartCount: is38 ? ngramParts : nil,
             ngramPartRows: is38 ? 2_500_012 : nil,
             pleLayerIndexes: is38 ? (pleLayers.isEmpty ? [1] : pleLayers) : nil,
-            pleConvKernelSize: is38 ? pleConvK : nil)
+            pleConvKernelSize: is38 ? pleConvK : nil,
+            pleEosTokenId: is38 ? pleEos : nil)
     }
 }

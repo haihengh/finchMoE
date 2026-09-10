@@ -95,7 +95,7 @@ import FinchMoEValidationSupport
 
     @Test("rope matches a half-split rotate_half transcription (real geometry)")
     func rope_matchesRotateHalf() {
-        let idxDim = 128, nRot = 32, half = 16
+        let idxDim = 128, nRot = 64, half = 32
         var x = [Float](repeating: 0, count: idxDim)
         for i in 0..<nRot { x[i] = Float(i) / 16 }
         let pos = 10

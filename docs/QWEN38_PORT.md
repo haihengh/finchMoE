@@ -46,7 +46,7 @@ and excluded.
 | `model_type` | `qwen4_exp_text` |
 | Layers | 48: 36 × GDN (`linear_attention`) + 12 × full attention at 3,7,…,47 |
 | Hidden size | 2560 (LM), untied `lm_head` |
-| Full attention | 24 Q heads (dim 256, **q\|gate interleaved**), 2 KV heads, head_dim 256, partial rotary 0.25, θ = 1e7, MRoPE sections [11, 11, 10] |
+| Full attention | 24 Q heads (dim 256, **q\|gate interleaved**), 2 KV heads, head_dim 256, partial rotary 0.25 → **n_rot 64**, θ = 1e7, MRoPE sections [11, 11, 10] **in dim pairs** (= 32 pairs = the 64 rotary dims) |
 | GDN | 16 key heads, 48 value heads, head dim 128, conv kernel 4, `conv_dim = 10240`, **sigmoid** output gate (3.6 uses silu) |
 | Hyper-connection | 4 parallel streams × 2560 = 10240 plane, lowrank 320 |
 | QSA indexer | 4 Q heads + 1 shared K head, dim 128; budget (top-k) 2048, compress ratio 4 |
@@ -162,8 +162,13 @@ Key facts and engine consequences:
    rotated with the block position `b·r` — the **first cell of the block**,
    not the last (`:374`, all four MRoPE sections carry it). Queries are
    normed (`index_q_norm`) and rotated per token. The rope call is the same
-   `ggml_rope_multi(n_rot, sections, …)` used by full attention; the engine
-   reuses its 3.6-validated MRoPE implementation on 128-dim heads.
+   `ggml_rope_multi(n_rot, sections, …)` used by full attention, with the same
+   `n_rot` — the indexer does **not** scale the rotary width to its own head.
+   `n_rot` is the context's `hparams.n_rot(il)` = the GGUF's
+   `rope.dimension_count`, already carrying `partial_rotary_factor`
+   (`llama-model.cpp:1335-1338`, `llama-hparams.cpp:85-91`), so for the 125B it
+   is 0.25 × 256 = **64** and the 128-dim indexer head rotates its first half.
+   The engine reuses its 3.6-validated MRoPE implementation on those heads.
 6. **Scores**: `score[b, token] = relu-sum over the 4 q heads of
    q[head]·pooled[b]` — per-head relu **before** the sum (`:576-584`).
 7. **Selection width**: `width = min(n_kv, indexer_top_k + r − 1)` =
@@ -389,23 +394,51 @@ tokenizer maps `qwen4_exp` into the shared `.qwen3_6` family. Tests:
    `isQwen3_8` helpers only. fp32 `HyperConnectionRef` + real-shape tests
    before wiring; `qwenLayerDebugHook` "hc.pre/hc.post" snapshots.
 
-4. **M3.2 QSA indexer (decode).** Separate indexer raw-key timeline (128
-   per token, single stream per the analysis above) allocated like the KV
-   cache on full layers only; kernels: index q/k projection (q from rows
-   [:512], k from [512:]), raw-key store, 4-token block mean pool, RMS +
-   partial-rope at block position 4b, per-head relu-dot scores, top-(2048+3)
-   with the causal-masked candidate set, −INF mask with selected rows zeroed
-   feeding the existing full-attention path (dense fast path while
-   `n_kv ≤ 2050`); V rotation follows the 3.6 dense path. `QSAIndexerRef` +
+4. **M3.2 QSA indexer (decode).** Built. Separate indexer raw-key timeline
+   (128 per token) allocated like the KV cache on full layers only; kernels:
+   index q/k projection, raw-key store, 4-token block mean pool, RMS +
+   partial-rope at block position 4b, per-head relu-dot block scores, and a
+   cell-granular top-k over the causal-masked candidate set (the cut is by
+   *cell*, not by block — the `+r−1` slack only guarantees whole blocks fit);
+   V rotation follows the 3.6 dense path.
+
+   The selection reaches attention **by omission, not by an −INF mask**: a
+   dedicated `attention_decode_cells_partial` walks the selected cell list,
+   and an unselected cell never enters the running softmax maximum, so it
+   carries no mass. This runtime therefore needs no `[n_kv]` mask buffer, and
+   `encodeFull` — which never had a mask argument — is untouched; causality
+   is implicit in its `[0, seq_len)` scan. While the selection width covers
+   every causally-visible cell the ranking is skipped and the dense path
+   answers, which for `n_kv ≤ 2050` is the same answer. `QSAIndexerRef` +
    edge-case tests (window boundary, budget crossing, incomplete tail).
 
-5. **M3.3 PLE (decode).** Host hash (UInt64 wrap, EOS window reset) → row
-   addresses; ≤16-row gather through the part-file streamer; key/value
-   projections; grouped norms (1+w baked); sigmoid sign·√|s|/√2560 gate;
-   4-stream broadcast add; dilated causal depthwise conv (kernel 4, dilation
-   3, history 9, per-sequence state) + silu; both gated and conv terms add
-   into the layer-1 HC plane before its attn mixer. `PLERef` incl. reset and
-   hash overflow; toy-table tests.
+5. **M3.3 PLE (decode).** Built. Host hash (UInt64 wrap, EOS window reset) →
+   row addresses (`PLEHost`, CPU by necessity — ggml has no int64 xor to hash
+   with, and the gather is 16 rows × 320 B = 5 KB per token, so nothing is
+   cached and nothing is resident); ≤16-row gather through the part-file
+   streamer; key/value projections (int8, riding the `linearAttention`
+   manifest slot — `requireAffine(..., quant.linearAttention)` at load, so
+   `int8GEMV` is provably the right kernel); grouped norms; sigmoid
+   sign·√|s|/√2560 gate; 4-stream broadcast add; dilated causal depthwise conv
+   (kernel 4, dilation 3, history 9, per-sequence state) + silu; both gated and
+   conv terms add into the layer-1 HC plane **before its attn mixer** (llama's
+   `t_layer_inp = res_hc` → PLE → `build_hc_mix` order; in the runner:
+   `gPLE?(cb)` immediately ahead of `gAttnMix(cb)` in both layer bodies, so
+   `hc.pre` holds the pre-PLE plane and `hc.mid` the post-PLE one).
+   The window is an `ngramSize`-entry ring, not a token history: this engine
+   never rewinds the KV cache (`ServerPromptCache.match` only hits where
+   `kvPosition == kvBackedTokenIDs.count`), so a resume continues from the
+   cursor with the last tokens still in the ring — O(1) memory is what the
+   16 GB budget requires, and `PLEHostTests.windowStaysBounded` pins it.
+   `PLERef` (locked to `qwen4exp.cpp`) + `PLEReferenceTests`; `PLEHostTests`
+   cross-checks the ring against the reference's full-token-array window;
+   `pleHashMetadataAndGatherMatchTheCheckpoint` pins the int64 constant
+   round-trip and the row→part→byte gather against the repacked install;
+   `pleTermsLandInTheLayerOnePlane` proves the table's contribution lands
+   exactly there — two installs from one seed, one with zeroed parts (a
+   provable no-op), bit-identical up to `hc.pre` of layer 1 and different from
+   `hc.mid` on. Runner cost: ~490 KB of buffers at the real geometry, of which
+   two 180 KiB conv-state rings kept separate rather than aliased.
 
 6. **M3.4 prefill + M3.5 toy e2e.** Chunked counterparts (block-granular
    indexer over the chunk, conv-chunk separate buffers, scratch accounting,
@@ -443,6 +476,26 @@ bounded — keep `-c` small, no GPU offload); the repack reads 352 GB and
 writes ~145 GB on the same external volume — staged checkpoints with fsync
 per file class, kill-and-resume = rerun with stale-partial cleanup, never
 two heavy jobs at once.
+
+**2026-09-10:** a third panic of the same signature killed a `swift build`
+mid-M3.2d (boot 07:20, stale `.build/.lock` left behind, Spotlight then
+reindexed the external volume for ~40 min — load average 18). Three panics
+from the same cause means the protocol needs to be a tool, not a habit:
+`tools/memguard.sh` wraps any command, refuses to start below 60% free
+(the documented gate), and during the run kills the whole process group if
+free memory falls under 12%, the compressor passes 4 GB, or swap is in use
+— the three states that precede the watchdog hang. Builds and test runs go
+through it: `tools/memguard.sh -- swift build -j 3`.
+
+**Indexer footprint (matters at the real geometry).** `QSAIndexerState`
+allocates per full-attention layer: `rawKeys` = `maxContext · idxDim · 2`
+bytes, `pooled` = `⌈maxContext/r⌉ · idxDim · 2`, plus ~8 KB of
+`scores`/`cells`. At the engine's default `maxContext` 4096 that is ~16 MB
+across the 12 full layers — nothing. It scales linearly with context
+though, and at the model's full 262144 it is ~1.0 GB, i.e. it must be
+charged against the KV budget before anyone sets a long context on this
+box. The raw timeline is not windowed: every complete block is scored on
+every step, so there is nothing to shrink it to.
 
 ## Repository state
 

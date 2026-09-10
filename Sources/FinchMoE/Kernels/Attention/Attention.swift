@@ -28,6 +28,8 @@ final class Attention {
     private let psoPartial: MTLComputePipelineState
     private let psoGQAPartial: MTLComputePipelineState
     private let psoCombine: MTLComputePipelineState
+    /// QSA sparse partial — walks an explicit cell list instead of a range.
+    private let psoCellsPartial: MTLComputePipelineState
     private let psoPartialSWA: MTLComputePipelineState
     private let psoPartialFull: MTLComputePipelineState
     private let psoGQAPartialSWA: MTLComputePipelineState
@@ -65,6 +67,7 @@ final class Attention {
         self.psoPartial = try context.pipeline("attention_decode_partial")
         self.psoGQAPartial = try context.pipeline("attention_decode_gqa_swa_partial")
         self.psoCombine = try context.pipeline("attention_decode_combine")
+        self.psoCellsPartial = try context.pipeline("attention_decode_cells_partial")
         self.psoPartialSWA = try Self.specializedPipeline(context,
                                                           "attention_decode_partial",
                                                           headDim: 256,
@@ -217,6 +220,100 @@ final class Attention {
                     headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
                     seqLen: seqLen, kvStart: 0, scale: sc,
                     preferGQASWA: false)
+    }
+
+    /// Full attention restricted to an explicit ascending list of K/V cells —
+    /// the attention body under QSA's indexer mask.
+    ///
+    /// `encodeFull` attends to the dense range `[0, seqLen)`; this attends to
+    /// exactly the cells in `cells[0..<nCells)`, which the indexer selected.
+    /// Cells outside the list are absent from the running softmax maximum, so
+    /// they contribute no probability mass — the mask is applied by omission.
+    /// That is the engine's stand-in for llama's `-INF`-filled `kq_mask`,
+    /// which this runtime has no room for: a dense mask would be `[n_kv]` of
+    /// FP16, but only the attention body can apply it, and it is written
+    /// per query row.
+    ///
+    /// Pass 1 splits over the LIST (chunk c owns list entries
+    /// `[c·chunk_len, min((c+1)·chunk_len, n_cells))`), so pass 2 is the same
+    /// `attention_decode_combine` the dense path uses and nothing about the
+    /// merge narrows. The two paths share `chunkCount`, so a cell list of
+    /// `0..<n` with `nCells == seqLen` reproduces `encodeFull` instruction for
+    /// instruction (the partials are identical, hence the output is too).
+    ///
+    /// `cells` must be ascending; the kernel does not require it, but the
+    /// chunk split only partitions the list if it is, and out-of-order entries
+    /// would put different cells in different chunks between runs.
+    func encodeFullCells(commandBuffer: MTLCommandBuffer,
+                         q: MTLBuffer, qOffset: Int = 0,
+                         k: MTLBuffer, kOffset: Int = 0,
+                         v: MTLBuffer, vOffset: Int = 0,
+                         cells: MTLBuffer, cellsOffset: Int = 0,
+                         out: MTLBuffer, outOffset: Int = 0,
+                         headDim: UInt32,
+                         numQHeads: UInt32,
+                         numKVHeads: UInt32,
+                         nCells: UInt32,
+                         scale: Float? = nil) {
+        precondition(numQHeads % numKVHeads == 0,
+                     "numQHeads must be a multiple of numKVHeads for GQA")
+        precondition(headDim <= 512,
+                     "head_dim must be <= 512 (kernel scratch is sized for the full-attn case)")
+        precondition(Int(numQHeads) <= Self.maxQHeads,
+                     "numQHeads \(numQHeads) exceeds split-KV scratch (max \(Self.maxQHeads))")
+        precondition(Int(headDim) <= Self.maxHeadDim,
+                     "head_dim \(headDim) exceeds split-KV scratch (max \(Self.maxHeadDim))")
+        precondition(nCells > 0, "sparse full attention needs at least one selected cell")
+        let sc = scale ?? Self.defaultScale(headDim: headDim)
+
+        let nChunks = Self.chunkCount(effLen: Int(nCells))
+        let chunkLen = (Int(nCells) + nChunks - 1) / nChunks
+
+        guard let p1 = commandBuffer.makeComputeCommandEncoder() else { return }
+        p1.setComputePipelineState(psoCellsPartial)
+        p1.setBuffer(q,     offset: qOffset,     index: 0)
+        p1.setBuffer(k,     offset: kOffset,     index: 1)
+        p1.setBuffer(v,     offset: vOffset,     index: 2)
+        p1.setBuffer(mPartial, offset: 0, index: 3)
+        p1.setBuffer(dPartial, offset: 0, index: 4)
+        p1.setBuffer(oPartial, offset: 0, index: 5)
+        p1.setBuffer(cells, offset: cellsOffset, index: 6)
+        var hd = headDim, nq = numQHeads, nkv = numKVHeads
+        var nc = UInt32(nCells), cl = UInt32(chunkLen), nch = UInt32(nChunks)
+        var scv = sc
+        p1.setBytes(&hd,   length: MemoryLayout<UInt32>.size, index: 7)
+        p1.setBytes(&nq,   length: MemoryLayout<UInt32>.size, index: 8)
+        p1.setBytes(&nkv,  length: MemoryLayout<UInt32>.size, index: 9)
+        p1.setBytes(&nc,   length: MemoryLayout<UInt32>.size, index: 10)
+        p1.setBytes(&cl,   length: MemoryLayout<UInt32>.size, index: 11)
+        p1.setBytes(&nch,  length: MemoryLayout<UInt32>.size, index: 12)
+        p1.setBytes(&scv,  length: MemoryLayout<Float>.size,  index: 13)
+        let tgWidth = min(Self.threadsPerGroup,
+                          Int(psoCellsPartial.maxTotalThreadsPerThreadgroup))
+        p1.dispatchThreadgroups(
+            MTLSize(width: Int(numQHeads) * nChunks, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
+        p1.endEncoding()
+
+        guard let p2 = commandBuffer.makeComputeCommandEncoder() else { return }
+        let combinePSO = combinePipeline(headDim: headDim,
+                                         numQHeads: numQHeads,
+                                         numKVHeads: numKVHeads,
+                                         numChunks: nChunks)
+        p2.setComputePipelineState(combinePSO)
+        p2.setBuffer(mPartial, offset: 0, index: 0)
+        p2.setBuffer(dPartial, offset: 0, index: 1)
+        p2.setBuffer(oPartial, offset: 0, index: 2)
+        p2.setBuffer(out, offset: outOffset, index: 3)
+        var hd2 = headDim, nc2 = UInt32(nChunks)
+        p2.setBytes(&hd2, length: MemoryLayout<UInt32>.size, index: 4)
+        p2.setBytes(&nc2, length: MemoryLayout<UInt32>.size, index: 5)
+        let combineTGWidth = min(Self.threadsPerGroup,
+                                 Int(combinePSO.maxTotalThreadsPerThreadgroup))
+        p2.dispatchThreadgroups(MTLSize(width: Int(numQHeads), height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: combineTGWidth,
+                                                               height: 1, depth: 1))
+        p2.endEncoding()
     }
 
 

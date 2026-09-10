@@ -391,6 +391,34 @@ public struct Model {
         try pleResident("ple_embedding.ngram_heads_vocab_sizes")
     }
 
+    /// The three PLE hash-metadata vectors as host-side `UInt64`. They are raw
+    /// I64 in the resident file precisely so they round-trip byte-exact —
+    /// multipliers run up to 45 bits and are *not* representable as floats —
+    /// so this is a straight read of the loaded bytes, validated for length and
+    /// dtype at load (`requireInt64`). One multiplier per gram position, and
+    /// one `(offset, vocabSize)` pair per head.
+    public func pleHashConstants() throws -> (multipliers: [UInt64],
+                                              headOffsets: [UInt64],
+                                              headVocabSizes: [UInt64]) {
+        let heads = config.ngramSize > 1
+            ? (config.ngramSize - 1) * config.headsPerNgram : 0
+        func read(_ view: TensorView, _ count: Int, _ name: String) throws -> [UInt64] {
+            guard count > 0 else { return [] }
+            let base = UnsafeRawPointer(view.buffer.contents())
+                .advanced(by: Int(view.offset))
+            guard Int(view.length) >= count * MemoryLayout<Int64>.size,
+                  UInt(bitPattern: base) % UInt(MemoryLayout<Int64>.alignment) == 0 else {
+                throw ModelError.indexCorrupt(
+                    detail: "\(name) is not a readable I64 vector of \(count)")
+            }
+            let p = base.assumingMemoryBound(to: Int64.self)
+            return (0..<count).map { UInt64(bitPattern: p[$0]) }
+        }
+        return (try read(pleLayerMultipliers(), config.ngramSize, "layer_multipliers"),
+                try read(pleHeadsOffsets(), heads, "ngram_heads_offsets"),
+                try read(pleHeadsVocabSizes(), heads, "ngram_heads_vocab_sizes"))
+    }
+
     // MARK: - Qwen3.8-Flash-Next: PLE n-gram part files (lazy)
 
     /// First touch of part file `part` opens it + verifies SHA-256; the

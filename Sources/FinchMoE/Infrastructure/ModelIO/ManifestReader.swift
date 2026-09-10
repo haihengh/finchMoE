@@ -51,6 +51,7 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let ngramPartRows: Int?
     public let pleLayerIndexes: [Int]?
     public let pleConvKernelSize: Int?
+    public let pleEosTokenId: Int?
 }
 
 public struct ManifestQuantSlot: Decodable, Equatable, Sendable {
@@ -261,6 +262,7 @@ public enum ManifestReader {
             try check("ngramPartRows",         a.ngramPartRows ?? 0,         e.ngramPartRows)
             try check("pleLayerIndexes",       a.pleLayerIndexes ?? [],      e.pleLayerIndexes)
             try check("pleConvKernelSize",     a.pleConvKernelSize ?? 0,     e.pleConvKernelSize)
+            try check("pleEosTokenId",         a.pleEosTokenId ?? 0,         e.pleEosTokenId)
         }
     }
 }
@@ -314,7 +316,8 @@ private extension ManifestArch {
                   ngramPartCount: wire.ngramPartCount,
                   ngramPartRows: wire.ngramPartRows,
                   pleLayerIndexes: wire.pleLayerIndexes,
-                  pleConvKernelSize: wire.pleConvKernelSize)
+                  pleConvKernelSize: wire.pleConvKernelSize,
+                  pleEosTokenId: wire.pleEosTokenId)
     }
 }
 

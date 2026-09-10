@@ -81,6 +81,11 @@ public struct ArchConfig: Sendable, Equatable {
     public let pleLayerIndexes: [Int]
     /// PLE causal convolution kernel width (`ple_conv_kernel_size`, 4).
     public let pleConvKernelSize: Int
+    /// The PLE n-gram hash's cut token (`eos_token_id`, 248044). Not the
+    /// generation stop set: it is the token the hash substitutes for a
+    /// predecessor that is an EOS or does not exist, so it has to be the
+    /// checkpoint's own value rather than whatever the tokenizer stops on.
+    public let pleEosTokenId: Int
 
     public init(
         hiddenSize: Int,
@@ -124,7 +129,8 @@ public struct ArchConfig: Sendable, Equatable {
         ngramPartCount: Int = 0,
         ngramPartRows: Int = 0,
         pleLayerIndexes: [Int] = [],
-        pleConvKernelSize: Int = 0
+        pleConvKernelSize: Int = 0,
+        pleEosTokenId: Int = 0
     ) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
@@ -168,6 +174,7 @@ public struct ArchConfig: Sendable, Equatable {
         self.ngramPartRows = ngramPartRows
         self.pleLayerIndexes = pleLayerIndexes
         self.pleConvKernelSize = pleConvKernelSize
+        self.pleEosTokenId = pleEosTokenId
     }
 
     /// Canonical family strings written to `manifest.json -> arch.modelFamily`
@@ -329,7 +336,8 @@ public struct ArchConfig: Sendable, Equatable {
         ngramPartCount: 128,
         ngramPartRows: 2_500_012,
         pleLayerIndexes: [1],
-        pleConvKernelSize: 4
+        pleConvKernelSize: 4,
+        pleEosTokenId: 248044
     )
 
     private static func gemma4LayerMask() -> [UInt8] {

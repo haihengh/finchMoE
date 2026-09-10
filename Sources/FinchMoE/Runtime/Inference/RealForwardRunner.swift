@@ -163,6 +163,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     // Qwen 3.8 Flash-Next hyper-connection (mix/combine/plane-init kernels).
     private let hyperConnection: HyperConnection
 
+    // Qwen 3.8 Flash-Next PLE n-gram head — layer `pleLayerIndex` only, and
+    // nil on every other family. The four device kernels live in `ple`; the
+    // routing that decides *which* 16 rows of the 102.4 GB table this token
+    // reads is host-side (`pleHost`), because the hash is 64-bit wrap
+    // arithmetic and the table is pread'd, not resident.
+    private let ple: PLE?
+    private let pleHost: PLEHost?
+    private let pleGathered: MTLBuffer      // fp16 [gatheredWidth]
+    private let pleKey: MTLBuffer           // fp16 [hc·D]  = key_proj · gathered
+    private let pleKeyNormed: MTLBuffer     // fp16 [hc·D]
+    private let pleQueryNormed: MTLBuffer   // fp16 [hc·D]  = normed copy of the plane
+    private let pleValue: MTLBuffer         // fp16 [D]     = value_proj · gathered
+    private let pleGate: MTLBuffer          // fp32 [hc]    — one gate per stream
+    private let pleGated: MTLBuffer         // fp16 [hc·D]
+    private let pleConvIn: MTLBuffer        // fp16 [hc·D]  = normed gated value
+    private let pleConvOut: MTLBuffer       // fp16 [hc·D]
+    private let pleConvState: MTLBuffer     // fp16 [(kern-1)·dil, hc·D]
+    private let pleConvStateNext: MTLBuffer // fp16 [same]  — the roll's destination
+
     // GDN linear-attention projections (in_proj_qkv/z/a/b, out_proj): the
     // manifest linearAttention slot is 4 on Gemma / legacy installs and 8 on
     // the production Qwen build. At 8 the decode gate decomposes onto two
@@ -246,12 +265,39 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let hcGated: MTLBuffer
     private let hcLo: MTLBuffer
     private let hcInject: MTLBuffer
+    /// Qwen 3.8 Flash-Next QSA indexer: the kernels and the per-full-layer
+    /// key timelines they keep. Nil for every other family and for a Qwen 3.8
+    /// install whose manifest carries no indexer, in which case the full
+    /// layers keep the dense `encodeFull` path.
+    private let qsaIndexer: QSAIndexer?
+    private let qsaState: QSAIndexerState?
     /// Internal test hook: receives (layer, phase, values) snapshots —
     /// "preLayer" (the layer input hidden, before any compute), "postAttn"
     /// (the post_attention_layernorm output, pre-MoE) after the layer-head CB
     /// completes, and "postLayer" (the final hidden) after the tail. Nil in
     /// production — the copies only run when a hook is installed.
     internal var qwenLayerDebugHook: ((Int, String, [Float16]) -> Void)? = nil
+
+    /// Test/debug: the QSA cells a full layer's attention read on the last
+    /// decode step, and how many blocks of its indexer timeline are pooled.
+    /// Nil when the layer carries no indexer. Valid once the step's command
+    /// buffer has completed, which `produce` guarantees on return.
+    ///
+    /// An empty list is not an error: while the context is inside the
+    /// selection width the ranking never runs and attention takes the dense
+    /// path, reading every causally-visible cell — which is exactly what a
+    /// zero `cellCount` records.
+    internal func qsaSelection(layer L: Int) -> (cells: [UInt32], pooledBlocks: Int)? {
+        guard let st = qsaState, let li = st.index(ofLayer: L) else { return nil }
+        let lay = st.layers[li]
+        let written = Int(lay.cellCount.contents()
+            .bindMemory(to: UInt32.self, capacity: 1).pointee)
+        let count = min(written, st.capacity)
+        let ptr = lay.cells.contents()
+            .bindMemory(to: UInt32.self, capacity: max(st.capacity, 1))
+        return (Array(UnsafeBufferPointer(start: ptr, count: count)),
+                lay.pooledBlocks)
+    }
     private var prefillChunkState = PrefillChunkCommitState()
     private var prefillScratch: PrefillChunkScratchBuffers?
 
@@ -575,6 +621,68 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 self.hcLo      = try buf(1)
                 self.hcInject  = try buf(1)
             }
+
+            // Qwen 3.8 Flash-Next: the QSA indexer's per-full-layer key
+            // timelines. Only the raw and pooled keys persist across steps —
+            // they are the indexer's own cache — so this is the one Qwen 3.8
+            // structure `reset()` has to clear.
+            if let state = try QSAIndexerState(device: device, config: cfg,
+                                               maxContext: maxContext) {
+                self.qsaIndexer = try QSAIndexer(context: ctx)
+                self.qsaState = state
+            } else {
+                self.qsaIndexer = nil
+                self.qsaState = nil
+            }
+
+            // Qwen 3.8 Flash-Next PLE n-gram head. The host hash needs its
+            // three I64 constants up front; a 3.8 install whose PLE is
+            // malformed traps in the initializer rather than routing every
+            // token off the end of the table.
+            let pleConstants = try model.pleHashConstants()
+            if let host = try PLEHost(config: cfg,
+                                      multipliers: pleConstants.multipliers,
+                                      headOffsets: pleConstants.headOffsets,
+                                      headVocabSizes: pleConstants.headVocabSizes) {
+                self.pleHost = host
+                self.ple = try PLE(context: ctx)
+                let hcDim = cfg.hyperConnectionDim
+                let hcCount = cfg.hyperConnectionCount
+                let hist = (cfg.pleConvKernelSize - 1) * cfg.ngramSize
+                let gathered = cfg.ngramRowDim
+                    * (cfg.ngramSize - 1) * cfg.headsPerNgram
+                self.pleGathered     = try zeros(max(gathered, 1), 2, label: "qwen38.ple_gathered")
+                self.pleKey          = try zeros(hcDim, 2, label: "qwen38.ple_key")
+                self.pleKeyNormed    = try zeros(hcDim, 2, label: "qwen38.ple_key_normed")
+                self.pleQueryNormed  = try zeros(hcDim, 2, label: "qwen38.ple_query_normed")
+                self.pleValue        = try zeros(D, 2, label: "qwen38.ple_value")
+                self.pleGate         = try zeros(max(hcCount, 1), 4, label: "qwen38.ple_gate")
+                self.pleGated        = try zeros(hcDim, 2, label: "qwen38.ple_gated")
+                self.pleConvIn       = try zeros(hcDim, 2, label: "qwen38.ple_conv_in")
+                self.pleConvOut      = try zeros(hcDim, 2, label: "qwen38.ple_conv_out")
+                // The conv history IS persistent state (like the GDN conv
+                // states): `reset()` clears it, `resetTransientState()` must
+                // not. Zero at a sequence start is what makes the first
+                // `hist` tokens read zeros rather than wrap.
+                self.pleConvState     = try zeros(max(hist, 1) * hcDim, 2,
+                                                  label: "qwen38.ple_conv_state")
+                self.pleConvStateNext = try zeros(max(hist, 1) * hcDim, 2,
+                                                  label: "qwen38.ple_conv_state_next")
+            } else {
+                self.pleHost = nil
+                self.ple = nil
+                self.pleGathered     = try buf(1)
+                self.pleKey          = try buf(1)
+                self.pleKeyNormed    = try buf(1)
+                self.pleQueryNormed  = try buf(1)
+                self.pleValue        = try buf(1)
+                self.pleGate         = try buf(1, MemoryLayout<Float>.size)
+                self.pleGated        = try buf(1)
+                self.pleConvIn       = try buf(1)
+                self.pleConvOut      = try buf(1)
+                self.pleConvState     = try buf(1)
+                self.pleConvStateNext = try buf(1)
+            }
         } else {
             self.qkvConv  = try buf(1)
             self.zBuf     = try buf(1)
@@ -594,6 +702,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             self.hcGated   = try buf(1)
             self.hcLo      = try buf(1)
             self.hcInject  = try buf(1)
+            self.qsaIndexer = nil
+            self.qsaState   = nil
+            self.ple = nil
+            self.pleHost = nil
+            self.pleGathered      = try buf(1)
+            self.pleKey           = try buf(1)
+            self.pleKeyNormed     = try buf(1)
+            self.pleQueryNormed   = try buf(1)
+            self.pleValue         = try buf(1)
+            self.pleGate          = try buf(1, MemoryLayout<Float>.size)
+            self.pleGated         = try buf(1)
+            self.pleConvIn        = try buf(1)
+            self.pleConvOut       = try buf(1)
+            self.pleConvState     = try buf(1)
+            self.pleConvStateNext = try buf(1)
         }
     }
 
@@ -604,6 +727,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // also runs on continuation and must keep the state intact.
         for s in gdnRecurrentState { memset(s.contents(), 0, s.length) }
         for c in gdnConvState { memset(c.contents(), 0, c.length) }
+        // Same lifetime: the QSA indexer's key timeline is positional state,
+        // and `pooledBlocks` in particular must return to 0 or the next run
+        // would skip pooling the blocks it refills.
+        qsaState?.reset()
+        // And the PLE's: the window of recent tokens and the dilated-conv
+        // history are both positional, and a stale window would hash the new
+        // sequence's first tokens against the old one's last.
+        pleHost?.reset()
+        memset(pleConvState.contents(), 0, pleConvState.length)
+        memset(pleConvStateNext.contents(), 0, pleConvStateNext.length)
         resetTransientState()
     }
 
@@ -3199,6 +3332,95 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                           d: D, hc: hc, invHc: invHc)
         }
 
+        // The PLE n-gram block, on `pleLayerIndex` only (layer 1 — before that
+        // layer's attention mixer). Everything it touches is `hcPlane`: the
+        // query norm is taken over the plane *as the layer received it*, and
+        // both PLE terms are added into it afterwards, so this has to encode
+        // before `gAttnMix` normalizes the plane (`qwen4exp.cpp:332-334`).
+        let gPLE: ((MTLCommandBuffer) -> Void)?
+        if let ple, L == model.pleLayerIndex {
+            // The projections are validated against the manifest's
+            // `linearAttention` slot at load, so a 3.8 install whose PLE loads
+            // at all has them int8 — the same kernel, and the same reason, as
+            // the GDN projections (dequant noise here amplifies downstream).
+            guard let gemv = int8GEMV else {
+                preconditionFailure("Qwen 3.8 PLE requires the int8 GEMV path")
+            }
+            let keyP   = try model.pleKeyProj()
+            let valueP = try model.pleValueProj()
+            let normQ  = try model.pleNormQuery()
+            let normK  = try model.pleNormKey()
+            let normC  = try model.pleNormConv()
+            let convW  = try model.pleConv1D()
+            let gathered = UInt32(cfg.ngramRowDim * (cfg.ngramSize - 1)
+                                    * cfg.headsPerNgram)
+            let planeN = UInt32(hcDim)
+            // One stream's width: the gate's dot and both norm reductions run
+            // over a single 2560-wide stream, not the whole 10240 plane.
+            let invSqrtD = 1.0 / Float(D).squareRoot()
+            let kern = UInt32(cfg.pleConvKernelSize)
+            let dil  = UInt32(cfg.ngramSize)
+            gPLE = { [self] cb in
+                gemv.encode(commandBuffer: cb,
+                            weights: keyP.buffer, weightsOffset: Int(keyP.offset),
+                            scales: keyP.buffer, scalesOffset: Int(keyP.scaleOffset),
+                            biases: keyP.buffer, biasesOffset: Int(keyP.biasOffset),
+                            x: pleGathered, y: pleKey, m: planeN, n: gathered)
+                gemv.encode(commandBuffer: cb,
+                            weights: valueP.buffer, weightsOffset: Int(valueP.offset),
+                            scales: valueP.buffer, scalesOffset: Int(valueP.scaleOffset),
+                            biases: valueP.buffer, biasesOffset: Int(valueP.biasOffset),
+                            x: pleGathered, y: pleValue, m: D, n: gathered)
+                // Normed over one stream under a whole-plane gamma — the same
+                // operator, on the same layout, as the HC mixers' norms.
+                hyperConnection.encodeGroupedRMS(commandBuffer: cb,
+                                                 x: pleKey,
+                                                 gamma: normK.buffer,
+                                                 gammaOffset: Int(normK.offset),
+                                                 out: pleKeyNormed,
+                                                 d: D, hc: hc, eps: eps)
+                hyperConnection.encodeGroupedRMS(commandBuffer: cb,
+                                                 x: hcPlane,
+                                                 gamma: normQ.buffer,
+                                                 gammaOffset: Int(normQ.offset),
+                                                 out: pleQueryNormed,
+                                                 d: D, hc: hc, eps: eps)
+                ple.encodeGate(commandBuffer: cb,
+                               key: pleKeyNormed, query: pleQueryNormed,
+                               gate: pleGate,
+                               d: D, invSqrtD: invSqrtD, hc: hc)
+                ple.encodeGatedValue(commandBuffer: cb,
+                                     value: pleValue, gate: pleGate,
+                                     gated: pleGated,
+                                     d: D, hc: hc)
+                hyperConnection.encodeGroupedRMS(commandBuffer: cb,
+                                                 x: pleGated,
+                                                 gamma: normC.buffer,
+                                                 gammaOffset: Int(normC.offset),
+                                                 out: pleConvIn,
+                                                 d: D, hc: hc, eps: eps)
+                // A distinct `newState` buffer rather than an alias: the roll
+                // is only alias-safe when every thread reaches it, which the
+                // divisible real geometry satisfies but the kernel does not
+                // promise. The second buffer costs 180 KB.
+                ple.encodeConvUpdate(commandBuffer: cb,
+                                     weight: convW.buffer,
+                                     weightOffset: Int(convW.offset),
+                                     state: pleConvState,
+                                     x: pleConvIn,
+                                     out: pleConvOut,
+                                     newState: pleConvStateNext,
+                                     c: planeN, kernel: kern, dilation: dil)
+                ple.encodePlaneAdd(commandBuffer: cb,
+                                   plane: hcPlane,
+                                   gated: pleGated,
+                                   conv: pleConvOut,
+                                   n: planeN)
+            }
+        } else {
+            gPLE = nil
+        }
+
         if isFull {
             // Full-attention layer: q_proj is doubled (per-head q|gate pairs),
             // q/k per-head norms, partial RoPE (rotary dim = 0.25 * head_dim),
@@ -3260,17 +3482,144 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     rotaryDim: rotaryDim,
                     eps: eps)
             }
+            // MARK: QSA indexer (M3.2d)
+            //
+            // The sparse-block selector that masks this layer's attention.
+            // Nil when the install carries no indexer — every other family,
+            // and a Qwen 3.8 repack built without the indexer tensors — in
+            // which case attention keeps the dense path it has always had.
+            //
+            // It keeps its own key timeline rather than reusing the KV cache:
+            // `rawKeys` gains this token's key head every step, unnormed and
+            // unrotated, and the block timeline gains a pooled key on the step
+            // that completes each block. Both are per-layer state, because a
+            // layer's indexer chain and its attention share one command buffer
+            // while the previous layer's may still be in flight.
+            let qsaLayer: (state: QSAIndexerState, index: Int)? = qsaState.flatMap { st in
+                st.index(ofLayer: L).map { (state: st, index: $0) }
+            }
+            // True while every causally-visible cell is selected, i.e. the
+            // indexer has nothing left to drop: `ggml_top_k` returns exactly
+            // `min(n_kv, budget + r − 1)` cells, which for n_kv below the
+            // selection width is n_kv itself — every visible cell, all of them
+            // causal. The mask then degenerates to the plain causal one
+            // `encodeFull` builds from `seqLen`, so the ranking dispatches are
+            // skipped and attention takes its dense path. The timeline above
+            // still runs every step, so the pooled blocks are there on the
+            // step this stops being true.
+            let idxDense = (qsaLayer?.state.capacity ?? Int.max) >= position + 1
+            let gIndexer: ((MTLCommandBuffer) -> Void)?
+            if let qsaIndexer, let qsaLayer {
+                let idxQK = try model.indexerQKProj(layer: L)
+                let idxQGamma = try model.indexerQLayernorm(layer: L)
+                let idxKGamma = try model.indexerKLayernorm(layer: L)
+                let st = qsaLayer.state
+                let li = qsaLayer.index
+                let lay = st.layers[li]          // buffer references — stable across the step
+                let r = st.r
+                let pos = UInt32(position)
+                let nvis = UInt32(position + 1)
+                let idxDim = UInt32(st.idxDim)
+                let nHeads = UInt32(st.numQHeads)
+                let nRot = UInt32(st.nRot)
+                let budget = UInt32(st.budget)
+                // Block `position / r` is complete exactly when this cell ends
+                // it, which is why pooling is a per-step branch and not a loop.
+                let completesPool = (position % r) == (r - 1)
+                let poolBlock = UInt32(position / r)
+
+                gIndexer = { [self] cb in
+                    int4.encode(commandBuffer: cb,
+                                weights: idxQK.buffer, weightsOffset: Int(idxQK.offset),
+                                scales: idxQK.buffer, scalesOffset: Int(idxQK.scaleOffset),
+                                biases: idxQK.buffer, biasesOffset: Int(idxQK.biasOffset),
+                                x: normed,
+                                y: lay.qkProj,
+                                m: (nHeads + UInt32(st.numKVHeads)) * idxDim, n: D)
+                    // Query heads normed and partially roped at this position;
+                    // the key head copied verbatim into the timeline.
+                    qsaIndexer.encodeQKPost(commandBuffer: cb,
+                                            qk: lay.qkProj,
+                                            qGamma: idxQGamma.buffer,
+                                            qGammaOffset: Int(idxQGamma.offset),
+                                            qOut: lay.qIdx,
+                                            kRaw: lay.rawKeys,
+                                            pos: pos,
+                                            nHeads: nHeads,
+                                            idxDim: idxDim,
+                                            nRot: nRot,
+                                            theta: st.theta,
+                                            eps: st.eps)
+                    if completesPool {
+                        qsaIndexer.encodeBlockPoolNormRope(commandBuffer: cb,
+                                                           kRaw: lay.rawKeys,
+                                                           kGamma: idxKGamma.buffer,
+                                                           kGammaOffset: Int(idxKGamma.offset),
+                                                           pooled: lay.pooled,
+                                                           firstBlock: poolBlock,
+                                                           blockCount: 1,
+                                                           r: UInt32(r),
+                                                           idxDim: idxDim,
+                                                           nRot: nRot,
+                                                           theta: st.theta,
+                                                           eps: st.eps)
+                        st.advancePooledBlocks(li)
+                    }
+                    guard !idxDense else { return }
+                    // Score every block of the timeline against this query —
+                    // including the incomplete tail, which the bias makes
+                    // force-visible — then reduce the scores to the cells the
+                    // attention may read.
+                    qsaIndexer.encodeBlockScores(commandBuffer: cb,
+                                                 q: lay.qIdx,
+                                                 pooled: lay.pooled,
+                                                 scores: lay.scores,
+                                                 nHeads: nHeads,
+                                                 idxDim: idxDim,
+                                                 r: UInt32(r),
+                                                 nKv: nvis,
+                                                 pos: pos)
+                    qsaIndexer.encodeSelectCells(commandBuffer: cb,
+                                                 scores: lay.scores,
+                                                 cells: lay.cells,
+                                                 count: lay.cellCount,
+                                                 pos: pos,
+                                                 nKv: nvis,
+                                                 r: UInt32(r),
+                                                 budget: budget)
+                }
+            } else {
+                gIndexer = nil
+            }
             let gAttention: (MTLCommandBuffer) -> Void = { [self] cb in
-                attention.encodeFull(commandBuffer: cb,
-                                     q: qScratch,
-                                     k: kSlot.buffer, kOffset: 0,
-                                     v: vSlot.buffer, vOffset: 0,
-                                     out: attnOut,
-                                     headDim: headDim,
-                                     numQHeads: numQ,
-                                     numKVHeads: numKV,
-                                     seqLen: seqLen,
-                                     scale: nil)   // rsqrt(head_dim) — Qwen's scaling
+                if let qsaLayer, !idxDense {
+                    // The selection fills its width exactly, so the cell count
+                    // is `capacity` here without reading back the kernel's
+                    // counter — which would stall the command buffer for a
+                    // number the host can already prove.
+                    attention.encodeFullCells(commandBuffer: cb,
+                                              q: qScratch,
+                                              k: kSlot.buffer, kOffset: 0,
+                                              v: vSlot.buffer, vOffset: 0,
+                                              cells: qsaLayer.state.layers[qsaLayer.index].cells,
+                                              out: attnOut,
+                                              headDim: headDim,
+                                              numQHeads: numQ,
+                                              numKVHeads: numKV,
+                                              nCells: UInt32(qsaLayer.state.capacity),
+                                              scale: nil)   // rsqrt(head_dim)
+                } else {
+                    attention.encodeFull(commandBuffer: cb,
+                                         q: qScratch,
+                                         k: kSlot.buffer, kOffset: 0,
+                                         v: vSlot.buffer, vOffset: 0,
+                                         out: attnOut,
+                                         headDim: headDim,
+                                         numQHeads: numQ,
+                                         numKVHeads: numKV,
+                                         seqLen: seqLen,
+                                         scale: nil)   // rsqrt(head_dim) — Qwen's scaling
+                }
             }
             let gGate: (MTLCommandBuffer) -> Void = { [self] cb in
                 qwenFusions.encodeAttnOutputGate(commandBuffer: cb,
@@ -3287,8 +3636,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             y: oOut,
                             m: D, n: qRows)
             }
+            gPLE?(cb)
             gAttnMix(cb)
             gProj(cb)
+            gIndexer?(cb)
             gEpilogue(cb)
             gAttention(cb)
             gGate(cb)
@@ -3452,6 +3803,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                 m: D, n: valueDim)
                 }
             }
+            gPLE?(cb)
             gAttnMix(cb)
             gProj(cb)
             gConv(cb)
@@ -3624,6 +3976,22 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                     d: D,
                                                     hc: UInt32(cfg.hyperConnectionCount))
                 }
+            }
+        }
+
+        // PLE routing for this token, before any layer runs: the rows are a
+        // hash of the token being produced and its two predecessors, and the
+        // table rows are read straight off disk (16 × 320 B = 5 KB — nothing
+        // is cached, because the reads are hash-random and the table is
+        // 102.4 GB). Record first, exactly as llama's `set_input` runs after
+        // `apply_ubatch` has already stored the ubatch.
+        if let pleHost {
+            pleHost.record(position: position, token: token)
+            let gathered = try pleHost.gather(atPosition: position) { part in
+                try model.openPLEPart(part)
+            }
+            gathered.withUnsafeBytes { src in
+                memcpy(pleGathered.contents(), src.baseAddress!, src.count)
             }
         }
 

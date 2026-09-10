@@ -223,6 +223,126 @@ void attention_decode_partial(
     }
 }
 
+// ============================================================================
+// attention_decode_cells_partial — the same online-softmax partial as
+// attention_decode_partial, but the positions it walks come from an explicit
+// ascending cell list instead of the contiguous range [kv_start, seq_len).
+//
+// This is the body of QSA (query-selection attention): the indexer picks the
+// cells that may carry softmax mass and everything else is treated as -inf,
+// which is exactly what "not in the list" means here. A cell never enters the
+// running max, so it contributes no mass and no output — the mask is applied
+// by omission rather than by a large negative bias.
+//
+// Chunking is over the LIST, not the timeline: chunk c owns list entries
+// [c * chunk_len, min((c+1) * chunk_len, n_cells)). That keeps the split-KV
+// shape identical to the dense kernel, so pass 2 is the very same
+// attention_decode_combine — it merges num_chunks partials per head and has no
+// idea what a chunk's entries mean.
+//
+// Passing the cell list 0…n-1 with n_cells == seq_len reproduces
+// attention_decode_partial exactly, instruction for instruction: the same
+// chunk geometry yields the same j ranges, and cells[j] == j makes every
+// K/V row hit the same address as the dense p. That equivalence is what the
+// tests lean on.
+//
+// No ring mapping here. `attn_ring_slot` exists for the SWA FP16 ring, and the
+// indexer only runs on full-attention layers, which are unringed — applying it
+// would silently wrap a cell list into a smaller buffer.
+// ============================================================================
+
+[[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
+void attention_decode_cells_partial(
+    device const half*  Q             [[buffer(0)]],
+    device const half*  K             [[buffer(1)]],
+    device const half*  V             [[buffer(2)]],
+    device       float* m_out         [[buffer(3)]],   // [num_q_heads * num_chunks]
+    device       float* d_out         [[buffer(4)]],   // [num_q_heads * num_chunks]
+    device       float* o_out         [[buffer(5)]],   // [num_q_heads * num_chunks * head_dim]
+    device const uint*  cells         [[buffer(6)]],   // [n_cells], ascending
+    constant     uint&  head_dim      [[buffer(7)]],
+    constant     uint&  num_q_heads   [[buffer(8)]],
+    constant     uint&  num_kv_heads  [[buffer(9)]],
+    constant     uint&  n_cells       [[buffer(10)]],
+    constant     uint&  chunk_len     [[buffer(11)]],
+    constant     uint&  num_chunks    [[buffer(12)]],
+    constant     float& scale         [[buffer(13)]],
+    uint tg_id           [[threadgroup_position_in_grid]],
+    uint lid             [[thread_position_in_threadgroup]],
+    uint lsize           [[threads_per_threadgroup]],
+    uint simd_lane_id    [[thread_index_in_simdgroup]],
+    uint simd_group_id   [[simdgroup_index_in_threadgroup]],
+    uint simdgroups      [[simdgroups_per_threadgroup]]
+) {
+    threadgroup float q_smem[kAttnMaxHeadDim];
+    threadgroup float reduce_scratch[kAttnMaxSimdGroups];
+    threadgroup float bcast;
+    const uint HD = attn_fc_head_dim(head_dim);
+    const uint NQ = attn_fc_num_q_heads(num_q_heads);
+    const uint NKV = attn_fc_num_kv_heads(num_kv_heads);
+    const uint NC = attn_fc_num_chunks(num_chunks);
+
+    const uint q_head = tg_id / NC;
+    const uint chunk  = tg_id % NC;
+    const uint j_start = chunk * chunk_len;
+    uint j_end = j_start + chunk_len;
+    if (j_end > n_cells) { j_end = n_cells; }
+
+    const uint kv_head = q_head / (NQ / NKV);
+
+    device const half* Q_row = Q + uint(q_head) * HD;
+    for (uint i = lid; i < HD; i += lsize) {
+        q_smem[i] = float(Q_row[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    constexpr uint kPerThread = (kAttnMaxHeadDim + kAttnThreads - 1) / kAttnThreads;
+    float o_local[kPerThread];
+    for (uint k = 0; k < kPerThread; ++k) { o_local[k] = 0.0f; }
+
+    float m_run = -INFINITY;
+    float d_run = 0.0f;
+
+    // j_start can land past the end when num_chunks > n_cells (the tail chunks
+    // are empty); the loop simply does not execute and the partial is
+    // (-inf, 0, 0), which the combine weights to zero via e^{-inf}.
+    for (uint j = j_start; j < j_end; ++j) {
+        const uint p = cells[j];
+        device const half* K_row = K + (p * NKV + kv_head) * HD;
+        device const half* V_row = V + (p * NKV + kv_head) * HD;
+
+        float partial = 0.0f;
+        for (uint i = lid; i < HD; i += lsize) {
+            partial = fma(q_smem[i], float(K_row[i]), partial);
+        }
+        float s = block_reduce_sum(partial,
+                                   simd_lane_id, simd_group_id, simdgroups,
+                                   reduce_scratch, &bcast);
+        s *= attn_fc_scale(scale);
+
+        const float m_new = max(m_run, s);
+        const float alpha = attn_softmax_exp(m_run - m_new);
+        const float p_exp = attn_softmax_exp(s     - m_new);
+        d_run = d_run * alpha + p_exp;
+
+        uint slot = 0;
+        for (uint i = lid; i < HD; i += lsize) {
+            o_local[slot] = o_local[slot] * alpha + p_exp * float(V_row[i]);
+            slot += 1;
+        }
+        m_run = m_new;
+    }
+
+    const uint base = uint(q_head) * NC + chunk;
+    if (lid == 0) { m_out[base] = m_run; d_out[base] = d_run; }
+    device float* o_row = o_out + base * HD;
+    uint slot = 0;
+    for (uint i = lid; i < HD; i += lsize) {
+        o_row[i] = o_local[slot];
+        slot += 1;
+    }
+}
+
 [[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
 void attention_decode_gqa_swa_partial(
     device const half*  Q             [[buffer(0)]],

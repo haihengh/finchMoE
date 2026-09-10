@@ -20,13 +20,18 @@ import Metal
 /// bake, so they multiply as stored (no `1 + w` fold here).
 ///
 /// Geometry (real Qwen 3.8 Flash-Next): idxDim 128, nHeads 4, kvHeads 1,
-/// r 4, budget 2048, nRot 128·0.25 = 32, theta 1e7, eps 1e-6. The runner
+/// r 4, budget 2048, nRot 64 (the model's 256·0.25 rope width, inherited),
+/// theta 1e7, eps 1e-6. The runner
 /// passes every one of them from `ArchConfig`; the defaults below only make
 /// the real geometry's values visible at the call site.
 final class QSAIndexer {
 
-    /// Partial-rope width (`partialRotaryFactor` × `indexerHeadDim`).
-    static let defaultNRot = 32
+    /// Rotated leading dims of the indexer head — the *model's* rope width
+    /// (`partialRotaryFactor` × `fullHeadDim` = 64), not the indexer's own
+    /// head scaled. `build_qsa_top_k` passes the indexer's rope call the same
+    /// `n_rot` as the layer's full attention (qwen4exp.cpp:563/572 vs
+    /// :749/755), so the 128-dim indexer head rotates its first half.
+    static let defaultNRot = 64
     static let defaultTheta: Float = 1.0e7
     static let defaultEps: Float = 1e-6
 
