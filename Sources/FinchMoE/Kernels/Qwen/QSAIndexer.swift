@@ -43,11 +43,13 @@ final class QSAIndexer {
     private let psoQKPost: MTLComputePipelineState
     private let psoPool: MTLComputePipelineState
     private let psoScores: MTLComputePipelineState
+    private let psoSelect: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.psoQKPost  = try context.pipeline("idx_qk_post")
         self.psoPool    = try context.pipeline("idx_block_pool_norm_rope")
         self.psoScores  = try context.pipeline("idx_block_scores")
+        self.psoSelect  = try context.pipeline("idx_select_cells")
     }
 
     private static func width(_ pso: MTLComputePipelineState) -> Int {
@@ -199,5 +201,66 @@ final class QSAIndexer {
             MTLSize(width: nBlocks, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32 * Int(nHeads), height: 1, depth: 1))
         enc.endEncoding()
+    }
+
+    /// Turn the biased block scores into the cell indices the attention body
+    /// may attend to — the engine's `ggml_top_k` (`qwen4exp.cpp:606`) and the
+    /// selection half of `build_attn_qsa`'s mask (`:659-683`).
+    ///
+    /// One threadgroup, one dispatch: a 4-bit-digit radix select finds the
+    /// boundary block's score exactly, then the kept blocks' cells are written
+    /// ascending. `cells` must hold `min(nKv, budget + r - 1)` entries, which
+    /// is what `selectCapacity` returns; `count` receives how many were
+    /// written. In the dense regime (`nKv <= budget + r - 1`) every causal
+    /// cell is selected, so the list is just `0..<nKv` and nothing is ranked.
+    ///
+    /// The list is the answer because it doubles as the mask: selecting a cell
+    /// is exactly zeroing its row in llama's `-INF`-filled mask, so an
+    /// attention that walks this list sees `selected ∩ causal` and no more.
+    func encodeSelectCells(
+        commandBuffer: MTLCommandBuffer,
+        scores: MTLBuffer, scoresOffset: Int = 0,
+        cells: MTLBuffer, cellsOffset: Int = 0,
+        count: MTLBuffer, countOffset: Int = 0,
+        pos: UInt32,
+        nKv: UInt32,
+        r: UInt32,
+        budget: UInt32
+    ) {
+        precondition(r > 0, "the block ratio must be positive")
+        precondition(nKv > 0, "selection needs a non-empty timeline")
+        precondition(pos < nKv, "the query sits past the end of the timeline")
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(psoSelect)
+        enc.setBuffer(scores, offset: scoresOffset, index: 0)
+        enc.setBuffer(cells,  offset: cellsOffset,  index: 1)
+        enc.setBuffer(count,  offset: countOffset,  index: 2)
+        var posVar = pos
+        var nKvVar = nKv
+        var rVar = r
+        var budgetVar = budget
+        enc.setBytes(&posVar,    length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&nKvVar,    length: MemoryLayout<UInt32>.size, index: 4)
+        enc.setBytes(&rVar,      length: MemoryLayout<UInt32>.size, index: 5)
+        enc.setBytes(&budgetVar, length: MemoryLayout<UInt32>.size, index: 6)
+        // Deliberately one threadgroup: the radix select re-scans the score
+        // array across its passes, so spreading it over a grid would need a
+        // dispatch per digit, and twelve QSA layers per token make dispatch
+        // count the budget that matters.
+        enc.dispatchThreadgroups(
+            MTLSize(width: 1, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(
+                width: min(Self.selectThreads, psoSelect.maxTotalThreadsPerThreadgroup),
+                height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Threads the select kernel is dispatched with (`kIdxSelThreads`).
+    static let selectThreads = 1024
+
+    /// Entries `cells` must hold: llama's `width = min(n_kv, top_k + r - 1)`
+    /// (`qwen4exp.cpp:607`), the whole-block rounding of the token budget.
+    static func selectCapacity(nKv: Int, r: Int, budget: Int) -> Int {
+        min(nKv, budget + r - 1)
     }
 }
