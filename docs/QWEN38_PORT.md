@@ -440,12 +440,47 @@ tokenizer maps `qwen4_exp` into the shared `.qwen3_6` family. Tests:
    `hc.mid` on. Runner cost: ~490 KB of buffers at the real geometry, of which
    two 180 KiB conv-state rings kept separate rather than aliased.
 
-6. **M3.4 prefill + M3.5 toy e2e.** Chunked counterparts (block-granular
-   indexer over the chunk, conv-chunk separate buffers, scratch accounting,
+6. **M3.4 prefill + M3.5 toy e2e. Done** (M3.4 `7973f83`; M3.5 with this
+   commit). Chunked counterparts (block-granular indexer over the chunk,
+   conv-chunk separate buffers, scratch accounting,
    `prepareForContinuation`/reset clears PLE conv + indexer state);
-   layer-debug-hook replay on layers 1 and a full layer; deterministic toy
-   decode + prefill vs the fp32 replay within `fp16ChainedReduction`;
-   toy CLI smoke.
+   layer-debug-hook replay on layers 1 and a full layer
+   (`Qwen38DecodeWiringTests.prefillChunkMatchesDecodeSteps`); deterministic
+   toy decode + prefill vs the fp32 replay
+   (`Qwen38ToyReplayTests`, 50 and 45 stages compared, all inside
+   `fp16ChainedReduction`); toy CLI smoke (`Qwen38ToyCLISmokeTests`).
+   26 tests / 7 suites green, memory flat (72% free, 2.6 GB compressed peak).
+
+   Three findings M3.5 produced, all now encoded in the tests:
+
+   * **The CLI could not load any non-production geometry.** `Run.swift`
+     resolved the expected arch from the *family's built-in preset*
+     (`ManifestReader.detectPreset`), so an install declaring `qwen3_8` was
+     required to be 2560-wide — a deliberate cross-check that is right for a
+     real install and made the toy unloadable. `detectPreset` gained
+     `allowManifestArch`, driven by `FINCHMOE_EXPECT_ARCH=1` and defaulting
+     to off: the production path is byte-identical, and the override points
+     the check at the arch the manifest declares about itself (so it still
+     catches an internally inconsistent manifest, no longer a
+     wrong-but-consistent one). `.fullSha256` content hashes are a separate
+     check and still run.
+   * **Layer 3's last-row prefill chain does not converge, and cannot.**
+     The replay may only share a chunk's last row (`snapRow = t − 1`), never
+     rows 8…10 of layer 3's KV timeline, and the QSA sparse selection turns
+     that residue macroscopic — `3|attnBlockOut` reaches 0.498. The control:
+     the engine's *own* decode and chunk paths differ at the same stage,
+     element and magnitude (0.50025904 vs 0.49819666), seeded at layer 0
+     where `MoeTailRef`'s chunked reduce takes fp16 `routePartials` while
+     decode's fused reduce keeps fp32. `T38.prefillAmplified` pins the seven
+     measured stages with 2× headroom as a *subset* check — a stage that
+     joins the list fails — and the same stages hold at ≤1.9e-3 in decode,
+     where every row is anchorable. Closing it is an engine change.
+   * **The toy's first greedy token is `<|im_end|>`**, so the CLI run ends
+     `stop=eos new=1tok` with an empty stdout delta (a special token has no
+     detokenized text). The smoke therefore asserts on the stderr footer
+     (`prefill=13tok` — the sidecar tokenizer's 13 byte tokens, and proof the
+     engine loaded and prefilled) rather than on streamed text, which is a
+     property of the toy's seeded-noise argmax and not of the plumbing.
 
 7. **M4 real install + oracle.** Safe-run repack of
    `models/Qwen3.8-Flash-Next-bf16` → `models/Qwen3.8-Flash-Next-125B.finch`
@@ -457,9 +492,11 @@ tokenizer maps `qwen4_exp` into the shared `.qwen3_6` family. Tests:
    16 GB expect slow — it is a one-shot run and must be alone), dump
    logits; engine CLI same prompt + logits dump; bar: top-1 agreement
    ≥ 50/64 with top-5 overlap and rank-correlation sanity (engine int4
-   group-64 vs IQ4XS → argmax agreement, not exact logits). Tokenizer
-   `qwen3_8` case in the shared qwen family; `AppModelInstallationProbe`
-   descriptor; full suite both families.
+   group-64 vs IQ4XS → argmax agreement, not exact logits). The tokenizer
+   side is already closed — M0 mapped `qwen4_exp` into the shared `.qwen3_6`
+   family (see the M0 entry above), and 3.8 shares the 3.6 tokenizer
+   byte-for-byte, so no `qwen3_8` case is needed. Remaining here:
+   `AppModelInstallationProbe` descriptor; full suite both families.
 
 Deferred (documented here): PLE table quant; MTP; vision; indexer cache
 compaction. `docs/QWEN36_PORT.md` remains the GDN/rope/mrope authority and
