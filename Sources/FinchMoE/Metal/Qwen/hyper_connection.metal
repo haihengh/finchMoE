@@ -26,6 +26,13 @@ using namespace metal;
 // Activation storage is FP16 everywhere, with FP32 kernel internals (the
 // decode convention of the rest of the engine). The grouped-RMS gamma is raw
 // BF16 — HC norms are never 1+w-baked (HyperConnectionRef.groupedRMS).
+//
+// The `_seq` kernels are the chunked-prefill forms: same math, with a token
+// axis added to the plane. Every HC stage is per-token and reads nothing but
+// its own token's plane, so the batch is a pure grid extension and the two
+// forms agree bit for bit. `hc_silu_scale` and `hc_gate_mul` are already
+// elementwise over a flat `N` and need no `_seq` twin: a chunk calls them with
+// `N = T · lowrank` and `N = T · hc·D` respectively.
 // ============================================================================
 
 static inline float hc_silu(float x) { return x / (1.0f + exp(-x)); }
@@ -185,5 +192,134 @@ void hc_combine(
     device half* ps = plane + stream * D;
     for (uint i = lid; i < D; i += lsize) {
         ps[i] = half(float(ps[i]) + float(block[i]) * w);
+    }
+}
+
+// ============================================================================
+// hc_seq_plane_init — the chunked plane seed: plane[t][c*D + i] = hidden[t][i],
+// hc identical copies per token. Grid = T·hc·D threads.
+// ============================================================================
+[[kernel, max_total_threads_per_threadgroup(kHcThreads)]]
+void hc_seq_plane_init(
+    device const half* hidden  [[buffer(0)]],  // [T, D] FP16
+    device       half* plane   [[buffer(1)]],  // [T, hc*D] FP16
+    constant     uint& D       [[buffer(2)]],
+    constant     uint& HC      [[buffer(3)]],
+    uint tid                   [[thread_position_in_grid]]
+) {
+    const uint i = tid % D;
+    const uint c = (tid / D) % HC;
+    const uint t = tid / (D * HC);
+    plane[(t * HC + c) * D + i] = hidden[t * D + i];
+}
+
+// ============================================================================
+// hc_seq_grouped_rms — `hc_grouped_rms` over a chunk. One threadgroup per
+// (stream, token), laid out flat: `tgid = token·HC + stream`, so the grid is
+// HC·T wide and one 1-D dispatch covers the chunk. (A uint2 grid axis cannot
+// be mixed with the scalar thread indices the reduction needs — Metal requires
+// the input declarations to be all-scalar or all-matching-vector — so the
+// decomposition is done here rather than by the grid.)
+//
+// The gamma is shared by every token ([hc*D] regardless of T) and the plane
+// row of token t starts at t·hc·D, so the body is the decode kernel's with the
+// base offset moved.
+// ============================================================================
+[[kernel, max_total_threads_per_threadgroup(kHcThreads)]]
+void hc_seq_grouped_rms(
+    device const half*   x      [[buffer(0)]],   // [T, hc*D] FP16
+    device const bfloat* gamma  [[buffer(1)]],   // [hc*D] BF16
+    device       half*   out    [[buffer(2)]],   // [T, hc*D] FP16
+    constant     uint&   D      [[buffer(3)]],   // one stream's width
+    constant     uint&   HC     [[buffer(4)]],
+    constant     float&  eps    [[buffer(5)]],
+    uint  tgid            [[threadgroup_position_in_grid]],
+    uint  lid             [[thread_position_in_threadgroup]],
+    uint  lsize           [[threads_per_threadgroup]],
+    uint  simd_lane       [[thread_index_in_simdgroup]],
+    uint  simd_group      [[simdgroup_index_in_threadgroup]],
+    uint  simdgroups      [[simdgroups_per_threadgroup]]
+) {
+    threadgroup float partial[kHcMaxSimdGroups];
+    const uint stream = tgid % HC;
+    const uint base = tgid * D;
+    device const half* xs = x + base;
+
+    float acc = 0.0f;
+    for (uint i = lid; i < D; i += lsize) {
+        const float v = float(xs[i]);
+        acc = fma(v, v, acc);
+    }
+    acc = simd_sum(acc);
+    if (simd_lane == 0) partial[simd_group] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd_group == 0) {
+        float v = (simd_lane < simdgroups) ? partial[simd_lane] : 0.0f;
+        v = simd_sum(v);
+        if (simd_lane == 0) partial[0] = rsqrt(v / float(D) + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float inv = partial[0];
+
+    device const bfloat* ws = gamma + stream * D;
+    device       half*   os = out   + base;
+    for (uint i = lid; i < D; i += lsize) {
+        os[i] = half(float(xs[i]) * inv * float(ws[i]));
+    }
+}
+
+// ============================================================================
+// hc_seq_stream_mean — `hc_stream_mean` over a chunk:
+// out[t*D + i] = (1/hc) · Σ_c gated[t][c*D + i]. Grid = T·D threads.
+// ============================================================================
+[[kernel, max_total_threads_per_threadgroup(kHcThreads)]]
+void hc_seq_stream_mean(
+    device const half* gated  [[buffer(0)]],  // [T, hc*D] FP16
+    device       half* out    [[buffer(1)]],  // [T, D] FP16
+    constant     uint& D      [[buffer(2)]],
+    constant     uint& HC     [[buffer(3)]],
+    constant     float& invHc [[buffer(4)]],
+    uint tid                  [[thread_position_in_grid]]
+) {
+    const uint i = tid % D;
+    const uint t = tid / D;
+    device const half* g = gated + t * HC * D + i;
+    float acc = 0.0f;
+    for (uint c = 0; c < HC; ++c) {
+        acc += float(g[c * D]);
+    }
+    out[t * D + i] = half(acc * invHc);
+}
+
+// ============================================================================
+// hc_seq_combine — `hc_combine` over a chunk: each token's plane takes its own
+// block output under its own [hc] inject weights:
+//   plane[t][c*D + i] += block[t][i] · 2·sigmoid(inject[t][c] · 1/hc)
+// One threadgroup per (stream, token), flat: `tgid = token·HC + stream`, so the
+// plane row, the inject weight and the block row all index off `tgid` directly.
+// ============================================================================
+[[kernel, max_total_threads_per_threadgroup(kHcThreads)]]
+void hc_seq_combine(
+    device       half* plane   [[buffer(0)]],  // [T, hc*D] FP16 in place
+    device const half* block   [[buffer(1)]],  // [T, D] FP16
+    device const half* inject  [[buffer(2)]],  // [T, hc] FP16
+    constant     uint& D       [[buffer(3)]],
+    constant     uint& HC      [[buffer(4)]],
+    constant     float& invHc  [[buffer(5)]],
+    uint  tgid           [[threadgroup_position_in_grid]],
+    uint  lid            [[thread_position_in_threadgroup]],
+    uint  lsize          [[threads_per_threadgroup]]
+) {
+    threadgroup float wTg;
+    if (lid == 0) {
+        wTg = 2.0f * hc_sigmoid(float(inject[tgid]) * invHc);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float w = wTg;
+
+    device       half* ps = plane + tgid * D;
+    device const half* bs = block + (tgid / HC) * D;
+    for (uint i = lid; i < D; i += lsize) {
+        ps[i] = half(float(ps[i]) + float(bs[i]) * w);
     }
 }

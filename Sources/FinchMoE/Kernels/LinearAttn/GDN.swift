@@ -20,8 +20,9 @@ final class GDN {
     }
 
     /// Function-constant index selecting the sigmoid gate (see gdn.metal).
-    /// 66 is free in the merged library — 60 is FC_ATTN_HEAD_DIM.
-    private static let sigmoidGateConstantIndex = 66
+    /// 66 is free in the merged library — 60 is FC_ATTN_HEAD_DIM. Shared with
+    /// `GDNPrefill`, whose batched twin selects its activation the same way.
+    static let sigmoidGateFunctionConstantIndex = 66
 
     private let psoConv: MTLComputePipelineState
     private let psoRecurrent: MTLComputePipelineState
@@ -38,7 +39,7 @@ final class GDN {
         self.psoNormGatedSigmoid = try context.pipeline(
             "gdn_rmsnorm_gated",
             constants: [MetalFunctionConstant(
-                index: Self.sigmoidGateConstantIndex, value: .bool(true))])
+                index: Self.sigmoidGateFunctionConstantIndex, value: .bool(true))])
         self.psoGateGEMV  = try context.pipeline("gdn_gate_gemv")
     }
 

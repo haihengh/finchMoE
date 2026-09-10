@@ -306,12 +306,21 @@ void prefill_gdn_gate(
 // ----------------------------------------------------------------------------
 // Batched gated RMSNorm over each (token, value head) vector:
 //   y[t][hv][i] = x[t][hv][i] * rsqrt(mean_i(x[t][hv][i]^2) + eps)
-//                 * weight[i] * silu(z[t][hv][i])
+//                 * weight[i] * act(z[t][hv][i])
 // One 256-thread threadgroup per (token, value head) — linearized 1D grid,
 // `t = head / V`, `hv = head % V`. `weight` is shared across all heads
 // (Qwen3_5MoeRMSNormGated(head_v_dim)); x/z are [T][V][D] fp16. Mean-based
 // (not sum), matching `Qwen3_5MoeRMSNormGated.forward`.
+//
+// `act` is silu (Qwen 3.5/3.6) or sigmoid (Qwen 3.8 Flash-Next, qwen4exp
+// `build_norm_gated`), selected by the same function constant the decode
+// kernel uses — FC_GDN_RMSNORM_GATE_SIGMOID at index 66, declared once in
+// `gdn.metal`. Both files land in one merged source, so declaring it here
+// again is a redefinition and a duplicate index; one declaration is what
+// makes the two forms unable to disagree about the family. The constant is
+// absent for a 3.6 install, which leaves this path bit-identical to before.
 // ----------------------------------------------------------------------------
+
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void prefill_gdn_rmsnorm_gated(
     device const half*   x          [[buffer(0)]],   // [T][V][D] fp16
@@ -347,10 +356,16 @@ void prefill_gdn_rmsnorm_gated(
     gdn_prefill_block_sum(acc, simd_lane, simd_group, simdgroups, partial);
     const float inv = rsqrt(partial[0] / float(D) + eps);
 
+    // Uniform per-pipeline branch, as in `gdn_rmsnorm_gated`.
+    const bool sigmoidGate =
+        is_function_constant_defined(FC_GDN_RMSNORM_GATE_SIGMOID) &&
+        FC_GDN_RMSNORM_GATE_SIGMOID;
+
     for (uint i = lid; i < D; i += lsize) {
         float xv = float(xh[i]);
         float wv = float(weight[i]);
         float zv = float(zh[i]);
-        oh[i] = half(xv * inv * wv * gdn_prefill_silu(zv));
+        float act = sigmoidGate ? 1.0f / (1.0f + exp(-zv)) : gdn_prefill_silu(zv);
+        oh[i] = half(xv * inv * wv * act);
     }
 }

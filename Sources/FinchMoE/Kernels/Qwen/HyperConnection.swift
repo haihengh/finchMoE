@@ -24,6 +24,11 @@ final class HyperConnection {
     private let psoGateMul: MTLComputePipelineState
     private let psoStreamMean: MTLComputePipelineState
     private let psoCombine: MTLComputePipelineState
+    // Chunked (prefill) forms — see the `_seq` note in `hyper_connection.metal`.
+    private let psoSeqPlaneInit: MTLComputePipelineState
+    private let psoSeqGroupedRMS: MTLComputePipelineState
+    private let psoSeqStreamMean: MTLComputePipelineState
+    private let psoSeqCombine: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.psoPlaneInit  = try context.pipeline("hc_plane_init")
@@ -32,6 +37,10 @@ final class HyperConnection {
         self.psoGateMul    = try context.pipeline("hc_gate_mul")
         self.psoStreamMean = try context.pipeline("hc_stream_mean")
         self.psoCombine    = try context.pipeline("hc_combine")
+        self.psoSeqPlaneInit  = try context.pipeline("hc_seq_plane_init")
+        self.psoSeqGroupedRMS = try context.pipeline("hc_seq_grouped_rms")
+        self.psoSeqStreamMean = try context.pipeline("hc_seq_stream_mean")
+        self.psoSeqCombine    = try context.pipeline("hc_seq_combine")
     }
 
     private static func width(_ pso: MTLComputePipelineState) -> Int {
@@ -187,6 +196,133 @@ final class HyperConnection {
         enc.setBytes(&invHcVar, length: MemoryLayout<Float>.size,  index: 4)
         enc.dispatchThreadgroups(MTLSize(width: Int(hc), height: 1, depth: 1),
                                  threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+}
+
+// MARK: - Chunked (prefill) forms
+
+extension HyperConnection {
+
+    private static let hcThreads = 256
+
+    /// `plane[t][c*D + i] = hidden[t][i]` — the chunked plane seed: `t`
+    /// identical stream copies of each of the `t` hidden rows. The chunked
+    /// prefill twin of `encodePlaneInit`.
+    func encodeSeqPlaneInit(
+        commandBuffer: MTLCommandBuffer,
+        hidden: MTLBuffer, hiddenOffset: Int = 0,
+        plane: MTLBuffer, planeOffset: Int = 0,
+        d: UInt32,
+        hc: UInt32,
+        tokens: UInt32
+    ) {
+        guard tokens > 0 else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(psoSeqPlaneInit)
+        enc.setBuffer(hidden, offset: hiddenOffset, index: 0)
+        enc.setBuffer(plane,  offset: planeOffset,  index: 1)
+        var dVar = d
+        var hcVar = hc
+        enc.setBytes(&dVar,  length: MemoryLayout<UInt32>.size, index: 2)
+        enc.setBytes(&hcVar, length: MemoryLayout<UInt32>.size, index: 3)
+        let n = Int(tokens) * Int(d) * Int(hc)
+        let w = Self.width(psoSeqPlaneInit)
+        enc.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Per-stream grouped RMSNorm over a chunk of planes. `x` and `out` are
+    /// `[tokens][hc*D]` with the whole-plane gamma shared across tokens; token
+    /// `t`'s rows are read and written at `t · hc · D`. `x` may alias `out`.
+    func encodeSeqGroupedRMS(
+        commandBuffer: MTLCommandBuffer,
+        x: MTLBuffer, xOffset: Int = 0,
+        gamma: MTLBuffer, gammaOffset: Int = 0,
+        out: MTLBuffer, outOffset: Int = 0,
+        d: UInt32,
+        hc: UInt32,
+        tokens: UInt32,
+        eps: Float
+    ) {
+        guard tokens > 0 else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(psoSeqGroupedRMS)
+        enc.setBuffer(x,     offset: xOffset,     index: 0)
+        enc.setBuffer(gamma, offset: gammaOffset, index: 1)
+        enc.setBuffer(out,   offset: outOffset,   index: 2)
+        var dVar = d
+        var hcVar = hc
+        var epsVar = eps
+        enc.setBytes(&dVar,   length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&hcVar,  length: MemoryLayout<UInt32>.size, index: 4)
+        enc.setBytes(&epsVar, length: MemoryLayout<Float>.size,  index: 5)
+        // One threadgroup per (stream, token), flat: threadgroup `t·hc + c`.
+        enc.dispatchThreadgroups(
+            MTLSize(width: Int(tokens) * Int(hc), height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: Self.hcThreads, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// `out[t][i] = (1/hc) · Σ_c gated[t][c*D + i]` — the chunked stream mean:
+    /// each token's `[hc*D]` gated plane collapses to its own `[D]` block
+    /// input. Pass `invHc = 1.0 / Float(streamCount)`.
+    func encodeSeqStreamMean(
+        commandBuffer: MTLCommandBuffer,
+        gated: MTLBuffer, gatedOffset: Int = 0,
+        out: MTLBuffer, outOffset: Int = 0,
+        d: UInt32,
+        hc: UInt32,
+        tokens: UInt32,
+        invHc: Float
+    ) {
+        guard tokens > 0 else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(psoSeqStreamMean)
+        enc.setBuffer(gated, offset: gatedOffset, index: 0)
+        enc.setBuffer(out,   offset: outOffset,   index: 1)
+        var dVar = d
+        var hcVar = hc
+        var invHcVar = invHc
+        enc.setBytes(&dVar,     length: MemoryLayout<UInt32>.size, index: 2)
+        enc.setBytes(&hcVar,    length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&invHcVar, length: MemoryLayout<Float>.size,  index: 4)
+        let n = Int(tokens) * Int(d)
+        let w = Self.width(psoSeqStreamMean)
+        enc.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// `plane[t][c*D + i] += blockOut[t][i] · 2·sigmoid(inject[t][c] · invHc)`,
+    /// in place. `blockOut` is `[tokens][D]`, `inject` is `[tokens][hc]` — the
+    /// per-token scatter weights.
+    func encodeSeqCombine(
+        commandBuffer: MTLCommandBuffer,
+        plane: MTLBuffer, planeOffset: Int = 0,
+        blockOut: MTLBuffer, blockOutOffset: Int = 0,
+        inject: MTLBuffer, injectOffset: Int = 0,
+        d: UInt32,
+        hc: UInt32,
+        tokens: UInt32,
+        invHc: Float
+    ) {
+        guard tokens > 0 else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(psoSeqCombine)
+        enc.setBuffer(plane,    offset: planeOffset,    index: 0)
+        enc.setBuffer(blockOut, offset: blockOutOffset, index: 1)
+        enc.setBuffer(inject,   offset: injectOffset,   index: 2)
+        var dVar = d
+        var hcVar = hc
+        var invHcVar = invHc
+        enc.setBytes(&dVar,     length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&hcVar,    length: MemoryLayout<UInt32>.size, index: 4)
+        enc.setBytes(&invHcVar, length: MemoryLayout<Float>.size,  index: 5)
+        enc.dispatchThreadgroups(
+            MTLSize(width: Int(tokens) * Int(hc), height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: Self.hcThreads, height: 1, depth: 1))
         enc.endEncoding()
     }
 }

@@ -374,4 +374,190 @@ import FinchMoEValidationSupport
         let relErr = RelError.compute(actual: actual, reference: expected)
         #expect(relErr < Tolerance.identity, "zero inject relErr=\(relErr)")
     }
+
+    // MARK: - Chunked (_seq) parity with decode
+
+    /// The M3.4 acceptance criterion, applied at kernel level: a chunk of T
+    /// tokens through the `_seq` kernel against T single-token dispatches of the
+    /// decode kernel, with the decode dispatches writing into the same
+    /// `[T][…]` buffer via offsets — so the two sides are compared element for
+    /// element on identical storage.
+    ///
+    /// The assertion is *exact equality*, not a tolerance. Every HC stage is
+    /// per-token and reads nothing but its own token's plane, so the chunked
+    /// kernel is the decode kernel with the base offset moved to `t·hc·D`: the
+    /// same fp32 operations in the same order produce the same bits. A
+    /// tolerance here would hide a kernel that, say, re-summed the streams in a
+    /// different order, or applied the RMS scale to a partly-written plane —
+    /// both of which still land "close" and both of which are wrong.
+    private static func expectIdentical(
+        _ actual: [Float], _ expected: [Float], _ label: String
+    ) {
+        guard actual.count == expected.count else {
+            Issue.record("\(label): \(actual.count) elements vs \(expected.count)")
+            return
+        }
+        var n = 0
+        var first = ""
+        for i in 0..<actual.count where actual[i] != expected[i] {
+            if n == 0 { first = "first at \(i): \(actual[i]) vs \(expected[i])" }
+            n += 1
+        }
+        #expect(n == 0, "\(label): \(n)/\(actual.count) elements differ — \(first)")
+    }
+
+    @Test("chunked plane init is T decode dispatches, bit for bit", arguments: [
+        (4, 256, 3, UInt64(0x560)),      // toy plane, short chunk
+        (3, 333, 5, UInt64(0x561)),      // odd widths: partial threadgroup + odd T
+    ])
+    func seqPlaneInit_matchesDecode(hc: Int, d: Int, tokens: Int, seed: UInt64) throws {
+        var rng = SeedTree(seed).key("hc-seq-plane-init")
+        let hidden = (0..<(tokens * d)).map { _ in Float16(rng.uniform(-2.0, 2.0)) }
+        let stride = MemoryLayout<Float16>.stride
+
+        let ctx = try MetalContext()
+        let kernel = try HyperConnection(context: ctx)
+        guard let hBuf   = Fp16Buffer.make(ctx.device, halves: hidden),
+              let seqBuf = Fp16Buffer.make(ctx.device, count: tokens * hc * d),
+              let oneBuf = Fp16Buffer.make(ctx.device, count: tokens * hc * d) else {
+            Issue.record("alloc failed"); return
+        }
+
+        let cb = ctx.queue.makeCommandBuffer()!
+        kernel.encodeSeqPlaneInit(commandBuffer: cb, hidden: hBuf, plane: seqBuf,
+                                  d: UInt32(d), hc: UInt32(hc), tokens: UInt32(tokens))
+        for t in 0..<tokens {
+            kernel.encodePlaneInit(commandBuffer: cb, hidden: hBuf,
+                                   hiddenOffset: t * d * stride,
+                                   plane: oneBuf, planeOffset: t * hc * d * stride,
+                                   d: UInt32(d), hc: UInt32(hc))
+        }
+        cb.commit(); cb.waitUntilCompleted()
+
+        Self.expectIdentical(Fp16Buffer.read(seqBuf, count: tokens * hc * d),
+                             Fp16Buffer.read(oneBuf, count: tokens * hc * d),
+                             "hc=\(hc) d=\(d) T=\(tokens) plane init")
+    }
+
+    @Test("chunked grouped RMS is T decode dispatches, bit for bit", arguments: [
+        (4, 256, 3, UInt64(0x562)),      // toy stream width
+        (4, 2560, 2, UInt64(0x563)),     // real stream width
+    ])
+    func seqGroupedRms_matchesDecode(hc: Int, d: Int, tokens: Int, seed: UInt64) throws {
+        var rng = SeedTree(seed).key("hc-seq-grouped-rms")
+        let hcDim = hc * d
+        let v = Self.seedVectors(&rng, hc: hc, d: hcDim, device: try MetalContext().device)
+        // `seedVectors` is shaped for one token; take the first `hcDim` and
+        // repeat with a per-token jitter so no two rows coincide.
+        let stride = MemoryLayout<Float16>.stride
+        let ctx = try MetalContext()
+        let kernel = try HyperConnection(context: ctx)
+        var xH = [Float16]()
+        for t in 0..<tokens {
+            for i in 0..<hcDim {
+                xH.append(Float16(Float(v.x[i]) * (1.0 + Float(t) * 0.37)))
+            }
+        }
+        guard let gBuf   = Self.makeBF16Buffer(ctx.device, v.gammaRef),
+              let xBuf   = Fp16Buffer.make(ctx.device, halves: xH),
+              let seqBuf = Fp16Buffer.make(ctx.device, count: tokens * hcDim),
+              let oneBuf = Fp16Buffer.make(ctx.device, count: tokens * hcDim) else {
+            Issue.record("alloc failed"); return
+        }
+
+        let cb = ctx.queue.makeCommandBuffer()!
+        kernel.encodeSeqGroupedRMS(commandBuffer: cb, x: xBuf, gamma: gBuf,
+                                   out: seqBuf, d: UInt32(d), hc: UInt32(hc),
+                                   tokens: UInt32(tokens), eps: Self.eps)
+        for t in 0..<tokens {
+            kernel.encodeGroupedRMS(commandBuffer: cb, x: xBuf,
+                                    xOffset: t * hcDim * stride,
+                                    gamma: gBuf,
+                                    out: oneBuf, outOffset: t * hcDim * stride,
+                                    d: UInt32(d), hc: UInt32(hc), eps: Self.eps)
+        }
+        cb.commit(); cb.waitUntilCompleted()
+
+        Self.expectIdentical(Fp16Buffer.read(seqBuf, count: tokens * hcDim),
+                             Fp16Buffer.read(oneBuf, count: tokens * hcDim),
+                             "hc=\(hc) d=\(d) T=\(tokens) grouped RMS")
+    }
+
+    @Test("chunked stream mean is T decode dispatches, bit for bit", arguments: [
+        (4, 256, 3, UInt64(0x564)),      // toy
+        (4, 2560, 2, UInt64(0x565)),     // real
+    ])
+    func seqStreamMean_matchesDecode(hc: Int, d: Int, tokens: Int, seed: UInt64) throws {
+        var rng = SeedTree(seed).key("hc-seq-stream-mean")
+        let hcDim = hc * d
+        let stride = MemoryLayout<Float16>.stride
+        let gH = (0..<(tokens * hcDim)).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+        let invHc: Float = 1.0 / Float(hc)
+
+        let ctx = try MetalContext()
+        let kernel = try HyperConnection(context: ctx)
+        guard let gBuf   = Fp16Buffer.make(ctx.device, halves: gH),
+              let seqBuf = Fp16Buffer.make(ctx.device, count: tokens * d),
+              let oneBuf = Fp16Buffer.make(ctx.device, count: tokens * d) else {
+            Issue.record("alloc failed"); return
+        }
+
+        let cb = ctx.queue.makeCommandBuffer()!
+        kernel.encodeSeqStreamMean(commandBuffer: cb, gated: gBuf, out: seqBuf,
+                                   d: UInt32(d), hc: UInt32(hc),
+                                   tokens: UInt32(tokens), invHc: invHc)
+        for t in 0..<tokens {
+            kernel.encodeStreamMean(commandBuffer: cb, gated: gBuf,
+                                    gatedOffset: t * hcDim * stride,
+                                    out: oneBuf, outOffset: t * d * stride,
+                                    d: UInt32(d), hc: UInt32(hc), invHc: invHc)
+        }
+        cb.commit(); cb.waitUntilCompleted()
+
+        Self.expectIdentical(Fp16Buffer.read(seqBuf, count: tokens * d),
+                             Fp16Buffer.read(oneBuf, count: tokens * d),
+                             "hc=\(hc) d=\(d) T=\(tokens) stream mean")
+    }
+
+    @Test("chunked combine is T decode dispatches, bit for bit", arguments: [
+        (4, 256, 3, UInt64(0x566)),      // toy
+        (4, 2560, 2, UInt64(0x567)),     // real
+    ])
+    func seqCombine_matchesDecode(hc: Int, d: Int, tokens: Int, seed: UInt64) throws {
+        var rng = SeedTree(seed).key("hc-seq-combine")
+        let hcDim = hc * d
+        let stride = MemoryLayout<Float16>.stride
+        // Per token: its own inject weights, so a kernel that read token 0's
+        // inject for every row differs from the decode path.
+        let p0 = (0..<(tokens * hcDim)).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+        let bH = (0..<(tokens * d)).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+        let iH = (0..<(tokens * hc)).map { _ in Float16(rng.uniform(-4.0, 4.0)) }
+        let invHc: Float = 1.0 / Float(hc)
+
+        let ctx = try MetalContext()
+        let kernel = try HyperConnection(context: ctx)
+        guard let pSeq = Fp16Buffer.make(ctx.device, halves: p0),
+              let pOne = Fp16Buffer.make(ctx.device, halves: p0),
+              let bBuf = Fp16Buffer.make(ctx.device, halves: bH),
+              let iBuf = Fp16Buffer.make(ctx.device, halves: iH) else {
+            Issue.record("alloc failed"); return
+        }
+
+        let cb = ctx.queue.makeCommandBuffer()!
+        kernel.encodeSeqCombine(commandBuffer: cb, plane: pSeq, blockOut: bBuf,
+                                inject: iBuf, d: UInt32(d), hc: UInt32(hc),
+                                tokens: UInt32(tokens), invHc: invHc)
+        for t in 0..<tokens {
+            kernel.encodeCombine(commandBuffer: cb, plane: pOne,
+                                 planeOffset: t * hcDim * stride,
+                                 blockOut: bBuf, blockOutOffset: t * d * stride,
+                                 inject: iBuf, injectOffset: t * hc * stride,
+                                 d: UInt32(d), hc: UInt32(hc), invHc: invHc)
+        }
+        cb.commit(); cb.waitUntilCompleted()
+
+        Self.expectIdentical(Fp16Buffer.read(pSeq, count: tokens * hcDim),
+                             Fp16Buffer.read(pOne, count: tokens * hcDim),
+                             "hc=\(hc) d=\(d) T=\(tokens) combine")
+    }
 }

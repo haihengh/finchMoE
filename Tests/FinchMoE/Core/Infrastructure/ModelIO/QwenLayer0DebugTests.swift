@@ -401,8 +401,22 @@ import FinchMoEValidationSupport
 
         func compareStage(_ name: String, _ engineValues: [Float16],
                           _ ref: [Float], count: Int) {
+            // `worst` starts at 0, not -1: it is only assigned when a diff
+            // exceeds `maxAbs`, so a stage that matches *exactly* leaves it
+            // unassigned and the report below reads `engineValues[-1]` — an
+            // index trap that takes the whole test process down and hides
+            // every test after it. The probe used to die on its best result.
+            //
+            // Both sides must also actually carry `count` elements: a probe
+            // wired to the wrong buffer makes `count` run past the end, which
+            // traps the same way. Report that rather than dying on it.
+            guard count > 0, count <= engineValues.count, count <= ref.count else {
+                print("\(name): SKIPPED — want \(count) elements, "
+                    + "engine has \(engineValues.count), ref has \(ref.count)")
+                return
+            }
             var maxAbs: Float = 0
-            var worst = -1
+            var worst = 0
             for i in 0..<count {
                 let e = Self.toF32(engineValues[i])
                 let diff = abs(e - ref[i])

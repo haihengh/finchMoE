@@ -4,8 +4,10 @@ import FinchMoEFormat
 @testable import FinchMoE
 
 /// M0 wire gate for the Qwen3.8-Flash-Next arch keys: a qwen3_8 manifest
-/// (all 14 new `arch` fields populated) encodes at format minor 0 with every
-/// key present, round-trips, auto-detects the built-in qwen3_8 preset, and
+/// (every 3.8 `arch` field populated — the 14 structural ones plus
+/// `pleEosTokenId`, which M3.3 plumbed end to end) encodes at format minor 0
+/// with every key present, round-trips, auto-detects the built-in qwen3_8
+/// preset, and
 /// passes `ManifestReader` arch validation exactly against that preset —
 /// while a nil-key manifest stays byte-identical to the pre-3.8 writer
 /// (omission is asserted at the JSON level).
@@ -36,7 +38,7 @@ import FinchMoEFormat
             indexerBudget: 2048, indexerCompressRatio: 4,
             ngramSize: 3, headsPerNgram: 8, ngramRowDim: 160,
             ngramPartCount: 128, ngramPartRows: 2_500_012,
-            pleLayerIndexes: [1], pleConvKernelSize: 4)
+            pleLayerIndexes: [1], pleConvKernelSize: 4, pleEosTokenId: 248044)
     }
 
     private static func manifest() -> FinchManifestV1 {
@@ -73,7 +75,8 @@ import FinchMoEFormat
                     "indexerBudget", "indexerCompressRatio",
                     "ngramSize", "headsPerNgram", "ngramRowDim",
                     "ngramPartCount", "ngramPartRows",
-                    "pleLayerIndexes", "pleConvKernelSize"] {
+                    "pleLayerIndexes", "pleConvKernelSize",
+                    "pleEosTokenId"] {
             #expect(arch[key] != nil, "missing wire key \(key)")
         }
         #expect(arch["modelFamily"] as? String == "qwen3_8")
@@ -113,7 +116,7 @@ import FinchMoEFormat
         let wireArch = try #require(root["arch"] as? [String: Any])
         for key in ["hyperConnectionCount", "hyperConnectionLowrank",
                     "indexerNumHeads", "ngramSize", "pleLayerIndexes",
-                    "pleConvKernelSize"] {
+                    "pleConvKernelSize", "pleEosTokenId"] {
             #expect(wireArch[key] == nil, "nil key \(key) leaked into the wire")
         }
     }
