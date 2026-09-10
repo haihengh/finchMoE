@@ -131,19 +131,27 @@ public enum QSAIndexerRef {
     /// Apply `rms` + `rope` to `perVector` vectors of length `dim`, each with
     /// its own position (block-major for the pooled keys, head-major for the
     /// query heads). Returns the same layout.
+    ///
+    /// `nRot`/`theta` are forwarded so the reference can express the whole
+    /// parameter space the kernels accept — the real geometry is
+    /// `nRot = 0.25 · dim`, but the kernel suites also drive narrower heads
+    /// with a full-width rotation, and a reference that silently rotated the
+    /// real 32 dims would disagree with a correct kernel there.
     public static func normRope(
         _ vectors: [Float], perVector: Int, gamma: [Float], pos: [Int],
-        dim: Int, eps: Float = rmsEps
+        dim: Int, eps: Float = rmsEps,
+        nRot: Int = Self.nRot, theta: Float = ropeTheta
     ) -> [Float] {
         precondition(vectors.count == perVector * dim)
         precondition(gamma.count == dim)
         precondition(pos.count == perVector)
+        precondition(nRot <= dim, "rotary width \(nRot) exceeds the vector dim \(dim)")
         var out = [Float](repeating: 0, count: perVector * dim)
         for v in 0..<perVector {
             let base = v * dim
             let one = (0..<dim).map { vectors[base + $0] }
             let normed = rms(one, gamma: gamma, eps: eps)
-            let rotated = rope(normed, pos: pos[v])
+            let rotated = rope(normed, pos: pos[v], nRot: nRot, theta: theta)
             for i in 0..<dim { out[base + i] = rotated[i] }
         }
         return out
