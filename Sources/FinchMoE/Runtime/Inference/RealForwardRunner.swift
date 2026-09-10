@@ -638,12 +638,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // Qwen 3.8 Flash-Next PLE n-gram head. The host hash needs its
             // three I64 constants up front; a 3.8 install whose PLE is
             // malformed traps in the initializer rather than routing every
-            // token off the end of the table.
-            let pleConstants = try model.pleHashConstants()
-            if let host = try PLEHost(config: cfg,
-                                      multipliers: pleConstants.multipliers,
-                                      headOffsets: pleConstants.headOffsets,
-                                      headVocabSizes: pleConstants.headVocabSizes) {
+            // token off the end of the table. Fetching them is family-gated:
+            // the accessors behind `pleHashConstants()` are themselves
+            // family-guarded and raise `tensorNotFound` on a model that has
+            // no PLE at all, so a 3.6 install must never reach them.
+            var pleConstants: (multipliers: [UInt64], headOffsets: [UInt64],
+                               headVocabSizes: [UInt64])? = nil
+            if cfg.isQwen3_8 { pleConstants = try model.pleHashConstants() }
+            if let c = pleConstants,
+               let host = try PLEHost(config: cfg,
+                                      multipliers: c.multipliers,
+                                      headOffsets: c.headOffsets,
+                                      headVocabSizes: c.headVocabSizes) {
                 self.pleHost = host
                 self.ple = try PLE(context: ctx)
                 let hcDim = cfg.hyperConnectionDim
@@ -898,7 +904,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     @discardableResult
     private func ensurePrefillScratch(config: PrefillRuntimeConfig) throws -> PrefillChunkScratchBuffers {
-        let layout = PrefillChunkScratchLayout(config: cfg, runtime: config)
+        let layout = PrefillChunkScratchLayout(config: cfg,
+                                               runtime: config,
+                                               maxContext: maxContext)
         if let scratch = prefillScratch, scratch.layout == layout {
             return scratch
         }
@@ -1000,6 +1008,39 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let t = tokens.count
         let emb = model.embedding
 
+        // PLE routing for the whole chunk, before any layer runs: the rows are
+        // a hash of each token and its two predecessors, and the table rows are
+        // read straight off disk (16 × 320 B = 5 KB a token — nothing is
+        // cached, because the reads are hash-random over a 102.4 GB table).
+        // Recording is per token and in position order, exactly as decode does
+        // it one token at a time; a chunk is just several of those in a row.
+        if let pleHost, cfg.isQwen3_8 {
+            // Per-token stride from the layout, never the buffer divided by
+            // the run length: the buffer is sized on the config's *maximum*
+            // chunk, so for any shorter chunk that division would spread the
+            // rows at the wrong stride — and the layer reads them at this one.
+            let width = scratch.layout.qwen38PleGatheredRowElements
+            let bytes = width * MemoryLayout<Float16>.stride
+            precondition(scratch.layout.qwen38PleGatheredElements >= t * width,
+                         "PLE gather scratch too small for a \(t)-token chunk")
+            for row in 0..<t {
+                let position = startPosition + row
+                pleHost.record(position: position, token: tokens[tokens.startIndex + row])
+                let gathered = try pleHost.gather(atPosition: position) { part in
+                    try model.openPLEPart(part)
+                }
+                // The gather is one token's n-gram row set; it can only ever be
+                // this wide, but a short read would be silent garbage.
+                precondition(gathered.count >= width,
+                             "PLE gather returned \(gathered.count) elements, need \(width)")
+                gathered.withUnsafeBytes { src in
+                    memcpy(scratch.qwen38PleGathered.contents().advanced(by: row * bytes),
+                           src.baseAddress!,
+                           bytes)
+                }
+            }
+        }
+
         prefillChunkState.markDirty(startPosition: startPosition, tokenCount: tokens.count)
 
         guard var cb = ctx.queue.makeCommandBuffer() else {
@@ -1017,6 +1058,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             t: UInt32(t),
                             d: UInt32(D),
                             outScale: sqrtHidden)
+        if cfg.isQwen3_8 {
+            // The 3.8 residual is the wide hyper-connection plane, seeded once
+            // per chunk with hc copies of each row's embedding (`hc_init`,
+            // qwen4exp.cpp :324-331). The whole chunk's rows go in one
+            // dispatch — this is the plane's only write that is not a combine.
+            // Same command buffer as the embedding, so it must follow it.
+            hyperConnection.encodeSeqPlaneInit(commandBuffer: cb,
+                                               hidden: scratch.hidden,
+                                               plane: scratch.qwen38Plane,
+                                               d: UInt32(D),
+                                               hc: UInt32(cfg.hyperConnectionCount),
+                                               tokens: UInt32(t))
+        }
 
         for L in 0..<cfg.numLayers {
             model.beginOpeningRoutedExpertStreamer(layer: L)
@@ -1027,11 +1081,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 continue
             }
             if cfg.isQwen3_8 {
-                // Qwen 3.8 prefill lands with M3.4. M3.1c wires decode only:
-                // falling through here would run the Gemma body against the
-                // 3.8 schema (no model.norm, no preFFN sandwich).
-                throw PrefillError.modelFamilyUnsupported(
-                    "qwen3_8 chunked prefill is not wired until M3.4")
+                // Hyper-connections replace every per-layer norm, so the 3.8
+                // body is its own pass — the Gemma path below would read
+                // `inputNorm`/`postAttnNorm`/`postFFN` that a 3.8 install does
+                // not carry.
+                cb = try await encodeQwen38PrefillLayer(L, scratch: scratch,
+                                                        startPosition: startPosition,
+                                                        tokenCount: t, cb: cb)
+                continue
             }
             let views = layerViews[L]
             let isFull = cfg.fullAttentionLayerMask[L] != 0
@@ -1454,15 +1511,57 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         if writeFinalHead {
-            guard let finalNorm = model.finalNorm else {
-                // Qwen3.8 has no model.norm — the M3 head path collapses the
-                // root hyper_connection_mixer instead of RMSNorm here.
-                throw ModelError.tensorNotFound(
-                    name: "language_model.model.norm.weight (qwen3_8 head path = root hyper_connection_mixer, M3)")
-            }
             let lm = model.lmHead
             guard let finalCB = ctx.queue.makeCommandBuffer() else {
                 throw ModelError.residentBufferWrapFailed
+            }
+            if cfg.isQwen3_8 {
+                // No `model.norm` in this family: the head input is the root
+                // `hyper_connection_mixer` collapsing the chunk's last plane
+                // row to [D] — the same stage every layer's mixer runs, with
+                // no block_inject and no inject target (decode's `rootMixer`
+                // head; qwen4exp.cpp :380-390). Reached through the chunked
+                // twin with `tokens: 1` so the row arithmetic is the layer
+                // path's, not a second copy of it.
+                let rootMixer = try model.hyperConnectionMixer()
+                encodeQwen38SeqMix(commandBuffer: finalCB,
+                                   norm: rootMixer.hcNorm,
+                                   down: rootMixer.mixDown,
+                                   up: rootMixer.mixUp,
+                                   blockInject: nil,
+                                   plane: scratch.qwen38Plane,
+                                   // BYTES: `planeOffset` reaches
+                                   // `setBuffer(_:offset:)`. Passing the
+                                   // element count here read an arbitrary
+                                   // offset — row 0 was right only when t == 1.
+                                   planeOffset: (t - 1) * cfg.hyperConnectionDim
+                                       * MemoryLayout<Float16>.stride,
+                                   blockOut: scratch.normed, blockOutOffset: 0,
+                                   inject: nil, injectOffset: 0,
+                                   scratch: scratch,
+                                   d: UInt32(D),
+                                   hc: UInt32(cfg.hyperConnectionCount),
+                                   lowrank: UInt32(cfg.hyperConnectionLowrank),
+                                   tokens: 1,
+                                   invHc: 1.0 / Float(cfg.hyperConnectionCount),
+                                   eps: eps)
+                int4.encode(commandBuffer: finalCB,
+                            weights: lm.buffer, weightsOffset: Int(lm.offset),
+                            scales: lm.buffer, scalesOffset: Int(lm.scaleOffset),
+                            biases: lm.buffer, biasesOffset: Int(lm.biasOffset),
+                            x: scratch.normed, y: logits,
+                            m: UInt32(cfg.vocabSize), n: UInt32(D))
+                finalCB.commit()
+                waitForCompletion(finalCB)
+                if let error = finalCB.error {
+                    throw error
+                }
+                kv?.advance(by: tokens.count)
+                prefillChunkState.markCommitted()
+                return
+            }
+            guard let finalNorm = model.finalNorm else {
+                throw ModelError.tensorNotFound(name: "language_model.model.norm.weight")
             }
             if outputMode == .greedyIfAvailable, useFusedGreedyHead {
                 fusionHead.encodeGreedyDecode(
@@ -1550,7 +1649,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                       family: PrefillProjectionFamily,
                                       weights: TensorView,
                                       x: MTLBuffer,
+                                      xBaseOffset: Int = 0,
                                       y: MTLBuffer,
+                                      yBaseOffset: Int = 0,
                                       rows: Int,
                                       columns: Int,
                                       tokenCount: Int,
@@ -1568,7 +1669,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 biases: weights.buffer,
                 biasesOffset: Int(weights.biasOffset),
                 x: x,
+                xOffset: xBaseOffset,
                 y: y,
+                yOffset: yBaseOffset,
                 m: tokenCount,
                 n: rows,
                 k: columns)
@@ -1586,7 +1689,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                               biases: weights.buffer,
                               biasesOffset: Int(weights.biasOffset),
                               x: x,
+                              xOffset: xBaseOffset,
                               y: y,
+                              yOffset: yBaseOffset,
                               t: tokenCount,
                               n: rows,
                               k: columns)
@@ -1601,9 +1706,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         biases: weights.buffer,
                         biasesOffset: Int(weights.biasOffset),
                         x: x,
-                        xOffset: row * xStrideElements * MemoryLayout<Float16>.stride,
+                        xOffset: xBaseOffset
+                            + row * xStrideElements * MemoryLayout<Float16>.stride,
                         y: y,
-                        yOffset: row * yStrideElements * MemoryLayout<Float16>.stride,
+                        yOffset: yBaseOffset
+                            + row * yStrideElements * MemoryLayout<Float16>.stride,
                         m: UInt32(rows),
                         n: UInt32(columns))
         }
@@ -3166,6 +3273,1057 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
+    /// Qwen 3.8 Flash-Next hyper-connection mix over a chunk — the
+    /// `[tokens]`-wide twin of `encodeQwen38Mix`, same stage order and the same
+    /// math (`build_hc_mix`, qwen4exp.cpp :226-262), with the token row moved.
+    ///
+    /// Three of the five stages are the *decode* kernels reached with a flat
+    /// `tokens·width` element count — `hc_silu_scale` and `hc_gate_mul` are
+    /// already elementwise over N, so they have no `_seq` twin and must not
+    /// grow one. The grouped RMS, the stream mean and the int4 projections are
+    /// the chunked forms.
+    ///
+    /// Every stage encodes serially into `cb` and reads only what an earlier
+    /// stage in the same CB wrote, so one shared scratch set serves the
+    /// layer's second mixer exactly as it does in decode.
+    private func encodeQwen38SeqMix(
+        commandBuffer cb: MTLCommandBuffer,
+        norm: TensorView,
+        down: TensorView,
+        up: TensorView,
+        blockInject: TensorView?,
+        plane: MTLBuffer, planeOffset: Int,
+        blockOut: MTLBuffer, blockOutOffset: Int,
+        inject: MTLBuffer?, injectOffset: Int,
+        scratch: PrefillChunkScratchBuffers,
+        d: UInt32,
+        hc: UInt32,
+        lowrank: UInt32,
+        tokens: UInt32,
+        invHc: Float,
+        eps: Float
+    ) {
+        precondition((blockInject == nil) == (inject == nil),
+                     "block_inject and inject buffers come as a pair")
+        let hcDim = Int(d) * Int(hc)
+
+        // xn = per-stream RMS of the plane, scaled by the [hc·D] BF16 gamma.
+        hyperConnection.encodeSeqGroupedRMS(commandBuffer: cb,
+                                            x: plane, xOffset: planeOffset,
+                                            gamma: norm.buffer,
+                                            gammaOffset: Int(norm.offset),
+                                            out: scratch.qwen38Xn,
+                                            d: d, hc: hc, tokens: tokens, eps: eps)
+        // lo = silu(down · xn · 1/hc) — the ÷hc precedes the silu.
+        encodeInt4Projection(commandBuffer: cb,
+                             family: .kv,
+                             weights: down,
+                             x: scratch.qwen38Xn,
+                             y: scratch.qwen38Lo,
+                             rows: Int(lowrank),
+                             columns: hcDim,
+                             tokenCount: Int(tokens),
+                             xStrideElements: hcDim,
+                             yStrideElements: Int(lowrank))
+        hyperConnection.encodeSiluScale(commandBuffer: cb,
+                                        z: scratch.qwen38Lo,
+                                        out: scratch.qwen38Lo,
+                                        n: tokens * lowrank,
+                                        invHc: invHc)
+        // Raw read-gate dot over the whole plane: z = up · lo.
+        encodeInt4Projection(commandBuffer: cb,
+                             family: .kv,
+                             weights: up,
+                             x: scratch.qwen38Lo,
+                             y: scratch.qwen38GateRaw,
+                             rows: hcDim,
+                             columns: Int(lowrank),
+                             tokenCount: Int(tokens),
+                             xStrideElements: Int(lowrank),
+                             yStrideElements: hcDim)
+        if let w = blockInject, let inj = inject {
+            // inject = block_inject row c · xn — a raw dot, no activation (the
+            // combine's 2·sigmoid(·/hc) is applied on read).
+            encodeInt4Projection(commandBuffer: cb,
+                                 family: .kv,
+                                 weights: w,
+                                 x: scratch.qwen38Xn,
+                                 y: inj, yBaseOffset: injectOffset,
+                                 rows: Int(hc),
+                                 columns: hcDim,
+                                 tokenCount: Int(tokens),
+                                 xStrideElements: hcDim,
+                                 yStrideElements: Int(hc))
+        }
+        // gated = xn · sigmoid(z), collapsed per token to the [D] block input.
+        hyperConnection.encodeGateMul(commandBuffer: cb,
+                                      xn: scratch.qwen38Xn, z: scratch.qwen38GateRaw,
+                                      out: scratch.qwen38Gated, n: tokens * UInt32(hcDim))
+        hyperConnection.encodeSeqStreamMean(commandBuffer: cb,
+                                            gated: scratch.qwen38Gated,
+                                            out: blockOut, outOffset: blockOutOffset,
+                                            d: d, hc: hc, tokens: tokens, invHc: invHc)
+    }
+
+    /// One Qwen 3.8 Flash-Next prefill layer: the chunked form of
+    /// `encodeQwen38DecodeLayer` (qwen4exp.cpp decode :329-378). Per layer:
+    ///   1. the PLE n-gram block on `pleLayerIndex`, reading the plane *as the
+    ///      layer received it* and adding both of its terms into that same
+    ///      plane before the mixer normalizes it;
+    ///   2. attn mix — plane → xn → silu(÷hc) lowrank → sigmoid read gate →
+    ///      stream mean = the [D] `normed` block input, plus the raw
+    ///      block_inject dot (`qwen38Inject`);
+    ///   3. attention body (full or GDN) at [D] width, the GDN body's output
+    ///      norm taking a SIGMOID z-gate (the family's one GDN delta);
+    ///   4. attn combine — plane += oOut · 2·sigmoid(inject/hc);
+    ///   5. ffn mix on the updated plane → `denseX` + a fresh `qwen38Inject`;
+    ///   6. router, shared expert, streamed routed tiles, then h2 = shared +
+    ///      routed and plane += h2 · 2·sigmoid(inject/hc).
+    /// There is no `hidden` write in a 3.8 layer — the plane *is* the residual,
+    /// rebuilt from the embedding once per chunk.
+    ///
+    /// `docs/QWEN38_PORT.md` pins the math; the M3.4 parity test runs this
+    /// against T decode steps of the same tokens.
+    private func encodeQwen38PrefillLayer(
+        _ L: Int,
+        scratch: PrefillChunkScratchBuffers,
+        startPosition: Int,
+        tokenCount: Int,
+        cb: MTLCommandBuffer
+    ) async throws -> MTLCommandBuffer {
+        let t = tokenCount
+        let D = cfg.hiddenSize
+        let hc = cfg.hyperConnectionCount
+        let hcDim = cfg.hyperConnectionDim
+        let lowrank = cfg.hyperConnectionLowrank
+        let invHc: Float = 1.0 / Float(hc)
+        let eps: Float = 1e-6
+        let isFull = cfg.fullAttentionLayerMask[L] != 0
+        let tokens32 = UInt32(t)
+        let planeN = UInt32(hcDim)
+        // The row every snapshot below is taken from: the chunk's last. After
+        // the layer it holds exactly what T sequential decode steps leave in
+        // the plane, which is what makes the M3.4 parity test a comparison of
+        // like with like.
+        let snapRow = t - 1
+
+        let attnMixW = try model.attnHyperConnection(layer: L)
+        let ffnMixW = try model.mlpHyperConnection(layer: L)
+        let routerW = try model.router(layer: L)
+        guard let onesEffective = qwenOnesEffectiveScale,
+              let onesExpert = qwenOnesPerExpertScale else {
+            preconditionFailure("Qwen prefill layer on a non-Qwen runner")
+        }
+
+        // The plane is private storage, so every debug snapshot is a blit of
+        // one row to a shared buffer, encoded at the point in the layer where
+        // that row is live and read after the CB carrying the blit completes.
+        var snapshots: [(name: String, buffer: MTLBuffer, isFloat32: Bool)] = []
+        func snapRowValue(_ name: String, _ src: MTLBuffer,
+                          _ offsetElements: Int, into target: MTLCommandBuffer,
+                          elements: Int? = nil,
+                          stride: Int = MemoryLayout<Float16>.stride) {
+            let bytes = (elements ?? hcDim) * stride
+            guard qwenLayerDebugHook != nil,
+                  let tmp = ctx.device.makeBuffer(length: bytes,
+                                                  options: .storageModeShared),
+                  let blit = target.makeBlitCommandEncoder() else { return }
+            blit.copy(from: src, sourceOffset: offsetElements * stride,
+                      to: tmp, destinationOffset: 0, size: bytes)
+            blit.endEncoding()
+            snapshots.append((name: name, buffer: tmp,
+                              isFloat32: stride == MemoryLayout<Float>.stride))
+        }
+        func drainSnapshots() {
+            guard let hook = qwenLayerDebugHook, !snapshots.isEmpty else { return }
+            for snap in snapshots {
+                if snap.isFloat32 {
+                    let count = snap.buffer.length / MemoryLayout<Float>.stride
+                    let ptr = snap.buffer.contents().bindMemory(to: Float.self,
+                                                                capacity: count)
+                    hook(L, snap.name,
+                         Array(UnsafeBufferPointer(start: ptr, count: count)).map(Float16.init))
+                } else {
+                    let count = snap.buffer.length / MemoryLayout<Float16>.stride
+                    let ptr = snap.buffer.contents().bindMemory(to: Float16.self,
+                                                                capacity: count)
+                    hook(L, snap.name, Array(UnsafeBufferPointer(start: ptr, count: count)))
+                }
+            }
+            snapshots.removeAll()
+        }
+        snapRowValue("hc.pre", scratch.qwen38Plane, snapRow * hcDim, into: cb)
+
+        // --- PLE n-gram block (before the mixer normalizes the plane) --------
+        if let ple, L == model.pleLayerIndex {
+            // The projections are validated against the manifest's
+            // `linearAttention` slot at load, so a 3.8 install whose PLE loads
+            // at all has them int8 — the same kernel, and the same reason, as
+            // the GDN projections.
+            guard int8GEMV != nil else {
+                preconditionFailure("Qwen 3.8 PLE requires the int8 GEMV path")
+            }
+            let keyP   = try model.pleKeyProj()
+            let valueP = try model.pleValueProj()
+            let normQ  = try model.pleNormQuery()
+            let normK  = try model.pleNormKey()
+            let normC  = try model.pleNormConv()
+            let convW  = try model.pleConv1D()
+            let gathered = cfg.ngramRowDim * (cfg.ngramSize - 1) * cfg.headsPerNgram
+            // One stream's width: the gate's dot and both norm reductions run
+            // over a single D-wide stream, not the whole plane.
+            let invSqrtD = 1.0 / Float(D).squareRoot()
+            let kern = UInt32(cfg.pleConvKernelSize)
+            let dil  = UInt32(cfg.ngramSize)
+            // No batched int8 QMM exists — one decode-style GEMV per projection
+            // per token, exactly as the 3.6 GDN body does it.
+            encodeRepeatedInt8(commandBuffer: cb,
+                               weights: keyP,
+                               x: scratch.qwen38PleGathered,
+                               y: scratch.qwen38PleKey,
+                               rows: hcDim,
+                               columns: gathered,
+                               tokenCount: t,
+                               xStrideElements: gathered,
+                               yStrideElements: hcDim)
+            encodeRepeatedInt8(commandBuffer: cb,
+                               weights: valueP,
+                               x: scratch.qwen38PleGathered,
+                               y: scratch.qwen38PleValue,
+                               rows: D,
+                               columns: gathered,
+                               tokenCount: t,
+                               xStrideElements: gathered,
+                               yStrideElements: D)
+            // Normed over one stream under a whole-plane gamma — the same
+            // operator, on the same layout, as the HC mixers' norms.
+            hyperConnection.encodeSeqGroupedRMS(commandBuffer: cb,
+                                                x: scratch.qwen38PleKey,
+                                                gamma: normK.buffer,
+                                                gammaOffset: Int(normK.offset),
+                                                out: scratch.qwen38PleKeyNormed,
+                                                d: UInt32(D), hc: UInt32(hc),
+                                                tokens: tokens32, eps: eps)
+            hyperConnection.encodeSeqGroupedRMS(commandBuffer: cb,
+                                                x: scratch.qwen38Plane,
+                                                gamma: normQ.buffer,
+                                                gammaOffset: Int(normQ.offset),
+                                                out: scratch.qwen38PleQueryNormed,
+                                                d: UInt32(D), hc: UInt32(hc),
+                                                tokens: tokens32, eps: eps)
+            ple.encodeSeqGate(commandBuffer: cb,
+                              key: scratch.qwen38PleKeyNormed,
+                              query: scratch.qwen38PleQueryNormed,
+                              gate: scratch.qwen38PleGate,
+                              d: UInt32(D), invSqrtD: invSqrtD,
+                              hc: UInt32(hc), tokens: tokens32)
+            ple.encodeSeqGatedValue(commandBuffer: cb,
+                                    value: scratch.qwen38PleValue,
+                                    gate: scratch.qwen38PleGate,
+                                    gated: scratch.qwen38PleGated,
+                                    d: UInt32(D), hc: UInt32(hc), tokens: tokens32)
+            hyperConnection.encodeSeqGroupedRMS(commandBuffer: cb,
+                                                x: scratch.qwen38PleGated,
+                                                gamma: normC.buffer,
+                                                gammaOffset: Int(normC.offset),
+                                                out: scratch.qwen38PleConvIn,
+                                                d: UInt32(D), hc: UInt32(hc),
+                                                tokens: tokens32, eps: eps)
+            // The conv history is persistent runner state (like the GDN conv
+            // states): a chunk shorter than the receptive field takes its taps
+            // out of the history, and the roll leaves the chunk's tail behind
+            // for the next chunk. `newState` must not alias `state`.
+            ple.encodeSeqConv(commandBuffer: cb,
+                              weight: convW.buffer, weightOffset: Int(convW.offset),
+                              state: pleConvState,
+                              x: scratch.qwen38PleConvIn,
+                              out: scratch.qwen38PleConvOut,
+                              newState: scratch.qwen38PleConvNewState,
+                              c: planeN, kernel: kern, dilation: dil,
+                              tokens: tokens32)
+            // Both PLE terms land in the plane the layer's mixer is about to
+            // normalize: `query` above saw the plane *without* them.
+            ple.encodePlaneAdd(commandBuffer: cb,
+                               plane: scratch.qwen38Plane,
+                               gated: scratch.qwen38PleGated,
+                               conv: scratch.qwen38PleConvOut,
+                               n: tokens32 * planeN)
+        }
+
+        // --- attn mix ---------------------------------------------------------
+        encodeQwen38SeqMix(commandBuffer: cb,
+                           norm: attnMixW.hcNorm, down: attnMixW.mixDown,
+                           up: attnMixW.mixUp, blockInject: attnMixW.blockInject,
+                           plane: scratch.qwen38Plane, planeOffset: 0,
+                           blockOut: scratch.normed, blockOutOffset: 0,
+                           inject: scratch.qwen38Inject, injectOffset: 0,
+                           scratch: scratch,
+                           d: UInt32(D), hc: UInt32(hc), lowrank: UInt32(lowrank),
+                           tokens: tokens32, invHc: invHc, eps: eps)
+        snapRowValue("attnBlockIn", scratch.normed, snapRow * D, into: cb, elements: D)
+
+        if isFull {
+            let qP = try model.qProj(layer: L)
+            let kP = try model.kProj(layer: L)
+            let vP = try model.vProj(layer: L)
+            let oP = try model.oProj(layer: L)
+            let qN = try model.qNorm(layer: L)
+            let kN = try model.kNorm(layer: L)
+            let headDim = cfg.fullHeadDim
+            let numQ = cfg.numHeads
+            let numKV = cfg.numFullKVHeads
+            let qDim = numQ * headDim
+            let kvDim = numKV * headDim
+            let rotaryDim = Int(Double(headDim) * cfg.partialRotaryFactor)
+
+            encodeInt4Projection(commandBuffer: cb,
+                                 family: .q,
+                                 weights: qP,
+                                 x: scratch.normed,
+                                 y: scratch.q,
+                                 rows: 2 * qDim,
+                                 columns: D,
+                                 tokenCount: t,
+                                 xStrideElements: D,
+                                 yStrideElements: 2 * qDim)
+            encodeInt4Projection(commandBuffer: cb,
+                                 family: .kv,
+                                 weights: kP,
+                                 x: scratch.normed,
+                                 y: scratch.kStage,
+                                 rows: kvDim,
+                                 columns: D,
+                                 tokenCount: t,
+                                 xStrideElements: D,
+                                 yStrideElements: kvDim)
+            encodeInt4Projection(commandBuffer: cb,
+                                 family: .kv,
+                                 weights: vP,
+                                 x: scratch.normed,
+                                 y: scratch.vStage,
+                                 rows: kvDim,
+                                 columns: D,
+                                 tokenCount: t,
+                                 xStrideElements: D,
+                                 yStrideElements: kvDim)
+
+            for row in 0..<t {
+                qwenFusions.encodeFullAttnEpilogue(
+                    commandBuffer: cb,
+                    qProj: scratch.q, qProjOffset: row * 2 * qDim * 2,
+                    qOut: scratch.q, qOutOffset: row * qDim * 2,
+                    gateOut: scratch.qwenQGate, gateOutOffset: row * qDim * 2,
+                    k: scratch.kStage, kOffset: row * kvDim * 2,
+                    qWeight: qN.buffer, qWeightOffset: Int(qN.offset),
+                    kWeight: kN.buffer, kWeightOffset: Int(kN.offset),
+                    headDim: UInt32(headDim),
+                    numQHeads: UInt32(numQ),
+                    numKVHeads: UInt32(numKV),
+                    position: UInt32(startPosition + row),
+                    theta: Float(cfg.fullRopeTheta),
+                    rotaryDim: UInt32(rotaryDim),
+                    eps: eps)
+            }
+
+            // Hand the chunk's K/V to the cache before anything reads it. The
+            // epilogue wrote `kStage` in this same CB, this blit is encoded
+            // after it, and the per-row attention further down is encoded
+            // after the blit — one CB, so submission order makes that exact.
+            // `vStage` is copied raw: values take no rope.
+            if let kv {
+                try copyPrefillKVToCache(
+                    commandBuffer: cb,
+                    kv: kv,
+                    layer: L,
+                    startPosition: startPosition,
+                    tokenCount: t,
+                    keySource: scratch.kStage,
+                    valueSource: scratch.vStage,
+                    bytesPerToken: kvDim * MemoryLayout<Float16>.stride)
+            }
+
+            let qsaLayer = qsaState.flatMap { st in
+                st.index(ofLayer: L).map { (state: st, index: $0) }
+            }
+            let idxCapacity = qsaLayer?.state.capacity ?? 0
+            // The position one past the chunk — both the KV length the
+            // per-row attention sees and the end of the poolable block range.
+            let endPosition = startPosition + t
+
+            // MARK: QSA indexer (M3.4 chunk form)
+            //
+            // The chunk's indexer timeline in three sweeps, because the
+            // per-token steps do not commute: every row's query projection and
+            // key hand-off first (one batched QMM, then T `encodeQKPost`s), then
+            // the blocks this chunk completes — a block is complete when the
+            // chunk's last cell fills it, so the pool is one contiguous range,
+            // not a per-row branch — then each row's score/select pair. The
+            // four kernels are the M3.2d-validated ones verbatim, reached with
+            // offsets.
+            //
+            // Nothing here is zero-filled. A block is pooled only once every
+            // one of its cells has been written by `encodeQKPost`, and both
+            // sub-chunk boundaries are accounted for: the range's first block
+            // (`startPosition / r`) keeps the cells an earlier chunk wrote
+            // before it, and the last complete block end is `endPosition / r`.
+            // The incomplete tail block is scored but never pooled — the
+            // kernel's +1e9 bias forces it visible, which is what the decode
+            // path relies on too.
+            if let qsaIndexer, let qsaLayer {
+                let idxQK = try model.indexerQKProj(layer: L)
+                let idxQGamma = try model.indexerQLayernorm(layer: L)
+                let idxKGamma = try model.indexerKLayernorm(layer: L)
+                let st = qsaLayer.state
+                let li = qsaLayer.index
+                let lay = st.layers[li]
+                let r = st.r
+                let idxDim = st.idxDim
+                let nHeads = st.numQHeads
+                let nKVHeads = st.numKVHeads
+                let projDim = (nHeads + nKVHeads) * idxDim
+
+                encodeInt4Projection(commandBuffer: cb,
+                                     family: .kv,
+                                     weights: idxQK,
+                                     x: scratch.normed,
+                                     y: scratch.qwen38IdxQKProj,
+                                     rows: projDim,
+                                     columns: D,
+                                     tokenCount: t,
+                                     xStrideElements: D,
+                                     yStrideElements: projDim)
+                for row in 0..<t {
+                    let pos = startPosition + row
+                    qsaIndexer.encodeQKPost(
+                        commandBuffer: cb,
+                        qk: scratch.qwen38IdxQKProj,
+                        qkOffset: row * projDim * MemoryLayout<Float16>.stride,
+                        qGamma: idxQGamma.buffer,
+                        qGammaOffset: Int(idxQGamma.offset),
+                        qOut: scratch.qwen38IdxQ,
+                        qOutOffset: row * nHeads * idxDim * MemoryLayout<Float16>.stride,
+                        kRaw: lay.rawKeys,
+                        kRawOffset: pos * idxDim * MemoryLayout<Float16>.stride,
+                        pos: UInt32(pos),
+                        nHeads: UInt32(nHeads),
+                        idxDim: UInt32(idxDim),
+                        nRot: UInt32(st.nRot),
+                        theta: st.theta,
+                        eps: st.eps)
+                }
+                // Blocks whose every cell this chunk has written. `bFirst` is
+                // the block holding `startPosition`, which an earlier chunk
+                // may already have partly filled; `endPosition / r` blocks are
+                // complete below the chunk's end.
+                let bFirst = startPosition / r
+                var poolCount = 0
+                while (bFirst + poolCount) * r + r - 1 < endPosition {
+                    poolCount += 1
+                }
+                if poolCount > 0 {
+                    qsaIndexer.encodeBlockPoolNormRope(
+                        commandBuffer: cb,
+                        kRaw: lay.rawKeys,
+                        kGamma: idxKGamma.buffer,
+                        kGammaOffset: Int(idxKGamma.offset),
+                        pooled: lay.pooled,
+                        firstBlock: UInt32(bFirst),
+                        blockCount: UInt32(poolCount),
+                        r: UInt32(r),
+                        idxDim: UInt32(idxDim),
+                        nRot: UInt32(st.nRot),
+                        theta: st.theta,
+                        eps: st.eps)
+                    st.advancePooledBlocks(li, by: poolCount)
+                }
+                for row in 0..<t {
+                    let pos = startPosition + row
+                    guard idxCapacity < pos + 1 else { continue }
+                    qsaIndexer.encodeBlockScores(commandBuffer: cb,
+                                                 q: scratch.qwen38IdxQ,
+                                                 qOffset: row * nHeads * idxDim
+                                                    * MemoryLayout<Float16>.stride,
+                                                 pooled: lay.pooled,
+                                                 scores: scratch.qwen38IdxScore,
+                                                 nHeads: UInt32(nHeads),
+                                                 idxDim: UInt32(idxDim),
+                                                 r: UInt32(r),
+                                                 nKv: UInt32(pos + 1),
+                                                 pos: UInt32(pos))
+                    qsaIndexer.encodeSelectCells(
+                        commandBuffer: cb,
+                        scores: scratch.qwen38IdxScore,
+                        cells: scratch.qwen38Cells,
+                        cellsOffset: row * idxCapacity * MemoryLayout<UInt32>.stride,
+                        count: scratch.qwen38CellCount,
+                        pos: UInt32(pos),
+                        nKv: UInt32(pos + 1),
+                        r: UInt32(r),
+                        budget: UInt32(st.budget))
+                }
+            }
+
+            // Per row, exactly as decode: the dense rows take the whole
+            // timeline, the rows past the selection width take the indexer's
+            // cell list. Both are the decode kernels — `encodeFull` builds its
+            // causal mask from `seqLen`, `encodeFullCells` reads the cells the
+            // select just wrote — so a chunk row and a decode step are the same
+            // arithmetic. The batched `encodeCausal` path is deliberately NOT
+            // used here: it is a different kernel, and a 3.8 chunk would then
+            // attend two ways at once.
+            guard let kv else {
+                throw PrefillError.chunkedUnsupported(
+                    "chunked prefill attention requires FP16 KV")
+            }
+            let kBuf = kv.keyBuffer(layer: L, validTokenCount: endPosition)
+            let vBuf = kv.valueBuffer(layer: L, validTokenCount: endPosition)
+            for row in 0..<t {
+                let pos = startPosition + row
+                if idxCapacity >= pos + 1 {
+                    attention.encodeFull(commandBuffer: cb,
+                                         q: scratch.q, qOffset: row * qDim * 2,
+                                         k: kBuf, kOffset: 0,
+                                         v: vBuf, vOffset: 0,
+                                         out: scratch.attentionOutput,
+                                         outOffset: row * qDim * 2,
+                                         headDim: UInt32(headDim),
+                                         numQHeads: UInt32(numQ),
+                                         numKVHeads: UInt32(numKV),
+                                         seqLen: UInt32(pos + 1),
+                                         scale: nil)   // rsqrt(head_dim)
+                } else {
+                    // The selection fills its width exactly, so the cell count
+                    // is `capacity` without reading back the kernel's counter.
+                    attention.encodeFullCells(
+                        commandBuffer: cb,
+                        q: scratch.q, qOffset: row * qDim * 2,
+                        k: kBuf, kOffset: 0,
+                        v: vBuf, vOffset: 0,
+                        cells: scratch.qwen38Cells,
+                        cellsOffset: row * idxCapacity * MemoryLayout<UInt32>.stride,
+                        out: scratch.attentionOutput, outOffset: row * qDim * 2,
+                        headDim: UInt32(headDim),
+                        numQHeads: UInt32(numQ),
+                        numKVHeads: UInt32(numKV),
+                        nCells: UInt32(idxCapacity),
+                        scale: nil)   // rsqrt(head_dim)
+                }
+            }
+
+            for row in 0..<t {
+                qwenFusions.encodeAttnOutputGate(commandBuffer: cb,
+                                                 attn: scratch.attentionOutput,
+                                                 attnOffset: row * qDim * 2,
+                                                 gate: scratch.qwenQGate,
+                                                 gateOffset: row * qDim * 2,
+                                                 n: UInt32(qDim))
+            }
+            encodeInt4Projection(commandBuffer: cb,
+                                 family: .o,
+                                 weights: oP,
+                                 x: scratch.attentionOutput,
+                                 y: scratch.qwen38OOut,
+                                 rows: D,
+                                 columns: qDim,
+                                 tokenCount: t,
+                                 xStrideElements: qDim,
+                                 yStrideElements: D)
+            snapRowValue("attnBlockOut", scratch.qwen38OOut, snapRow * D, into: cb, elements: D)
+        } else {
+            // GDN (linear-attention) layer: identical to the Qwen 3.6 body
+            // except the output norm's z-gate — sigmoid here, silu there
+            // (qwen4exp `build_norm_gated` :411-421) — and the out_proj target,
+            // which lands in the plane-visible `qwen38OOut` rather than the
+            // [D] `h1` the 3.6 tail adds to.
+            let si = gdnStateIndexByLayer[L]
+            precondition(si >= 0, "GDN layer \(L) without state")
+            let qkvP = try model.gdnInProjQKV(layer: L)
+            let zP = try model.gdnInProjZ(layer: L)
+            let outP = try model.gdnOutProj(layer: L)
+            let convW = try model.gdnConv1D(layer: L)
+            let aLog = try model.gdnALog(layer: L)
+            let dt = try model.gdnDtBias(layer: L)
+            let normW = try model.gdnNormWeight(layer: L)
+            let recState = gdnRecurrentState[si]
+            let convState = gdnConvState[si]
+            let aP = linearAttnBits == 8 ? try model.gdnInProjA(layer: L) : nil
+            let bP = linearAttnBits == 8 ? try model.gdnInProjB(layer: L) : nil
+            let keyDim = cfg.linearNumKeyHeads * cfg.linearKeyHeadDim
+            let valueDim = cfg.linearNumValueHeads * cfg.linearValueHeadDim
+            let qkvDim = 2 * keyDim + valueDim
+            let numV = cfg.linearNumValueHeads
+            let headDim = cfg.linearValueHeadDim
+            let scale = 1.0 / Float(cfg.linearKeyHeadDim).squareRoot()
+            let betaByteOffset = t * numV * MemoryLayout<Float>.size
+
+            if linearAttnBits == 8 {
+                encodeRepeatedInt8(commandBuffer: cb,
+                                   weights: qkvP,
+                                   x: scratch.normed,
+                                   y: scratch.qwenQKVProj,
+                                   rows: qkvDim,
+                                   columns: D,
+                                   tokenCount: t,
+                                   xStrideElements: D,
+                                   yStrideElements: qkvDim)
+                encodeRepeatedInt8(commandBuffer: cb,
+                                   weights: zP,
+                                   x: scratch.normed,
+                                   y: scratch.qwenZ,
+                                   rows: valueDim,
+                                   columns: D,
+                                   tokenCount: t,
+                                   xStrideElements: D,
+                                   yStrideElements: valueDim)
+                encodeRepeatedInt8(commandBuffer: cb,
+                                   weights: aP!,
+                                   x: scratch.normed,
+                                   y: scratch.qwenAB,
+                                   rows: numV,
+                                   columns: D,
+                                   tokenCount: t,
+                                   xStrideElements: D,
+                                   yStrideElements: 2 * numV,
+                                   yBaseElements: 0)
+                encodeRepeatedInt8(commandBuffer: cb,
+                                   weights: bP!,
+                                   x: scratch.normed,
+                                   y: scratch.qwenAB,
+                                   rows: numV,
+                                   columns: D,
+                                   tokenCount: t,
+                                   xStrideElements: D,
+                                   yStrideElements: 2 * numV,
+                                   yBaseElements: numV)
+            } else {
+                encodeInt4Projection(commandBuffer: cb,
+                                     family: .kv,
+                                     weights: qkvP,
+                                     x: scratch.normed,
+                                     y: scratch.qwenQKVProj,
+                                     rows: qkvDim,
+                                     columns: D,
+                                     tokenCount: t,
+                                     xStrideElements: D,
+                                     yStrideElements: qkvDim)
+                encodeInt4Projection(commandBuffer: cb,
+                                     family: .kv,
+                                     weights: zP,
+                                     x: scratch.normed,
+                                     y: scratch.qwenZ,
+                                     rows: valueDim,
+                                     columns: D,
+                                     tokenCount: t,
+                                     xStrideElements: D,
+                                     yStrideElements: valueDim)
+                let gateW = gdnGateWeights[si]
+                prefillQMM.encode(commandBuffer: cb,
+                                  weights: gateW.weights,
+                                  scales: gateW.scales,
+                                  biases: gateW.biases,
+                                  x: scratch.normed,
+                                  y: scratch.qwenAB,
+                                  t: t,
+                                  n: 2 * numV,
+                                  k: D)
+            }
+            gdnPrefill.encodeGateBatch(commandBuffer: cb,
+                                       ab: scratch.qwenAB,
+                                       A_log: aLog.buffer, A_logOffset: Int(aLog.offset),
+                                       dt_bias: dt.buffer, dt_biasOffset: Int(dt.offset),
+                                       g: scratch.qwenGBeta,
+                                       beta: scratch.qwenGBeta, betaOffset: betaByteOffset,
+                                       numValueHeads: numV,
+                                       tokens: t)
+            gdnPrefill.encodeConvChunk(commandBuffer: cb,
+                                       w: convW.buffer, wOffset: Int(convW.offset),
+                                       state: convState,
+                                       x: scratch.qwenQKVProj,
+                                       out: scratch.qwenQKVConvOut,
+                                       newState: scratch.qwenConvNewState,
+                                       channels: qkvDim,
+                                       tokens: t)
+            snapRowValue("qkvProjected", scratch.qwenQKVProj, snapRow * qkvDim,
+                         into: cb, elements: qkvDim)
+            snapRowValue("qkvConv", scratch.qwenQKVConvOut, snapRow * qkvDim,
+                         into: cb, elements: qkvDim)
+            snapRowValue("gFloat", scratch.qwenGBeta, snapRow * numV, into: cb,
+                         elements: numV, stride: MemoryLayout<Float>.stride)
+            gdnPrefill.encodeRecurrentSeq(commandBuffer: cb,
+                                          state: recState,
+                                          conv: scratch.qwenQKVConvOut,
+                                          g: scratch.qwenGBeta,
+                                          beta: scratch.qwenGBeta, betaOffset: betaByteOffset,
+                                          out: scratch.qwenRecOut,
+                                          headDim: UInt32(headDim),
+                                          channels: UInt32(qkvDim),
+                                          kOffset: UInt32(keyDim),
+                                          vOffset: UInt32(2 * keyDim),
+                                          numValueHeads: numV,
+                                          tokens: t,
+                                          scale: scale,
+                                          l2eps: eps)
+            snapRowValue("recState", recState, 0, into: cb,
+                         elements: numV * headDim * headDim,
+                         stride: MemoryLayout<Float>.stride)
+            gdnPrefill.encodeRMSNormGatedBatch(commandBuffer: cb,
+                                               x: scratch.qwenRecOut,
+                                               z: scratch.qwenZ,
+                                               weight: normW.buffer, weightOffset: Int(normW.offset),
+                                               out: scratch.qwenRecOut,
+                                               headDim: UInt32(headDim),
+                                               numValueHeads: numV,
+                                               tokens: t,
+                                               eps: eps,
+                                               activation: .sigmoid)
+            // Snapshotted AFTER the gated norm, matching decode: its
+            // `recurrentOut` hook reads `attnOut` after `gNormGated` wrote it
+            // back in place, so the two stages must be compared at the same
+            // point in the pipeline.
+            snapRowValue("recurrentOut", scratch.qwenRecOut, snapRow * valueDim,
+                         into: cb, elements: valueDim)
+            if linearAttnBits == 8 {
+                encodeRepeatedInt8(commandBuffer: cb,
+                                   weights: outP,
+                                   x: scratch.qwenRecOut,
+                                   y: scratch.qwen38OOut,
+                                   rows: D,
+                                   columns: valueDim,
+                                   tokenCount: t,
+                                   xStrideElements: valueDim,
+                                   yStrideElements: D)
+            } else {
+                encodeInt4Projection(commandBuffer: cb,
+                                     family: .o,
+                                     weights: outP,
+                                     x: scratch.qwenRecOut,
+                                     y: scratch.qwen38OOut,
+                                     rows: D,
+                                     columns: valueDim,
+                                     tokenCount: t,
+                                     xStrideElements: valueDim,
+                                     yStrideElements: D)
+            }
+            snapRowValue("attnBlockOut", scratch.qwen38OOut, snapRow * D, into: cb, elements: D)
+        }
+
+        // --- attn combine, then the ffn mix on the updated plane ------------
+        hyperConnection.encodeSeqCombine(commandBuffer: cb,
+                                         plane: scratch.qwen38Plane,
+                                         blockOut: scratch.qwen38OOut,
+                                         inject: scratch.qwen38Inject,
+                                         d: UInt32(D), hc: UInt32(hc),
+                                         tokens: tokens32, invHc: invHc)
+        snapRowValue("hc.mid", scratch.qwen38Plane, snapRow * hcDim, into: cb)
+        encodeQwen38SeqMix(commandBuffer: cb,
+                           norm: ffnMixW.hcNorm, down: ffnMixW.mixDown,
+                           up: ffnMixW.mixUp, blockInject: ffnMixW.blockInject,
+                           plane: scratch.qwen38Plane, planeOffset: 0,
+                           blockOut: scratch.denseX, blockOutOffset: 0,
+                           inject: scratch.qwen38Inject, injectOffset: 0,
+                           scratch: scratch,
+                           d: UInt32(D), hc: UInt32(hc), lowrank: UInt32(lowrank),
+                           tokens: tokens32, invHc: invHc, eps: eps)
+        snapRowValue("ffnBlockIn", scratch.denseX, snapRow * D, into: cb, elements: D)
+
+        // Router (both layer types): plain softmax over all experts, top-8
+        // renormalized — identical math to the kernel's top-8 softmax, so the
+        // Gemma block is reused with ones-filled scales (as in decode).
+        prefillRouter.encodeGemma4Block(
+            commandBuffer: cb,
+            weights: routerW.buffer,
+            weightsOffset: Int(routerW.offset),
+            scales: routerW.buffer,
+            scalesOffset: Int(routerW.scaleOffset),
+            biases: routerW.buffer,
+            biasesOffset: Int(routerW.biasOffset),
+            hidden: scratch.denseX,
+            effectiveScale: onesEffective,
+            perExpertScale: onesExpert,
+            perExpertScaleOffset: 0,
+            outIndices: scratch.routeIDs,
+            outWeights: scratch.routeWeights,
+            queryCount: UInt32(t),
+            numExperts: UInt32(cfg.numExperts),
+            d: UInt32(D),
+            topK: UInt32(cfg.topKExperts),
+            hiddenStrideElements: UInt32(D))
+        cb.commit()
+        waitForCompletion(cb)
+        if let error = cb.error {
+            throw error
+        }
+        drainSnapshots()
+
+        // CPU readback of the router indices → expert grouping, as in decode.
+        let routeCount = t * cfg.topKExperts
+        let idPtr = scratch.routeIDs.contents()
+            .bindMemory(to: UInt32.self, capacity: routeCount)
+        let weightPtr = scratch.routeWeights.contents()
+            .bindMemory(to: Float16.self, capacity: routeCount)
+        var routeIDs = [UInt32]()
+        routeIDs.reserveCapacity(routeCount)
+        var routeWeights = [Float16]()
+        routeWeights.reserveCapacity(routeCount)
+        for i in 0..<routeCount {
+            routeIDs.append(min(idPtr[i], UInt32(cfg.numExperts - 1)))
+            routeWeights.append(weightPtr[i])
+        }
+        let pairs = PrefillRouter.makeTokenExpertPairs(indices: routeIDs,
+                                                       weights: routeWeights,
+                                                       queryCount: t,
+                                                       topK: cfg.topKExperts)
+        let schedulerConfig = Self.prefillRoutedTileSchedulerConfig
+        let routeTileExpertCount: Int
+        if let slotCount = model.routedExpertCacheSlotCount(layer: L) {
+            guard schedulerConfig.fitsSlotBudget(slotCount: slotCount) else {
+                throw PrefillError.chunkedUnsupported(
+                    "prefill routed tile depth \(schedulerConfig.maxPendingDepth) with \(schedulerConfig.tileExperts) experts/tile needs \((schedulerConfig.maxPendingDepth + 1) * schedulerConfig.tileExperts) slots, has \(slotCount)")
+            }
+            routeTileExpertCount = min(schedulerConfig.tileExperts, slotCount)
+        } else {
+            routeTileExpertCount = schedulerConfig.tileExperts
+        }
+        let routes = try PrefillMoEGrouping.groupTokenExpertPairs(
+            pairs,
+            queryCount: t,
+            topK: cfg.topKExperts,
+            numExperts: cfg.numExperts,
+            tileExpertCount: routeTileExpertCount,
+            expertSortKeys: model.routedExpertPhysicalOffsets(layer: L))
+
+        // Shared expert (silu) on an early-committed CB, then the Qwen post
+        // stage: sigmoid(shared_expert_gate · x) scales h1 per token.
+        guard let sharedCB = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        let sharedProj = sharedExpertProjections[L]
+        try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
+                                            x: scratch.denseX,
+                                            y: scratch.h1,
+                                            gate: sharedProj.gate,
+                                            up: sharedProj.up,
+                                            down: sharedProj.down,
+                                            scratchGate: scratch.sharedGateScratch,
+                                            scratchUp: scratch.sharedUpScratch,
+                                            scratchAct: scratch.sharedActScratch,
+                                            queryCount: t,
+                                            d: D,
+                                            intermediate: cfg.intermediateSize,
+                                            xStrideElements: D,
+                                            yStrideElements: D,
+                                            activation: .silu)
+        let sharedGate = try model.sharedExpertGateProj(layer: L)
+        for row in 0..<t {
+            qwenFusions.encodeSharedGate(commandBuffer: sharedCB,
+                                         weights: sharedGate.buffer,
+                                         weightsOffset: Int(sharedGate.offset),
+                                         scales: sharedGate.buffer,
+                                         scalesOffset: Int(sharedGate.scaleOffset),
+                                         biases: sharedGate.buffer,
+                                         biasesOffset: Int(sharedGate.biasOffset),
+                                         x: scratch.denseX, xOffset: row * D * 2,
+                                         h1: scratch.h1, h1Offset: row * D * 2,
+                                         n: UInt32(D), d: UInt32(D))
+        }
+        sharedCB.commit()
+        waitForCompletion(sharedCB)
+        if let error = sharedCB.error {
+            throw error
+        }
+
+        // Streamed routed-expert tiles (silu), mirroring the Gemma tile loop.
+        let metadata = try prefillGroupedMoE.makeStreamedMetadataBuffers(
+            device: ctx.device,
+            routes: routes)
+        let routedOffsets = model.routedExpertOffsets(layer: L)
+        struct PendingPrefillTile {
+            let tileIndex: Int
+            let commandBuffer: MTLCommandBuffer
+            let fetch: PrefillStreamedTileFetchResult
+            let argumentBuffer: PrefillStreamedTileArgumentBuffer
+        }
+        var pendingTiles: [PendingPrefillTile] = []
+        var tileLifetime = PrefillStreamedTileSlotLifetime()
+        func drainOldestPendingTile() throws {
+            guard !pendingTiles.isEmpty else { return }
+            let pending = pendingTiles.removeFirst()
+            withExtendedLifetime((pending.fetch, pending.argumentBuffer)) {
+                waitForCompletion(pending.commandBuffer)
+            }
+            if let error = pending.commandBuffer.error {
+                throw error
+            }
+            if !pending.fetch.plannedMissSlots.isEmpty {
+                try tileLifetime.complete(tileIndex: pending.tileIndex)
+            }
+        }
+
+        let routedTileScheduler = PrefillRoutedTileScheduler(config: schedulerConfig)
+        for (tileIndex, tile) in routes.tiles.enumerated() {
+            let expertIDs = try PrefillStreamedTileBinding.expertIDs(
+                forTile: tileIndex,
+                routes: routes)
+            var plannedFetch: RoutedExpertFetchPlan?
+            if !pendingTiles.isEmpty {
+                let pendingAssignedSlots = pendingTiles.flatMap(\.fetch.plannedAssignedSlots)
+                if !pendingAssignedSlots.isEmpty {
+                    let pendingSlots = Set(pendingAssignedSlots)
+                    let plan = try model.planRoutedExpertsIfPossible(
+                        layer: L,
+                        experts: expertIDs,
+                        avoidingSlots: pendingSlots)
+                    let decision = routedTileScheduler.decide(
+                        PrefillRoutedTileSchedulerInput(
+                            hasPendingTile: true,
+                            pendingDepth: pendingTiles.count,
+                            pendingAssignedSlots: pendingAssignedSlots,
+                            avoidingSlotPlanAvailable: plan != nil))
+                    switch decision {
+                    case .prefetchNext:
+                        guard let plan else {
+                            throw ModelError.indexCorrupt(
+                                detail: "routed tile scheduler requested missing plan")
+                        }
+                        plannedFetch = plan
+                    case .drainBeforeIssue:
+                        try drainOldestPendingTile()
+                    case .issueWithoutPending:
+                        throw ModelError.indexCorrupt(
+                            detail: "routed tile scheduler ignored pending tile")
+                    }
+                } else {
+                    let decision = routedTileScheduler.decide(
+                        PrefillRoutedTileSchedulerInput(
+                            hasPendingTile: true,
+                            pendingDepth: pendingTiles.count,
+                            pendingAssignedSlots: [],
+                            avoidingSlotPlanAvailable: false))
+                    switch decision {
+                    case .drainBeforeIssue:
+                        try drainOldestPendingTile()
+                    case .issueWithoutPending, .prefetchNext:
+                        throw ModelError.indexCorrupt(
+                            detail: "routed tile scheduler failed to drain empty-slot pending tile")
+                    }
+                }
+            } else {
+                let decision = routedTileScheduler.decide(
+                    PrefillRoutedTileSchedulerInput(
+                        hasPendingTile: false,
+                        pendingAssignedSlots: [],
+                        avoidingSlotPlanAvailable: false))
+                switch decision {
+                case .issueWithoutPending:
+                    break
+                case .prefetchNext, .drainBeforeIssue:
+                    throw ModelError.indexCorrupt(
+                        detail: "routed tile scheduler requested pending action without pending tile")
+                }
+            }
+            let fetch = try await PrefillStreamedTileBinding.fetchBindingForTile(
+                model: model,
+                layer: L,
+                tileIndex: tileIndex,
+                routes: routes,
+                plannedFetch: plannedFetch,
+                avoidingSlots: Set(pendingTiles.flatMap(\.fetch.plannedAssignedSlots)))
+            try fetch.binding.validateCoversPairs(routes.sortedPairs,
+                                                  pairStart: Int(tile.pairStart),
+                                                  pairCount: Int(tile.pairCount))
+            if !fetch.plannedMissSlots.isEmpty {
+                try tileLifetime.begin(tileIndex: tileIndex,
+                                       plannedSlots: fetch.plannedMissSlots)
+            }
+            let argumentBuffer = try prefillGroupedMoE.makeStreamedArgumentBuffer(
+                device: ctx.device,
+                binding: fetch.binding)
+            let streamedParams = PrefillGroupedRoutedMoEStreamedParams(
+                pairStart: tile.pairStart,
+                pairCount: tile.pairCount,
+                d: UInt32(D),
+                routedIntermediate: UInt32(cfg.moeIntermediateSize),
+                topK: UInt32(cfg.topKExperts),
+                hiddenStrideElements: UInt32(D),
+                binding: fetch.binding,
+                offsets: routedOffsets)
+            guard let tileCB = ctx.queue.makeCommandBuffer() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            _ = prefillGroupedMoE.encodeStreamedBatched(
+                commandBuffer: tileCB,
+                hidden: scratch.denseX,
+                sortedPairs: metadata.sortedPairs,
+                routePartials: scratch.routePartials,
+                gateUpActScratch: scratch.routedGateUpActScratch,
+                downScratch: scratch.routedDownScratch,
+                argumentBuffer: argumentBuffer,
+                binding: fetch.binding,
+                params: streamedParams,
+                pairMicrobatchRows: scratch.layout.routedPairMicrobatchRows,
+                activation: .silu)
+            tileCB.commit()
+            pendingTiles.append(PendingPrefillTile(tileIndex: tileIndex,
+                                                   commandBuffer: tileCB,
+                                                   fetch: fetch,
+                                                   argumentBuffer: argumentBuffer))
+            while pendingTiles.count > schedulerConfig.maxPendingDepth {
+                try drainOldestPendingTile()
+            }
+        }
+        while !pendingTiles.isEmpty {
+            try drainOldestPendingTile()
+        }
+
+        // Tail: h2 = routed reduce, h2 += h1 (the shared expert, already
+        // gate-scaled — the decode path's phase-2 residual), then the MLP
+        // combine scatters h2 into the plane. 3.8 has no `hidden` write, no
+        // layer_scalar and no sandwich norms.
+        guard let tailCB = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        prefillMoE.encodeReduceTokenMajor(commandBuffer: tailCB,
+                                          routePartials: scratch.routePartials,
+                                          routeWeights: scratch.routeWeights,
+                                          h2: scratch.h2,
+                                          queryCount: UInt32(t),
+                                          topK: UInt32(cfg.topKExperts),
+                                          d: UInt32(D))
+        for row in 0..<t {
+            qwenFusions.encodeVecAdd(commandBuffer: tailCB,
+                                     a: scratch.h2, aOffset: row * D * 2,
+                                     b: scratch.h1, bOffset: row * D * 2,
+                                     d: UInt32(D))
+        }
+        snapRowValue("mlpBlockIn", scratch.h2, snapRow * D, into: tailCB,
+                     elements: D)
+        snapRowValue("sharedOut", scratch.h1, snapRow * D, into: tailCB,
+                     elements: D)
+        hyperConnection.encodeSeqCombine(commandBuffer: tailCB,
+                                         plane: scratch.qwen38Plane,
+                                         blockOut: scratch.h2,
+                                         inject: scratch.qwen38Inject,
+                                         d: UInt32(D), hc: UInt32(hc),
+                                         tokens: tokens32, invHc: invHc)
+        snapRowValue("hc.post", scratch.qwen38Plane, snapRow * hcDim, into: tailCB)
+        tailCB.commit()
+        withExtendedLifetime(metadata) {
+            waitForCompletion(tailCB)
+        }
+        if let error = tailCB.error {
+            throw error
+        }
+        drainSnapshots()
+
+        if L + 1 < cfg.numLayers {
+            guard let nextCB = ctx.queue.makeCommandBuffer() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            return nextCB
+        }
+        return cb
+    }
+
     /// Qwen 3.8 Flash-Next hyper-connection mix stage — llama `build_hc_mix`
     /// (`archive/llama.cpp/src/models/qwen4exp.cpp` :226-262): grouped RMS
     /// over the [hc·D] plane scaled by the raw-BF16 [hc·D] gamma → int4 down
@@ -3929,6 +5087,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                     capacity: hcDim)
             hook(L, "hc.post", Array(UnsafeBufferPointer(start: ptr,
                                                          count: hcDim)))
+            // The MLP combine's block input (shared + routed, residual-added):
+            // splits the MoE block from the combine that scatters it.
+            let h2Ptr = h2Buf.contents().bindMemory(to: Float16.self,
+                                                    capacity: cfg.hiddenSize)
+            hook(L, "mlpBlockIn", Array(UnsafeBufferPointer(start: h2Ptr,
+                                                            count: cfg.hiddenSize)))
+            // The shared-expert term alone: h2 = shared + routed, so a
+            // matching shared leaves the routed path as the difference.
+            let h1Ptr = h1Buf.contents().bindMemory(to: Float16.self,
+                                                    capacity: cfg.hiddenSize)
+            hook(L, "sharedOut", Array(UnsafeBufferPointer(start: h1Ptr,
+                                                           count: cfg.hiddenSize)))
         }
     }
 

@@ -789,8 +789,8 @@ import FinchMoEValidationSupport
 ///     (layer 3) both stay finite through the routed tail;
 ///   * the head collapses the root hyper_connection_mixer over the plane and
 ///     lm_head produces finite logits.
-/// A second test asserts chunked prefill is gated to an explicit error until
-/// M3.4 wires the 3.8 prefill bodies.
+/// A second test runs the M3.4 chunked prefill path and holds it against the
+/// same tokens decoded one step at a time.
 @Suite struct Qwen38DecodeWiringTests {
 
     private static let hc = 4
@@ -965,30 +965,264 @@ import FinchMoEValidationSupport
                 "the query's own cell must survive the selection")
     }
 
-    @Test func prefillGateBlocksQwen38() async throws {
+    /// M3.4: the chunked prefill path, held against decode over the same
+    /// tokens — and against itself across chunk boundaries.
+    ///
+    /// Twelve tokens is the shortest chunk the runner can be asked for and the
+    /// most demanding one: below 32 tokens every projection in the chunk takes
+    /// the repeated-GEMV path, which *is* decode's `int4.encode`, so a chunk
+    /// and twelve sequential decode steps run the same kernels over the same
+    /// values. That is what makes this a wiring test rather than a tolerance
+    /// test — a wrong buffer, offset or stage order moves the logits far beyond
+    /// the fp16 rounding the two paths share. It has already earned its keep:
+    /// the head passed its `planeOffset` in elements where `setBuffer(_:offset:)`
+    /// wants bytes, so every prefill with `t > 1` read the wrong plane row. The
+    /// tell was not noise but structure — the logits changed with the boundary.
+    ///
+    /// Twelve also straddles the toy's indexer capacity (11): rows 0…10 attend
+    /// the whole timeline through `encodeFull`, row 11 attends through the
+    /// indexer's selected cell list. Both branches of the 3.8 attention inside
+    /// one chunk, each against the matching decode step.
+    ///
+    /// Three tiers, because bitwise logits are not on offer here:
+    ///
+    ///  1. **Chunking invariance** — one 12-token span, two 6-token spans and
+    ///     twelve 1-token spans must land on identical stages and identical
+    ///     logits. The strongest statement available, and it needs no
+    ///     reference: the chunk path is a pure function of the tokens and the
+    ///     state they build, so the boundary must not be observable.
+    ///  2. **Shared arithmetic** — at layer 0, every stage the chunk and a
+    ///     decode step compute the same way must match bit for bit.
+    ///  3. **Whole-model agreement** — the logits against twelve decode steps,
+    ///     via cosine. Exact equality is not achievable: the chunk's routed
+    ///     reduce takes fp16 `routePartials` and adds the shared residual in a
+    ///     separate fp16 rounding, where decode's `moe_phase2_down_reduce_k8`
+    ///     keeps each per-slot value fp32, seeds the accumulator with the
+    ///     residual and rounds once. That is structural, not a wiring bug, and
+    ///     at layer 0 it costs 1 fp16 ulp of the row maximum (`mlpBlockIn`
+    ///     nDiff 28/64); four layers of this toy amplify it to ~6%.
+    ///
+    /// For calibration, in the final logits: correct is ≈ 0.98 cosine, and both
+    /// a chunking-only perturbation and the mis-wired head sat at ≈ 0. Nothing
+    /// in the logits separates chaos from a wiring bug — which is why tier 1
+    /// carries the weight.
+    @Test func prefillChunkMatchesDecodeSteps() async throws {
         let model = try await Qwen38EngineLoadTests.loadToy38()
-        let runner = try Self.makeRunner(model)
         let vocab = Qwen38EngineLoadTests.Toy38.vocab
-        guard let logits = model.device.makeBuffer(
-            length: vocab * MemoryLayout<Float16>.size,
-            options: .storageModeShared) else {
-            Issue.record("logits alloc failed"); return
+        let fullLayer = 3
+        let r = Qwen38EngineLoadTests.Toy38.indexerCompressRatio
+        let budget = Qwen38EngineLoadTests.Toy38.indexerBudget
+        // The runner's maxContext caps the width the same way the state does.
+        let capacity = min(256, budget + r - 1)
+        let chunk = capacity + 1
+        let tokens = (0..<chunk).map { Int32(3 + $0) }
+
+        let read: (MTLBuffer) -> [Float16] = { buf in
+            let ptr = buf.contents().bindMemory(to: Float16.self, capacity: vocab)
+            return Array(UnsafeBufferPointer(start: ptr, count: vocab))
         }
-        let tokens = [Int32(3), Int32(4)]
-        do {
-            _ = try await runner.prefillChunked(
-                tokens: tokens[...],
-                startPosition: 0,
-                outputMode: .greedyIfAvailable,
-                config: .defaultChunked,
-                into: logits,
-                onProgress: { _ in })
-            Issue.record("expected qwen3_8 prefill to throw until M3.4")
-        } catch let e {
-            guard case PrefillError.modelFamilyUnsupported = e else {
-                Issue.record("unexpected prefill error: \(e)"); return
+
+        /// One scenario: a fresh runner carrying the stage hook and a logits
+        /// buffer of its own, returned with everything it recorded.
+        func scenario(_ body: (RealForwardRunner, MTLBuffer) async throws -> Int)
+            async throws -> (runner: RealForwardRunner, stages: [String: [Float16]],
+                             logits: [Float16], newPosition: Int) {
+            let runner = try Self.makeRunner(model)
+            var stages: [String: [Float16]] = [:]
+            runner.qwenLayerDebugHook = { L, name, values in
+                stages["\(L)|\(name)"] = values
+            }
+            let logits = try #require(model.device.makeBuffer(
+                length: vocab * MemoryLayout<Float16>.size,
+                options: .storageModeShared))
+            let newPosition = try await body(runner, logits)
+            runner.qwenLayerDebugHook = nil
+            return (runner, stages, read(logits), newPosition)
+        }
+
+        /// The chunked path over `spans`, in order.
+        func prefill(_ spans: [[Int32]]) async throws
+            -> (runner: RealForwardRunner, stages: [String: [Float16]],
+                logits: [Float16], newPosition: Int) {
+            try await scenario { runner, logits in
+                var position = 0
+                var advanced = 0
+                for span in spans {
+                    let result = try await runner.prefillChunked(
+                        tokens: span[...], startPosition: position,
+                        outputMode: .logits, config: .defaultChunked,
+                        into: logits, onProgress: { _ in })
+                    position += span.count
+                    advanced = result.newPosition
+                }
+                return advanced
             }
         }
+
+        /// The first element two stage sets disagree on, or nil.
+        func firstDivergence(_ a: [String: [Float16]],
+                             _ b: [String: [Float16]]) -> String? {
+            guard a.count == b.count else { return "\(a.count) stages vs \(b.count)" }
+            for key in a.keys.sorted() {
+                guard let x = a[key], let y = b[key] else { return "\(key) on one side only" }
+                guard x.count == y.count else {
+                    return "\(key): \(x.count) elements vs \(y.count)"
+                }
+                for i in 0..<x.count where x[i] != y[i] {
+                    return "\(key)[\(i)]: \(x[i]) vs \(y[i])"
+                }
+            }
+            return nil
+        }
+
+        /// How far `b` is from `a`, in fp16 ulps of `a`'s largest magnitude.
+        func worst(_ a: [Float16], _ b: [Float16])
+            -> (diff: Float, maxAbs: Float, ulps: Float) {
+            var diff: Float = 0
+            var maxAbs: Float = 0
+            for i in 0..<min(a.count, b.count) {
+                diff = max(diff, abs(Float(a[i]) - Float(b[i])))
+                maxAbs = max(maxAbs, abs(Float(a[i])))
+            }
+            let ulp = maxAbs > 0 ? Float(Float16(maxAbs).ulp) : 1
+            return (diff, maxAbs, diff / ulp)
+        }
+        func describe(_ a: [Float16], _ b: [Float16]) -> String {
+            let w = worst(a, b)
+            return "\(w.diff) apart at max |x| = \(w.maxAbs) (\(w.ulps) fp16 ulps)"
+        }
+
+        // The reference: the same tokens one step at a time, on a runner of its
+        // own so both paths start from the same empty state.
+        let decode = try await scenario { runner, logits in
+            for p in 0..<chunk {
+                try await runner.produce(token: tokens[p], position: p, into: logits)
+            }
+            return chunk
+        }
+
+        // The whole run as a single span. `tokens.count` sets the chunk width
+        // here, not the config's 32-token ceiling — which is what keeps this
+        // on the GEMV path and comparable to decode.
+        let whole = try await prefill([tokens])
+        #expect(whole.newPosition == chunk,
+                "prefill advanced to \(whole.newPosition), expected \(chunk)")
+
+        // MARK: Tier 1 — the chunk path cannot see where the spans fell
+
+        let halves = try await prefill([Array(tokens[0..<(chunk / 2)]),
+                                        Array(tokens[(chunk / 2)...])])
+        let singles = try await prefill(tokens.map { [$0] })
+        for (label, split) in [("6+6", halves), ("12×1", singles)] {
+            let stages = firstDivergence(whole.stages, split.stages)
+            #expect(stages == nil,
+                    "\(label) must leave every stage bit-identical to one \(chunk)-token chunk; first divergence: \(stages ?? "")")
+            let logits = worst(whole.logits, split.logits)
+            #expect(whole.logits == split.logits,
+                    "\(label) logits differ from one \(chunk)-token chunk by \(logits.diff) at max |x| = \(logits.maxAbs)")
+        }
+
+        // The same span once more, on a runner of its own — an independent
+        // context with its own buffers must reproduce `whole` exactly. This
+        // is the guard against a chunk that reads state it never wrote: an
+        // unwritten row, or a scratch region that survives from an earlier
+        // allocation, surfaces here as a rerun that disagrees with itself
+        // instead of as a mystery cosine four tiers down.
+        let rerun = try await prefill([tokens])
+        let rerunStages = firstDivergence(whole.stages, rerun.stages)
+        #expect(rerunStages == nil,
+                "a rerun of the same span must be bit-identical; first divergence: \(rerunStages ?? "")")
+        #expect(whole.logits == rerun.logits,
+                "a rerun of the same span must produce the same logits: \(worst(whole.logits, rerun.logits))")
+
+        // MARK: Tier 2 — the arithmetic the two paths share
+
+        // Layer 0 is the only layer still comparable: every stage below it is
+        // the same kernel over the same values, and every stage above it has
+        // the routed reduce's one ulp baked in. `qkvProjected` is absent from
+        // the decode side — the chunk snapshots the fused pre-conv projection,
+        // which decode never materializes.
+        let shared = ["hc.pre", "attnBlockIn", "qkvConv", "recurrentOut",
+                      "recState", "attnBlockOut", "hc.mid", "ffnBlockIn", "sharedOut"]
+        for stage in shared {
+            let key = "0|\(stage)"
+            let want = try #require(decode.stages[key], "decode never reached \(key)")
+            let have = try #require(whole.stages[key], "chunk never reached \(key)")
+            #expect(want.count == have.count,
+                    "\(key): decode \(want.count) elements, chunk \(have.count)")
+            #expect(want == have, "\(key) must be bit-exact: \(describe(want, have))")
+        }
+
+        // `gFloat` is the one shared stage the two paths snapshot at different
+        // widths: decode records the fused pair, `[g | beta]` at 2·numV, and
+        // the chunk records `g` alone at numV. Every element the chunk writes
+        // is decode's elementwise twin, so the chunk's whole run must be
+        // bit-exact as decode's prefix.
+        do {
+            let key = "0|gFloat"
+            let want = try #require(decode.stages[key], "decode never reached \(key)")
+            let have = try #require(whole.stages[key], "chunk never reached \(key)")
+            let lead = Array(want.prefix(have.count))
+            #expect(have.count <= want.count,
+                    "\(key): the chunk recorded \(have.count) elements, past decode's \(want.count)")
+            #expect(lead == have,
+                    "\(key) must be bit-exact over the chunk's \(have.count): \(describe(lead, have))")
+        }
+
+        // The routed reduce moves exactly two layer-0 stages — `mlpBlockIn` is
+        // shared + routed, `hc.post` is the plane after it lands — and it moves
+        // them by one ulp of the row maximum. A mis-routed expert, a wrong tile
+        // offset or a dropped term is O(1) relative, so a four-ulp bound of the
+        // row maximum still fails every wiring defect while admitting the fp16
+        // partials the chunk's reduce is built on.
+        for stage in ["mlpBlockIn", "hc.post"] {
+            let key = "0|\(stage)"
+            let want = try #require(decode.stages[key], "decode never reached \(key)")
+            let have = try #require(whole.stages[key], "chunk never reached \(key)")
+            let w = worst(want, have)
+            #expect(w.ulps <= 4,
+                    "\(key) is \(w.ulps) fp16 ulps from decode — \(describe(want, have))")
+        }
+
+        // MARK: Tier 3 — the whole model against decode
+
+        #expect(whole.logits.allSatisfy { $0.isFinite }, "chunked logits finite")
+        #expect(decode.logits.allSatisfy { $0.isFinite }, "decode logits finite")
+
+        var maxDiff: Float = 0
+        var argmaxGot = 0
+        var argmaxRef = 0
+        var dot = 0.0
+        var normGot = 0.0
+        var normRef = 0.0
+        for i in 0..<vocab {
+            let g = Double(whole.logits[i]), d = Double(decode.logits[i])
+            maxDiff = max(maxDiff, abs(Float(g - d)))
+            dot += g * d
+            normGot += g * g
+            normRef += d * d
+            if whole.logits[i] > whole.logits[argmaxGot] { argmaxGot = i }
+            if decode.logits[i] > decode.logits[argmaxRef] { argmaxRef = i }
+        }
+        let cosine = dot / (normGot.squareRoot() * normRef.squareRoot())
+        let rmsRef = Float((normRef / Double(vocab)).squareRoot())
+        #expect(cosine > 0.9,
+                "chunked prefill is \(cosine) cosine from \(chunk) decode steps (max |Δ| = \(maxDiff), rms \(rmsRef))")
+        #expect(argmaxGot == argmaxRef,
+                "chunk argmax \(argmaxGot) vs decode argmax \(argmaxRef) at cosine \(cosine)")
+
+        // MARK: Pooling — the one piece of the chunk's work that outlives it
+
+        // The chunk's batched pool must leave the indexer exactly where twelve
+        // steps of per-block pooling leave it.
+        let chunkSel = try #require(whole.runner.qsaSelection(layer: fullLayer),
+                                    "the toy's full layer must carry an indexer")
+        let decodeSel = try #require(decode.runner.qsaSelection(layer: fullLayer),
+                                     "the toy's full layer must carry an indexer")
+        #expect(chunkSel.pooledBlocks == chunk / r,
+                "chunk pooled \(chunkSel.pooledBlocks) blocks, expected \(chunk / r)")
+        #expect(chunkSel.pooledBlocks == decodeSel.pooledBlocks,
+                "chunk pooled \(chunkSel.pooledBlocks) blocks, decode pooled \(decodeSel.pooledBlocks)")
     }
 
     // MARK: - PLE decode wiring (M3.3)

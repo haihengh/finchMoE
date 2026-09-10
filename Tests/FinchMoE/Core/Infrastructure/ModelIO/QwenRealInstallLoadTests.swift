@@ -57,4 +57,30 @@ import Metal
         #expect(try model.sharedExpertGateProj(layer: 0).shape == (1, 2_048, 0, 0))
         #expect(model.packedExpertsLayout.expertsPerLayer == 256)
     }
+
+    /// A 3.6 install must be able to build the production runner.
+    ///
+    /// `RealForwardRunner.init` walks the 3.8-only surface — hyper-connection
+    /// scratch, the QSA indexer state, the PLE hash constants — and every one
+    /// of those accessors raises `tensorNotFound` on a manifest that has no
+    /// such tensor. An ungated call there is therefore not a subtle numeric
+    /// drift: it makes the entire 3.6 engine unconstructible, and because the
+    /// only tests that build a non-3.8 runner are the `QwenLayer0DebugTests`
+    /// probes, the symptom is a pile of unrelated-looking diagnostics rather
+    /// than a load failure. Exactly that happened with a stray unconditional
+    /// `model.pleHashConstants()`; this is the gate that names it.
+    @Test(.enabled(if: installExists))
+    func realInstallBuildsTheProductionRunner() throws {
+        let ctx = try MetalContext()
+        let model = try Model.load(
+            directoryURL: URL(fileURLWithPath: Self.installPath),
+            device: ctx.device,
+            expecting: .qwen3_6_35B_A3B)
+        let runner = try RealForwardRunner(model: model, context: ctx,
+                                           maxContext: 256,
+                                           runtimeConfiguration: .production)
+        // Wired, not merely allocated: a fresh runner sits at position 0 and
+        // carries every per-layer state its mask calls for.
+        #expect(runner.continuationPosition == 0)
+    }
 }

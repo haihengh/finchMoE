@@ -21,12 +21,18 @@ final class GDNPrefill {
     private let psoRecurrentSeq: MTLComputePipelineState
     private let psoGate: MTLComputePipelineState
     private let psoNormGated: MTLComputePipelineState
+    /// The Qwen 3.8 Flash-Next gate variant — see `RMSNormGateActivation`.
+    private let psoNormGatedSigmoid: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.psoConvChunk     = try context.pipeline("prefill_gdn_conv_chunk")
         self.psoRecurrentSeq  = try context.pipeline("prefill_gdn_recurrent_seq")
         self.psoGate          = try context.pipeline("prefill_gdn_gate")
         self.psoNormGated     = try context.pipeline("prefill_gdn_rmsnorm_gated")
+        self.psoNormGatedSigmoid = try context.pipeline(
+            "prefill_gdn_rmsnorm_gated",
+            constants: [MetalFunctionConstant(
+                index: GDN.sigmoidGateFunctionConstantIndex, value: .bool(true))])
     }
 
     /// Batched causal conv1d over the chunk (kernel 4, silu). `x`/`out` are
@@ -154,9 +160,11 @@ final class GDNPrefill {
     }
 
     /// Batched gated RMSNorm over each (token, value head) vector:
-    /// `y = x * rsqrt(mean(x^2) + eps) * weight * silu(z)`. `x`/`z`/`out` are
-    /// [T][V][D] fp16 (out may alias x); `weight` is [D] bf16 shared across
-    /// heads.
+    /// `y = x * rsqrt(mean(x^2) + eps) * weight * act(z)`, where `act` is
+    /// `silu` (Qwen 3.5/3.6) or `sigmoid` (Qwen 3.8 Flash-Next — the same
+    /// function-constant switch the decode kernel uses, at the same index).
+    /// `x`/`z`/`out` are [T][V][D] fp16 (out may alias x); `weight` is [D]
+    /// bf16 shared across heads.
     func encodeRMSNormGatedBatch(
         commandBuffer: MTLCommandBuffer,
         x: MTLBuffer,      xOffset: Int = 0,
@@ -166,10 +174,12 @@ final class GDNPrefill {
         headDim: UInt32,
         numValueHeads: Int,
         tokens: Int,
-        eps: Float = 1e-6
+        eps: Float = 1e-6,
+        activation: GDN.RMSNormGateActivation = .silu
     ) {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
-        enc.setComputePipelineState(psoNormGated)
+        enc.setComputePipelineState(
+            activation == .sigmoid ? psoNormGatedSigmoid : psoNormGated)
         enc.setBuffer(x,      offset: xOffset,      index: 0)
         enc.setBuffer(z,      offset: zOffset,      index: 1)
         enc.setBuffer(weight, offset: weightOffset, index: 2)

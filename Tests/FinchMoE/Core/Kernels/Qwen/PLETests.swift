@@ -148,8 +148,12 @@ import FinchMoEValidationSupport
         cb.waitUntilCompleted()
         if let err = cb.error { throw ChainError.commandBuffer(err) }
 
+        // Read `stateBuf`, not `newState`: the wrapper owns the write-back, so
+        // this is the buffer the runner will hand the next position. Reading
+        // the roll destination instead would let the chain pass here while the
+        // engine re-read a frozen history — which is exactly what it did.
         return (Fp16Buffer.read(planeBuf, count: hcDim),
-                Fp16Buffer.read(newState, count: hist * hcDim))
+                Fp16Buffer.read(stateBuf, count: hist * hcDim))
     }
 
     private enum ChainError: Error {
@@ -484,6 +488,183 @@ import FinchMoEValidationSupport
             let want = acc / (1 + exp(-acc))
             #expect(abs(got[ch] - want) < 1e-3, "channel \(ch): \(got[ch]) vs \(want)")
         }
+    }
+
+    // MARK: - Chunked (_seq) parity with decode
+
+    /// The M3.4 acceptance criterion for PLE: a chunk of T tokens through
+    /// `encodeSeqGate` / `encodeSeqGatedValue` / `encodeSeqConv` against T
+    /// single-token dispatches of the decode chain — and against a decode
+    /// dispatch that carries the history forward one token at a time, which is
+    /// the part the chunked form has to reproduce without ever seeing the
+    /// intermediate states.
+    ///
+    /// Both sides read the *same* normed planes (produced once by the chunked
+    /// norm, which the HC suite already pins against the per-token form), so
+    /// what is under test here is the PLE kernels alone. The assertion is exact
+    /// equality: the chunked kernels are the decode kernels with the token row
+    /// moved, and the conv taps resolve to the same fp16 values on both sides,
+    /// so the fp32 arithmetic is identical operation for operation.
+    ///
+    /// `chunk` is chosen to straddle the roll's two cases — a chunk shorter
+    /// than the receptive field takes its rolled rows out of the pre-chunk
+    /// history, a longer one out of the chunk itself.
+    @Test("chunked PLE chain is T decode steps, bit for bit", arguments: [
+        (5, UInt64(0xF41)),      // T < hist (9): the roll reaches back into `state`
+        (11, UInt64(0xF42)),     // T > hist: the roll takes rows from the chunk
+    ])
+    func seqChain_matchesDecode(tokens: Int, seed: UInt64) throws {
+        let streamCount = 2, nEmbd = 32, hcDim = streamCount * nEmbd
+        let kernel = 4, dilation = 3
+        let hist = (kernel - 1) * dilation
+        let stride = MemoryLayout<Float16>.stride
+        let invSqrtD = 1.0 / Float(nEmbd).squareRoot()
+
+        var rng = SeedTree(seed).key("ple-seq-chain")
+        let normKey   = Self.bf16(&rng, hcDim, 0.5, 1.5)
+        let normQuery = Self.bf16(&rng, hcDim, 0.5, 1.5)
+        let normConv  = Self.bf16(&rng, hcDim, 0.5, 1.5)
+        let convWeight = (0..<hcDim * kernel).map { _ in Float(Float16(rng.uniform(-1, 1))) }
+        // Per-token planes: a chunked kernel that reused one token's row for
+        // every token differs from the decode path here.
+        let keyH   = (0..<(tokens * hcDim)).map { _ in Float16(rng.uniform(-2, 2)) }
+        let valueH = (0..<(tokens * nEmbd)).map { _ in Float16(rng.uniform(-2, 2)) }
+        let plane0 = (0..<(tokens * hcDim)).map { _ in Float16(rng.uniform(-2, 2)) }
+        // A mid-sequence start: a full, nonzero history, so every dilated tap
+        // of the first chunk token carries signal.
+        let state0 = (0..<(hist * hcDim)).map { _ in Float16(rng.uniform(-2, 2)) }
+
+        let ctx = try MetalContext()
+        let ple = try PLE(context: ctx)
+        let hc = try HyperConnection(context: ctx)
+        let dev = ctx.device
+
+        guard let keyBuf   = Fp16Buffer.make(dev, halves: keyH),
+              let valueBuf = Fp16Buffer.make(dev, halves: valueH),
+              let gK = Self.bf16Buffer(dev, normKey),
+              let gQ = Self.bf16Buffer(dev, normQuery),
+              let gC = Self.bf16Buffer(dev, normConv),
+              let nk = Fp16Buffer.make(dev, count: tokens * hcDim),
+              let nq = Fp16Buffer.make(dev, count: tokens * hcDim),
+              let nc = Fp16Buffer.make(dev, count: tokens * hcDim),
+              let weightBuf = Fp16Buffer.make(dev, values: convWeight),
+              // Two of everything past the norms: one side per path.
+              let gateDec = Self.f32Buffer(dev, count: tokens * streamCount),
+              let gateSeq = Self.f32Buffer(dev, count: tokens * streamCount),
+              let gatedDec = Fp16Buffer.make(dev, count: tokens * hcDim),
+              let gatedSeq = Fp16Buffer.make(dev, count: tokens * hcDim),
+              let convDec = Fp16Buffer.make(dev, count: tokens * hcDim),
+              let convSeq = Fp16Buffer.make(dev, count: tokens * hcDim),
+              let planeDec = Fp16Buffer.make(dev, halves: plane0),
+              let planeSeq = Fp16Buffer.make(dev, halves: plane0),
+              let stateDec = Fp16Buffer.make(dev, halves: state0),
+              let stateSeq = Fp16Buffer.make(dev, halves: state0),
+              let stateSeqNext = Fp16Buffer.make(dev, count: hist * hcDim)
+        else { Issue.record("alloc failed"); return }
+
+        let cb = ctx.queue.makeCommandBuffer()!
+
+        // The three normed planes, chunked — shared input to both paths.
+        hc.encodeSeqGroupedRMS(commandBuffer: cb, x: keyBuf, gamma: gK, out: nk,
+                               d: UInt32(nEmbd), hc: UInt32(streamCount),
+                               tokens: UInt32(tokens), eps: Self.eps)
+        // The query norm reads the *plane*, exactly as the decode chain does.
+        hc.encodeSeqGroupedRMS(commandBuffer: cb, x: planeSeq, gamma: gQ, out: nq,
+                               d: UInt32(nEmbd), hc: UInt32(streamCount),
+                               tokens: UInt32(tokens), eps: Self.eps)
+
+        // --- Chunked path -------------------------------------------------
+        ple.encodeSeqGate(commandBuffer: cb, key: nk, query: nq, gate: gateSeq,
+                          d: UInt32(nEmbd), invSqrtD: invSqrtD,
+                          hc: UInt32(streamCount), tokens: UInt32(tokens))
+        ple.encodeSeqGatedValue(commandBuffer: cb, value: valueBuf, gate: gateSeq,
+                                gated: gatedSeq, d: UInt32(nEmbd),
+                                hc: UInt32(streamCount), tokens: UInt32(tokens))
+        hc.encodeSeqGroupedRMS(commandBuffer: cb, x: gatedSeq, gamma: gC, out: nc,
+                               d: UInt32(nEmbd), hc: UInt32(streamCount),
+                               tokens: UInt32(tokens), eps: Self.eps)
+        ple.encodeSeqConv(commandBuffer: cb, weight: weightBuf,
+                          state: stateSeq, x: nc, out: convSeq,
+                          newState: stateSeqNext,
+                          c: UInt32(hcDim), kernel: UInt32(kernel),
+                          dilation: UInt32(dilation), tokens: UInt32(tokens))
+        ple.encodePlaneAdd(commandBuffer: cb, plane: planeSeq, gated: gatedSeq,
+                           conv: convSeq, n: UInt32(tokens * hcDim))
+
+        // --- Decode path, one token at a time -----------------------------
+        // The query norm for the decode side has to see the *decoded* plane
+        // before that token's PLE lands, so the token loop re-runs it.
+        for t in 0..<tokens {
+            let hOff = t * hcDim * stride
+            let vOff = t * nEmbd * stride
+            let dOff = t * streamCount * 4
+            hc.encodeGroupedRMS(commandBuffer: cb, x: planeDec, xOffset: hOff,
+                                gamma: gQ, out: nq, outOffset: hOff,
+                                d: UInt32(nEmbd), hc: UInt32(streamCount), eps: Self.eps)
+            ple.encodeGate(commandBuffer: cb, key: nk, keyOffset: hOff,
+                           query: nq, queryOffset: hOff,
+                           gate: gateDec, gateOffset: dOff,
+                           d: UInt32(nEmbd), invSqrtD: invSqrtD,
+                           hc: UInt32(streamCount))
+            ple.encodeGatedValue(commandBuffer: cb, value: valueBuf, valueOffset: vOff,
+                                 gate: gateDec, gateOffset: dOff,
+                                 gated: gatedDec, gatedOffset: hOff,
+                                 d: UInt32(nEmbd), hc: UInt32(streamCount))
+            hc.encodeGroupedRMS(commandBuffer: cb, x: gatedDec, xOffset: hOff,
+                                gamma: gC, out: nc, outOffset: hOff,
+                                d: UInt32(nEmbd), hc: UInt32(streamCount), eps: Self.eps)
+            ple.encodeConvUpdate(commandBuffer: cb, weight: weightBuf,
+                                 state: stateDec, x: nc, xOffset: hOff,
+                                 out: convDec, outOffset: hOff,
+                                 newState: stateSeqNext,
+                                 c: UInt32(hcDim), kernel: UInt32(kernel),
+                                 dilation: UInt32(dilation))
+            ple.encodePlaneAdd(commandBuffer: cb, plane: planeDec, planeOffset: hOff,
+                               gated: gatedDec, gatedOffset: hOff,
+                               conv: convDec, convOffset: hOff, n: UInt32(hcDim))
+        }
+        cb.commit()
+        cb.waitUntilCompleted()
+        if let err = cb.error { Issue.record("command buffer failed: \(err)") }
+
+        Self.expectIdentical(Self.readF32(gateSeq, count: tokens * streamCount),
+                             Self.readF32(gateDec, count: tokens * streamCount),
+                             "T=\(tokens) gate")
+        Self.expectIdentical(Fp16Buffer.read(gatedSeq, count: tokens * hcDim),
+                             Fp16Buffer.read(gatedDec, count: tokens * hcDim),
+                             "T=\(tokens) gated value")
+        Self.expectIdentical(Fp16Buffer.read(convSeq, count: tokens * hcDim),
+                             Fp16Buffer.read(convDec, count: tokens * hcDim),
+                             "T=\(tokens) conv")
+        Self.expectIdentical(Fp16Buffer.read(planeSeq, count: tokens * hcDim),
+                             Fp16Buffer.read(planeDec, count: tokens * hcDim),
+                             "T=\(tokens) plane")
+        // The end state is the one thing the chunked form cannot check against
+        // its own output: the chunk never materialises the intermediate
+        // histories, so this compares the roll of T tokens against the
+        // history the T decode steps ended on.
+        Self.expectIdentical(Fp16Buffer.read(stateSeq, count: hist * hcDim),
+                             Fp16Buffer.read(stateDec, count: hist * hcDim),
+                             "T=\(tokens) rolled history")
+    }
+
+    /// Exact-equality comparison: the chunked kernels are the decode kernels
+    /// with the token row moved, so any difference at all is a defect, not
+    /// rounding. See the HC suite's twin.
+    private static func expectIdentical(
+        _ actual: [Float], _ expected: [Float], _ label: String
+    ) {
+        guard actual.count == expected.count else {
+            Issue.record("\(label): \(actual.count) elements vs \(expected.count)")
+            return
+        }
+        var n = 0
+        var first = ""
+        for i in 0..<actual.count where actual[i] != expected[i] {
+            if n == 0 { first = "first at \(i): \(actual[i]) vs \(expected[i])" }
+            n += 1
+        }
+        #expect(n == 0, "\(label): \(n)/\(actual.count) elements differ — \(first)")
     }
 
     // MARK: - Real geometry
