@@ -59,6 +59,7 @@ package struct FinchManifestArchV1: Codable, Equatable, Sendable {
     package let ngramPartRows: Int?
     package let pleLayerIndexes: [Int]?
     package let pleConvKernelSize: Int?
+    package let pleEosTokenId: Int?
 
     package init(hiddenSize: Int, ffnIntermediate: Int, moeIntermediateSize: Int,
                  numHeads: Int, numKVHeads: Int, numFullKVHeads: Int,
@@ -85,7 +86,8 @@ package struct FinchManifestArchV1: Codable, Equatable, Sendable {
                  ngramPartCount: Int? = nil,
                  ngramPartRows: Int? = nil,
                  pleLayerIndexes: [Int]? = nil,
-                 pleConvKernelSize: Int? = nil) {
+                 pleConvKernelSize: Int? = nil,
+                 pleEosTokenId: Int? = nil) {
         self.hiddenSize = hiddenSize
         self.ffnIntermediate = ffnIntermediate
         self.moeIntermediateSize = moeIntermediateSize
@@ -128,6 +130,7 @@ package struct FinchManifestArchV1: Codable, Equatable, Sendable {
         self.ngramPartRows = ngramPartRows
         self.pleLayerIndexes = pleLayerIndexes
         self.pleConvKernelSize = pleConvKernelSize
+        self.pleEosTokenId = pleEosTokenId
     }
 }
 
@@ -181,6 +184,7 @@ extension FinchManifestArchV1 {
         if let v = ngramPartRows { try c.encode(v, forKey: .ngramPartRows) }
         if let v = pleLayerIndexes { try c.encode(v, forKey: .pleLayerIndexes) }
         if let v = pleConvKernelSize { try c.encode(v, forKey: .pleConvKernelSize) }
+        if let v = pleEosTokenId { try c.encode(v, forKey: .pleEosTokenId) }
     }
 }
 

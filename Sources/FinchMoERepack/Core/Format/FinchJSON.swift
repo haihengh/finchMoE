@@ -106,7 +106,8 @@ enum FinchJSON {
             ngramPartCount: arch.ngramPartCount,
             ngramPartRows: arch.ngramPartRows,
             pleLayerIndexes: arch.pleLayerIndexes,
-            pleConvKernelSize: arch.pleConvKernelSize)
+            pleConvKernelSize: arch.pleConvKernelSize,
+            pleEosTokenId: arch.pleEosTokenId)
         func slot(_ name: String) throws -> FinchManifestQuantSlotV1 {
             guard let weightBits = bitWidthsByQuantSlot[name] else {
                 throw RepackError.configurationInvalid(

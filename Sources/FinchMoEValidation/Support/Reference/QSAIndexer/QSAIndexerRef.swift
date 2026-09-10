@@ -10,7 +10,7 @@ import Foundation
 ///   kv heads                    = 1     // one key head; raw keys contiguous
 ///   r (compress_ratio)          = 4     // whole blocks of 4 tokens
 ///   budget (indexer_top_k)      = 2048  // whole blocks
-///   n_rot                       = idx_dim * 0.25 = 32  // 16 rope pairs
+///   n_rot                       = 64   // NOT idx_dim*0.25 — see below
 ///   theta                       = 1e7 (rope_parameters.rope_theta)
 ///   rms eps                     = 1e-6
 ///
@@ -41,7 +41,12 @@ public enum QSAIndexerRef {
     public static let nIdxHeads = 4
     public static let compressRatio = 4
     public static let budget    = 2048
-    public static let nRot      = 32
+    /// Rotated leading dims of the indexer head: the *model's* rope width,
+    /// `partial_rotary_factor` × the full-attention head dim (256 × 0.25 = 64),
+    /// which `build_qsa_top_k` passes to the indexer unchanged. It is not
+    /// `idxDim * 0.25` (that would be 32) — the indexer's head is 128 but it
+    /// rotates as many dims as the model's rope asks for, i.e. its first half.
+    public static let nRot      = 64
     public static let ropeTheta: Float = 1.0e7
 
     // MARK: - block mean-pool

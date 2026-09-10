@@ -11,7 +11,8 @@ import FinchMoEValidationSupport
 /// the discipline of the other kernel suites.
 ///
 /// Geometries: the real indexer shape (idxDim 128, 4 query heads, r 4,
-/// nRot 32) plus a tiny one where a hand check is possible. Cases cover the
+/// nRot 64 — the model's 256·0.25 rope width, not a quarter of the indexer's
+/// own 128-dim head) plus a tiny one where a hand check is possible. Cases cover the
 /// dense tail (the query ends a complete block, no force-visible block), the
 /// sparse tail (the query's own block is incomplete → bias +1e9), the -INF
 /// partial-pool arm llama reserves for a cache hole, and the two ordering
@@ -57,10 +58,11 @@ import FinchMoEValidationSupport
 
     @Test("indexer q head: RMS + partial rope matches the reference at `pos`",
           arguments: [
-            (4, 128, 32, 37, UInt64(0x901)),   // real geometry, mid-timeline
-            (4, 128, 32, 0, UInt64(0x902)),    // position 0 (rope ≈ identity)
+            (4, 128, 64, 37, UInt64(0x901)),   // real geometry, mid-timeline
+            (4, 128, 64, 0, UInt64(0x902)),    // position 0 (rope ≈ identity)
             (2, 32, 16, 5, UInt64(0x903)),     // tiny, partial rotary
-            (4, 128, 32, 4097, UInt64(0x904)), // past the dense window
+            (4, 128, 64, 4097, UInt64(0x904)), // past the dense window
+            (4, 128, 128, 9, UInt64(0x905)),   // fully rotated: no carry-through
           ])
     func qPost_matchesRef(nHeads: Int, idxDim: Int, nRot: Int,
                           pos: Int, seed: UInt64) throws {
@@ -104,7 +106,7 @@ import FinchMoEValidationSupport
 
     @Test("indexer key head reaches the timeline raw — no norm, no rotation")
     func qPost_keyHeadIsRaw() throws {
-        let nHeads = 4, idxDim = 128, nRot = 32, pos = 11
+        let nHeads = 4, idxDim = 128, nRot = 64, pos = 11
         var rng = SeedTree(0x911).key("idx-k-raw")
         let ctx = try MetalContext()
         let kernel = try QSAIndexer(context: ctx)
@@ -146,7 +148,7 @@ import FinchMoEValidationSupport
 
     @Test("indexer query rope tracks the token position, not a fixed one")
     func qPost_ropeTracksPosition() throws {
-        let nHeads = 4, idxDim = 128, nRot = 32, pos = 13
+        let nHeads = 4, idxDim = 128, nRot = 64, pos = 13
         var rng = SeedTree(0x921).key("idx-q-rope-pos")
         let ctx = try MetalContext()
         let kernel = try QSAIndexer(context: ctx)
@@ -191,8 +193,8 @@ import FinchMoEValidationSupport
 
     @Test("block pooling: mean, RMS and rope match the reference",
           arguments: [
-            (4, 128, 32, 6, 0, UInt64(0x931)),   // real geometry, whole timeline
-            (4, 128, 32, 3, 2, UInt64(0x932)),   // finalise a suffix from block 2
+            (4, 128, 64, 6, 0, UInt64(0x931)),   // real geometry, whole timeline
+            (4, 128, 64, 3, 2, UInt64(0x932)),   // finalise a suffix from block 2
             (2, 32, 16, 2, 0, UInt64(0x933)),    // tiny
           ])
     func blockPool_matchesRef(r: Int, idxDim: Int, nRot: Int,
@@ -254,7 +256,7 @@ import FinchMoEValidationSupport
 
     @Test("the pooled key rotates at the block's FIRST cell, not its last")
     func blockPool_ropeAtFirstCell() throws {
-        let r = 4, idxDim = 128, nRot = 32, nBlocks = 3
+        let r = 4, idxDim = 128, nRot = 64, nBlocks = 3
         var rng = SeedTree(0x941).key("idx-block-rope-pos")
         let ctx = try MetalContext()
         let kernel = try QSAIndexer(context: ctx)
@@ -473,7 +475,7 @@ import FinchMoEValidationSupport
             (43, UInt64(0xB03)),   // tail block one cell in
           ])
     func decodeChain_matchesRef(nKv: Int, seed: UInt64) throws {
-        let nHeads = 4, idxDim = 128, r = 4, nRot = 32
+        let nHeads = 4, idxDim = 128, r = 4, nRot = 64
         let nComplete = nKv / r
         let nBlocks = (nKv + r - 1) / r
         let pos = nKv - 1

@@ -81,6 +81,7 @@ public final class MetalContext: @unchecked Sendable {
         "qwen",
         "hyper_connection",
         "qsa_indexer",
+        "ple",
     ]
 
     /// Bundle locations for runtime shader modules.
@@ -97,6 +98,7 @@ public final class MetalContext: @unchecked Sendable {
         "qwen": "Metal/Qwen",
         "hyper_connection": "Metal/Qwen",
         "qsa_indexer": "Metal/Qwen",
+        "ple": "Metal/Qwen",
         "rmsnorm": "Metal/Primitives",
         "rope": "Metal/Primitives",
         "tensorops": "Metal/TensorCore",

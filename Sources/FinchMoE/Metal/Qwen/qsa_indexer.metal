@@ -92,7 +92,7 @@ void idx_qk_post(
     constant     uint&   pos       [[buffer(4)]],  // query position
     constant     uint&   n_heads   [[buffer(5)]],
     constant     uint&   idx_dim   [[buffer(6)]],
-    constant     uint&   n_rot     [[buffer(7)]],  // rotated leading dims (32)
+    constant     uint&   n_rot     [[buffer(7)]],  // rotated leading dims (64 = the model's rope width)
     constant     float&  theta     [[buffer(8)]],
     constant     float&  eps       [[buffer(9)]],
     uint  tg   [[threadgroup_position_in_grid]],

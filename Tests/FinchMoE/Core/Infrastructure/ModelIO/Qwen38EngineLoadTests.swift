@@ -3,6 +3,7 @@ import Foundation
 import Metal
 import FinchMoERepackCore
 import FinchMoEFormat
+import FinchMoEValidationSupport
 @testable import FinchMoE
 
 /// End-to-end proof of the Qwen3.8-Flash-Next load path: a tiny synthetic
@@ -47,10 +48,17 @@ import FinchMoEFormat
         static let qkvDim = 2 * keyDim + valueDim
 
         // QSA indexer (full layers only).
+        //
+        // The budget is deliberately tiny: the selection width is
+        // `budget + r − 1` (11 here), so a decode of a dozen-odd tokens
+        // outgrows it and the full layer must rank blocks instead of reading
+        // the whole timeline. A budget at or above the context — the real
+        // model's 2048 against a 256-cell toy — would leave the selector
+        // permanently in its dense regime, never exercised.
         static let indexerNumHeads = 2
         static let indexerKVHeads = 1
         static let indexerHeadDim = 32
-        static let indexerBudget = 512
+        static let indexerBudget = 8
         static let indexerCompressRatio = 4
 
         // PLE n-gram block (layer 1 only). pleHeads total heads =
@@ -61,6 +69,10 @@ import FinchMoEFormat
         static let ngramPartCount = 4
         static let ngramPartRows = 32
         static let pleConvKernel = 4
+        /// The hash's cut token (`eos_token_id`). Any nonzero in-vocab value:
+        /// 0 would make every window read as "the previous token was an EOS",
+        /// which the engine refuses rather than hashing wrong.
+        static let pleEosTokenId = 200
         /// Config ple_layer_ids is 1-based; the engine arch stores id − 1.
         static let pleLayerIDs = [2]
         static var pleHeads: Int { (ngramSize - 1) * headsPerNgram }   // 4
@@ -108,7 +120,8 @@ import FinchMoEFormat
             ngramPartCount: ngramPartCount,
             ngramPartRows: ngramPartRows,
             pleLayerIndexes: pleLayerIDs.map { $0 - 1 },
-            pleConvKernelSize: pleConvKernel)
+            pleConvKernelSize: pleConvKernel,
+            pleEosTokenId: pleEosTokenId)
 
         static func configJSON() -> [String: Any] {
             [
@@ -155,6 +168,7 @@ import FinchMoEFormat
                     "split_ngram_parts": ngramPartCount,
                     "ple_conv_kernel_size": pleConvKernel,
                     "ple_layer_ids": pleLayerIDs,
+                    "eos_token_id": pleEosTokenId,
                 ],
             ]
         }
@@ -263,6 +277,32 @@ import FinchMoEFormat
             return out
         }
 
+        /// Real values for the three PLE hash vectors, or nil for anything
+        /// else. These cannot be noise like the weights: the engine checks
+        /// every head's reach against the table's `partCount × partRows` rows
+        /// when it builds the host router (llama's own load-time bound,
+        /// `qwen4exp.cpp:135`), and random int64s trip it. Odd coprime
+        /// multipliers; offsets that put heads 2 and 3 in the back half of
+        /// the table, so a gather crosses a part boundary.
+        private static func pleHashMeta(for name: String, count: Int) -> Data? {
+            let half = Int64(ngramPartCount * ngramPartRows / 2)      // 64 rows
+            let values: [Int64]
+            if name.hasSuffix(".ple_embedding.layer_multipliers") {
+                values = (0..<count).map { Int64(2 * $0 + 3) }        // 3, 5, 7
+            } else if name.hasSuffix(".ple_embedding.ngram_heads_offsets") {
+                values = (0..<count).map { Int64($0 / headsPerNgram) * half }
+            } else if name.hasSuffix(".ple_embedding.ngram_heads_vocab_sizes") {
+                values = Array(repeating: half, count: count)
+            } else {
+                return nil
+            }
+            var out = Data(capacity: count * 8)
+            for var value in values {
+                withUnsafeBytes(of: &value) { out.append(contentsOf: $0) }
+            }
+            return out
+        }
+
         /// Deterministic BF16 bytes in a realistic weight range (roughly ±2),
         /// seeded per-tensor the same way the repack-side snapshot does, so
         /// the repacked install reproduces the source byte-for-byte.
@@ -299,7 +339,9 @@ import FinchMoEFormat
                 let elements = shape.reduce(1, *)
                 let bytes: Data
                 if dtype == "I64" {
-                    bytes = i64Bytes(count: elements, seed: seed &+ UInt64(name.count) &* 104_729)
+                    bytes = pleHashMeta(for: name, count: elements)
+                        ?? i64Bytes(count: elements,
+                                    seed: seed &+ UInt64(name.count) &* 104_729)
                 } else {
                     bytes = bf16Bytes(count: elements, seed: seed &+ UInt64(name.count) &* 7919)
                 }
@@ -501,6 +543,84 @@ import FinchMoEFormat
         #expect(throws: ModelError.self) { try model.openPLEPart(4) }
         #expect(throws: ModelError.self) { try model.openPLEPart(-1) }
         #expect(model.plePartOpenCount() == 1)
+    }
+
+    /// The hash constants come back from the resident tensors byte-exact, and
+    /// the host router turns *this install's* constants into *this install's*
+    /// rows.
+    ///
+    /// Two things the other PLE tests cannot see. The constants are int64 read
+    /// out of a raw resident buffer: a byte-swapped or misaligned read still
+    /// lands in range and still routes *some* row, so every downstream check
+    /// would pass while the engine read a different table — the round-trip is
+    /// only provable against the values the checkpoint wrote. And the rows are
+    /// checked against `PLERef` (the locked `qwen4exp.cpp` oracle) fed from the
+    /// manifest rather than from the test's own copy of the fixture, which is
+    /// what ties the gather to the bytes on disk at those rows.
+    @Test func pleHashMetadataAndGatherMatchTheCheckpoint() async throws {
+        let directory = try await Self.makeInstall()
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let model = try Model.load(directoryURL: URL(fileURLWithPath: directory),
+                                   device: device,
+                                   expecting: Toy38.arch)
+
+        // The three int64 vectors, exactly as `Toy38.pleHashMeta` wrote them.
+        let half = UInt64(Toy38.ngramPartCount * Toy38.ngramPartRows / 2)
+        let wantMultipliers: [UInt64] = (0..<Toy38.ngramSize).map { UInt64(2 * $0 + 3) }
+        let wantOffsets: [UInt64] = [0, 0, half, half]
+        let wantVocabs: [UInt64] = Array(repeating: half, count: Toy38.pleHeads)
+        let meta = try model.pleHashConstants()
+        #expect(meta.multipliers == wantMultipliers)
+        #expect(meta.headOffsets == wantOffsets)
+        #expect(meta.headVocabSizes == wantVocabs)
+
+        // Position 0 has no predecessors, so its window is the token plus a
+        // sticky EOS on both sides.
+        let host = try #require(PLEHost(config: Toy38.arch,
+                                        multipliers: meta.multipliers,
+                                        headOffsets: meta.headOffsets,
+                                        headVocabSizes: meta.headVocabSizes))
+        host.record(position: 0, token: 7)
+        let eos = Int32(Toy38.pleEosTokenId)
+        let rows = host.rowIndices(atPosition: 0)
+        let wantRows = PLERef.rowIndices(context: [7, eos, eos],
+                                         multipliers: meta.multipliers,
+                                         vocabSizes: meta.headVocabSizes,
+                                         offsets: meta.headOffsets,
+                                         headsPerNGram: Toy38.headsPerNgram)
+        #expect(rows == wantRows, "rows \(rows) vs \(wantRows)")
+
+        // Every gathered value is the byte pair on disk at that row: the part
+        // split, the row offset and the BF16→FP16 widening, all at once.
+        let gathered = try host.gather(atPosition: 0) { try model.openPLEPart($0) }
+        #expect(gathered.count == Toy38.ngramWidth)
+
+        var expected = [Float16](repeating: 0, count: gathered.count)
+        let rowDim = Toy38.ngramRowDim
+        for (h, row) in rows.enumerated() {
+            let (part, rowInPart) = host.location(ofRow: row)
+            let path = directory + String(format: "/ple_shards/shard_%03d.bin", part)
+            let raw = try Data(contentsOf: URL(fileURLWithPath: path))
+            let base = rowInPart * rowDim * 2
+            for d in 0..<rowDim {
+                let lo = UInt16(raw[base + 2 * d])
+                let hi = UInt16(raw[base + 2 * d + 1])
+                let value = Float16(Quantization.bf16ToFloat(lo | (hi << 8)))
+                expected[h * rowDim + d] = value
+            }
+        }
+
+        var mismatch = -1
+        for i in 0..<expected.count where gathered[i] != expected[i] {
+            mismatch = i
+            break
+        }
+        if mismatch >= 0 {
+            let head = mismatch / rowDim
+            let dim = mismatch % rowDim
+            Issue.record("gathered head \(head) dim \(dim) = \(gathered[mismatch]), but row \(rows[head]) holds \(expected[mismatch])")
+        }
     }
 
     // MARK: - Load/stream negatives against the install on disk
@@ -791,6 +911,60 @@ import FinchMoEFormat
         #expect((0..<vocab).contains(best), "argmax \(best) in vocab range")
     }
 
+    /// M3.2d: once the context outgrows the indexer's selection width the
+    /// full layer must attend through the indexer's cell list rather than the
+    /// whole timeline, and that list must be a causal, ascending, exactly-
+    /// `capacity`-sized subset of what the dense path would have read.
+    ///
+    /// This is the only test that runs the selector through the real runner —
+    /// the kernel suites feed it buffers directly, and the toy's budget is
+    /// chosen small precisely so a short decode crosses the width.
+    @Test func sparseDecodeSelectsIndexerCells() async throws {
+        let model = try await Qwen38EngineLoadTests.loadToy38()
+        let runner = try Self.makeRunner(model)
+        let vocab = Qwen38EngineLoadTests.Toy38.vocab
+        let fullLayer = 3, r = Qwen38EngineLoadTests.Toy38.indexerCompressRatio
+        let budget = Qwen38EngineLoadTests.Toy38.indexerBudget
+        // The runner's maxContext caps the width the same way the state does.
+        let capacity = min(256, budget + r - 1)
+
+        guard let logits = model.device.makeBuffer(
+            length: vocab * MemoryLayout<Float16>.size,
+            options: .storageModeShared) else {
+            Issue.record("logits alloc failed"); return
+        }
+
+        let steps = capacity + 6
+        for p in 0..<steps {
+            try await runner.produce(token: Int32(1 + p % 7), position: p, into: logits)
+            let ptr = logits.contents().bindMemory(to: Float16.self, capacity: vocab)
+            let row = Array(UnsafeBufferPointer(start: ptr, count: vocab))
+            #expect(row.allSatisfy { $0.isFinite }, "step \(p): logits finite")
+        }
+
+        let pos = steps - 1
+        let sel = try #require(runner.qsaSelection(layer: fullLayer),
+                               "the toy's full layer must carry an indexer")
+        // Block `b` is pooled on the step that fills it, so after `pos` the
+        // timeline holds every block that is complete.
+        #expect(sel.pooledBlocks == (pos + 1) / r,
+                "pooled \(sel.pooledBlocks) blocks at pos \(pos), expected \((pos + 1) / r)")
+
+        // Past the width the selection fills its capacity exactly.
+        #expect(sel.cells.count == capacity,
+                "selected \(sel.cells.count) cells, expected the full width \(capacity)")
+        #expect(sel.cells == sel.cells.sorted(), "the cell list must ascend")
+        #expect(Set(sel.cells).count == sel.cells.count, "no cell selected twice")
+        #expect(sel.cells.allSatisfy { Int($0) <= pos },
+                "selection must stay causal — nothing past \(pos)")
+        // This step ends inside an incomplete tail block (steps − 1 is not a
+        // multiple of r), so the query's own cell is force-visible and is the
+        // largest one selected. That is the bias arm doing its job.
+        #expect(pos % r != r - 1, "case built around the query NOT ending a block")
+        #expect(sel.cells.last == UInt32(pos),
+                "the query's own cell must survive the selection")
+    }
+
     @Test func prefillGateBlocksQwen38() async throws {
         let model = try await Qwen38EngineLoadTests.loadToy38()
         let runner = try Self.makeRunner(model)
@@ -815,5 +989,154 @@ import FinchMoEFormat
                 Issue.record("unexpected prefill error: \(e)"); return
             }
         }
+    }
+
+    // MARK: - PLE decode wiring (M3.3)
+
+    /// Decode token 7 at position 0 on two installs repacked from the same
+    /// seed — byte-identical weights, byte-identical hash metadata — with one
+    /// install's PLE parts overwritten by zeros. The table is then the only
+    /// thing that differs between the runs, and the snapshots say exactly what
+    /// it moved.
+    ///
+    /// The zeroed table is the isolation trick and it is what makes the two
+    /// halves of this test work together. It is a provable no-op: every row
+    /// reads as zero, so `key` and `value` are zero, the gate multiplies a
+    /// zero vector, `silu(0)` is zero, and the plane gains exactly nothing —
+    /// which means anything that differs between the runs differs *because of
+    /// the table* and not because the PLE block ran at all. So the two
+    /// assertions bracket the insertion point from both sides:
+    ///   * strictly upstream (`hc.pre` is snapshotted at the top of the layer,
+    ///     before anything is encoded) — bit-identical, including every
+    ///     snapshot of layer 0;
+    ///   * from the write itself (`hc.mid` is read after CB1 completes, so it
+    ///     holds the PLE's plane add *and* the attn combine) — must differ.
+    ///
+    /// The second half is what stops a silently-unwired PLE from passing: if
+    /// the block were skipped, both runs would be identical everywhere and
+    /// only the "must differ" assertions would fail.
+    ///
+    /// Pooled layer 1 is a GDN layer here, so this exercises the linear-
+    /// attention branch's call site; the full-attention branch has the
+    /// identical `gPLE?(cb)` before its `gAttnMix`. One decode step at
+    /// position 0 is enough — the hash window is `[7, EOS, EOS]` there, and
+    /// the ring's deeper history is covered by `PLEHostTests`.
+    @Test func pleTermsLandInTheLayerOnePlane() async throws {
+        let real = try await Qwen38EngineLoadTests.makeInstall()
+        defer { try? FileManager.default.removeItem(atPath: real) }
+        let zeroed = try await Qwen38EngineLoadTests.makeInstall()
+        defer { try? FileManager.default.removeItem(atPath: zeroed) }
+        try Self.zeroPleShards(in: zeroed)
+
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let load: (String) throws -> Model = { directory in
+            try Model.load(directoryURL: URL(fileURLWithPath: directory),
+                           device: device,
+                           expecting: Qwen38EngineLoadTests.Toy38.arch)
+        }
+        let modelReal = try load(real)
+        let modelZeroed = try load(zeroed)
+        let runnerReal = try Self.makeRunner(modelReal)
+        let runnerZeroed = try Self.makeRunner(modelZeroed)
+
+        var realSnaps: [String: [Float16]] = [:]
+        var zeroSnaps: [String: [Float16]] = [:]
+        runnerReal.qwenLayerDebugHook = { L, name, values in
+            realSnaps["\(L)|\(name)"] = values
+        }
+        runnerZeroed.qwenLayerDebugHook = { L, name, values in
+            zeroSnaps["\(L)|\(name)"] = values
+        }
+        defer {
+            runnerReal.qwenLayerDebugHook = nil
+            runnerZeroed.qwenLayerDebugHook = nil
+        }
+
+        let vocab = Qwen38EngineLoadTests.Toy38.vocab
+        guard let logits = device.makeBuffer(
+            length: vocab * MemoryLayout<Float16>.size,
+            options: .storageModeShared) else {
+            Issue.record("logits alloc failed"); return
+        }
+        try await runnerReal.produce(token: 7, position: 0, into: logits)
+        try await runnerZeroed.produce(token: 7, position: 0, into: logits)
+
+        #expect(Set(realSnaps.keys) == Set(zeroSnaps.keys),
+                "both runs must reach the same snapshots")
+        #expect(realSnaps.values.allSatisfy { !$0.isEmpty },
+                "no empty snapshots — an empty one would hide a difference")
+
+        // The zeroed table's premise: the PLE contributes nothing. If a
+        // grouped RMS of zeros were to divide by zero and poison the plane,
+        // this is where it shows up, rather than as a fake "the table changed
+        // something" pass downstream.
+        for (key, values) in zeroSnaps {
+            #expect(values.allSatisfy { $0.isFinite }, "zero-table snapshot \(key)")
+        }
+
+        // Upstream of the PLE, the two runs must agree bit for bit — the whole
+        // of layer 0, and layer 1 up to the plane as it arrived.
+        let upstream = ["0|preLayer", "0|hc.pre", "0|hc.mid", "0|hc.post",
+                        "0|qkvConv", "0|recurrentOut", "0|gFloat",
+                        "1|preLayer", "1|hc.pre"]
+        for key in upstream {
+            #expect(realSnaps[key] == zeroSnaps[key],
+                    "\(key) is upstream of the PLE and must be bit-identical")
+        }
+
+        // From the plane write onward the table is what changed: the attn mix
+        // reads the plane the PLE just added to, so `hc.mid`, the block input
+        // derived from it, and everything after all move.
+        let downstream = ["1|hc.mid", "1|attnBlockIn", "1|hc.post",
+                          "2|hc.pre", "2|hc.mid"]
+        for key in downstream {
+            #expect(realSnaps[key] != zeroSnaps[key],
+                    "\(key) is downstream of the PLE and must differ — identical here means the PLE never ran")
+        }
+    }
+
+    /// Overwrite every PLE part file with zeros and re-point the manifest's
+    /// SHA-256 at the new bytes. Sizes are unchanged, so the install still
+    /// passes every structural check; the hash has to be updated because
+    /// `openPLEPart` verifies a part the first time it is touched, and a
+    /// zeroed table with a stale hash is rejected at load.
+    private static func zeroPleShards(in directory: String) throws {
+        let shardDir = directory + "/ple_shards"
+        let expected = Qwen38EngineLoadTests.Toy38.ngramPartCount
+        let shards = try FileManager.default.contentsOfDirectory(atPath: shardDir)
+        guard shards.count == expected else {
+            throw CocoaError(.fileReadCorruptFile, userInfo: [
+                NSLocalizedDescriptionKey:
+                    "expected \(expected) PLE part files, found \(shards.count)"])
+        }
+
+        var digest = ""
+        for name in shards.sorted() {
+            let url = URL(fileURLWithPath: shardDir + "/" + name)
+            let size = try Data(contentsOf: url).count
+            let zeros = Data(count: size)
+            try zeros.write(to: url)
+            digest = Sha256Verifier.hashData(zeros)
+        }
+
+        let manifestURL = URL(fileURLWithPath: directory + "/manifest.json")
+        guard var json = try JSONSerialization.jsonObject(
+                with: Data(contentsOf: manifestURL)) as? [String: Any],
+              var files = json["files"] as? [String: Any] else {
+            throw CocoaError(.fileReadCorruptFile, userInfo: [
+                NSLocalizedDescriptionKey: "manifest.json has no files map"])
+        }
+        for name in shards {
+            let key = "ple_shards/" + name
+            guard var entry = files[key] as? [String: Any] else {
+                throw CocoaError(.fileReadCorruptFile, userInfo: [
+                    NSLocalizedDescriptionKey: "manifest.json has no entry for \(key)"])
+            }
+            entry["sha256"] = digest
+            files[key] = entry
+        }
+        json["files"] = files
+        try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
+            .write(to: manifestURL)
     }
 }
