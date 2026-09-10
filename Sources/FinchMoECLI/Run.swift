@@ -12,9 +12,14 @@ public struct RunResult: Equatable, Sendable {
     public init(exitCode: Int32) { self.exitCode = exitCode }
 }
 
+/// `environment` is a parameter rather than a direct `ProcessInfo` read so a
+/// test can drive the `FINCHMOE_EXPECT_ARCH` override without mutating global
+/// process state — Swift Testing runs cases in parallel, so `setenv` in one
+/// case would race every other case that reads the environment.
 public func run(args: Args,
                 stdout: FileHandle = .standardOutput,
-                stderr: FileHandle = .standardError) async -> RunResult {
+                stderr: FileHandle = .standardError,
+                environment: [String: String] = ProcessInfo.processInfo.environment) async -> RunResult {
     do {
         let modelURL = URL(fileURLWithPath: args.model)
         let tokenizer = try await GFTokenizer.load(forModelDirectory: modelURL)
@@ -63,7 +68,9 @@ public func run(args: Args,
         let model = try Model.load(
             directoryURL: modelURL,
             device: context.device,
-            expecting: try ManifestReader.detectPreset(directoryURL: modelURL),
+            expecting: try ManifestReader.detectPreset(
+                directoryURL: modelURL,
+                allowManifestArch: environment["FINCHMOE_EXPECT_ARCH"] == "1"),
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: args.verify)

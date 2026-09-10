@@ -23,7 +23,9 @@ import FinchMoEValidationSupport
 
     // MARK: - Toy model (mirrors SyntheticQwenSnapshot.Toy38, engine-valid)
 
-    fileprivate enum Toy38 {
+    // Internal, not fileprivate: `Qwen38ToyReplayTests` (a separate file)
+    // composes an fp32 replay against this same toy geometry.
+    enum Toy38 {
         static let D = 64
         static let plane = 4 * D                        // hc_count 4
         static let hcLowrank = 64
@@ -378,7 +380,7 @@ import FinchMoEValidationSupport
     // MARK: - Harness
 
     /// Repacks a fresh toy snapshot and returns the install directory.
-    fileprivate static func makeInstall() async throws -> String {
+    static func makeInstall() async throws -> String {
         let base = NSTemporaryDirectory() + "qwen38-engine-\(UUID().uuidString)"
         let src = base + "-src"
         let out = base + "-out"
@@ -391,7 +393,7 @@ import FinchMoEValidationSupport
         return out
     }
 
-    fileprivate static func loadToy38() async throws -> Model {
+    static func loadToy38() async throws -> Model {
         let directory = try await Self.makeInstall()
         let device = try #require(MTLCreateSystemDefaultDevice())
         return try Model.load(directoryURL: URL(fileURLWithPath: directory),
@@ -795,7 +797,7 @@ import FinchMoEValidationSupport
 
     private static let hc = 4
 
-    private static func makeRunner(_ model: Model) throws -> RealForwardRunner {
+    static func makeRunner(_ model: Model) throws -> RealForwardRunner {
         let context = try MetalContext()
         return try RealForwardRunner(model: model, context: context,
                                      maxContext: 256)

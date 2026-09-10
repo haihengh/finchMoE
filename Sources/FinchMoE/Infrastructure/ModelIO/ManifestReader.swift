@@ -115,8 +115,21 @@ public enum ManifestReader {
     /// Peeks the installed manifest's arch and returns the built-in preset it
     /// matches, so loaders pick the Qwen or Gemma preset from the model itself
     /// instead of hardcoding one. Unknown/nil families fall back to Gemma.
+    ///
+    /// `allowManifestArch` (`FINCHMOE_EXPECT_ARCH=1`, set by the toy CLI smoke)
+    /// returns the arch the manifest declares about *itself* instead. Without it
+    /// a non-production geometry cannot load through the CLI at all: the preset
+    /// is a cross-check that the declared dims match the family's shipped shape,
+    /// and against a deliberately 64-dim toy install that comparison can only
+    /// fail. Understand the trade before setting it — `validateArch` then
+    /// compares the manifest against itself, so it still catches an internally
+    /// inconsistent manifest but no longer a wrong-but-consistent one. The
+    /// `.fullSha256` content hashes are a separate check and still run.
+    ///
+    /// Default `false`: production behavior is unchanged.
     public static func detectPreset(directoryURL: URL,
-                                    maxBytes: UInt64 = defaultMaxBytes) throws -> ArchConfig {
+                                    maxBytes: UInt64 = defaultMaxBytes,
+                                    allowManifestArch: Bool = false) throws -> ArchConfig {
         let directory = try FinchModelDirectory(rootURL: directoryURL)
         let data: Data
         do {
@@ -125,6 +138,9 @@ public enum ManifestReader {
             throw ModelError.partialInstall(path: directoryURL.path)
         }
         let wire = try FinchManifestCodec.decodeUnchecked(data)
+        if allowManifestArch {
+            return ArchConfig(manifestArch: ManifestArch(wire: wire.arch))
+        }
         return ArchConfig.preset(forModelFamily: wire.arch.modelFamily)
     }
 
@@ -270,6 +286,61 @@ public enum ManifestReader {
 private extension ManifestFileEntry {
     init(wire: FinchManifestFileV1) {
         self.init(size: wire.size, sha256: wire.sha256)
+    }
+}
+
+/// The arch a manifest declares about itself, read back as an `ArchConfig`.
+///
+/// Only `detectPreset`'s `allowManifestArch` path uses this. The optional
+/// Qwen3.6 / 3.8 fields fall back to the same zero defaults the built-in
+/// presets use when a family does not carry them, so a Gemma manifest converts
+/// to exactly what `preset(forModelFamily:)` would have produced.
+private extension ArchConfig {
+    init(manifestArch a: ManifestArch) {
+        self.init(
+            hiddenSize: a.hiddenSize,
+            intermediateSize: a.ffnIntermediate,
+            moeIntermediateSize: a.moeIntermediateSize,
+            numHeads: a.numHeads,
+            numKVHeads: a.numKVHeads,
+            numFullKVHeads: a.numFullKVHeads,
+            headDim: a.headDim,
+            fullHeadDim: a.fullHeadDim,
+            vocabSize: a.vocabSize,
+            slidingWindow: a.slidingWindow,
+            finalLogitSoftcap: a.finalLogitSoftcap,
+            ropeTheta: a.ropeTheta,
+            fullRopeTheta: a.fullRopeTheta,
+            partialRotaryFactor: a.partialRotaryFactor,
+            numLayers: a.numLayers,
+            numExperts: a.numExperts,
+            topKExperts: a.topKExperts,
+            tieWordEmbeddings: a.tieWordEmbeddings,
+            attentionKEqV: a.attentionKEqV,
+            fullAttentionLayerMask: a.fullAttentionLayerMask.map { UInt8($0) },
+            hiddenActivation: a.hiddenActivation,
+            modelFamily: a.modelFamily ?? "",
+            attnOutputGate: a.attnOutputGate ?? false,
+            linearNumKeyHeads: a.linearNumKeyHeads ?? 0,
+            linearNumValueHeads: a.linearNumValueHeads ?? 0,
+            linearKeyHeadDim: a.linearKeyHeadDim ?? 0,
+            linearValueHeadDim: a.linearValueHeadDim ?? 0,
+            linearConvKernelDim: a.linearConvKernelDim ?? 0,
+            hyperConnectionCount: a.hyperConnectionCount ?? 0,
+            hyperConnectionLowrank: a.hyperConnectionLowrank ?? 0,
+            indexerNumHeads: a.indexerNumHeads ?? 0,
+            indexerKVHeads: a.indexerKVHeads ?? 0,
+            indexerHeadDim: a.indexerHeadDim ?? 0,
+            indexerBudget: a.indexerBudget ?? 0,
+            indexerCompressRatio: a.indexerCompressRatio ?? 0,
+            ngramSize: a.ngramSize ?? 0,
+            headsPerNgram: a.headsPerNgram ?? 0,
+            ngramRowDim: a.ngramRowDim ?? 0,
+            ngramPartCount: a.ngramPartCount ?? 0,
+            ngramPartRows: a.ngramPartRows ?? 0,
+            pleLayerIndexes: a.pleLayerIndexes ?? [],
+            pleConvKernelSize: a.pleConvKernelSize ?? 0,
+            pleEosTokenId: a.pleEosTokenId ?? 0)
     }
 }
 
