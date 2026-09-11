@@ -38,7 +38,32 @@ import Metal
         return url
     }
 
+    /// The byte a file at absolute offset `i` carries in the offset-tagged
+    /// fixture. Any position-dependence will do; this one is cheap and spreads
+    /// the values over the full byte range.
+    static func patternByte(_ i: Int) -> UInt8 {
+        UInt8(truncatingIfNeeded: i &* 31 &+ 7)
+    }
+
+    /// Write a layer where every byte depends on its absolute file offset.
+    ///
+    /// The tag fixture above cannot see a tiling bug in a chunked read: every
+    /// byte of an expert is the same byte, so a skipped or repeated chunk still
+    /// reads as valid data. This one makes a gap read as a *wrong* byte, which
+    /// is the only way an assertion can catch the chunk arithmetic being off by
+    /// one.
+    static func writeOffsetTaggedLayer() throws -> URL {
+        let total = Int(streamOffset) + Int(streamSize)
+        var bytes = [UInt8](repeating: 0, count: total)
+        for i in 0..<total { bytes[i] = patternByte(i) }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pread-streamer-pattern-\(UUID().uuidString).bin")
+        try Data(bytes).write(to: url)
+        return url
+    }
+
     static func makeLayout(path: String) -> StreamLayout {
+
         StreamLayout(path: path,
                      streamOffset: streamOffset,
                      streamSize: streamSize,
