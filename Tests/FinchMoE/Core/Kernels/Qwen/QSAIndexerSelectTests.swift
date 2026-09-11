@@ -126,6 +126,61 @@ import FinchMoEValidationSupport
         #expect(Set(cells).count == cells.count, "no cell may be emitted twice")
     }
 
+    /// The same comparison at the real budget. Every case above uses a budget
+    /// of 8–16 cells, and the budget is what sizes the emitted-cell buffer
+    /// (`QSAIndexer.selectCapacity`) and what the kernel's radix select is
+    /// bounded by — the two places this family has already been bitten by a
+    /// ceiling chosen for a smaller model (`Attention.maxQHeads`,
+    /// `kPrefillRouterMaxExperts`). Budgets that fit in a toy block count can
+    /// pass while 2048 cells overrun a buffer or truncate a selection.
+    ///
+    /// `r = 4` is the model's `indexerCompressRatio`, so the crossing sits
+    /// where the engine actually crosses it: at `n_kv` 2052, the first length
+    /// whose visible cells exceed `budget + r − 1` and leave the dense path.
+    @Test("the real 2048-cell budget selects the same cells as the reference",
+          arguments: [
+            // (nKv, r, budget, pos) — pos = nKv - 1 is the decode shape.
+            (2_048, 4, 2_048, 2_047),  // exactly the budget: still dense
+            (2_051, 4, 2_048, 2_050),  // exactly the dense width
+            (2_052, 4, 2_048, 2_051),  // one cell past it: the first sparse case
+            (4_096, 4, 2_048, 4_095),  // blocks divide evenly, no tail
+            (4_097, 4, 2_048, 4_096),  // tail block one cell in
+            (8_192, 4, 2_048, 8_191),  // well past the budget
+          ])
+    func select_realBudgetMatchesRef(nKv: Int, r: Int, budget: Int, pos: Int) throws {
+        let ctx = try MetalContext()
+        let kernel = try QSAIndexer(context: ctx)
+
+        let nBlocks = (nKv + r - 1) / r
+        var rng = SeedTree(UInt64(nKv &* 1_000 &+ budget &* 10 &+ r))
+            .key("idx-select-realbudget")
+        let unbiased = (0..<nBlocks).map { _ in Float(rng.uniform(0, 100)) }
+
+        // The buffer the caller has to size. It must hold the widest selection
+        // the kernel can emit, which is `width` — not the budget: the boundary
+        // block contributes up to `r − 1` cells on top.
+        let capacity = QSAIndexer.selectCapacity(nKv: nKv, r: r, budget: budget)
+        let width = min(nKv, budget + r - 1)
+        #expect(capacity >= width,
+                "capacity \(capacity) cannot hold a \(width)-cell selection")
+
+        let (cells, count) = try Self.select(ctx, kernel, unbiased: unbiased,
+                                             pos: pos, nKv: nKv, r: r, budget: budget)
+        let ref = QSAIndexerRef.topKCells(unbiased, pos: pos, n_kv: nKv, r: r, budget: budget)
+
+        #expect(cells.map { Int($0) } == ref,
+                "nKv=\(nKv) budget=\(budget): kernel and reference disagree")
+        #expect(count == width, "expected \(width) cells, got \(count)")
+        #expect(count <= capacity, "the kernel wrote past the buffer it was given")
+        #expect(cells == cells.sorted(), "the list must be ascending by construction")
+        #expect(Set(cells).count == cells.count, "no cell may be emitted twice")
+        // Causality is a per-cell test, so nothing beyond the query may be
+        // selected — whether the query's *own* cell survives is not asserted:
+        // `blockBias` forces the block containing `pos` in only when `pos` does
+        // not end a block, which several of these cases do.
+        #expect(cells.allSatisfy { $0 <= UInt32(pos) })
+    }
+
     @Test("the boundary block is cut mid-block, keeping its lowest cell indices")
     func select_cutsTheBoundaryBlock() throws {
         // r = 4, budget = 8 → width = 11: two whole blocks plus 3 cells. The

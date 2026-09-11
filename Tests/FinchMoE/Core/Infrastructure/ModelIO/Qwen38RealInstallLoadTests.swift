@@ -115,6 +115,108 @@ import Metal
         #expect(ple.headVocabSizes.count == 16)
     }
 
+    // MARK: - PLE at real size
+
+    /// The 128 part files are equal-sized and the split is a plain divmod, but
+    /// the heads' vocabularies do not fill the table exactly — the last part
+    /// ends in a tail of rows no head can address. That tail is the thing a
+    /// toy cannot show: at toy sizes `partCount · partRows` and the covered
+    /// range tend to coincide, so a wrong part count, a wrong `partRows`, or an
+    /// off-by-one at the seam all pass. Here every seam is real and the tail
+    /// has to come out to its actual size.
+    @Test(.enabled(if: installExists))
+    func realInstall38PLEPartSeamsAndTail() throws {
+        let ctx = try MetalContext()
+        let model = try Model.load(
+            directoryURL: URL(fileURLWithPath: Self.installPath),
+            device: ctx.device,
+            expecting: .qwen3_8_flashNext_125B)
+        let c = try model.pleHashConstants()
+        let host = try #require(PLEHost(config: model.config,
+                                        multipliers: c.multipliers,
+                                        headOffsets: c.headOffsets,
+                                        headVocabSizes: c.headVocabSizes))
+        let geo = host.geometry
+        #expect(geo.partCount == 128)
+        #expect(geo.partRows == 2_500_012)
+        #expect(geo.rowDim == 160)
+        #expect(geo.headCount == 16)
+        #expect(geo.totalRows == 320_001_536)
+
+        // The covered range. `PLEHost.init` already traps if any head reaches
+        // past the table, so this pins the *size* of the tail rather than the
+        // safety property: 320001536 − 320001446.
+        let covered = c.headOffsets.indices
+            .map { c.headOffsets[$0] + c.headVocabSizes[$0] }
+            .max() ?? 0
+        #expect(covered == 320_001_446)
+        #expect(geo.totalRows - Int(covered) == 90)
+
+        // The seam: row 2 500 012 is the first row of part 1, not part 0.
+        #expect(host.location(ofRow: 2_500_011) == (0, 2_500_011))
+        #expect(host.location(ofRow: 2_500_012) == (1, 0))
+        #expect(host.location(ofRow: 5_000_024) == (2, 0))
+        // The last addressable row and the last row of the table.
+        #expect(host.location(ofRow: Int(covered) - 1) == (127, 2_499_921))
+        #expect(host.location(ofRow: geo.totalRows - 1) == (127, 2_500_011))
+    }
+
+    /// Every token id, in each position of the real 3-gram, must hash to a row
+    /// its own head owns. This is the whole-table version of the range check
+    /// `PLEHost.init` makes from the constants alone: it exercises the hash —
+    /// the wrapping multiply, the xor, the unsigned modulo, the offset add —
+    /// at the real 45-bit multipliers and 20M-wide per-head vocabularies, over
+    /// the real 248 320-token vocabulary. A multiplier or modulus taken in the
+    /// wrong width still lands *somewhere*; landing outside the head's own
+    /// range is what gives it away.
+    @Test(.enabled(if: installExists))
+    func realInstall38PLEHashStaysInEachHeadsRange() throws {
+        let ctx = try MetalContext()
+        let model = try Model.load(
+            directoryURL: URL(fileURLWithPath: Self.installPath),
+            device: ctx.device,
+            expecting: .qwen3_8_flashNext_125B)
+        let c = try model.pleHashConstants()
+        let host = try #require(PLEHost(config: model.config,
+                                        multipliers: c.multipliers,
+                                        headOffsets: c.headOffsets,
+                                        headVocabSizes: c.headVocabSizes))
+
+        let lo = c.headOffsets.map(Int.init)
+        let hi = zip(c.headOffsets, c.headVocabSizes).map { Int($0 + $1) }
+
+        // `#expect` is not used inside the loop: swift-testing records every
+        // call, and a violation count is both faster and a better failure
+        // message than 4 million passing expectations.
+        var outOfRange = 0
+        var firstBad = (position: -1, token: -1, head: -1, row: -1)
+        var position = 0
+
+        func route(_ token: Int) {
+            host.record(position: position, token: Int32(token))
+            let rows = host.rowIndices(atPosition: position)
+            position += 1
+            for h in 0..<rows.count where rows[h] < lo[h] || rows[h] >= hi[h] {
+                outOfRange += 1
+                if firstBad.position < 0 {
+                    firstBad = (position - 1, token, h, rows[h])
+                }
+            }
+        }
+
+        // Walking the token ids in order varies every position of the window,
+        // not just the one being routed: the predecessors are the two previous
+        // tokens, so the bigram head's pair and the trigram's triple both move.
+        let vocab = model.config.vocabSize
+        for t in 0..<vocab { route(t) }
+        #expect(outOfRange == 0, """
+            \(outOfRange) rows fell outside their head's range; first was \
+            position \(firstBad.position) token \(firstBad.token) head \
+            \(firstBad.head) row \(firstBad.row) (head owns \
+            \(lo[firstBad.head])..<\(hi[firstBad.head]))
+            """)
+    }
+
     /// The config-driven half of the GDN mapping — the actual root cause of the
     /// 3.8 soup. The kernel's divisor is `numValueHeads / numKeyHeads`, so this
     /// pins the two numbers it divides, and the division itself: 3 here, 2 on
