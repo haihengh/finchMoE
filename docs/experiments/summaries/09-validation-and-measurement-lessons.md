@@ -229,6 +229,42 @@ from representative holdouts.
   order it is committed. A span that *contains* the thing you meant to exclude
   cannot be corrected by adjusting the coefficients afterwards.
 
+<a id="meth-12"></a>
+### METH-12: An awaited I/O window is a latency measurement, not a bandwidth one
+
+- **Hypothesis:** A wall clock wrapped around an `await`ed expert fetch measures
+  the bytes read, so bytes/time is the achieved read bandwidth, and comparing it
+  to a measured cold-stripe ceiling says whether the drive is saturated.
+- **Variants tested:** Six decode runs on Qwen 3.6 holding prompt, context length
+  and `--max-new` fixed and varying only `--expert-cache-slots` across 16/24/32,
+  in both sweep orders; plus a controlled 16-versus-24 pair on Qwen 3.8.
+- **Evidence:** Bytes and time moved in *opposite* directions. On 3.6, going
+  32 -> 16 slots cuts io time 12.9% forward and 7.8% reverse for 8.7% and 6.2%
+  more throughput, while reading 34% *more* bytes -- monotonically across all
+  three slot counts in both orderings. On 3.8, 11.6% fewer bytes bought 1.1%
+  less time. Every reverse-sweep run was 2-4 ms/step slower than its forward
+  counterpart, so session drift is real and was subtracted first; the reverse
+  sweep's *last* run was also its fastest, which is the observation that rules
+  drift out as the explanation.
+- **What changed the conclusion:** The earlier reading divided bytes by the
+  `io` figure and got 2.1-3.2 GB/s against a ~2.1-2.3 GB/s ceiling, which looked
+  like saturation and closed the read side for three cycles. The window contains
+  issue, queue and first-byte latency that the division attributes to transfer --
+  at 16 slots the same arithmetic returns 6.2 GB/s. Worse, the model was
+  *falsifiable and falsified*: "misses are issued in parallel, so removing a
+  fifth does not shorten the critical path" predicts io independent of miss
+  count, and io instead rises as the batch shrinks. Miss count is also the queue
+  depth, so more outstanding reads capture more of the drive.
+- **Final disposition:** The slot recommendation stands on other grounds (16 is
+  the minimum legal count on both installs and the best measured one), but it is
+  no longer supported by the reason given for it, and "cache capacity is the only
+  read-side axis" is withdrawn. Item 2.1 is reopened and re-scoped around
+  in-flight depth rather than capacity.
+- **Lesson:** An awaited window bounds the transfer from above; it does not
+  measure it. Divide bytes by it only after showing the window is transfer-bound
+  -- and show that by varying the bytes, never by comparing the quotient to a
+  ceiling.
+
 ## Boundaries that were not failed experiments
 
 - ANE/Core ML offload was excluded by the platform and architecture decision;
