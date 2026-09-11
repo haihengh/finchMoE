@@ -492,7 +492,11 @@ tokenizer maps `qwen4_exp` into the shared `.qwen3_6` family. Tests:
    `packed_experts/` + 102.4 GB `ple_shards/`; disk free 980 GiB; the
    transient ≈ 290 GB peak applies only to the *overwrite* case, which this
    run was not; measured duration: see the M4 status entry below). Source
-   snapshot is 377,446,183,588 B (351.5 GiB) over 131 shards. Real-shape
+   snapshot is 360,000,192,888 B of safetensors (335.3 GiB) over 131 shards —
+   that is what the repack reads, since it opens only the shards named in the
+   index `weight_map`; the directory totals 377,446,183,588 B (351.5 GiB) but
+   the 16 GiB difference is a HuggingFace `.cache/` the repack never touches.
+   Real-shape
    gated tests (PLE part-boundary rows, real-vocab hash collisions, indexer
    crossing 2048). Oracle: build `archive/llama.cpp`, run the AD quant GGUF
    (**79 GB**, 28 shards) on a fixed prompt (mmap; on 16 GB expect slow — it
@@ -517,8 +521,9 @@ Mac16,10; watchdog panics from memory/IO thrash — the tell is a fresh
 `panic-full-*.panic` + `ResetCounter` pair). Additional 2026-09-09 facts:
 `hw.memsize` 16 GB; disk free 1.1 TiB; the M4 oracle run on the 79 GB GGUF
 must be the only heavy process (mmap pages the model; 16 GB RAM → slow but
-bounded — keep `-c` small, no GPU offload); the repack reads 377.4 GB and
-writes 174 GB on the same external volume — staged checkpoints with fsync
+bounded — keep `-c` small, no GPU offload); the repack reads 360 GB
+(335.3 GiB of shards) and writes 174 GB on the same external volume — staged
+checkpoints with fsync
 per file class, `--resume` (M4 Phase A) makes a kill cost only the in-flight
 file, never two heavy jobs at once.
 
