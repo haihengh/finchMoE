@@ -153,6 +153,9 @@ public struct DecodeServiceEvent: Codable, Sendable {
     public var peakMemoryBytes: UInt64?
     public var prefill: DecodePrefillDiagnostics?
     public var runner: DecodeRunnerDiagnostics?
+    /// Carried on the load response only, because the service is what performs
+    /// the load: the app cannot see the receipt decision any other way.
+    public var integrityOutcome: String?
 
     public init(kind: DecodeServiceEventKind, generationID: UUID,
                 sequence: UInt64 = 0, textDelta: String = "",
@@ -164,7 +167,8 @@ public struct DecodeServiceEvent: Codable, Sendable {
                 stopReason: String? = nil, error: String? = nil,
                 currentMemoryBytes: UInt64? = nil, peakMemoryBytes: UInt64? = nil,
                 prefill: DecodePrefillDiagnostics? = nil,
-                runner: DecodeRunnerDiagnostics? = nil) {
+                runner: DecodeRunnerDiagnostics? = nil,
+                integrityOutcome: String? = nil) {
         self.kind = kind
         self.generationID = generationID
         self.sequence = sequence
@@ -183,6 +187,7 @@ public struct DecodeServiceEvent: Codable, Sendable {
         self.peakMemoryBytes = peakMemoryBytes
         self.prefill = prefill
         self.runner = runner
+        self.integrityOutcome = integrityOutcome
     }
 }
 

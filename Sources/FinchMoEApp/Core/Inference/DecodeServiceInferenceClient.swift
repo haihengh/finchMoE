@@ -5,7 +5,8 @@ import FinchMoE
 import FinchMoEDecodeProtocol
 
 public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
-    AppInferenceMemoryReporting, AppInferenceTranscriptReporting, @unchecked Sendable {
+    AppInferenceMemoryReporting, AppInferenceTranscriptReporting,
+    AppModelIntegrityReporting, @unchecked Sendable {
     private struct Connection {
         var input: FileHandle?
         var responses: DecodeServiceResponseRouter?
@@ -17,10 +18,18 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
     private let connection = Mutex(Connection())
     private let serviceURL: URL
     private let inferenceMemory = Mutex<UInt64?>(nil)
+    /// Learned from the load response, because the service is the side that
+    /// reads the receipt. Held rather than passed along so a run started later
+    /// still reports what the load it is running against decided.
+    private let integrity = Mutex<String?>(nil)
     public let generationTranscriptMailbox = GenerationTranscriptMailbox()
 
     public var currentInferenceMemoryBytes: UInt64? {
         inferenceMemory.withLock { $0 }
+    }
+
+    public var modelIntegrityDescription: String? {
+        integrity.withLock { $0 }
     }
 
     public init(serviceURL: URL? = nil) {
@@ -52,6 +61,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                 "decode service returned \(event.kind.rawValue) for a load request")
         }
         inferenceMemory.withLock { $0 = event.currentMemoryBytes }
+        integrity.withLock { $0 = event.integrityOutcome }
         connection.withLock { $0.loadedDirectory = modelDirectory.standardizedFileURL }
         onState(.ready(modelDirectory: modelDirectory, loadSeconds: 0))
     }
@@ -65,6 +75,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
               event.kind == .unloaded else { return }
         connection.withLock { $0.loadedDirectory = nil }
         inferenceMemory.withLock { $0 = nil }
+        integrity.withLock { $0 = nil }
     }
 
     public func generate(_ request: AppGenerationRequest)
@@ -127,7 +138,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         }
 
                         let diagnostics = Self.diagnostics(
-                            event, options: request.runtimeOptions)
+                            event, options: request.runtimeOptions,
+                            integrityOutcome: modelIntegrityDescription)
                         switch event.kind {
                         case .finished:
                             continuation.yield(.finished(diagnostics))
@@ -262,7 +274,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
     }
 
     private static func diagnostics(_ event: DecodeServiceEvent,
-                                    options: AppRuntimeOptions) -> AppDiagnostics {
+                                    options: AppRuntimeOptions,
+                                    integrityOutcome: String?) -> AppDiagnostics {
         let stop = AppStopReason(rawValue: event.stopReason ?? "")
             ?? (event.kind == .cancelled
                 ? .cancelled
@@ -278,7 +291,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             peakMemoryBytes: event.peakMemoryBytes,
             runtimeOptions: options,
             prefill: prefillDiagnostics(event.prefill, options: options),
-            runner: event.runner.map(runnerDiagnostics))
+            runner: event.runner.map(runnerDiagnostics),
+            integrityOutcome: integrityOutcome)
     }
 
     private static func prefillDiagnostics(

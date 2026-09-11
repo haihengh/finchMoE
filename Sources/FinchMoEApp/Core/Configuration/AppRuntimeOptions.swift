@@ -28,7 +28,8 @@ public enum AppRDAdvicePolicy: String, CaseIterable, Sendable, Identifiable {
     }
 }
 
-public enum AppModelVerification: String, CaseIterable, Sendable, Identifiable {
+public enum AppModelVerification: String, CaseIterable, Codable, Sendable, Identifiable {
+    case automatic = "auto"
     case fullSha256 = "full-sha256"
     case trustedInstall = "trusted-install"
 
@@ -36,13 +37,32 @@ public enum AppModelVerification: String, CaseIterable, Sendable, Identifiable {
 
     public var label: String {
         switch self {
+        case .automatic: return "Automatic"
         case .fullSha256: return "Full SHA-256"
         case .trustedInstall: return "Trust verified install"
         }
     }
 
+    /// The line under the picker. The three modes are not variations on one
+    /// cost: `Automatic` is the only one whose work depends on the install, and
+    /// the only one that can absorb a broken receipt instead of failing.
+    public var detail: String {
+        switch self {
+        case .automatic:
+            return "Use verified-install.json when it is present and valid, and hash otherwise."
+        case .fullSha256:
+            return "Always hash every layer and PLE part on first use. Slowest, and independent of the receipt."
+        case .trustedInstall:
+            return "Require verified-install.json and size-check against it. Fails when the receipt is missing."
+        }
+    }
+
+    /// The raw values are the wire format for the decode service, which rejects
+    /// anything it does not know (`Entry.swift:161`) -- so an app built from
+    /// this source needs a matching service, not an older one.
     var runtimeValue: ModelIntegrityPreference {
         switch self {
+        case .automatic: return .automatic
         case .fullSha256: return .fullSha256
         case .trustedInstall: return .sizeCheckTrustedReceipt
         }
@@ -65,13 +85,24 @@ public struct AppRuntimeOptions: Equatable, Sendable {
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,
                 rdadvisePolicy: AppRDAdvicePolicy = .off,
-                modelVerification: AppModelVerification = .fullSha256) {
+                modelVerification: AppModelVerification = .automatic) {
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
         self.prefillEnabled = prefillEnabled
         self.prefillChunkTokens = prefillChunkTokens
         self.rdadvisePolicy = rdadvisePolicy
         self.modelVerification = modelVerification
+    }
+
+    /// The one way persisted settings become runtime options. There are two
+    /// callers -- `AppModel.init` and `applyPersistedSettings`, for a launch and
+    /// a model switch -- and while they each built the options themselves they
+    /// drifted: a newly persisted field reached one and not the other, so the
+    /// setting survived changing models but not relaunching the app.
+    init(persisted settings: MacAppSettings) {
+        self.init(expertCacheSlots: settings.expertCacheSlots,
+                  prefillEnabled: settings.prefillEnabled,
+                  modelVerification: settings.modelVerification)
     }
 
     public func validate() throws {
@@ -91,7 +122,18 @@ public struct AppRuntimeOptions: Equatable, Sendable {
 
     public var resultSummary: String {
         let prefill = prefillEnabled ? "prefill \(prefillChunkTokens)" : "prefill off"
-        let verification = modelVerification == .fullSha256 ? "full SHA-256" : "trusted receipt"
+        // Exhaustive on purpose: as a ternary this labelled every mode that was
+        // not `.fullSha256` as "trusted receipt", which is the one thing
+        // `automatic` is not -- it takes the receipt only when the receipt is
+        // good. The summary is what the diagnostics pane reports as the settings
+        // a run used, so a wrong label there is a wrong answer to "did I get the
+        // fast path?".
+        let verification: String
+        switch modelVerification {
+        case .automatic: verification = "auto verification"
+        case .fullSha256: verification = "full SHA-256"
+        case .trustedInstall: verification = "trusted receipt"
+        }
         return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), FP16 KV, RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
     }
 
