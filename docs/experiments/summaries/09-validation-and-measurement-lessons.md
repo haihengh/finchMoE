@@ -332,6 +332,66 @@ from representative holdouts.
   one axis (bytes) while the win would land on another (latency) is not a
   refutation, and reading it as one nearly discarded a live hypothesis.
 
+<a id="meth-14"></a>
+### METH-14: A replay is only as faithful as the reuse it cannot see
+
+- **Hypothesis:** METH-13 closed by naming the next measurement — replay the
+  engine's own pread offset sequence offline at depth 6 with a cold cache, and
+  see whether it reproduces the engine's 4.74 ms/layer read window. An offline
+  replay holds the offsets and the depth exactly, so it should price the drive
+  and nothing else.
+- **Variants tested:** Five conditions on the engine's exact 9,083-pread
+  sequence — page cache allowed and bypassed, ten resident destinations against
+  48×16 rotating engine-shaped destinations (1.98 GiB), and depth 3 against
+  depth 10 — interleaved and round-alternated (METH-06). Then the one condition
+  that showed a large win was A/B'd on the engine itself.
+- **Evidence:** The replay reproduced *neither* number it was built to choose
+  between, landing below both: 130.3-177.9 ms/step against the engine's 225.4,
+  with the engine slower than its own worst offline arm. Two differences were
+  then measured rather than assumed. Engine-shaped destination pages cost
+  19.3 ms/step — real and small. Pool width cost nothing (depth 3: 147.3;
+  depth 10: 149.6), the queue-depth knee from the earlier drive probes
+  reappearing. The remaining ~75 ms/step stayed unmodelled and was reported as
+  such.
+- **What changed the conclusion:** The bypassed arms were 42-61 ms/step faster
+  offline — a fifth to a quarter of the engine's own window, in both orders —
+  and the engine opens its layer files without `F_NOCACHE`, so this looked like
+  a free win. Added as an off-by-default knob and A/B'd on the engine in both
+  orders: **225.4 → 261.0 ms/step of `io`, −12% tok/s**, token IDs identical
+  across all four runs. The sign was
+  wrong, not just the size. The trace explains it: 41.7% of the engine's 9,083
+  reads repeat a (layer, expert) pair already read during the run, but the
+  *median* reuse distance is **3.97 GiB** and not one of the 3,787 repeats lands
+  within 512 MiB. Ten recycling 2.64 MiB destination buffers — 26 MB — were
+  holding reuse that the engine's own OS cache cannot, so the harness's
+  "bypassed" arm was measuring a hit rate the engine has and the engine's
+  "allowed" condition could not reach. The harness was not wrong about the
+  drive; it was wrong about the *workload*, and it could not tell the two apart
+  because it never reported a reuse distance.
+- **Final disposition:** The offline replay is retired as a predictor for the
+  read path and kept only as a drive pacer. The `F_NOCACHE` knob ships off by
+  default, with the engine's number recorded at the call site so the offline
+  argument is not re-derived by the next reader. The ~75 ms/step residual is
+  recorded as unexplained, with its next discriminator named: the engine's slot
+  pages are GPU-shared `MTLBuffer`s under a live Metal heap, which changes the
+  vm object's reclamation behaviour in a way a Python replay cannot hold. A
+  corollary control was also rebuilt: the first pass's "syscall cost" arm
+  re-read one blob 5,000 times and so priced bandwidth, not syscall entry
+  (978 µs/call). Redone at one byte per call it is 28.3 µs hot and 107.9 µs on
+  a fresh page, and the engine's own batch shape splits **2.0% issue / 98.0%
+  completion** — which is what the in-engine split independently said.
+- **Lesson:** A replay inherits the offsets, the depth and the block size, and
+  silently discards the destination working set and the reuse distance — the
+  two quantities that decide whether a cache arm means anything. Before
+  trusting a cache-condition result, compute the workload's reuse distances and
+  compare them against the cache it claims to model; a harness with a 26 MB
+  working set will report a hit rate that a 2 GiB one cannot have. The general
+  form: when a microbenchmark predicts a sign, the prediction is a claim about
+  the *workload it ran*, and the burden is on showing the engine shares the
+  property that made it true. Related, and the same failure in miniature — a
+  control arm is only a control for what it actually varies, so check that the
+  quantity it names is the quantity it moves before quoting it.
+
 ## Boundaries that were not failed experiments
 
 - ANE/Core ML offload was excluded by the platform and architecture decision;

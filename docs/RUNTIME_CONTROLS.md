@@ -40,6 +40,7 @@ is currently reached only by tests. Qwen 3.8 has 12 full-attention layers of 48.
 | Prompt prefill | On, off | On | On processes known prompt tokens through the chunked prefill path. Off disables that path. |
 | RDADVISE | Off, Default, Bounded, Adaptive | Off | Applies experimental read advice. Its effect depends on the workload; it may help a short decode and slow a long one. |
 | Model verification | Automatic, Full SHA-256, Trust verified install | Automatic | Automatic uses `verified-install.json` when it is present and valid and hashes everything otherwise. Full SHA-256 always hashes. Trust verified install requires the receipt and fails without one. The CLI and the server take the same three modes as `--verify auto\|full-sha256\|trusted-install`. |
+| Layer-file caching (`FINCHMOE_IO_NOCACHE=1`) | unset, 1 | unset | Off by default, and **measured to lose.** Sets `F_NOCACHE` on every layer file, bypassing the OS buffer cache. Replaying the engine's own pread sequence offline says this is worth 42-61 ms/step; on the engine it costs 225.4 → 261.0 ms/step of `io` and −12% tok/s, in both orderings, with identical token IDs. Kept as the falsifier for that offline claim rather than as a control worth setting. See [METH-14](experiments/summaries/09-validation-and-measurement-lessons.md#meth-14). |
 
 Changing context length, expert-cache slots, RDADVISE, or model verification requires a reload.
 Some sampling changes also require a reload because greedy and sampled
@@ -87,6 +88,26 @@ the changed setting.
   see. See [System design](SYSTEM_DESIGN.md) for the bucket table, the per-layer
   rule for reading the two stack splits, and why `wait` minus `gpu_cb1` is not
   dispatch overhead.
+
+- **The `io` split**, on the same line: `io_read_wall` is the `concurrentPerform`
+  and its preads, `io_dispatch_wall` is submit-to-thread-entry, `io_tail_wall` is
+  the cache bookkeeping and view construction that follow, and `io_handoff_wall`
+  is the remainder — the continuation hops, the `streamersQueue.sync` and the
+  `ensureLayerOpened` check. Those four tile `io` and the remainder saturates at
+  zero rather than wrapping. `io_plan_cpu` is the one field that is *outside*
+  the window: it is the expert selection and cache plan, which runs between the
+  router readback and the preads, and it is printed beside `io` rather than
+  subtracted from it. (It covers selection, not the readback itself.) On Qwen
+  3.8 at 16 slots the four costs inside the window total 1.18 ms/step of 224.67
+  — 0.5% — which is why no submission-path optimization is open.
+
+- **`FQ_EXPERT_TRACE=<path>`** writes the engine's own pread sequence — one
+  `layer, missCount, experts...` record per layer-batch — after the footer, for
+  offline replay. It is an input to a measurement rather than one, and the
+  replay it feeds is retained only as a drive pacer: it reproduces neither the
+  engine's throughput nor its response to a cache-policy change. See
+  [METH-14](experiments/summaries/09-validation-and-measurement-lessons.md#meth-14)
+  before trusting anything built on it.
 
 During chunked prefill, the phase label reports exact progress, for example
 `Prefill (128/514)`. Errors and unsupported configurations appear only when

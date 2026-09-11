@@ -154,6 +154,44 @@ Grounded in: `docs/SYSTEM_DESIGN.md`, `docs/OPTIMIZATION_JOURNEY.md`, `docs/QWEN
 
   See [METH-13](experiments/summaries/09-validation-and-measurement-lessons.md#meth-13) for the method — summing two spans that are claimed to overlap bounds the overlap at the complement, and needs no new instrumentation.
 
+  **That measurement was made, and it splits the ~1.8 ms/batch three ways — none of them the CPU.** The `io` window is now instrumented into its parts (`PreadExpertStreamer.executeExpertCachePlan`, surfaced as four new counters fields and a derived remainder). On the same 3.8 install at 16 slots:
+
+  | field | ms/step | share |
+  | --- | ---: | ---: |
+  | `io_wall_ms/step` | 224.67 | 100% |
+  | `io_read_wall_ms/step` (the `concurrentPerform`) | 224.07 | 99.7% |
+  | `io_plan_cpu_ms/step` (expert selection and cache plan, outside the window) | 0.58 | 0.26% |
+  | `io_handoff_wall_ms/step` (continuation hops, `streamersQueue.sync`, `ensureLayerOpened`) | 0.33 | 0.15% |
+  | `io_dispatch_wall_ms/step` (submit → thread entry) | 0.23 | 0.10% |
+  | `io_tail_wall_ms/step` (cache bookkeeping, view construction) | 0.04 | 0.02% |
+
+  So of the ~1.8 ms/batch the runtime accounts for 0.025 ms/batch. **The three-level dispatch chain is not the cost** — `streamersQueue.sync` → `DispatchQueue.global` → `concurrentPerform`, run 48 times a token, is 0.27% of the window between them — and neither is the CPU plan. The copy into the slot buffer is not merely small but *absent*: `readFull` preads straight into `slotPointers[slot]`, which are `posix_memalign`ed pages already wrapped by `makeBuffer(bytesNoCopy:options:.storageModeShared)`, and `expertCachePlanBuffers` returns views over those same pages (`PreadExpertStreamer.swift:213-217, 344-351`). The remaining ~1.8 ms/batch is inside the read: issue, queue, first-byte and tail latency. This closes item 2.2's premise — see §2.2.
+
+  **The requested replay was then run, and what it falsifies is the harness.** The block above asks for the engine's own offset sequence replayed offline at depth 6 with a cold cache. It was run — 9,083 preads captured through a new `FQ_EXPERT_TRACE` writer, 1488 layer-batches, 293 reads/step, 6.10/batch, 773.7 MiB/step, replayed at the engine's own per-layer depth into anonymous zero-copy destinations, interleaved in both orders (METH-06):
+
+  | condition | ms/step | GB/s |
+  | --- | ---: | ---: |
+  | **the engine's own `io` window** | **225.4** | **3.60** |
+  | replay, page cache allowed (the engine's own condition) | 177.9 | 4.56 |
+  | replay, page cache bypassed | 130.3 | 6.23 |
+  | replay, bypassed, engine-shaped destinations (48×16 = 1.98 GiB) | 149.6 | 5.42 |
+  | replay, bypassed, engine-shaped, depth 3 | 147.3 | 5.51 |
+
+  It reproduces neither 4.74 ms/layer nor the ~3 ms the depth curve predicts; it lands *below both*, and **the engine runs slower than its own worst offline condition.** Two of the differences are now measured rather than assumed. Engine-shaped destination pages — 48 layers × 16 slots of rotating anonymous memory, 1.98 GiB, each page reused only once per ~773 MiB of traffic, against the harness's ten resident 2.64 MiB buffers — cost 19.3 ms/step, real and small. Pool width costs nothing at all: depth 3 is 147.3 against depth 10's 149.6, the queue-depth knee again. **The residual ~75 ms/step is unmodelled and is not claimed.**
+
+  **The one lever the replay did appear to find is inverted on the engine.** Bypassing the page cache is worth 42-61 ms/step offline — a fifth to a quarter of the engine's own window — on identical offsets at identical depth, in both orders. The engine opens its layer files without `F_NOCACHE`, so this was the obvious candidate. A/B'd on the engine with the flag added as an off-by-default knob, both orders, token IDs identical across all four runs:
+
+  | `FINCHMOE_IO_NOCACHE` | `io` ms/step | tok/s |
+  | --- | ---: | ---: |
+  | off | 225.36 / 225.38 | 2.807 / 2.829 |
+  | on | 261.24 / 260.97 | 2.484 / 2.483 |
+
+  **The read window grows 15.9% and throughput falls 12%.** The trace says why the harness was wrong to predict a gain: 41.7% of the engine's 9,083 reads repeat a (layer, expert) pair already read during the run, but the *median* reuse distance is 3.97 GiB and **not one of the 3,787 repeats lands within 512 MiB**. The harness's ten recycling destination pages were holding reuse the engine's OS cache cannot, so bypassing threw away a hit rate the engine actually has. This is the same two-cache mechanism the drive probes found — repetition worth 2-3×, absorbed by both the buffer cache and the SSD controller — reappearing from the opposite direction. The knob ships off by default as the falsifier for that claim, with the engine number recorded at the call site so the offline argument is not re-derived.
+
+  **Caveat on that A/B.** `gpu_routed` moved in the same direction as `io` (39.96/38.38 off, 47.50/47.61 on), and `F_NOCACHE` cannot change device work. The io difference is consistent and dominant across both orderings, but the two arms differ in more than the read path, so the mechanism is not pinned and the −12% should be read as the flag's effect in this runtime rather than as a clean one-variable result.
+
+  **Where the fixed per-batch cost now stands.** The bounce copy was the last candidate, and it is priced by a control rather than argued: 181.6 µs per 2.64 MiB memcpy is 1.82 ms per 10-expert batch, 29.3 batches/step, **53.2 ms/step — 24% of the window — had a copy existed.** It does not. So the recoverable part of the ~84 ms/step is bounded by what is inside the transfer itself, and the only remaining axis is the drive's own dynamic range: 3.60 GB/s observed against 5.4-5.7 GB/s at this depth on synthetic offsets. Closing that gap is not a scheduling, dispatch or copy problem, and every offline model built so far has failed to reproduce it — the next discriminator is one the replay cannot reach, namely that the engine's slot pages are GPU-shared `MTLBuffer`s under a live Metal heap, which changes the vm object's reclamation behaviour in ways a Python replay has no way to hold.
+
 
 ### 2.2 [MEDIUM impact, MEDIUM-HIGH risk] Reduce per-layer command-buffer count in the decode hot path
 - **Evidence**: `RealForwardRunner.swift` shows the Qwen decode path issuing multiple `makeCommandBuffer()`/`commit()` pairs per layer per token — a `cb1`-equivalent, a `sharedCB`, one or more `tileCB` per miss-tile (in `executeExpertCachePlan`-driven decode paths near lines 1046-1305, 2135-2271), and a `tailCB`. At 40 layers this is potentially 3-5+ command buffers × 40 = 120-200+ command buffer commits per generated token. `SYSTEM_DESIGN.md`'s own "Metal execution" section says decode already stays on custom GEMV to avoid MPP overhead — but doesn't discuss CB-count overhead itself, and the OPTIMIZATION_JOURNEY.md doesn't record a CB-batching experiment for Qwen (all the historical fusion experiments — QKV, layer-tail, head — reduced *kernel* count within a CB, not CB count across layers).
@@ -161,6 +199,20 @@ Grounded in: `docs/SYSTEM_DESIGN.md`, `docs/OPTIMIZATION_JOURNEY.md`, `docs/QWEN
 - **Expected impact**: 5-15% decode speedup if CB overhead is currently significant; **could be near-zero** if the existing overlap design (shared-expert branch runs while I/O happens, tile CBs run concurrently with reads) means CB overhead is already hidden — this needs the profiling step first, and note the strong prior in `OPTIMIZATION_JOURNEY.md` that "clean local designs often lost in the full runtime," especially schemes that reduce launch count at the cost of concurrency/overlap (the exact failure mode of the rejected monolithic fusion and the rejected "reusing Metal argument buffers" experiment, which *cut 21,217 allocations to two* and still **slowed** long prefill by 9%).
 - **Risk**: medium-high — this directly touches the `cb1`/`io`/`cb2` overlap design that is core to the runtime's decode-speed story; any CB coalescing that removes the ability to start the shared-expert branch early or start cache-hit routed work before misses land could regress throughput, per the explicit "Finer-grained overlap did not help" lesson.
 - **Validate**: must be a full end-to-end decode benchmark (not isolated CB-timing microbenchmark, per the journey doc's central lesson), output byte-identical to current path, tested at both short and long context (attention-heavy full-layer cost changes with context depth per the 4096-soak data: 10.2→7.6 tok/s).
+
+- **Measured 2026-09-11 — the count is now instrumented, and the premise is wrong twice over.**
+
+  **The evidence above cites the wrong path.** The `tileCB` machinery it points at (`:1046-1305`, `:2135-2271`) is **prefill**; decode has no `tileCB` at all. Decode's commits are exactly seven sites — the layer's `cb`, `sharedCB`, `routedCB` (three per layer, unconditional), `phase1HitCB` when the hit-split branch runs, and two `runSync` buffers per forward for the embed and the head. That yields a falsifiable prediction, and the counters now test it:
+
+  ```
+  CBs = 3 · layers + H + 2        H = layers that took the hit-split branch
+  ```
+
+  Qwen 3.8 (48 layers): **146 ≤ n ≤ 194**. Qwen 3.6 (40): **122 ≤ n ≤ 162**. Measured on 3.8 at 16 slots: **`cbs=5883`, `cbs/step=189.8`**, i.e. `H` = 43.8 of 48 layers — in band, high, and the shape is what the prediction describes.
+
+  **The overhead the section was written to reduce does not exist.** The `io` split in §2.1 prices the whole per-layer submission path: `streamersQueue.sync` → `DispatchQueue.global` → `concurrentPerform`, plus the continuation handoff and the `ensureLayerOpened` check, is **0.6 ms/step of 224.67 — 0.27%** — across 48 invocations per token. The `cb1` encode clocks are 2.62 ms/step total. Whatever 190 command buffers cost, it is not in the CPU submission path.
+
+  **Action 1 is done, not deferred**: the CB count is reported as `cbs` / `cbs/step` on every `--counters` line, so the prediction stays checkable at any slot count or install without re-instrumenting. **Recommendation: close this item.** Coalescing miss-tile CBs cannot recover a cost that measures at 0.27%, and the section's own risk note — that removing the early-committed shared-expert buffer could regress the overlap it exists to provide — argues against spending the risk budget on a 0.27% target. The one thing that would reopen it is a machine whose `io` window is far shorter than this one's, where a fixed CPU cost would be a larger share; on this box at this operating point it is not.
 
 ### 2.3 [MEDIUM impact, LOW-MEDIUM risk] Fuse the GDN gate + recurrent-step epilogue further, or batch value-head dispatch
 - **Evidence**: `Metal/LinearAttn/gdn.metal` currently dispatches `gdn_conv_update`, `gdn_gate`/`gdn_gate_gemv`, `gdn_recurrent` (one threadgroup per value head — 32 threadgroups per GDN layer, 30 layers = 960 threadgroup dispatches per token just for the recurrent step, likely as separate kernel launches per layer given the per-layer state buffer indexing in `RealForwardRunner.swift:1658-1768`), and `gdn_rmsnorm_gated` as **separate kernel dispatches** per layer. Each GDN layer's recurrent-state read+write is only ~2 MiB (per `QWEN36_PORT.md`: "32 heads × 128 × 128 × 4B = 2MiB per GDN layer") — computationally trivial (O(V·D²) ≈ 524K fp32 ops/layer) but currently paying full per-kernel dispatch overhead (PSO bind, argument encode, barrier) for ~4 separate kernels × 30 layers = 120 dispatches/token, on data that's small enough to be dispatch-bound rather than compute- or bandwidth-bound.
