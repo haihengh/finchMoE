@@ -102,6 +102,27 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         guard openedFD >= 0 else {
             throw StreamerError.openFailed(path: layout.path, errno: errno)
         }
+        // `F_NOCACHE` -- measured on the engine, and it loses. Replaying this
+        // streamer's exact pread sequence offline says bypassing the buffer
+        // cache is worth 48-59 ms/step, 21-26% of a decode token, on identical
+        // offsets at identical depth, interleaved and run in both orders. On
+        // the engine it costs instead: 225.4 -> 261.0 ms/step of `io`, -13%
+        // tok/s, reproduced in both orders with identical token IDs.
+        //
+        // The offline harness is what is wrong, and the trace says how. 41.7%
+        // of this streamer's reads are repeats of a (layer, expert) pair
+        // already read during the run, but the *median* reuse distance is 3.97
+        // GiB and not one repeat lands within 512 MiB -- so the harness's ten
+        // recycling destination pages were holding reuse the engine's cache
+        // cannot, and bypassing threw away a hit rate the engine actually has.
+        // Worth re-testing only if the reuse distance ever shortens.
+        //
+        // Kept, off by default, as the falsifier for that claim rather than as
+        // a knob anyone should turn on.
+        if ProcessInfo.processInfo.environment["FINCHMOE_IO_NOCACHE"] == "1",
+           fcntl(openedFD, F_NOCACHE, 1) != 0 {
+            throw StreamerError.openFailed(path: layout.path, errno: errno)
+        }
         self.fd = openedFD
         var closeFDOnFailure = true
         defer { if closeFDOnFailure { close(openedFD) } }
@@ -267,6 +288,16 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             hits: experts.count - misses.count)
     }
 
+    /// The last `executeExpertCachePlan` call's split, in nanoseconds: the
+    /// `concurrentPerform` fan-out plus its preads, then the cache bookkeeping
+    /// and the view construction that follow. Read immediately by the caller
+    /// that owns the running totals (`ModelExpertIO`), on the same thread that
+    /// made the call and before any other call can start — which is why these
+    /// are plain properties and not a lock-guarded accumulator. A per-call
+    /// lock here would be measured by the very numbers it produces.
+    public private(set) var lastReadNanos: UInt64 = 0
+    public private(set) var lastTailNanos: UInt64 = 0
+
     public func executeExpertCachePlan(_ plan: ExpertCachePlan) throws
         -> [(buffer: MTLBuffer, offset: UInt64, size: UInt64)] {
         precondition(plan.experts.count <= slotCount,
@@ -276,6 +307,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
         let errorLock = NSLock()
         nonisolated(unsafe) var firstError: Error?
+        let tRead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         DispatchQueue.concurrentPerform(iterations: plan.misses.count) { missOffset in
             let index = plan.misses[missOffset]
             do {
@@ -289,15 +321,24 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 errorLock.unlock()
             }
         }
+        // Timed around `concurrentPerform` inclusive, so this covers the fan-out
+        // itself as well as the preads: a nested dispatch that has to wake six
+        // pool threads is part of what the caller's wall clock sees, and
+        // attributing it to the reads is the honest split until it is measured
+        // apart.
+        lastReadNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- tRead
         if let firstError { throw firstError }
 
+        let tTail = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         cacheLock.lock()
         for index in plan.misses {
             slotExpert[plan.assignedSlots[index]] = plan.experts[index]
         }
         cacheLock.unlock()
 
-        return expertCachePlanBuffers(plan)
+        let views = expertCachePlanBuffers(plan)
+        lastTailNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- tTail
+        return views
     }
 
     public func expertCachePlanBuffers(_ plan: ExpertCachePlan)

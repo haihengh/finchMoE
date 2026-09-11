@@ -67,6 +67,17 @@ public struct Model {
     final class StreamersBox: @unchecked Sendable {
         var streamers: [PreadExpertStreamer?]
         var layerVerified: [Bool]
+        /// Where the `io` wall clock goes, accumulated here rather than on the
+        /// runner because two of the three spans are only visible inside the
+        /// fetch. Written from the single `DispatchQueue.global` worker that
+        /// serialises expert fetches -- the decode loop awaits each fetch
+        /// before issuing the next, so there is never more than one writer --
+        /// and read only at the two snapshot points, which are outside any
+        /// fetch. A lock would be safe and would also be inside the window
+        /// these numbers exist to price.
+        var ioDispatchNanos: UInt64 = 0
+        var ioReadNanos: UInt64 = 0
+        var ioTailNanos: UInt64 = 0
         init(numLayers: Int) {
             self.streamers = Array(repeating: nil, count: numLayers)
             self.layerVerified = Array(repeating: false, count: numLayers)

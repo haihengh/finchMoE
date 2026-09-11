@@ -161,4 +161,53 @@ import Testing
         #expect(later.delta(from: values).gpuCb1GdnNanos == 30_000_000)
         #expect(later.delta(from: values).gpuCb1FullAttnNanos == 0)
     }
+
+    /// The `io` window's three parts leave a remainder, and that remainder is
+    /// where a per-layer fixed cost would hide — the continuation hops, the
+    /// `streamersQueue.sync`, the `ensureLayerOpened` check, all of which run
+    /// once per layer per token. It is derived by subtraction, which is the
+    /// arithmetic that wraps to ~1.8e19 in `UInt64`, so saturation is the
+    /// property under test rather than an implementation detail.
+    @Test func ioPartsTileTheWindowAndTheRemainderSaturates() {
+        var values = Self.tiled(forwards: 2, cb1: 80_000)
+        values.ioNanos = 20_000_000
+        values.ioDispatchNanos = 200_000
+        values.ioReadNanos = 19_600_000
+        values.ioTailNanos = 40_000
+        // 20,000,000 - 19,840,000 = 160,000 ns of handoff, over 2 steps.
+        let line = RunnerCounters.line(values, expertStride: nil)
+        #expect(Self.field("io_wall_ms/step", in: line) == "10.00")
+        #expect(Self.field("io_read_wall_ms/step", in: line) == "9.80")
+        #expect(Self.field("io_handoff_wall_ms/step", in: line) == "0.08")
+
+        // Parts that exceed the window cannot be subtracted. This is the shape a
+        // snapshot takes when a fetch completes between the two reads, and a
+        // wrapped `UInt64` would print as ~1.8e19 ms — reading as a units bug
+        // rather than as the ordering bug it is.
+        var incoherent = values
+        incoherent.ioReadNanos = 30_000_000
+        let wrapped = RunnerCounters.line(incoherent, expertStride: nil)
+        #expect(Self.field("io_handoff_wall_ms/step", in: wrapped) == "0.00")
+        // The parts themselves stay honest: clamping them to `io` would hide the
+        // discrepancy rather than expose it.
+        #expect(Self.field("io_read_wall_ms/step", in: wrapped) == "15.00")
+    }
+
+    /// `plan` is CPU work *between* the router readback and the fetch, so it
+    /// happens outside the window and must not be subtracted from it. Tiling
+    /// `io` with it would drive the remainder to zero on every real run — and
+    /// the remainder is exactly the per-layer fixed cost this split exists to
+    /// measure.
+    @Test func planTimeIsOutsideTheWindowAndNeverSubtracted() {
+        var values = Self.tiled(forwards: 2, cb1: 80_000)
+        values.ioNanos = 20_000_000
+        values.ioDispatchNanos = 200_000
+        values.ioReadNanos = 19_600_000
+        values.ioTailNanos = 40_000
+        values.ioPlanNanos = 5_000_000
+
+        let line = RunnerCounters.line(values, expertStride: nil)
+        #expect(Self.field("io_plan_cpu_ms/step", in: line) == "2.50")
+        #expect(Self.field("io_handoff_wall_ms/step", in: line) == "0.08")
+    }
 }

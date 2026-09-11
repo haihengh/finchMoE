@@ -186,6 +186,13 @@ public func run(args: Args,
                 scope: countersAtDecodeStart == nil ? "whole-run" : "decode")
             stderr.write(Data((line + "\n").utf8))
         }
+        // The engine's own pread sequence, for the offline replay. Written on
+        // its own gate and after the footer, because it is not a measurement
+        // but an input to one: the offline harness prices the drive on the
+        // offsets the engine actually issued rather than on a synthetic draw.
+        if let tracePath = ProcessInfo.processInfo.environment["FQ_EXPERT_TRACE"] {
+            try runner.writeExpertTrace(to: tracePath)
+        }
         return RunResult(exitCode: 0)
     } catch is CancellationError {
         stdout.write(Data("\n".utf8))
