@@ -344,7 +344,8 @@ import FinchMoEValidationSupport
             ?? [Float](repeating: 0, count: V * HD * HD)
         var rec = [Float](repeating: 0, count: valueDim)
         for hv in 0..<V {
-            let kh = hv / 2
+            let kh = hv / (model.config.linearNumValueHeads
+                    / model.config.linearNumKeyHeads)
             let qHead = Array(conv[(kh * HD)..<(kh * HD + HD)])
             let kHead = Array(conv[(keyDim + kh * HD)..<(keyDim + kh * HD + HD)])
             let vHead = Array(conv[(2 * keyDim + hv * HD)..<(2 * keyDim + hv * HD + HD)])
@@ -489,7 +490,9 @@ import FinchMoEValidationSupport
                                 k: convBuf, kOffset: keyDim * 2,
                                 v: convBuf, vOffset: keyDim * 4,
                                 g: gBuf, beta: bBuf, out: outBuf,
-                                numValueHeads: V, headDim: UInt32(HD),
+                                numValueHeads: V,
+                                numKeyHeads: model.config.linearNumKeyHeads,
+                                headDim: UInt32(HD),
                                 scale: scale, l2eps: 1e-6)
             cb.commit(); await cb.completed()
             let kOut = (0..<valueDim).map { Self.toF32(outBuf.contents()
@@ -636,7 +639,8 @@ import FinchMoEValidationSupport
             convP = Self.f16(convP)
             var recP = [Float](repeating: 0, count: valueDim)
             for hv in 0..<V {
-                let kh = hv / 2
+                let kh = hv / (model.config.linearNumValueHeads
+                    / model.config.linearNumKeyHeads)
                 let qHead = Array(convP[(kh * HD)..<(kh * HD + HD)])
                 let kHead = Array(convP[(keyDim + kh * HD)..<(keyDim + kh * HD + HD)])
                 let vHead = Array(convP[(2 * keyDim + hv * HD)..<(2 * keyDim + hv * HD + HD)])
@@ -989,7 +993,8 @@ extension QwenLayer0DebugTests {
                 let scale = 1.0 / Float(HD).squareRoot()
                 var rec = [Float](repeating: 0, count: valueDim)
                 for hv in 0..<V {
-                    let kh = hv / 2
+                    let kh = hv / (model.config.linearNumValueHeads
+                    / model.config.linearNumKeyHeads)
                     let qHead = Array(conv[(kh * HD)..<(kh * HD + HD)])
                     let kHead = Array(conv[(keyDim + kh * HD)..<(keyDim + kh * HD + HD)])
                     let vHead = Array(conv[(2 * keyDim + hv * HD)..<(2 * keyDim + hv * HD + HD)])
@@ -1162,7 +1167,8 @@ extension QwenLayer0DebugTests {
                 }
                 // recurrent step
                 for hv in 0..<V0 {
-                    let kh = hv / 2
+                    let kh = hv / (model.config.linearNumValueHeads
+                    / model.config.linearNumKeyHeads)
                     let qHead = Array(conv[(kh * HD0)..<(kh * HD0 + HD0)])
                     let kHead = Array(conv[(keyDim0 + kh * HD0)..<(keyDim0 + kh * HD0 + HD0)])
                     let vHead = Array(conv[(2 * keyDim0 + hv * HD0)..<(2 * keyDim0 + hv * HD0 + HD0)])
@@ -1479,7 +1485,8 @@ extension QwenLayer0DebugTests {
                     }
                     var rec = [Float](repeating: 0, count: valueDim)
                     for hv in 0..<V {
-                        let kh = hv / 2
+                        let kh = hv / (model.config.linearNumValueHeads
+                    / model.config.linearNumKeyHeads)
                         let qHead = Array(conv[(kh * HD)..<(kh * HD + HD)])
                         let kHead = Array(conv[(keyDim + kh * HD)..<(keyDim + kh * HD + HD)])
                         let vHead = Array(conv[(2 * keyDim + hv * HD)..<(2 * keyDim + hv * HD + HD)])
@@ -1814,7 +1821,8 @@ extension QwenLayer0DebugTests {
                     }
                     var rec = [Float](repeating: 0, count: valueDim)
                     for hv in 0..<V {
-                        let kh = hv / 2
+                        let kh = hv / (model.config.linearNumValueHeads
+                    / model.config.linearNumKeyHeads)
                         let qHead = Array(conv[(kh * HD)..<(kh * HD + HD)])
                         let kHead = Array(conv[(keyDim + kh * HD)..<(keyDim + kh * HD + HD)])
                         let vHead = Array(conv[(2 * keyDim + hv * HD)..<(2 * keyDim + hv * HD + HD)])
@@ -2428,7 +2436,8 @@ extension QwenLayer0DebugTests {
             }
             var rec = [Float](repeating: 0, count: valueDim)
             for hv in 0..<V {
-                let kh = hv / 2
+                let kh = hv / (model.config.linearNumValueHeads
+                    / model.config.linearNumKeyHeads)
                 let qHead = Array(conv[(kh * HD)..<(kh * HD + HD)])
                 let kHead = Array(conv[(keyDim + kh * HD)..<(keyDim + kh * HD + HD)])
                 let vHead = Array(conv[(2 * keyDim + hv * HD)..<(2 * keyDim + hv * HD + HD)])
@@ -2902,7 +2911,8 @@ extension QwenLayer0DebugTests {
                     let scale = 1.0 / Float(HD).squareRoot()
                     var rec = [Float](repeating: 0, count: valueDim)
                     for hv in 0..<V {
-                        let kh = hv / 2
+                        let kh = hv / (model.config.linearNumValueHeads
+                    / model.config.linearNumKeyHeads)
                         let qHead = Array(conv[(kh * HD)..<(kh * HD + HD)])
                         let kHead = Array(conv[(keyDim + kh * HD)..<(keyDim + kh * HD + HD)])
                         let vHead = Array(conv[(2 * keyDim + hv * HD)..<(2 * keyDim + hv * HD + HD)])

@@ -82,6 +82,7 @@ final class GDNPrefill {
     /// threadgroup per value head. `conv` is the fused [T][C] conv output
     /// (q at 0, k at `kOffset`, v at `vOffset` elements); `g`/`beta` are
     /// [T][V] fp32; `out` is [T][V][D] fp16; `state` is mutated in place.
+    /// Value head `hv` reads key head `hv / (numValueHeads / numKeyHeads)`.
     func encodeRecurrentSeq(
         commandBuffer: MTLCommandBuffer,
         state: MTLBuffer,  stateOffset: Int = 0,
@@ -94,10 +95,14 @@ final class GDNPrefill {
         kOffset: UInt32,           // k block offset (elements)
         vOffset: UInt32,           // v block offset (elements)
         numValueHeads: Int,
+        numKeyHeads: Int,
         tokens: Int,
         scale: Float,
         l2eps: Float = 1e-6
     ) {
+        let vPerK = GDN.valueHeadsPerKeyHead(numValueHeads: numValueHeads,
+                                             numKeyHeads: numKeyHeads)
+
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(psoRecurrentSeq)
         enc.setBuffer(state, offset: stateOffset, index: 0)
@@ -113,6 +118,7 @@ final class GDNPrefill {
         var tVar = UInt32(tokens)
         var scaleVar = scale
         var l2epsVar = l2eps
+        var vPerKVar = UInt32(vPerK)
         enc.setBytes(&dVar,     length: MemoryLayout<UInt32>.size, index: 5)
         enc.setBytes(&cVar,     length: MemoryLayout<UInt32>.size, index: 6)
         enc.setBytes(&kOffVar,  length: MemoryLayout<UInt32>.size, index: 7)
@@ -121,6 +127,7 @@ final class GDNPrefill {
         enc.setBytes(&tVar,     length: MemoryLayout<UInt32>.size, index: 10)
         enc.setBytes(&scaleVar, length: MemoryLayout<Float>.size,  index: 11)
         enc.setBytes(&l2epsVar, length: MemoryLayout<Float>.size,  index: 12)
+        enc.setBytes(&vPerKVar, length: MemoryLayout<UInt32>.size, index: 13)
 
         let width = min(Int(psoRecurrentSeq.maxTotalThreadsPerThreadgroup), 256)
         enc.dispatchThreadgroups(MTLSize(width: numValueHeads, height: 1, depth: 1),

@@ -43,6 +43,24 @@ final class GDN {
         self.psoGateGEMV  = try context.pipeline("gdn_gate_gemv")
     }
 
+    /// Value heads sharing one key head — the divisor that maps a value head
+    /// to its key head (`kh = hv / vPerK`). Qwen 3.6 is 32 V / 16 K (2) and
+    /// Qwen 3.8 48 V / 16 K (3); both store the grouped `kHead * vPerK + j`
+    /// order, so this is the whole of the GQA pairing.
+    ///
+    /// Traps rather than falling back to 1: a config whose head counts do not
+    /// divide means the mapping is unknown, and guessing it silently routes
+    /// every value head to the wrong key head — soup, not a crash.
+    static func valueHeadsPerKeyHead(numValueHeads: Int, numKeyHeads: Int) -> Int {
+        precondition(numKeyHeads > 0 && numValueHeads > 0,
+                     "GDN needs positive key/value head counts "
+                     + "(got \(numKeyHeads) K / \(numValueHeads) V)")
+        precondition(numValueHeads % numKeyHeads == 0,
+                     "GDN value heads (\(numValueHeads)) must be a multiple of "
+                     + "key heads (\(numKeyHeads))")
+        return numValueHeads / numKeyHeads
+    }
+
     /// Fused in_proj_a/in_proj_b int4-affine GEMVs + gate formula.
     /// `weights` is [2V, N/2] nibbles (a-rows first, then b-rows), `scales`/
     /// `biases` [2V, N/64] BF16, `x` [N] fp16, `A_log`/`dt_bias` [V] fp32,
@@ -108,7 +126,9 @@ final class GDN {
     }
 
     /// Recurrent gated-delta-rule decode step for all `numValueHeads`.
-    /// `state` is mutated in place. `q`/`k` are key-head indexed (head `hv/2`).
+    /// `state` is mutated in place. `q`/`k` are key-head indexed: value head
+    /// `hv` reads key head `hv / (numValueHeads / numKeyHeads)`, the grouped
+    /// (repeat_interleave) pairing the checkpoint stores.
     func encodeRecurrent(
         commandBuffer: MTLCommandBuffer,
         state: MTLBuffer,  stateOffset: Int = 0,
@@ -119,10 +139,14 @@ final class GDN {
         beta: MTLBuffer,   betaOffset: Int = 0,
         out: MTLBuffer,    outOffset: Int = 0,
         numValueHeads: Int,
+        numKeyHeads: Int,
         headDim: UInt32,
         scale: Float,
         l2eps: Float = 1e-6
     ) {
+        let vPerK = Self.valueHeadsPerKeyHead(numValueHeads: numValueHeads,
+                                              numKeyHeads: numKeyHeads)
+
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(psoRecurrent)
         enc.setBuffer(state, offset: stateOffset, index: 0)
@@ -135,9 +159,11 @@ final class GDN {
         var dVar = headDim
         var scaleVar = scale
         var l2epsVar = l2eps
+        var vPerKVar = UInt32(vPerK)
         enc.setBytes(&dVar,     length: MemoryLayout<UInt32>.size, index: 7)
         enc.setBytes(&scaleVar, length: MemoryLayout<Float>.size,  index: 8)
         enc.setBytes(&l2epsVar, length: MemoryLayout<Float>.size,  index: 9)
+        enc.setBytes(&vPerKVar, length: MemoryLayout<UInt32>.size, index: 10)
 
         let width = min(Int(psoRecurrent.maxTotalThreadsPerThreadgroup), 256)
         enc.dispatchThreadgroups(MTLSize(width: numValueHeads, height: 1, depth: 1),

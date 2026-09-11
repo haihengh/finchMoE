@@ -103,10 +103,14 @@ import FinchMoEValidationSupport
         }
 
         // Reference: per value-head, mutate the fp32 state copy, collect out.
+        // The pairing is the checkpoint's grouped (repeat_interleave) order,
+        // so the divisor is `V / K` — not a literal (Qwen 3.6 is 32/16, but
+        // 3.8 is 48/16, and a hardcoded 2 reads the wrong q/k there).
+        let vPerK = V / K
         var refState = state
         var refOut = [Float](repeating: 0, count: V*D)
         for hv in 0..<V {
-            let kh = hv / 2
+            let kh = hv / vPerK
             let sBase = hv * D * D
             var slice = Array(refState[sBase..<(sBase + D*D)])
             let o = GDNRef.recurrentStep(
@@ -120,7 +124,8 @@ import FinchMoEValidationSupport
         kernel.encodeRecurrent(
             commandBuffer: cb, state: sBuf, q: qBuf, k: kBuf, v: vBuf,
             g: gBuf, beta: bBuf, out: oBuf,
-            numValueHeads: V, headDim: UInt32(D), scale: scale, l2eps: l2Eps)
+            numValueHeads: V, numKeyHeads: K,
+            headDim: UInt32(D), scale: scale, l2eps: l2Eps)
         cb.commit(); cb.waitUntilCompleted()
 
         let outActual = Fp16Buffer.read(oBuf, count: V*D)
@@ -143,6 +148,13 @@ import FinchMoEValidationSupport
     @Test func gdn_recurrent_gqa1() throws {
         // K == V: key-head index equals value-head index (no repeat).
         try Self.runRecurrent(numKeyHeads: 8, numValueHeads: 8, headDim: 64, seed: 0x203)
+    }
+    @Test func gdn_recurrent_gqa3() throws {
+        // The real Qwen 3.8 ratio: 48 value heads over 16 key heads. This is
+        // the case the hardcoded `hv / 2` got wrong for every layer of the
+        // real model while every ratio-2 toy passed.
+        try Self.runRecurrent(numKeyHeads: 16, numValueHeads: 48, headDim: 128, seed: 0x204)
+        try Self.runRecurrent(numKeyHeads: 4, numValueHeads: 12, headDim: 32, seed: 0x205)
     }
 
     // MARK: - Per-value-head gate

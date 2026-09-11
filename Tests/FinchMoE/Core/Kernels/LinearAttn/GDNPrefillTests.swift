@@ -171,7 +171,7 @@ import FinchMoEValidationSupport
         let refOut = GDNPrefillRef.recurrentChunk(
             state: &refState, conv: convRef, g: g, beta: beta,
             channels: C, kOffset: kOff, vOffset: vOff,
-            numValueHeads: V, headDim: D, tokens: T, scale: scale)
+            numValueHeads: V, numKeyHeads: K, headDim: D, tokens: T, scale: scale)
 
         let cb = ctx.queue.makeCommandBuffer()!
         kernel.encodeRecurrentSeq(
@@ -179,7 +179,7 @@ import FinchMoEValidationSupport
             g: gBuf, beta: bBuf, out: oBuf,
             headDim: UInt32(D), channels: UInt32(C),
             kOffset: UInt32(kOff), vOffset: UInt32(vOff),
-            numValueHeads: V, tokens: T, scale: scale, l2eps: l2Eps)
+            numValueHeads: V, numKeyHeads: K, tokens: T, scale: scale, l2eps: l2Eps)
         cb.commit(); cb.waitUntilCompleted()
 
         let outActual = Fp16Buffer.read(oBuf, count: T*valueDim)
@@ -208,6 +208,11 @@ import FinchMoEValidationSupport
     @Test func prefill_recurrent_gqa1() throws {
         // K == V: key-head index equals value-head index (no repeat).
         try Self.runRecurrentSeq(numKeyHeads: 8, numValueHeads: 8, headDim: 64, tokens: 5, seed: 0x1205)
+    }
+    @Test func prefill_recurrent_gqa3() throws {
+        // The real Qwen 3.8 ratio: 48 value heads over 16 key heads.
+        try Self.runRecurrentSeq(numKeyHeads: 16, numValueHeads: 48, headDim: 128, tokens: 4, seed: 0x1206)
+        try Self.runRecurrentSeq(numKeyHeads: 4, numValueHeads: 12, headDim: 32, tokens: 3, seed: 0x1207)
     }
 
     // MARK: - Batched gate (fp16 a|b QMM output → g/beta)
@@ -365,7 +370,8 @@ import FinchMoEValidationSupport
                                   g: gBuf, beta: betaBuf, out: recOutBuf,
                                   headDim: UInt32(D), channels: UInt32(C),
                                   kOffset: UInt32(kOff), vOffset: UInt32(vOff),
-                                  numValueHeads: V, tokens: T, scale: scale, l2eps: l2Eps)
+                                  numValueHeads: V, numKeyHeads: K,
+                                  tokens: T, scale: scale, l2eps: l2Eps)
         // gated norm in place on recOutBuf (out == x)
         kernel.encodeRMSNormGatedBatch(commandBuffer: cb, x: recOutBuf, z: zBuf,
                                        weight: nwBuf, out: recOutBuf,
@@ -382,7 +388,7 @@ import FinchMoEValidationSupport
         let recOutRef = GDNPrefillRef.recurrentChunk(
             state: &refState, conv: convOut16, g: gRef, beta: betaRef,
             channels: C, kOffset: kOff, vOffset: vOff,
-            numValueHeads: V, headDim: D, tokens: T, scale: scale)
+            numValueHeads: V, numKeyHeads: K, headDim: D, tokens: T, scale: scale)
         let recOut16 = recOutRef.map { Float(Float16($0)) }
         let normRef = GDNPrefillRef.rmsNormGatedBatch(
             x: recOut16, z: zRef, weight: nwRef, numValueHeads: V, headDim: D, tokens: T)

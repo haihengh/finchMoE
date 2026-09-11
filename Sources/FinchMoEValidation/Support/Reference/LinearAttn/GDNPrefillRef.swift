@@ -95,14 +95,19 @@ public enum GDNPrefillRef {
         kOffset: Int,
         vOffset: Int,
         numValueHeads: Int,
+        numKeyHeads: Int,
         headDim: Int,
         tokens: Int,
         scale: Float
     ) -> [Float] {
+        // Grouped (repeat_interleave) pairing: value head `hv` reads key head
+        // `hv / (V/K)`. Qwen 3.6 is 32/16 and 3.8 is 48/16, so the divisor has
+        // to come from the geometry — a literal 2 is wrong on 3.8.
+        let vPerK = numValueHeads / numKeyHeads
         var out = [Float](repeating: 0, count: tokens * numValueHeads * headDim)
         for t in 0..<tokens {
             for hv in 0..<numValueHeads {
-                let kh = hv / 2
+                let kh = hv / vPerK
                 let q = Array(conv[(t * channels + kh * headDim)..<(t * channels + kh * headDim + headDim)])
                 let k = Array(conv[(t * channels + kOffset + kh * headDim)..<(t * channels + kOffset + kh * headDim + headDim)])
                 let v = Array(conv[(t * channels + vOffset + hv * headDim)..<(t * channels + vOffset + hv * headDim + headDim)])
