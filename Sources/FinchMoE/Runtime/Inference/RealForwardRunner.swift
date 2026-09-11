@@ -2086,6 +2086,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                           kOffset: UInt32(keyDim),
                                           vOffset: UInt32(2 * keyDim),
                                           numValueHeads: numV,
+                                          numKeyHeads: cfg.linearNumKeyHeads,
                                           tokens: t,
                                           scale: scale,
                                           l2eps: eps)
@@ -3114,6 +3115,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                     beta: gBeta, betaOffset: betaByteOffset,
                                     out: attnOut,
                                     numValueHeads: numV,
+                                    numKeyHeads: cfg.linearNumKeyHeads,
                                     headDim: headDim,
                                     scale: scale,
                                     l2eps: 1e-6)
@@ -3960,6 +3962,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                           kOffset: UInt32(keyDim),
                                           vOffset: UInt32(2 * keyDim),
                                           numValueHeads: numV,
+                                          numKeyHeads: cfg.linearNumKeyHeads,
                                           tokens: t,
                                           scale: scale,
                                           l2eps: eps)
@@ -4927,6 +4930,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                     beta: gBeta, betaOffset: betaByteOffset,
                                     out: attnOut,
                                     numValueHeads: numV,
+                                    numKeyHeads: cfg.linearNumKeyHeads,
                                     headDim: headDim,
                                     scale: scale,
                                     l2eps: 1e-6)
