@@ -21,6 +21,10 @@ public struct RunnerCounterValues: Equatable, Sendable {
     public var cb1WaitNanos: UInt64
     public var cb2Nanos: UInt64
     public var ioNanos: UInt64
+    public var ioPlanNanos: UInt64
+    public var ioDispatchNanos: UInt64
+    public var ioReadNanos: UInt64
+    public var ioTailNanos: UInt64
     public var headNanos: UInt64
     public var expertHits: UInt64
     public var expertMisses: UInt64
@@ -45,6 +49,10 @@ public struct RunnerCounterValues: Equatable, Sendable {
                 cb1WaitNanos: UInt64 = 0,
                 cb2Nanos: UInt64 = 0,
                 ioNanos: UInt64 = 0,
+                ioPlanNanos: UInt64 = 0,
+                ioDispatchNanos: UInt64 = 0,
+                ioReadNanos: UInt64 = 0,
+                ioTailNanos: UInt64 = 0,
                 headNanos: UInt64 = 0,
                 expertHits: UInt64 = 0,
                 expertMisses: UInt64 = 0,
@@ -68,6 +76,10 @@ public struct RunnerCounterValues: Equatable, Sendable {
         self.cb1WaitNanos = cb1WaitNanos
         self.cb2Nanos = cb2Nanos
         self.ioNanos = ioNanos
+        self.ioPlanNanos = ioPlanNanos
+        self.ioDispatchNanos = ioDispatchNanos
+        self.ioReadNanos = ioReadNanos
+        self.ioTailNanos = ioTailNanos
         self.headNanos = headNanos
         self.expertHits = expertHits
         self.expertMisses = expertMisses
@@ -104,6 +116,10 @@ public struct RunnerCounterValues: Equatable, Sendable {
             cb1WaitNanos: d(cb1WaitNanos, base.cb1WaitNanos),
             cb2Nanos: d(cb2Nanos, base.cb2Nanos),
             ioNanos: d(ioNanos, base.ioNanos),
+            ioPlanNanos: d(ioPlanNanos, base.ioPlanNanos),
+            ioDispatchNanos: d(ioDispatchNanos, base.ioDispatchNanos),
+            ioReadNanos: d(ioReadNanos, base.ioReadNanos),
+            ioTailNanos: d(ioTailNanos, base.ioTailNanos),
             headNanos: d(headNanos, base.headNanos),
             expertHits: d(expertHits, base.expertHits),
             expertMisses: d(expertMisses, base.expertMisses),
@@ -134,6 +150,10 @@ extension RunnerCounterValues {
                   cb1WaitNanos: runner.totalCb1WaitNanos,
                   cb2Nanos: runner.totalCb2Nanos,
                   ioNanos: runner.totalIoNanos,
+                  ioPlanNanos: runner.totalIoPlanNanos,
+                  ioDispatchNanos: runner.totalIoDispatchNanos,
+                  ioReadNanos: runner.totalIoReadNanos,
+                  ioTailNanos: runner.totalIoTailNanos,
                   // Summed, as the app does: which of the two carries the head
                   // depends on whether the run took the fused-greedy path, and
                   // a reader wants the cost, not the path.
@@ -156,6 +176,17 @@ extension RunnerCounterValues {
 public enum RunnerCounters {
     /// Nanoseconds per millisecond, as a `Double` divisor.
     private static let nanosPerMilli = 1_000_000.0
+
+    /// What is left of the `io` window once its three measured parts are
+    /// subtracted. Saturating for the same reason `delta` is: a negative here
+    /// means the parts were snapshotted across a fetch that completed between
+    /// the two reads, not that the window is shorter than its own contents, and
+    /// a wrapped `UInt64` would print as ~1.8e19.
+    private static func ioHandoff(_ values: RunnerCounterValues) -> UInt64 {
+        let accounted = values.ioDispatchNanos &+ values.ioReadNanos
+            &+ values.ioTailNanos
+        return values.ioNanos > accounted ? values.ioNanos - accounted : 0
+    }
 
     /// Fields that are per-step are suffixed `/step`; counts are not. Every
     /// duration key carries its clock kind, because these numbers are not one
@@ -231,6 +262,20 @@ public enum RunnerCounters {
             "identity=\(identity)",
             "cb2_cpu_ms/step=\(msPerStep(values.cb2Nanos))",
             "io_wall_ms/step=\(msPerStep(values.ioNanos))",
+            // The `io` window split, and the one place the suffix rule earns
+            // its keep: `plan` is CPU work that happens *outside* the window
+            // (between the router readback and the fetch) and is printed beside
+            // it rather than inside it. The three `_wall` terms below do not
+            // tile `io` — `handoff` is the remainder, and it is the
+            // continuation hops, the `streamersQueue.sync` and the
+            // `ensureLayerOpened` check. That remainder is per-layer fixed cost
+            // on a path that runs once per layer per token, which is the
+            // quantity this split exists to expose.
+            "io_plan_cpu_ms/step=\(msPerStep(values.ioPlanNanos))",
+            "io_dispatch_wall_ms/step=\(msPerStep(values.ioDispatchNanos))",
+            "io_read_wall_ms/step=\(msPerStep(values.ioReadNanos))",
+            "io_tail_wall_ms/step=\(msPerStep(values.ioTailNanos))",
+            "io_handoff_wall_ms/step=\(msPerStep(ioHandoff(values)))",
             "head_wall_ms/step=\(msPerStep(values.headNanos))",
             "ple_wall_ms/step=\(msPerStep(values.pleGatherNanos))",
             "hits=\(values.expertHits)",

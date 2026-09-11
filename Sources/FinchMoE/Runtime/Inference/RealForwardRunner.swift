@@ -792,6 +792,47 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     public private(set) var totalIoNanos: UInt64 = 0
+    // Expert selection, which is CPU planning on the critical path. It sits
+    // *outside* the `io` window -- `tIoStart` is read after this returns -- and
+    // inside no `cb1` bucket either, so before this counter it landed in the
+    // serial sum's unexplained remainder rather than in any measured span.
+    public private(set) var totalIoPlanNanos: UInt64 = 0
+    // The `io` window's parts, held on the model because two of the three are
+    // only visible inside the fetch. `io - plan` is not the identity here:
+    // `plan` is outside the window, and the three parts below do not tile it --
+    // what remains after subtracting them is the continuation hops, the
+    // `streamersQueue.sync` and the `ensureLayerOpened` check, all of which are
+    // the per-layer fixed cost this split exists to find.
+    public var totalIoDispatchNanos: UInt64 { model.routedIoDispatchNanos() }
+    public var totalIoReadNanos: UInt64 { model.routedIoReadNanos() }
+    public var totalIoTailNanos: UInt64 { model.routedIoTailNanos() }
+
+    // The engine's own pread sequence, so the drive can be priced offline on
+    // the real offset pattern rather than a synthetic one: the offline probes
+    // bracket this workload at 7.1 GB/s for diverse offsets and 14.4 GB/s for a
+    // repeated pool, and the engine's actual sequence is neither. Collected
+    // only when `FQ_EXPERT_TRACE` names a path, so the default run allocates
+    // nothing and the append costs one branch per miss.
+    private let expertTracePath: String? =
+        ProcessInfo.processInfo.environment["FQ_EXPERT_TRACE"]
+    /// Flat, because the replay harness only ever reads it forward: `[layer,
+    /// missCount, expert...]` repeated per layer per step. The expert ids are
+    /// the router's, not slot indices, so the harness can rebuild file offsets
+    /// from the layout alone.
+    public private(set) var expertTrace: [Int32] = []
+
+    /// Writes the collected pread sequence for offline replay, as one integer
+    /// per line. Expert ids only: the harness rebuilds byte offsets from the
+    /// install's own layout, so nothing here depends on the trace being taken
+    /// on the machine that replays it.
+    public func writeExpertTrace(to path: String) throws {
+        var out = Data()
+        out.reserveCapacity(expertTrace.count * 6)
+        for value in expertTrace {
+            out.append(contentsOf: Array("\(value)\n".utf8))
+        }
+        try out.write(to: URL(fileURLWithPath: path))
+    }
     // Expert-cache hit/miss counts, accumulated once per layer in
     // `encodeRoutedTail`. Deliberately counts rather than bytes: the byte
     // figure is `misses * expertStride` exactly, but obtaining the stride per
@@ -2822,9 +2863,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let topK = UInt32(cfg.topKExperts)
         let canPlanPhase1HitSplit =
             cfg.topKExperts <= MoE.maxStreamedExperts
+        // Expert selection runs on the critical path between the router readback
+        // above and the preads below, and it is inside neither the `cb1` buckets
+        // nor the `io` window (`tIoStart` is read after this returns). Before
+        // this timer it fell into the serial sum's unexplained remainder.
+        let tPlan = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let plannedFetch = canPlanPhase1HitSplit
             ? try model.planRoutedExperts(layer: L, experts: experts)
             : nil
+        totalIoPlanNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- tPlan
         // Expert-cache accounting for this layer, counted here and nowhere
         // else: this is the one and only `planRoutedExperts` call per layer, and
         // the plan below is consumed by several branches. Counting inside any of
@@ -2838,6 +2885,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         if let plan = plannedFetch {
             totalExpertHits &+= UInt64(plan.hits)
             totalExpertMisses &+= UInt64(plan.misses.count)
+            if expertTracePath != nil {
+                // Layer, miss count, then the expert ids: enough for the
+                // harness to rebuild every pread offset in order without
+                // reproducing the cache.
+                expertTrace.append(Int32(L))
+                expertTrace.append(Int32(plan.misses.count))
+                for index in plan.misses {
+                    expertTrace.append(Int32(experts[index]))
+                }
+            }
         } else {
             // Unreachable while the router's `topK <= maxStreamedExperts`
             // precondition holds, but instrumentation must not be the thing
