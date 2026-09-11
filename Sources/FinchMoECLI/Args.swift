@@ -95,8 +95,11 @@ extension Args {
                                 trusted-install requires the receipt and
                                 size-checks those files against it instead.
                                 On the 125B install the receipt path cuts
-                                prefill from ~45 s to ~2 s. model_weights.bin
-                                and the expert layout are hashed in every mode.
+                                prefill from ~63 s to ~5 s cold, ~2 s warm (a
+                                19-token prompt; the spread is the page cache,
+                                not the policy). model_weights.bin and the
+                                expert layout are hashed in every mode, so none
+                                of that saving is theirs.
       --help                    Show this message.
     """
 
