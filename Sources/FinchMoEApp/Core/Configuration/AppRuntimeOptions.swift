@@ -41,7 +41,7 @@ public enum AppModelVerification: String, CaseIterable, Sendable, Identifiable {
         }
     }
 
-    var runtimeValue: ModelIntegrityPolicy {
+    var runtimeValue: ModelIntegrityPreference {
         switch self {
         case .fullSha256: return .fullSha256
         case .trustedInstall: return .sizeCheckTrustedReceipt
