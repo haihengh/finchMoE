@@ -9,7 +9,12 @@ using namespace mpp::tensor_ops;
 constant constexpr uint kPrefillGroupSize = 64;
 constant constexpr uint kPrefillRmsMaxSimdGroups = 8;
 constant constexpr uint kPrefillPostMaxD = 4096;
-constant constexpr uint kPrefillRouterMaxExperts = 256;
+// Qwen 3.6 routes over 256 experts, Qwen 3.8 over 512. The kernel clamps with
+// `min(num_experts, kPrefillRouterMaxExperts)`, so this must be at least the
+// real expert count or the router silently considers only a prefix of them —
+// which is exactly why PrefillRouter's Swift side asserts instead. Keep the two
+// in sync, and keep this matching MoE.swift's decode-side 512.
+constant constexpr uint kPrefillRouterMaxExperts = 512;
 constant constexpr uint kPrefillRouterMaxTopK = 64;
 constant constexpr uint kPrefillAttentionMaxSimdGroups = 16;
 constant constexpr uint kPrefillMaxTileExperts = 16;

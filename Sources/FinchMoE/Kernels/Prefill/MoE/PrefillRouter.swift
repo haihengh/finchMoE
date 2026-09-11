@@ -28,6 +28,16 @@ public struct PrefillTokenExpertPair: Equatable, Sendable {
 }
 
 final class PrefillRouter {
+    /// Mirrors `kPrefillRouterMaxExperts` in `Metal/Prefill/prefill.metal`,
+    /// which sizes the kernel's threadgroup score array and caps the experts it
+    /// will scan. Qwen 3.8 routes over 512 experts (3.6 over 256), and the
+    /// decode path's `MoE` already allows 512. Raising it here without raising
+    /// the Metal constant would let the router read past its score array;
+    /// lowering it would make the kernel silently ignore every expert beyond
+    /// the cap and route each token to the wrong experts — so the assertion
+    /// stays a hard failure rather than a clamp.
+    static let maxExperts: UInt32 = 512
+
     private let pso: MTLComputePipelineState
 
     init(context: MetalContext) throws {
@@ -57,7 +67,8 @@ final class PrefillRouter {
                                   topK: UInt32,
                                   hiddenStrideElements: UInt32) {
         precondition(queryCount > 0, "queryCount must be positive")
-        precondition(numExperts <= 256, "numExperts > 256 is not supported")
+        precondition(numExperts <= Self.maxExperts,
+                     "numExperts \(numExperts) exceeds the router's \(Self.maxExperts) supported experts")
         precondition(topK > 0 && topK <= 64, "topK must be in 1...64")
         precondition(d % UInt32(Quantization.groupSize) == 0,
                      "D must be a multiple of \(Quantization.groupSize)")
