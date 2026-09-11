@@ -72,6 +72,25 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private let slotPointers: [UnsafeMutableRawPointer]
     private let slotBuffers: [MTLBuffer]
 
+    /// `FINCHMOE_IO_READ_SPLIT` -- how many `pread`s one expert read is issued
+    /// as, sequentially within the calling thread. Default 1, which is the
+    /// shape every number before this knob was measured in.
+    ///
+    /// It exists to test exactly one thing: whether this drive serves a smaller
+    /// request faster *per byte*. Qwen 3.8 reads 2.64 MiB experts at 3.05 GB/s
+    /// where Qwen 3.6 reads 1.69 MiB experts at 6.12 GB/s, same engine, same
+    /// drive, and every other explanation has been measured away -- the reads
+    /// are 99.7% of the window at 100% of the fan-out width asked for, and
+    /// bypassing the buffer cache leaves the gap at 1.95x against a cached
+    /// 2.01x. Splitting the read is the only way to change request size while
+    /// holding the install, the offsets and the bytes fixed.
+    ///
+    /// It is not a throughput knob to reach for on faith. It converts one
+    /// `pread` into K and trades per-stream queue depth for request count, so
+    /// it can as easily lose -- see `FINCHMOE_IO_NOCACHE` above for what this
+    /// file does with a knob that measures well offline and badly here.
+    private let readSplit: Int
+
     private var nextSlot = 0
     private let cursorLock = NSLock()
 
@@ -96,7 +115,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                  device: MTLDevice,
                  slotCount: Int,
                  cachePolicy: ExpertCachePolicy = .lfu,
-                 fileDescriptor: Int32?) throws {
+                 fileDescriptor: Int32?,
+                 readSplit: Int? = nil) throws {
         precondition(slotCount > 0, "slotCount must be positive")
         self.layout = layout
         self.slotCount = slotCount
@@ -187,6 +207,16 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             buffers.append(buffer)
         }
 
+        // Read once per layer open rather than per read: this sits on the hot
+        // path, and `getenv` there would be measured by the numbers it exists
+        // to produce. The parameter wins over the environment so tests can set
+        // it without mutating process state.
+        self.readSplit = max(
+            1,
+            readSplit
+                ?? ProcessInfo.processInfo.environment["FINCHMOE_IO_READ_SPLIT"]
+                    .flatMap(Int.init)
+                ?? 1)
         self.slotPointers = pointers
         self.slotBuffers = buffers
         self.slotExpert = [Int](repeating: -1, count: slotCount)
@@ -512,20 +542,37 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private func readFull(into destination: UnsafeMutableRawPointer,
                           fileOffset: UInt64,
                           count: Int) throws {
-        var filled = 0
-        while filled < count {
-            let readCount = pread(
-                fd,
-                destination.advanced(by: filled),
-                count - filled,
-                off_t(fileOffset) + off_t(filled))
-            if readCount < 0 {
-                throw StreamerError.preadFailed(errno: errno)
+        guard count > 0 else { return }
+        // Split into `readSplit` sequential chunks. With the default of 1 this
+        // is exactly the single loop it has always been; the loop is kept
+        // per-chunk rather than around the whole read so that a chunk which
+        // comes back short is resumed at its own offset instead of restarting
+        // the read -- the existing short-read semantics, applied per piece.
+        let chunks = min(readSplit, count)
+        let base = count / chunks
+        let remainder = count % chunks
+        var chunkStart = 0
+        for chunk in 0..<chunks {
+            // The remainder is spread over the first few chunks so the pieces
+            // tile `count` exactly whatever the split divides into.
+            let chunkCount = base + (chunk < remainder ? 1 : 0)
+            var filled = 0
+            while filled < chunkCount {
+                let readCount = pread(
+                    fd,
+                    destination.advanced(by: chunkStart + filled),
+                    chunkCount - filled,
+                    off_t(fileOffset) + off_t(chunkStart + filled))
+                if readCount < 0 {
+                    throw StreamerError.preadFailed(errno: errno)
+                }
+                if readCount == 0 {
+                    throw StreamerError.sizeMismatch(
+                        expected: UInt64(count), actual: UInt64(chunkStart + filled))
+                }
+                filled += readCount
             }
-            if readCount == 0 {
-                throw StreamerError.sizeMismatch(expected: UInt64(count), actual: UInt64(filled))
-            }
-            filled += readCount
+            chunkStart += chunkCount
         }
     }
 }
