@@ -80,6 +80,7 @@ import Testing
         #expect(!settings.topPEnabled)
         #expect(settings.topP == 0.8)
         #expect(!settings.prefillEnabled)
+        #expect(settings.modelVerification == .automatic)
         #expect(settings.newlineShortcut == .return)
         #expect(settings.showPromptExamples)
         #expect(settings.sentPromptBehavior == .keep)
@@ -99,6 +100,50 @@ import Testing
         #expect(AppNewlineShortcut.sendMessageOptions == [.shiftReturn, .return])
         #expect(AppNewlineShortcut.shiftReturn.sendMessageLabel == "Return")
         #expect(AppNewlineShortcut.return.sendMessageLabel == "Command-Return")
+    }
+
+    @Test(arguments: AppModelVerification.allCases)
+    func modelVerificationRoundTrips(_ mode: AppModelVerification) throws {
+        let initial = MacAppSettings(modelVerification: mode)
+        let decoded = try JSONDecoder().decode(
+            MacAppSettings.self,
+            from: JSONEncoder().encode(initial))
+
+        #expect(decoded == initial)
+    }
+
+    @Test func unknownPersistedVerificationDoesNotWipeTheOtherSettings() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = root.appendingPathComponent("gemma4.finch", isDirectory: true)
+        let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
+        // Written by a future build, read back by this one. `loadOrCreate`
+        // answers *any* decode throw by deleting the file, so decoding the raw
+        // string rather than the enum is what keeps one unknown mode from
+        // resetting slots, temperature and the shortcut along with it.
+        try Data("""
+        {
+          "version": 1,
+          "contextTokens": 8192,
+          "expertCacheSlots": 24,
+          "temperature": 0.4,
+          "topKEnabled": true,
+          "topK": 64,
+          "topPEnabled": true,
+          "topP": 0.95,
+          "prefillEnabled": true,
+          "modelVerification": "quantum-notarized",
+          "newlineShortcut": "shift-return"
+        }
+        """.utf8).write(to: fileURL)
+
+        let settings = MacAppSettingsFileStore.loadOrCreate(forModelDirectory: model)
+
+        #expect(settings.modelVerification == .automatic)
+        #expect(settings.contextTokens == 8_192)
+        #expect(settings.expertCacheSlots == 24)
+        #expect(settings.temperature == 0.4)
+        #expect(settings.newlineShortcut == .shiftReturn)
     }
 
     @Test(arguments: [true, false])
@@ -164,6 +209,7 @@ import Testing
             topPEnabled: false,
             topP: 0.8,
             prefillEnabled: false,
+            modelVerification: .trustedInstall,
             newlineShortcut: .shiftReturn,
             showPromptExamples: false,
             sentPromptBehavior: .clear)
@@ -180,6 +226,7 @@ import Testing
         #expect(!model.topPEnabled)
         #expect(model.topP == 0.8)
         #expect(!model.runtimeOptions.prefillEnabled)
+        #expect(model.runtimeOptions.modelVerification == .trustedInstall)
         #expect(model.newlineShortcut == .shiftReturn)
         #expect(!model.showPromptExamples)
         #expect(model.sentPromptBehavior == .clear)
@@ -187,6 +234,7 @@ import Testing
         model.temperature = 0.6
         model.runtimeOptions.expertCacheSlots = 32
         model.runtimeOptions.prefillEnabled = true
+        model.runtimeOptions.modelVerification = .fullSha256
         let beforeGenerate = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: modelDirectory)
         #expect(beforeGenerate == initial)
@@ -199,6 +247,7 @@ import Testing
         #expect(saved.temperature == 0.6)
         #expect(saved.expertCacheSlots == 32)
         #expect(saved.prefillEnabled)
+        #expect(saved.modelVerification == .fullSha256)
         #expect(saved.newlineShortcut == .shiftReturn)
         #expect(!saved.showPromptExamples)
         #expect(saved.sentPromptBehavior == .clear)

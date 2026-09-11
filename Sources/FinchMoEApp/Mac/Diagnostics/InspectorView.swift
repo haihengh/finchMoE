@@ -155,6 +155,19 @@ struct InspectorView: View {
             Text("RDADVISE is experimental. It may speed up short decodes but slow down long decodes.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Model verification")
+                Picker("Model verification", selection: $model.runtimeOptions.modelVerification) {
+                    ForEach(AppModelVerification.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text(model.runtimeOptions.modelVerification.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             if model.hasStaleLoadedRuntime {
                 Text("Reload required")
                     .font(.caption)

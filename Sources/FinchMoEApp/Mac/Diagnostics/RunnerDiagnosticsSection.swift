@@ -9,6 +9,10 @@ struct RunnerDiagnosticsSection: View {
             if let diagnostics {
                 groupLabel("Result")
                 DiagnosticRow("Settings", diagnostics.runtimeOptions.resultSummary, multiline: true)
+                // The request, above, and the outcome, here: with `Automatic`
+                // they differ whenever the receipt was missing or unusable, and
+                // that is exactly the case a user needs told.
+                DiagnosticRow("Verification", diagnostics.integrityOutcome ?? "unknown")
                 DiagnosticRow("Prompt tokens", diagnostics.promptTokenCount.map(String.init) ?? "unknown")
                 DiagnosticRow("Output tokens", "\(diagnostics.generatedTokens)")
                 DiagnosticRow("Stop", diagnostics.stopReason.rawValue)

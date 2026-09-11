@@ -11,12 +11,34 @@ import FinchMoE
         #expect(options.prefillEnabled)
         #expect(options.prefillChunkTokens == 128)
         #expect(options.rdadvisePolicy == .off)
-        #expect(options.modelVerification == .fullSha256)
+        #expect(options.modelVerification == .automatic)
 
         let runtime = try options.resolvedRuntimeConfiguration(forceLogitsHead: false)
         #expect(runtime == .production)
         #expect(options.resultSummary ==
-            "Cache 16 LFU, prefill 128, FP16 KV, RDADVISE off, full SHA-256")
+            "Cache 16 LFU, prefill 128, FP16 KV, RDADVISE off, auto verification")
+    }
+
+    @Test func verificationModesAreDistinctlyLabelled() {
+        // The picker renders `label` and the diagnostics pane renders
+        // `resultSummary`. Three modes that summarised alike would leave that
+        // pane unable to answer the one question it exists for -- whether this
+        // run took the receipt -- so distinctness is the property under test,
+        // not the exact wording.
+        let summaryOptions = AppModelVerification.allCases.map {
+            AppRuntimeOptions(modelVerification: $0).resultSummary
+        }
+        #expect(Set(summaryOptions).count == AppModelVerification.allCases.count)
+        #expect(Set(AppModelVerification.allCases.map(\.label)).count
+            == AppModelVerification.allCases.count)
+        #expect(AppModelVerification.allCases.allSatisfy { !$0.detail.isEmpty })
+        // First, because the segmented picker renders `allCases` in order.
+        #expect(AppModelVerification.allCases.first == .automatic)
+
+        #expect(AppModelVerification.automatic.runtimeValue == .automatic)
+        #expect(AppModelVerification.fullSha256.runtimeValue == .fullSha256)
+        #expect(AppModelVerification.trustedInstall.runtimeValue
+            == .sizeCheckTrustedReceipt)
     }
 
     @Test func everyPublicChoiceMapsToRuntime() throws {
