@@ -61,6 +61,58 @@ public struct RawCompletionScratch: @unchecked Sendable {
     }
 }
 
+extension RawCompletionScratch {
+    /// Elements of the widened f32 vector materialized at a time — 4 MB. See
+    /// `writeLogits(to:)` for why this is chunked at all.
+    static let logitsDumpChunkElements = 1 << 20
+
+    /// Writes the logits buffer to `path` as raw little-endian f32 — the format
+    /// the logits-diff scorer reads.
+    ///
+    /// The buffer is FP16, the sampler's native width, so this widens on the
+    /// way out. Nothing here is on a hot path; a dump happens once per run.
+    ///
+    /// Chunked rather than materialized whole because at the Qwen 3.8 vocab
+    /// (20,000,171) the widened vector is ~80 MB, and it is allocation spikes
+    /// that panic this box — the memguard protocol exists for exactly that.
+    /// Peak here is one 4 MB chunk.
+    public func writeLogits(to path: String) throws {
+        let count = logits.length / MemoryLayout<Float16>.size
+        let source = logits.contents().bindMemory(to: Float16.self, capacity: count)
+
+        let fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+        guard fd >= 0 else {
+            throw ModelError.posixFailed(call: "open(\(path))", errno: errno)
+        }
+        defer { close(fd) }
+
+        let capacity = Self.logitsDumpChunkElements
+        var chunk = [Float](repeating: 0, count: capacity)
+        var offset = 0
+        while offset < count {
+            let n = min(capacity, count - offset)
+            for i in 0..<n { chunk[i] = Float(source[offset + i]) }
+            try chunk.withUnsafeBytes { full in
+                let raw = UnsafeRawBufferPointer(
+                    rebasing: full[0 ..< n * MemoryLayout<Float>.size])
+                var written = 0
+                while written < raw.count {
+                    let wrote = write(fd, raw.baseAddress!.advanced(by: written),
+                                      raw.count - written)
+                    // A short write is legal and just means "again"; only a
+                    // zero or negative result is a failure.
+                    guard wrote > 0 else {
+                        throw ModelError.posixFailed(
+                            call: "write(\(path))", errno: wrote < 0 ? errno : EIO)
+                    }
+                    written += wrote
+                }
+            }
+            offset += n
+        }
+    }
+}
+
 extension GenerationConfig {
     /// A pure-greedy config can use the fused head's GPU argmax
     /// (`RealForwardRunner.lastGreedyToken`) instead of sampling from the
@@ -80,6 +132,12 @@ extension GenerationConfig {
 /// logits buffer is never written; the loop then requires a pure-greedy config
 /// and reads `lastGreedyToken`. Callers with sampling configs must construct
 /// the runner with `forceLogitsHead: true`.
+///
+/// `prefillLogitsDumpPath` writes the final prefill row — the distribution the
+/// first generated token is drawn from — before decode begins, which is the
+/// last moment that row exists: the first `produce` overwrites the buffer. It
+/// needs the logits head for the same reason, and refuses a fused-greedy
+/// producer rather than dumping whatever the buffer happened to hold.
 public func runRawCompletion(producer: any LogitProducer,
                              tokenizer: GFTokenizer,
                              promptIds: [Int32],
@@ -87,6 +145,7 @@ public func runRawCompletion(producer: any LogitProducer,
                              context: MetalContext,
                              scratch: RawCompletionScratch,
                              prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+                             prefillLogitsDumpPath: String? = nil,
                              start: RawCompletionStart = .reset,
                              shouldStop: () -> Bool = { false },
                              onProgress: (RawDecodeProgress) -> Void) async throws -> RawDecodeResult {
@@ -172,6 +231,16 @@ public func runRawCompletion(producer: any LogitProducer,
             history.append(t)
             onProgress(.prefill(done: position, total: promptIds.count))
         }
+    }
+
+    // Dumped here and not later: this is the window in which the buffer holds
+    // the final prefill row. Decode overwrites it on its first `produce`.
+    if let prefillLogitsDumpPath {
+        guard !fusedGreedy else {
+            throw PrefillError.unsupportedPrefillSeed(
+                "a prefill logits dump needs the logits head, but this producer is fused-greedy")
+        }
+        try scratch.writeLogits(to: prefillLogitsDumpPath)
     }
 
     let decodeStart = Date()
