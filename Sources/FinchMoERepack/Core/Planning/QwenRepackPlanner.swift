@@ -442,13 +442,21 @@ enum QwenRepackPlanner {
         // 3-D (generic throw).
         if family == ArchInfo.qwen38Family {
             if source.hasSuffix(".hc_norm.weight") {
-                // Hyper-connection grouped-RMS gate (per-mixer and the root
-                // mixer): the torch module multiplies its weight raw
-                // (GatedNorm-style, like the GDN norm) — no (1 + w) bake.
+                // Hyper-connection grouped-RMS gate, per-mixer and the root
+                // mixer (which IS this family's output norm). The family's
+                // blanket `norm.weight` rule applies: the checkpoint stores
+                // `w` and the gate multiplies `(1 + w)`. The reference
+                // converter folds exactly this set — `qwen.py:394` adds 1 to
+                // every `norm.weight` and exempts ONLY
+                // `linear_attn.norm.weight` — and `build_hc_mix`
+                // (archive/llama.cpp/src/models/qwen4exp.cpp:230) documents
+                // the fold. Taking it raw instead leaves the residual plane
+                // sign-scrambled at a plausible magnitude: healthy RMS,
+                // no signal.
                 guard shape.count == 1 else {
                     throw RepackError.shapeMismatch(name: source, detail: "\(shape)")
                 }
-                return .normRawBf16(Int(shape[0]))
+                return .normOnePlusW(Int(shape[0]))
             }
             if source.contains(".self_attn.indexer.") {
                 if source.hasSuffix(".q_layernorm.weight")

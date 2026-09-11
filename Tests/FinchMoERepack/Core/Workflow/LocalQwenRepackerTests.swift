@@ -369,15 +369,23 @@ import FinchMoEFormat
                     ..< Data.Index(entry.fileOffset + entry.sizeBytes))
         }
 
-        // hc_norm.weight is a grouped-RMS gate multiplied RAW (GatedNorm
-        // convention, like linear_attn.norm.weight) — its payload must be the
-        // source bf16 bytes verbatim, with no (1 + w) bake.
+        // hc_norm.weight is a grouped-RMS gate the family's blanket
+        // `norm.weight` rule covers: the gate multiplies (1 + w), so the
+        // payload must be the source bf16 values with 1.0 added — NOT the
+        // raw bytes. (Only linear_attn.norm.weight is multiplied raw.)
         let hcSource = try Self.readSourceTensor(
             snapshot, name: "model.language_model.hyper_connection_mixer.hc_norm.weight")
         let hcEntry = try #require(
             byName["language_model.hyper_connection_mixer.hc_norm.weight"])
         #expect(hcEntry.sizeBytes == UInt64(hcSource.count))
-        #expect(payloadBytes(hcEntry) == hcSource)
+        let hcWritten = payloadBytes(hcEntry).withUnsafeBytes { raw -> [UInt16] in
+            Array(raw.bindMemory(to: UInt16.self))
+        }
+        for i in 0..<(Int(hcSource.count) / 2) {
+            let srcBits = UInt16(hcSource[2 * i]) | UInt16(hcSource[2 * i + 1]) << 8
+            #expect(hcWritten[i] == FinchQuantization.bf16Bits(
+                1.0 + FinchQuantization.bf16ToFloat(srcBits)))
+        }
 
         // Indexer layernorms ARE (1 + w) baked (Qwen RMSNorm form).
         let lnSource = try Self.readSourceTensor(
