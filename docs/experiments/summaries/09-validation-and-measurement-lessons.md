@@ -258,12 +258,31 @@ from representative holdouts.
 - **Final disposition:** The slot recommendation stands on other grounds (16 is
   the minimum legal count on both installs and the best measured one), but it is
   no longer supported by the reason given for it, and "cache capacity is the only
-  read-side axis" is withdrawn. Item 2.1 is reopened and re-scoped around
-  in-flight depth rather than capacity.
+  read-side axis" is withdrawn. The replacement hypothesis -- re-scope item 2.1
+  around in-flight concurrency -- was then tested against the drive and is also
+  withdrawn; see below.
+- **Refinement, same day:** Before writing any prefetch code, both candidate
+  mechanisms were priced against the real expert file. Delivered bandwidth rises
+  steeply with outstanding-request depth (2.69 GB/s at depth 1, 4.82 at 2, 5.66
+  at 4), saturates by depth 4-8, and then *declines* (5.34 at 16, 4.89 at 32,
+  4.24 at 64) -- and decode already runs at depth 3-6, so the queue is at its
+  knee and the curve past it points down. Repetition, by contrast, is worth more
+  than concurrency at every depth: at fixed depth 4 and volume, a 24-expert
+  repeated pool runs at 14.4 GB/s against 7.1 GB/s for diverse offsets with the
+  buffer cache bypassed, and 28.2 against 9.8 with it allowed. So the slot
+  inversion is two effects pointing the same way -- a smaller cache re-reads a
+  more repetitive set that both the OS buffer cache and the SSD's controller
+  cache absorb, and it concentrates misses into deeper per-layer batches while a
+  large cache starves many layers down to depth 1-2. Neither is a byte effect,
+  and both say a wider read set is the wrong direction. **Do not build the
+  prefetch.** Item 2.1 is closed with the recommendation unchanged and the
+  reasoning replaced.
 - **Lesson:** An awaited window bounds the transfer from above; it does not
   measure it. Divide bytes by it only after showing the window is transfer-bound
   -- and show that by varying the bytes, never by comparing the quotient to a
-  ceiling.
+  ceiling. Then price the replacement hypothesis against the device before
+  building on it: a mechanism that is real in the aggregate can still be one the
+  system is already sitting on.
 
 ## Boundaries that were not failed experiments
 
