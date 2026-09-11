@@ -327,7 +327,10 @@ M0 (commit `4de4774`, 2026-09-08): ArchConfig preset
 zero-defaulted for the other presets; manifest wire keys optional +
 omit-on-nil (format minor stays 0); `ManifestReader` arch enforcement;
 repack-side `ArchInfo` family/field parse (1-based → 0-based
-`pleLayerIndexes`; ngram geometry frozen 160 × 2,500,012 pending M1 census);
+`pleLayerIndexes`; ngram geometry 160 × 2,500,012 — **confirmed by the M4
+census against the real tensor** `[2500012, 160]` in `model-00005`; the
+config's `ngram_vocab_size_base: 20000000` is a nominal base, not a row
+count);
 tokenizer maps `qwen4_exp` into the shared `.qwen3_6` family. Tests:
 `Qwen38ArchModelTests` (incl. the bare-family-literal scan),
 `Qwen38ManifestWireTests`, `ArchInfoTests` additions. The preset matches
@@ -484,19 +487,24 @@ tokenizer maps `qwen4_exp` into the shared `.qwen3_6` family. Tests:
 
 7. **M4 real install + oracle.** Safe-run repack of
    `models/Qwen3.8-Flash-Next-bf16` → `models/Qwen3.8-Flash-Next-125B.finch`
-   (~40 GB quantized core + 102.4 GB PLE + overhead ≈ 145 GB; disk free
-   1.1 TiB; transient peak ≈ 290 GB during rename; 2–6 h streaming,
-   release binary only). Real-shape gated tests (PLE part-boundary rows,
-   real-vocab hash collisions, indexer crossing 2048). Oracle: build
-   `archive/llama.cpp`, run the AD quant GGUF on a fixed prompt (mmap; on
-   16 GB expect slow — it is a one-shot run and must be alone), dump
-   logits; engine CLI same prompt + logits dump; bar: top-1 agreement
-   ≥ 50/64 with top-5 overlap and rank-correlation sanity (engine int4
-   group-64 vs IQ4XS → argmax agreement, not exact logits). The tokenizer
-   side is already closed — M0 mapped `qwen4_exp` into the shared `.qwen3_6`
-   family (see the M0 entry above), and 3.8 shares the 3.6 tokenizer
-   byte-for-byte, so no `qwen3_8` case is needed. Remaining here:
-   `AppModelInstallationProbe` descriptor; full suite both families.
+   (**174,403,168,940 B (162 GiB) measured**, not the ~145 GB estimated
+   before the build: 3,877,265,688 B resident `model_weights.bin` + ~63 GB
+   `packed_experts/` + 102.4 GB `ple_shards/`; disk free 980 GiB; the
+   transient ≈ 290 GB peak applies only to the *overwrite* case, which this
+   run was not; measured duration: see the M4 status entry below). Source
+   snapshot is 377,446,183,588 B (351.5 GiB) over 131 shards. Real-shape
+   gated tests (PLE part-boundary rows, real-vocab hash collisions, indexer
+   crossing 2048). Oracle: build `archive/llama.cpp`, run the AD quant GGUF
+   (**79 GB**, 28 shards) on a fixed prompt (mmap; on 16 GB expect slow — it
+   is a one-shot run and must be alone), dump logits; engine CLI same prompt
+   + logits dump. **Bar is the 3.6-proven single-final-prefill-row method**
+   (cos 0.998213, argmax MATCH, top10 10/10 — `archive/README.md:62`), not
+   the earlier 64-row top-1 bar, which has no producer on either side; engine
+   int4 group-64 vs IQ4XS → argmax-level agreement, not exact logits. The
+   tokenizer side is already closed — M0 mapped `qwen4_exp` into the shared
+   `.qwen3_6` family (see the M0 entry above), and 3.8 shares the 3.6
+   tokenizer byte-for-byte, so no `qwen3_8` case is needed. Remaining here:
+   full suite both families.
 
 Deferred (documented here): PLE table quant; MTP; vision; indexer cache
 compaction. `docs/QWEN36_PORT.md` remains the GDN/rope/mrope authority and
@@ -509,10 +517,10 @@ Mac16,10; watchdog panics from memory/IO thrash — the tell is a fresh
 `panic-full-*.panic` + `ResetCounter` pair). Additional 2026-09-09 facts:
 `hw.memsize` 16 GB; disk free 1.1 TiB; the M4 oracle run on the 79 GB GGUF
 must be the only heavy process (mmap pages the model; 16 GB RAM → slow but
-bounded — keep `-c` small, no GPU offload); the repack reads 352 GB and
-writes ~145 GB on the same external volume — staged checkpoints with fsync
-per file class, kill-and-resume = rerun with stale-partial cleanup, never
-two heavy jobs at once.
+bounded — keep `-c` small, no GPU offload); the repack reads 377.4 GB and
+writes 174 GB on the same external volume — staged checkpoints with fsync
+per file class, `--resume` (M4 Phase A) makes a kill cost only the in-flight
+file, never two heavy jobs at once.
 
 **2026-09-10:** a third panic of the same signature killed a `swift build`
 mid-M3.2d (boot 07:20, stale `.build/.lock` left behind, Spotlight then
