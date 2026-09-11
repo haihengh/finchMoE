@@ -210,4 +210,58 @@ import Testing
         #expect(Self.field("io_plan_cpu_ms/step", in: line) == "2.50")
         #expect(Self.field("io_handoff_wall_ms/step", in: line) == "0.08")
     }
+
+    /// The read split tiles `io_read_wall` exactly, and `io_conc` is the summed
+    /// thread time over the span rather than a fourth part of the window.
+    ///
+    /// The distinction is the whole point of the field: `io_thread_wall` is
+    /// normally *larger* than the span it sits inside, so a reader who added it
+    /// to the other three would get a total that doubles the read. The test
+    /// pins both the tiling and the fact that the thread figure is outside it.
+    @Test func readSplitTilesTheReadWindowAndConcurrencyIsARatio() {
+        var values = Self.tiled(forwards: 2, cb1: 80_000)
+        values.ioReadNanos = 12_000_000
+        values.ioFanoutNanos = 1_000_000
+        values.ioSpanNanos = 9_000_000
+        values.ioDrainNanos = 2_000_000
+        // Six iterations' worth of thread time inside a 9 ms span: 2.33 deep.
+        values.ioThreadNanos = 21_000_000
+
+        let line = RunnerCounters.line(values, expertStride: nil)
+        #expect(Self.field("io_read_identity", in: line) == "exact")
+        #expect(Self.field("io_conc", in: line) == "2.33")
+        #expect(Self.field("io_span_wall_ms/step", in: line) == "4.50")
+        #expect(Self.field("io_thread_wall_ms/step", in: line) == "10.50")
+        // Thread time exceeds the read window it was spent inside, which is the
+        // property that makes it not a part of that window.
+        #expect(values.ioThreadNanos > values.ioReadNanos)
+    }
+
+    /// A snapshot taken across a fetch in flight shows up as a broken tiling
+    /// rather than as a plausible wrong number, and the parts stay honest --
+    /// clamping them would hide the ordering bug instead of exposing it.
+    @Test func aMisTiledReadSplitIsReportedNotClamped() {
+        var values = Self.tiled(forwards: 2, cb1: 80_000)
+        values.ioReadNanos = 10_000_000
+        values.ioFanoutNanos = 4_000_000
+        values.ioSpanNanos = 9_000_000
+        values.ioDrainNanos = 2_000_000
+
+        let line = RunnerCounters.line(values, expertStride: nil)
+        // 15,000,000 - 10,000,000 = 5,000,000 ns over the window.
+        #expect(Self.field("io_read_identity", in: line) == "OFF(5000000ns)")
+        #expect(Self.field("io_read_wall_ms/step", in: line) == "5.00")
+    }
+
+    /// An uninstrumented run reports zeros, and zero tiles zero -- so the
+    /// identity must not claim `exact` for a family that measured nothing. This
+    /// mirrors `identity=none` on the `cb1` side, and matters for the same
+    /// reason: Gemma is uninstrumented on both.
+    @Test func anUnmeasuredReadSplitDoesNotClaimAnExactTiling() {
+        let values = Self.tiled(forwards: 2, cb1: 80_000)
+        let line = RunnerCounters.line(values, expertStride: nil)
+        #expect(Self.field("io_read_identity", in: line) == "none")
+        // No span to divide by, so the ratio is absent rather than infinite.
+        #expect(Self.field("io_conc", in: line) == "n/a")
+    }
 }
