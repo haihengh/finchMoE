@@ -816,6 +816,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public var totalIoSpanNanos: UInt64 { model.routedIoSpanNanos() }
     public var totalIoDrainNanos: UInt64 { model.routedIoDrainNanos() }
     public var totalIoThreadNanos: UInt64 { model.routedIoThreadNanos() }
+    public var totalIoPreadNanos: UInt64 { model.routedIoPreadNanos() }
+    public var totalIoCopyNanos: UInt64 { model.routedIoCopyNanos() }
 
     // The engine's own pread sequence, so the drive can be priced offline on
     // the real offset pattern rather than a synthetic one: the offline probes

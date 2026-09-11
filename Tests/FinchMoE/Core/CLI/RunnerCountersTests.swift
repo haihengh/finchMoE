@@ -253,6 +253,52 @@ import Testing
         #expect(Self.field("io_read_wall_ms/step", in: line) == "5.00")
     }
 
+    /// The pread/copy pair is a split of `io_thread_wall`, so the two must not
+    /// be added to it and must not be read as a timeline of their own.
+    ///
+    /// With staging off the streamer charges the whole read to `pread` and
+    /// reports no copy, which is what makes the pair sum to the thread time
+    /// rather than to something smaller; a run that reported both halves of an
+    /// unstaged read would be inventing a copy that never happened.
+    @Test func thePreadCopySplitChargesAnUnstagedReadEntirelyToPread() {
+        var values = Self.tiled(forwards: 2, cb1: 80_000)
+        values.ioReadNanos = 12_000_000
+        values.ioSpanNanos = 9_000_000
+        values.ioThreadNanos = 21_000_000
+        values.ioPreadNanos = 21_000_000
+        values.ioCopyNanos = 0
+
+        let line = RunnerCounters.line(values, expertStride: nil)
+        #expect(Self.field("io_pread_wall_ms/step", in: line) == "10.50")
+        #expect(Self.field("io_copy_wall_ms/step", in: line) == "0.00")
+        // Both halves divide by `forwards` like every other timing field, and
+        // together they tile the thread time they were split out of.
+        #expect(values.ioPreadNanos + values.ioCopyNanos == values.ioThreadNanos)
+    }
+
+    /// Staged, the two spans are disjoint sub-intervals of the iteration, so
+    /// they fall short of the thread time by the loop's own bounds check and
+    /// offset arithmetic. The gap is expected, not an error -- which is the
+    /// opposite of the `io_read_identity` case, where any gap is a bug.
+    @Test func aStagedReadLeavesTheLoopOverheadUnattributed() {
+        var values = Self.tiled(forwards: 2, cb1: 80_000)
+        values.ioReadNanos = 12_000_000
+        values.ioFanoutNanos = 1_000_000
+        values.ioSpanNanos = 9_000_000
+        values.ioDrainNanos = 2_000_000
+        values.ioThreadNanos = 21_000_000
+        values.ioPreadNanos = 20_000_000
+        values.ioCopyNanos = 500_000
+
+        let line = RunnerCounters.line(values, expertStride: nil)
+        #expect(Self.field("io_pread_wall_ms/step", in: line) == "10.00")
+        #expect(Self.field("io_copy_wall_ms/step", in: line) == "0.25")
+        #expect(values.ioPreadNanos + values.ioCopyNanos < values.ioThreadNanos)
+        // The read tiling is unaffected by the operational split: staging
+        // changes where the bytes land, not the shape of the window.
+        #expect(Self.field("io_read_identity", in: line) == "exact")
+    }
+
     /// An uninstrumented run reports zeros, and zero tiles zero -- so the
     /// identity must not claim `exact` for a family that measured nothing. This
     /// mirrors `identity=none` on the `cb1` side, and matters for the same

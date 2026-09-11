@@ -135,6 +135,8 @@ extension Model {
                     box.ioSpanNanos &+= streamer.lastReadSpanNanos
                     box.ioDrainNanos &+= streamer.lastReadDrainNanos
                     box.ioThreadNanos &+= streamer.lastReadThreadNanos
+                    box.ioPreadNanos &+= streamer.lastReadPreadNanos
+                    box.ioCopyNanos &+= streamer.lastReadCopyNanos
                     continuation.resume(returning: Self.makeExpertViews(
                         buffers,
                         layer: plan.layer,
@@ -164,6 +166,8 @@ extension Model {
                     box.ioSpanNanos &+= streamer.lastReadSpanNanos
                     box.ioDrainNanos &+= streamer.lastReadDrainNanos
                     box.ioThreadNanos &+= streamer.lastReadThreadNanos
+                    box.ioPreadNanos &+= streamer.lastReadPreadNanos
+                    box.ioCopyNanos &+= streamer.lastReadCopyNanos
                     continuation.resume(returning: Self.makeExpertViews(
                         buffers,
                         layer: layer,
@@ -187,6 +191,8 @@ extension Model {
     public func routedIoSpanNanos() -> UInt64 { streamersBox.ioSpanNanos }
     public func routedIoDrainNanos() -> UInt64 { streamersBox.ioDrainNanos }
     public func routedIoThreadNanos() -> UInt64 { streamersBox.ioThreadNanos }
+    public func routedIoPreadNanos() -> UInt64 { streamersBox.ioPreadNanos }
+    public func routedIoCopyNanos() -> UInt64 { streamersBox.ioCopyNanos }
 
     private static func makeExpertViews(
         _ buffers: [(buffer: MTLBuffer, offset: UInt64, size: UInt64)],

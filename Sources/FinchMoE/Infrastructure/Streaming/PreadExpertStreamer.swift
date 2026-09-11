@@ -64,6 +64,26 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// for the line those stamps live on.
     private static let markStride = 16
 
+    /// The staging buffer's per-thread slot, owned by `pthread_key_t` so that a
+    /// pool thread which exits frees its buffer instead of leaking it. The
+    /// destructor is the only owner and the only free.
+    ///
+    /// One key for the whole process, so the buffer is shared by every streamer
+    /// that runs on a thread rather than held per instance. That is safe here
+    /// for a reason worth writing down, because nothing enforces it: there is
+    /// one construction site (`Model.swift`, one streamer per layer) and every
+    /// layer draws the same `packedExpertsLayout.expertStride`, so all streamers
+    /// in a process agree on the staging length. A future second construction
+    /// site with a *larger* stride traps on the precondition in `readFull`
+    /// rather than overrunning; one with a smaller stride reuses an oversized
+    /// buffer, which is harmless because only `count` bytes are ever written to
+    /// it or copied out. What would not be safe is a smaller-then-larger pair
+    /// with the precondition removed.
+    private static let stageKey: pthread_key_t? = {
+        var key = pthread_key_t()
+        return pthread_key_create(&key) { raw in free(raw) } == 0 ? key : nil
+    }()
+
     public let layout: StreamLayout
     public let slotCount: Int
     public let cachePolicy: ExpertCachePolicy
@@ -136,6 +156,68 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// `io_conc` counter and the summed thread time are what tell those apart.
     private let readWave: Int
 
+    /// `FINCHMOE_IO_STAGE` -- read into a plain staging buffer and copy into the
+    /// slot, instead of reading straight into the slot.
+    ///
+    /// One variable changes and it is the one every previous experiment held
+    /// fixed: *where the bytes land*. The staging buffer is allocated with the
+    /// same `posix_memalign(Self.scratchAlignment, ...)` call and the same
+    /// padded length as a slot, so alignment and page size match the slot
+    /// exactly. The only difference left is that the slot is handed to
+    /// `device.makeBuffer(bytesNoCopy:options:.storageModeShared)` and the
+    /// staging buffer is not.
+    ///
+    /// **Measured, and the answer is no.** `docs/OPTIMIZATION_PLAN.md` named
+    /// this as the next discriminator: the engine reads at 3.60 GB/s where the
+    /// offline replay reads the same offsets at 5.42, and the last difference
+    /// left standing between them was that "the engine's slot pages are
+    /// GPU-shared `MTLBuffer`s under a live Metal heap, which changes the vm
+    /// object's reclamation behaviour" (`:193`, the 5.42 at `:177`). Staging
+    /// holds the drive, the offsets, the depth, the slot and the alignment
+    /// fixed and moves only the destination. Qwen 3.8 reads at 3.28 GB/s with
+    /// it off and 3.28 with it on, two rounds each agreeing to 0.3%; the window
+    /// grows 2.5% and the added memcpy is 2.4% of it. The slot mapping is not
+    /// the cost.
+    ///
+    /// The control is what makes that a finding rather than an artifact: Qwen
+    /// 3.6 reads at 6.24/6.55 GB/s off against 6.90/6.87 on, so the staging
+    /// path is not itself expensive and its null result on 3.8 belongs to the
+    /// read, not to the knob. The copy separates by install too -- 0.043
+    /// ms/MiB on 3.8 against 0.050 on 3.6, within 15%, while the *read* differs
+    /// 3.3x (1.68 ms/MiB against 0.51). Same memory system, same bytes, same
+    /// pages: symmetric on the copy, asymmetric on the read. Whatever the 2.2x
+    /// between the installs is, it is upstream of the destination.
+    ///
+    /// One earlier reason to suspect the destination did not survive
+    /// re-reading. The slot sweep reported Qwen 3.6 losing a quarter to a third
+    /// of its per-byte rate when its pool doubled, but its *absolute* read
+    /// thread time is flat across that change (146.5/138.6 ms/step at 16 slots
+    /// against 136.9/144.1 at 32) and the window moves only 3-10%; the rate
+    /// falls because 32 slots cache-hit more and so read 30% fewer bytes in
+    /// about the same window. Nothing per byte got worse. What does rise is
+    /// per-read latency, 38%, across 30% fewer reads -- and that is a statement
+    /// about the drive's response to fewer, sparser requests, not about where
+    /// the bytes land, which staging confirms by decoupling the two: 3.6 at 32
+    /// slots reads at 4.16/4.02 GB/s off against 4.25/4.04 on, same byte count
+    /// either way. So the corrected reading is not "a bigger pool reads slower"
+    /// but "a bigger pool issues fewer reads, and each costs more"; the per-byte
+    /// version is how this becomes the reason to try staging a second time.
+    ///
+    /// It costs a memcpy of every expert read, so it is not a knob to leave on.
+    private let stageReads: Bool
+
+    /// The padded byte length of one slot, which is also the staging buffer's
+    /// length. Kept so the two allocations can be made identically.
+    private let stageAllocationSize: Int
+
+    /// The staging experiment's two timers, summed across the batch's threads
+    /// under a lock. This is not the per-call lock the comment above rejects:
+    /// it is taken once per *read*, and the read it brackets is three orders of
+    /// magnitude longer than the acquisition is.
+    private let stageLock = NSLock()
+    private var batchPreadNanos: UInt64 = 0
+    private var batchCopyNanos: UInt64 = 0
+
     private var nextSlot = 0
     private let cursorLock = NSLock()
 
@@ -162,7 +244,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                  cachePolicy: ExpertCachePolicy = .lfu,
                  fileDescriptor: Int32?,
                  readSplit: Int? = nil,
-                 readWave: Int? = nil) throws {
+                 readWave: Int? = nil,
+                 stageReads: Bool? = nil) throws {
         precondition(slotCount > 0, "slotCount must be positive")
         self.layout = layout
         self.slotCount = slotCount
@@ -272,6 +355,14 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 ?? ProcessInfo.processInfo.environment["FINCHMOE_IO_READ_WAVE"]
                     .flatMap(Int.init)
                 ?? 0)
+        // `FINCHMOE_IO_STAGE=0` is a meaningful setting, so this reads presence
+        // plus value rather than presence alone.
+        // Parenthesised because `??` binds tighter than `!=` in Swift: without
+        // the outer pair this parses as `(stageReads ?? Int) != 0`.
+        self.stageReads = stageReads
+            ?? ((ProcessInfo.processInfo.environment["FINCHMOE_IO_STAGE"]
+                .flatMap(Int.init) ?? 0) != 0)
+        self.stageAllocationSize = allocationSize
         self.slotPointers = pointers
         self.slotBuffers = buffers
         self.slotExpert = [Int](repeating: -1, count: slotCount)
@@ -415,6 +506,16 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public private(set) var lastReadDrainNanos: UInt64 = 0
     public private(set) var lastReadThreadNanos: UInt64 = 0
 
+    /// The read split by *operation* rather than by thread, and only
+    /// meaningful as a pair. With `FINCHMOE_IO_STAGE` off the whole of
+    /// `lastReadThreadNanos` is charged to `pread` and `copy` is zero, which is
+    /// the honest reading -- there was no copy. With it on they are the two
+    /// spans actually taken. They tile the read portion of the iteration and
+    /// fall a few nanoseconds short of `lastReadThreadNanos`, which also
+    /// contains the slot bounds check and the offset arithmetic around them.
+    public private(set) var lastReadPreadNanos: UInt64 = 0
+    public private(set) var lastReadCopyNanos: UInt64 = 0
+
     public func executeExpertCachePlan(_ plan: ExpertCachePlan) throws
         -> [(buffer: MTLBuffer, offset: UInt64, size: UInt64)] {
         precondition(plan.experts.count <= slotCount,
@@ -448,6 +549,10 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         // The marks stay indexed by the *global* miss offset, not by the offset
         // within the wave, so the tiling below is unchanged by the split -- a
         // wave boundary falls inside `span` and nowhere else.
+        stageLock.lock()
+        batchPreadNanos = 0
+        batchCopyNanos = 0
+        stageLock.unlock()
         let waveWidth = readWave > 0 ? min(readWave, plan.misses.count) : plan.misses.count
         var waveStart = 0
         while waveStart < plan.misses.count {
@@ -509,6 +614,17 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             lastReadSpanNanos = lastExit &- firstEnter
             lastReadDrainNanos = tReadEnd &- lastExit
             lastReadThreadNanos = threadNanos
+        }
+        // Published after the thread-time split, not before, because the
+        // no-staging branch is defined in terms of it.
+        if stageReads {
+            stageLock.lock()
+            lastReadPreadNanos = batchPreadNanos
+            lastReadCopyNanos = batchCopyNanos
+            stageLock.unlock()
+        } else {
+            lastReadPreadNanos = lastReadThreadNanos
+            lastReadCopyNanos = 0
         }
         if let firstError { throw firstError }
 
@@ -616,9 +732,56 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             maxCallNanos: maxCallNanos)
     }
 
+    /// The thread's staging buffer, allocated on first use at the same
+    /// alignment and length as a slot and registered with the key before it is
+    /// returned, so exactly one owner can ever free it.
+    private func stagingBuffer() -> UnsafeMutableRawPointer? {
+        guard let key = Self.stageKey else { return nil }
+        if let existing = pthread_getspecific(key) { return existing }
+        var raw: UnsafeMutableRawPointer?
+        guard posix_memalign(&raw, Self.scratchAlignment, stageAllocationSize) == 0,
+              let buffer = raw else { return nil }
+        pthread_setspecific(key, buffer)
+        return buffer
+    }
+
+    /// Read the expert into `destination`, optionally by way of the thread's
+    /// plain staging buffer.
+    ///
+    /// Timed as two spans rather than one so the experiment can say where the
+    /// time went: `pread` is the drive and the staging write, `copy` is the
+    /// write into the slot's mapping. With staging off there is no second span
+    /// and the whole of it is charged to `pread`, which keeps the pair tiling
+    /// the read in both modes rather than only in the one under test.
     private func readFull(into destination: UnsafeMutableRawPointer,
                           fileOffset: UInt64,
                           count: Int) throws {
+        guard count > 0 else { return }
+        guard stageReads, let staging = stagingBuffer() else {
+            try readChunks(into: destination, fileOffset: fileOffset, count: count)
+            return
+        }
+        // The staging buffer is sized once from `expertStride` at init, while
+        // `count` is chosen per call. Today they agree by construction; the
+        // precondition is here so that a second caller with a larger read
+        // fails loudly instead of overrunning a thread-local allocation.
+        precondition(
+            count <= stageAllocationSize,
+            "staged read of \(count) bytes into a \(stageAllocationSize)-byte staging buffer")
+        let tPreadStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        try readChunks(into: staging, fileOffset: fileOffset, count: count)
+        let tPreadEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        memcpy(destination, staging, count)
+        let tCopyEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        stageLock.lock()
+        batchPreadNanos &+= tPreadEnd &- tPreadStart
+        batchCopyNanos &+= tCopyEnd &- tPreadEnd
+        stageLock.unlock()
+    }
+
+    private func readChunks(into destination: UnsafeMutableRawPointer,
+                            fileOffset: UInt64,
+                            count: Int) throws {
         guard count > 0 else { return }
         // Split into `readSplit` sequential chunks. With the default of 1 this
         // is exactly the single loop it has always been; the loop is kept
