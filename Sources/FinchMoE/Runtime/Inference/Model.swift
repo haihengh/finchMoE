@@ -687,7 +687,7 @@ extension Model {
                             expecting: ArchConfig = .gemma4_26B_A4B,
                             streamingMode: ExpertStreamingMode = .pread(slotCount: 16),
                             expertCachePolicy: ExpertCachePolicy = PreadExpertStreamer.cachePolicyDefault,
-                            integrityPolicy: ModelIntegrityPreference = .fullSha256,
+                            integrityPolicy: ModelIntegrityPreference = .automatic,
                             loadStats: UnsafeMutablePointer<ModelLoadStats>? = nil) throws -> Model {
         var stats = ModelLoadStats()
         defer {
