@@ -736,13 +736,7 @@ import FinchMoEValidationSupport
                     gateRef[h * HD3 + i] = Float(Float16(qVec[h * 2 * HD3 + HD3 + i]))
                 }
             }
-            var m: Float = 0
-            var w = -1
-            for i in 0..<qDim {
-                let d = abs(gF[i] - gateRef[i])
-                if d > m { m = d; w = i }
-            }
-            print("L3 gateRaw maxAbs=\(m) at \(w): engine=\(gF[w]) ref=\(gateRef[w])")
+            print(Self.describeDelta(gF, gateRef, "L3 gateRaw"))
         }
         do {
             let qF = try #require(phases["qOutF.3"]).map { Self.toF32($0) }
@@ -766,26 +760,44 @@ import FinchMoEValidationSupport
                     knRef[h * HD3 + i] = Float(Float16(kn[i]))
                 }
             }
-            func maxDiff(_ a: [Float], _ b: [Float]) -> (Float, Int) {
-                var m: Float = 0
-                var w = -1
-                for i in 0..<min(a.count, b.count) {
-                    let d = abs(a[i] - b[i])
-                    if d > m { m = d; w = i }
-                }
-                return (m, w)
-            }
-            let (qm, qw) = maxDiff(qF, qnRef)
-            let (gm, gw) = maxDiff(gF, gateRef)
-            let (km, kw) = maxDiff(kF, knRef)
-            print("L3 qOut maxAbs=\(qm) at \(qw): engine=\(qF[qw]) ref=\(qnRef[qw])")
-            print("L3 gate maxAbs=\(gm) at \(gw): engine=\(gF[gw]) ref=\(gateRef[gw])")
-            print("L3 k maxAbs=\(km) at \(kw): engine=\(kF[kw]) ref=\(knRef[kw])")
+            print(Self.describeDelta(qF, qnRef, "L3 qOut"))
+            print(Self.describeDelta(gF, gateRef, "L3 gate"))
+            print(Self.describeDelta(kF, knRef, "L3 k"))
         }
     }
 }
 
 extension QwenLayer0DebugTests {
+
+    /// Max-abs divergence between two planes and the index it sits at,
+    /// computed without the `var idx = -1` sentinel these sweeps used to
+    /// carry. The sentinel only advances when `d > m`, so when *no* element
+    /// differs — or every pairwise comparison is unordered because one plane
+    /// carries a NaN — it stays at -1 and the `a[idx]` in the report traps
+    /// `Index out of range`, taking the whole test process with it. A nil
+    /// index here means "nothing to report", and `nan` says which of the two
+    /// it was: exact agreement or poison.
+    static func worstDelta(_ a: [Float], _ b: [Float]) -> (max: Float, idx: Int?, nan: Bool) {
+        var m: Float = 0
+        var idx: Int?
+        var nan = false
+        for i in 0..<min(a.count, b.count) {
+            let d = abs(a[i] - b[i])
+            if d.isNaN { nan = true; continue }
+            if d > m { m = d; idx = i }
+        }
+        return (m, idx, nan)
+    }
+
+    /// One-line rendering of `worstDelta`, so call sites cannot index with the
+    /// sentinel by accident.
+    static func describeDelta(_ a: [Float], _ b: [Float], _ label: String) -> String {
+        let d = worstDelta(a, b)
+        guard let i = d.idx else {
+            return "\(label): no element differs (nan=\(d.nan))"
+        }
+        return "\(label): maxAbs=\(d.max) at \(i): a=\(a[i]) b=\(b[i])"
+    }
 
     /// Sweeps every layer's mixer (GDN + full-attention) for the first
     /// decode token after a 1-token prefill, comparing each layer's
@@ -937,19 +949,9 @@ extension QwenLayer0DebugTests {
                                      seqLen: 2, scale: nil)
                     cb.commit(); cb.waitUntilCompleted()
                     let kOut = (0..<qDim).map { Self.toF32(oB.contents().advanced(by: $0 * 2).load(as: Float16.self)) }
-                    var am: Float = 0, aw = -1
-                    for i in 0..<qDim {
-                        let d = abs(kOut[i] - attn[i])
-                        if d > am { am = d; aw = i }
-                    }
-                    print("L3 attnKernel vs ref: maxAbs=\(am) at \(aw): kernel=\(kOut[aw]) ref=\(attn[aw])")
+                    print(Self.describeDelta(kOut, attn, "L3 attnKernel vs ref"))
                     let engAttn = (phases["recurrentOut.3"] ?? []).map { Self.toF32($0) }
-                    var em: Float = 0, ew = -1
-                    for i in 0..<qDim {
-                        let d = abs(engAttn[i] - kOut[i])
-                        if d > em { em = d; ew = i }
-                    }
-                    print("L3 attnKernel vs engine: maxAbs=\(em) at \(ew): kernel=\(kOut[ew]) engine=\(engAttn[ew])")
+                    print(Self.describeDelta(kOut, engAttn, "L3 attnKernel vs engine"))
                 }
                 let o = Self.f16(Self.gemv(oP, attn))
                 let h1 = Self.f16(zip(input, o).map { $0 + $1 })
@@ -1050,24 +1052,13 @@ extension QwenLayer0DebugTests {
             let ref = mixerReference(layer: layer, input: input)
             let engineDense = try #require(phases["postAttn.\(layer)"])
                 .map { Self.toF32($0) }
-            var m: Float = 0
-            var w = -1
-            for i in 0..<D {
-                let d = abs(engineDense[i] - ref[i])
-                if d > m { m = d; w = i }
-            }
-            print("L\(layer) mixer: maxAbs=\(m) at \(w): engine=\(engineDense[w]) ref=\(ref[w])")
+            print(Self.describeDelta(engineDense, ref, "L\(layer) mixer"))
             if layer == 1 {
                 // Sub-bisect layer 1: norm → qkv proj → conv.
                 let inW1 = Self.bf16Values(try! model.inputNorm(layer: 1), count: D)
                 let x1 = Self.f16(Self.rms(input, weight: inW1))
                 let normed1 = try #require(phases["normed.1"]).map { Self.toF32($0) }
-                var nm: Float = 0, nw = -1
-                for i in 0..<D {
-                    let d = abs(normed1[i] - x1[i])
-                    if d > nm { nm = d; nw = i }
-                }
-                print("L1 normed: maxAbs=\(nm) at \(nw): engine=\(normed1[nw]) ref=\(x1[nw])")
+                print(Self.describeDelta(normed1, x1, "L1 normed"))
                 let qkv1 = try #require(phases["qkvConv.1"]).map { Self.toF32($0) }
                 let qkvW1 = Self.int4Rows(try! model.gdnInProjQKV(layer: 1),
                                           rows: qkvDim, cols: D)
@@ -1085,12 +1076,7 @@ extension QwenLayer0DebugTests {
                     convRef1[c] = acc / (1.0 + expf(-acc))
                 }
                 convRef1 = Self.f16(convRef1)
-                var cm: Float = 0, cw = -1
-                for i in 0..<qkvDim {
-                    let d = abs(qkv1[i] - convRef1[i])
-                    if d > cm { cm = d; cw = i }
-                }
-                print("L1 qkvConv: maxAbs=\(cm) at \(cw): engine=\(qkv1[cw]) ref=\(convRef1[cw])")
+                print(Self.describeDelta(qkv1, convRef1, "L1 qkvConv"))
                 let pfS1 = phases["pfState.1"]?.map { Self.toF32($0) }
                     ?? [Float](repeating: 0, count: V * HD * HD)
                 var sMax: Float = 0
@@ -2086,6 +2072,36 @@ extension QwenLayer0DebugTests {
                 }
             }
         }
+        /// Reads just `rows` (of width `cols`) out of one tensor as [Float].
+        ///
+        /// `lm_head`, `embed_tokens` and the fused expert tensors are 0.5-1 GB
+        /// in bf16 and their fp32 widening is double that, but every caller
+        /// below compares a handful of rows: widening `lm_head` whole costs
+        /// 2 GB to look at 8 rows, and `experts.gate_up_proj` — all 256
+        /// experts, 1.07 GB — the same to look at expert 0. Bounding the read
+        /// takes the four big reads in this test from ~7.3 GB of live fp32
+        /// down to a few MB. `rows * cols * 2` is the flat row-major byte
+        /// layout, and matches each of those four tensors' `data_offsets` span
+        /// exactly.
+        func readBF16Rows(_ shardName: String, _ tensorName: String,
+                          rows: Range<Int>, cols: Int) throws -> [Float] {
+            let data = try shard(shardName)
+            let n = Int(data.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) })
+            let header = try JSONSerialization.jsonObject(
+                with: data[8..<8 + n]) as! [String: Any]
+            let info = try #require(header[tensorName] as? [String: Any])
+            let offs = try #require(info["data_offsets"] as? [Int])
+            let base = 8 + n + offs[0]
+            let lo = base + rows.lowerBound * cols * 2
+            let hi = base + rows.upperBound * cols * 2
+            let raw = data[lo..<hi]
+            return raw.withUnsafeBytes { ptr in
+                let words = ptr.bindMemory(to: UInt16.self)
+                return (0..<(raw.count / 2)).map {
+                    FinchQuantization.bf16ToFloat(words[$0])
+                }
+            }
+        }
         func compare(_ name: String, _ got: [Float], _ ref: [Float]) {
             var maxAbs: Float = 0
             var worst = -1
@@ -2160,22 +2176,23 @@ extension QwenLayer0DebugTests {
         }
         // 5. lm_head rows 0..7 [248320, 2048].
         do {
-            let ref = try readBF16("model-00026-of-00026.safetensors", "lm_head.weight")
+            let ref = try readBF16Rows("model-00026-of-00026.safetensors",
+                                       "lm_head.weight", rows: 0..<8, cols: 2048)
             let view = model.lmHead
             let got = Self.int4Rows(view, rows: 8, cols: 2048).flatMap { $0 }
-            compare("lm_head[0..8]", got, Array(ref[0..<(8 * 2048)]))
+            compare("lm_head[0..8]", got, ref)
         }
         // 5b. Embedding rows for the actual prompt ids [760, 6511, 314,
         // 9338, 369] ("The capital of France is") — the model's input
         // vectors, against the checkpoint's embed_tokens.
         do {
-            let ref = try readBF16("model-00001-of-00026.safetensors",
-                                   "model.language_model.embed_tokens.weight")
             let view = model.embedding
             for tid in [760, 6511, 314, 9338, 369] {
+                let ref = try readBF16Rows("model-00001-of-00026.safetensors",
+                                           "model.language_model.embed_tokens.weight",
+                                           rows: tid..<(tid + 1), cols: 2048)
                 let got = Self.int4Rows(view, rows: tid + 1, cols: 2048)[tid]
-                compare("embed[\(tid)]",
-                        got, Array(ref[(tid * 2048)..<((tid + 1) * 2048)]))
+                compare("embed[\(tid)]", got, ref)
             }
         }
         // 6. Router (mlp.gate) [256, 2048] — int8 affine.
@@ -2218,10 +2235,16 @@ extension QwenLayer0DebugTests {
         }
         // 7. Expert 0 gate/up/down vs the fused checkpoint tensors.
         do {
-            let gateRef = try readBF16("model-00001-of-00026.safetensors",
-                "model.language_model.layers.0.mlp.experts.gate_up_proj")
-            let downRef = try readBF16("model-00002-of-00026.safetensors",
-                "model.language_model.layers.0.mlp.experts.down_proj")
+            // Only expert 0 is compared, so bound both reads to its rows:
+            // gate_up_proj spans all 256 experts (1.07 GB) and down_proj all
+            // 256 (0.54 GB) in bf16, and this block holds both refs live at
+            // once — the two together were the largest single spike in here.
+            let gateRef = try readBF16Rows("model-00001-of-00026.safetensors",
+                "model.language_model.layers.0.mlp.experts.gate_up_proj",
+                rows: 0..<1024, cols: 2048)
+            let downRef = try readBF16Rows("model-00002-of-00026.safetensors",
+                "model.language_model.layers.0.mlp.experts.down_proj",
+                rows: 0..<2048, cols: 512)
             let layout = model.packedExpertsLayout
             let l0 = layout.layers[0]
             let fileData = try Data(contentsOf: URL(fileURLWithPath: Self.installPath)
