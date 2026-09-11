@@ -277,6 +277,32 @@ from representative holdouts.
   and both say a wider read set is the wrong direction. **Do not build the
   prefetch.** Item 2.1 is closed with the recommendation unchanged and the
   reasoning replaced.
+- **Refinement, 2026-09-11:** The depth curve above does not describe the
+  regime the engine operates in, and the correction comes from measuring depth
+  on the engine instead of against the device. `FINCHMOE_IO_READ_WAVE` sweeps
+  outstanding reads from 5.28 down to 1.81 and the rate stays pinned at
+  2.87-2.97 GB/s across the whole range; per-read latency absorbs the
+  difference almost exactly linearly
+  ([IO-14](01-model-install-and-expert-io.md#io-14)). The probe, by contrast,
+  rose steeply from 2.69 GB/s at depth 1 to 5.66 at depth 4 and then declined,
+  and its repeated-pool arm reached 14.4 GB/s bypassed and 28.2 allowed. Two
+  things follow. The *shape* — a steep rise, a knee at 4-8, a decline past 16 —
+  is not reproduced where the engine actually reads, so a recommendation that
+  the queue is "at its knee" was drawn from a curve the engine does not sit on.
+  And the *absolute* rates on the repeated arm exceed what either install
+  delivers cold on this volume by a factor of four to eight. `F_NOCACHE` was
+  set, so this is not the unified buffer cache — but it bypasses that cache and
+  nothing else, and every cell in the probe re-read the same 433 MiB
+  `layer_00.bin`, which the drive's own controller and SLC caches are free to
+  serve in a way that a 63 GB working set never is. A paired purge control
+  since then shows the OS buffer cache serves none of the engine's decode
+  window on either install, which is why the engine's own numbers look nothing
+  like the probe's. At minimum the probe measured a state the engine is not in. The repetition result may well be real — the `FINCHMOE_IO_NOCACHE`
+  A/B is explained by exactly that mechanism — but its magnitude was measured
+  in a state the engine is not in. Treat the probe rows as an upper bound on
+  what the device could do, never as what it does; and see
+  [METH-15](#meth-15) for the drift
+  that makes even paired device rows fragile.
 - **Lesson:** An awaited window bounds the transfer from above; it does not
   measure it. Divide bytes by it only after showing the window is transfer-bound
   -- and show that by varying the bytes, never by comparing the quotient to a
@@ -391,6 +417,54 @@ from representative holdouts.
   property that made it true. Related, and the same failure in miniature — a
   control arm is only a control for what it actually varies, so check that the
   quantity it names is the quantity it moves before quoting it.
+
+<a id="meth-15"></a>
+### METH-15: A rate is only comparable inside the session that measured it
+
+- **Hypothesis:** The read-gap investigation ([IO-11](01-model-install-and-expert-io.md#io-11)
+  through [IO-17](01-model-install-and-expert-io.md#io-17)) compares an engine
+  run against an offline replay, and the comparison is a subtraction of two
+  rates. Both numbers were measured carefully, so the subtraction should hold
+  even though the runs happened weeks apart.
+- **Variants tested:** Nothing was changed to test this; it was found by
+  repeating an arm. The same install's engine was run twice within one session
+  (paired, interleaved, identical flags and prompt), one identical synthetic
+  cell was repeated minutes apart, and one cell was repeated four times.
+- **Evidence:** The drive drifts *within* a session. 3.6's engine read at 4.68
+  and then 5.18 GB/s in paired runs eleven minutes apart, while agreeing with
+  itself to 0.3% inside any one of those runs. One identical synthetic cell
+  gave 1.825 and 3.163 GB/s twenty minutes apart — a 1.7x swing on a variable
+  nothing had touched. Four repeats of a single cell gave 2.729 / 3.180 /
+  3.113 / 3.152. Across sessions the same engine figure has been recorded at
+  3.60, 6.24, 6.55, 6.90 and 4.736 GB/s. Spotlight indexing is live on the
+  volume (`mdbulkimport`, `mds_stores`), and while it is not proven to be the
+  cause it is not excluded either.
+- **What changed the conclusion:** The gap the investigation exists to explain
+  is 1.57x. The instrument's own drift, measured on a fixed variable, is of the
+  same order or larger. That makes §2.1's published table — an engine row at
+  3.60 GB/s against a replay row at 5.42, measured in different sessions —
+  uninterpretable as a subtraction. The rows are not wrong measurements; they
+  are not a comparison, and reading them as one produced the named
+  discriminator that IO-15 then spent a cycle refuting. Two smaller readings
+  were also withdrawn on this basis: a file-level claim drawn from one layer
+  per install ([IO-13](01-model-install-and-expert-io.md#io-13)), and a
+  spacing effect that reversed under a reverse-order run
+  ([IO-17](01-model-install-and-expert-io.md#io-17)).
+- **Final disposition:** Every arm that is compared against another is now run
+  paired and interleaved inside one session, with the rounds ordered one way
+  and then the other, so that drift cannot separate the arms and agreement
+  cannot be an artifact of order. Cross-session rates are quoted as history,
+  never subtracted. The pairing is stated wherever a ratio is claimed.
+- **Lesson:** A rate carries its session with it. Before subtracting two
+  measurements of the same physical quantity, repeat one of them and see how
+  much it moves on its own — if that movement is comparable to the effect you
+  are measuring, the effect has not been measured yet, however careful each
+  individual number was. The related failure is the single-order sweep: when a
+  working set fits in RAM, a parameter sweep over it measures the sweep's
+  position rather than its variable, and only a reverse-order run can tell you
+  which one you measured. METH-06 covers the same ground for first-run and
+  thermal state; this is the magnitude, measured, and the size of the effect it
+  invalidates.
 
 ## Boundaries that were not failed experiments
 

@@ -41,6 +41,9 @@ is currently reached only by tests. Qwen 3.8 has 12 full-attention layers of 48.
 | RDADVISE | Off, Default, Bounded, Adaptive | Off | Applies experimental read advice. Its effect depends on the workload; it may help a short decode and slow a long one. |
 | Model verification | Automatic, Full SHA-256, Trust verified install | Automatic | Automatic uses `verified-install.json` when it is present and valid and hashes everything otherwise. Full SHA-256 always hashes. Trust verified install requires the receipt and fails without one. The CLI and the server take the same three modes as `--verify auto\|full-sha256\|trusted-install`. |
 | Layer-file caching (`FINCHMOE_IO_NOCACHE=1`) | unset, 1 | unset | Off by default, and **measured to lose.** Sets `F_NOCACHE` on every layer file, bypassing the OS buffer cache. Replaying the engine's own pread sequence offline says this is worth 42-61 ms/step; on the engine it costs 225.4 → 261.0 ms/step of `io` and −12% tok/s, in both orderings, with identical token IDs. Kept as the falsifier for that offline claim rather than as a control worth setting. See [METH-14](experiments/summaries/09-validation-and-measurement-lessons.md#meth-14). |
+| Read request shape (`FINCHMOE_IO_READ_SPLIT=K`) | unset, 1, 2, 4 | unset | Off by default, and **measured flat.** Issues one expert read as K sequential preads — the only way to vary request size while holding the install, the offsets and the bytes fixed. Across a fourfold change in request count the read window moves a fifth of a percent and `io_thread_wall` under 1%: the drive serves 2.64 MiB in 4.8 ms whether it arrives as one request or four. Kept as the falsifier for the request-size hypothesis. See [IO-12](experiments/summaries/01-model-install-and-expert-io.md#io-12). |
+| Read depth cap (`FINCHMOE_IO_READ_WAVE=K`) | unset, 0, 2, 3, 4, 6 | unset (0) | Off by default, and **measured flat.** Issues the misses in waves of K, so at most K preads are in the drive at once. Across a 2.9x range of outstanding reads the window moves 6%, toward the wider end, at a pinned 2.87-2.97 GB/s — per-read latency scales linearly with depth while throughput holds, which is a saturated drive. Not the same experiment as `FINCHMOE_IO_READ_SPLIT`: that varies how a read is cut, this varies how many are outstanding. See [IO-14](experiments/summaries/01-model-install-and-expert-io.md#io-14). |
+| Expert read staging (`FINCHMOE_IO_STAGE=1`) | unset, 1 | unset | Off by default, and **measured flat.** Reads each expert into a plain aligned staging buffer and memcpys it into the slot, moving the destination out of the GPU-shared `MTLBuffer` pool — the last named difference between the engine and an offline replay of its own preads. Qwen 3.8 reads at 3.28 GB/s either way, rounds agreeing to 0.3%. Costs a memcpy of every expert read, so it is a measurement tool and not a setting. See [IO-15](experiments/summaries/01-model-install-and-expert-io.md#io-15). |
 
 Changing context length, expert-cache slots, RDADVISE, or model verification requires a reload.
 Some sampling changes also require a reload because greedy and sampled
@@ -104,10 +107,17 @@ the changed setting.
 - **`FQ_EXPERT_TRACE=<path>`** writes the engine's own pread sequence — one
   `layer, missCount, experts...` record per layer-batch — after the footer, for
   offline replay. It is an input to a measurement rather than one, and the
-  replay it feeds is retained only as a drive pacer: it reproduces neither the
-  engine's throughput nor its response to a cache-policy change. See
+  replay it feeds is not a predictor of the engine's throughput: replayed
+  through one harness, 3.6's trace runs 1.20-1.33x *slower* than the engine and
+  3.8's runs 1.31-1.43x *faster*. What it is good for is the question it was
+  captured to answer — whether the access pattern explains the 3.6-versus-3.8
+  read gap. It does not, and the traces say so directly by putting the two
+  installs in the opposite order from the engine. See
+  [IO-17](experiments/summaries/01-model-install-and-expert-io.md#io-17), and
   [METH-14](experiments/summaries/09-validation-and-measurement-lessons.md#meth-14)
-  before trusting anything built on it.
+  for what a replay cannot hold, and
+  [METH-15](experiments/summaries/09-validation-and-measurement-lessons.md#meth-15)
+  before comparing any replay figure across sessions.
 
 During chunked prefill, the phase label reports exact progress, for example
 `Prefill (128/514)`. Errors and unsupported configurations appear only when

@@ -46,7 +46,7 @@ resident set size; and **NLL** is negative log-likelihood. See
 
 | Area | Summary | Entries |
 | --- | --- | ---: |
-| Model installation and expert I/O | [Remote repack, `pread`, hints, compression, and speculative I/O](summaries/01-model-install-and-expert-io.md) | 10 |
+| Model installation and expert I/O | [Remote repack, `pread`, hints, compression, speculative I/O, and the 3.6-versus-3.8 read gap](summaries/01-model-install-and-expert-io.md) | 17 |
 | Decode MoE, INT4, and router | [Persistent MoE, vectorization, router, and rejected geometries](summaries/02-decode-moe-int4-and-router.md) | 18 |
 | Expert cache and layout | [Replacement policy, capacity, prediction, and disk layout](summaries/03-expert-cache-prediction-and-layout.md) | 9 |
 | RDADVISE | [The complete short-win to long-context-rejection arc](summaries/04-rdadvise.md) | 7 |
@@ -54,10 +54,10 @@ resident set size; and **NLL** is negative log-likelihood. See
 | Prefill | [Chunking, MPP, routed MoE, overlap, attention, and allocation experiments](summaries/06-prefill.md) | 17 |
 | Fusions and orchestration | [Targeted fusions, head variants, queues, and synchronization](summaries/07-fusions-head-and-orchestration.md) | 15 |
 | Sampling and output | [Gumbel sampling, tokenizer caching, and detokenization](summaries/08-sampling-tokenization-and-output.md) | 4 |
-| Validation methodology | [False rejections, holdouts, thermal state, and benchmark artifacts](summaries/09-validation-and-measurement-lessons.md) | 14 |
-| **Total** | | **108** |
+| Validation methodology | [False rejections, holdouts, thermal state, and benchmark artifacts](summaries/09-validation-and-measurement-lessons.md) | 15 |
+| **Total** | | **116** |
 
-## All 108 experiments
+## All 116 experiments
 
 ### Model installation and expert I/O
 
@@ -73,6 +73,13 @@ resident set size; and **NLL** is negative log-likelihood. See
 | [IO-08](summaries/01-model-install-and-expert-io.md#io-08) — Speculative reads | Probe reached 10.63 GB/s; decode fell 4.937 to 4.742 tok/s. | Rejected. |
 | [IO-09](summaries/01-model-install-and-expert-io.md#io-09) — MTLIO | Warm 13.1-13.3 GB/s; only 5.4-7.5% of misses fully warm. | Rejected for runtime. |
 | [IO-10](summaries/01-model-install-and-expert-io.md#io-10) — Remote streaming repack | 14,952,958,284 bytes, 229 ranges, 524,288-byte heap bounds. | Production. |
+| [IO-11](summaries/01-model-install-and-expert-io.md#io-11) — Decomposing the read window | Fan-out plus drain is 0.29-0.80% of the `io_read_wall` window; 3.8 achieves 5.60 concurrent reads against 3.6's 2.96 and still gets half the throughput. | Rejected; counters kept, submission path closed. |
+| [IO-12](summaries/01-model-install-and-expert-io.md#io-12) — Read request size | `FINCHMOE_IO_READ_SPLIT` 1/2/4: a fifth of a percent across a fourfold change in request count; `io_thread_wall` flat to 1%. | Rejected; knob kept off as falsifier. |
+| [IO-13](summaries/01-model-install-and-expert-io.md#io-13) — Retracting the file claim | Five layers per install: medians 3.23 against 3.18 GB/s within a 2.81-3.86 range. The 1.37-1.60x gap was an artifact of picking `layer_00` on both. | Claim withdrawn; request-size refutation stands. |
+| [IO-14](summaries/01-model-install-and-expert-io.md#io-14) — Capping the read depth | `FINCHMOE_IO_READ_WAVE` 0/2/3/4/6: the window moves 6% across a 2.9x depth range, toward the wider end, at a pinned 2.87-2.97 GB/s. Per-read latency scales linearly with depth. | Rejected; drive saturated at IO-11's own concurrency. |
+| [IO-15](summaries/01-model-install-and-expert-io.md#io-15) — Moving the destination out of the Metal heap | 3.8 reads at 3.28 GB/s with staging off and 3.28 with it on, rounds agreeing to 0.3%; the copy separates the installs by 15% where the read separates them 3.3x. | Rejected; knob kept as measurement tool. |
+| [IO-16](summaries/01-model-install-and-expert-io.md#io-16) — Reproducing the engine's batch structure offline | The harness reproduces the batch shape (133/249 reads per round against 134.8/245.7) and inverts the ordering (1.917-2.482 GB/s against the engine's 4.736/3.167). Barrier ~7%; fewer files is slower. | Rejected; harness kept out of the runtime. |
+| [IO-17](summaries/01-model-install-and-expert-io.md#io-17) — Replaying the engine's own traces | The engine beats its own replay by 1.20-1.33x on 3.6 and loses to it by 1.31-1.43x on 3.8, so the engine flips the sign of a comparison the traces make 1.34-1.49x the other way. | Read side closed as "not the pattern"; deficit is in the 3.8 runtime. |
 
 ### Decode MoE, INT4, and router
 
@@ -211,6 +218,7 @@ resident set size; and **NLL** is negative log-likelihood. See
 | [METH-12](summaries/09-validation-and-measurement-lessons.md#meth-12) | An awaited I/O window is a latency measurement, not a bandwidth one. | Six slot-sweep runs in both orders: 32 -> 16 slots cuts io time 12.9%/7.8% while reading 34% more bytes. Direct drive probes then priced both candidate mechanisms: bandwidth saturates by depth 4-8 (~5.7 GB/s) and declines past it, while a repeated 24-expert pool runs 2-3x the rate of diverse offsets. The queue is at its knee and repetition is what pays; prefetch is not built. |
 | [METH-13](summaries/09-validation-and-measurement-lessons.md#meth-13) | A near-complete serial sum bounds the overlap. | Re-reading seven captured runs: `io` plus all device time plus head and PLE is 93.0-97.8% of the token, so the pipeline's claimed read/compute overlap is a few percent at most. The mechanism is documented in the code and five times too small to matter; the read order is forced by the router readback. Device work pays 1:1, and ~84 ms/step of the read window is fixed per-batch cost rather than transfer. |
 | [METH-14](summaries/09-validation-and-measurement-lessons.md#meth-14) | A replay is only as faithful as the reuse it cannot see. | The engine's exact 9,083-pread sequence replayed offline lands at 130.3-177.9 ms/step against the engine's 225.4, below both numbers it was built to choose between. The one large offline win -- bypassing the page cache, 42-61 ms/step -- inverts on the engine to -12% tok/s, because 41.7% of the reads repeat a (layer, expert) pair at a median reuse distance of 3.97 GiB that ten recycling 26 MB destination buffers were holding and the engine's cache cannot. |
+| [METH-15](summaries/09-validation-and-measurement-lessons.md#meth-15) | A rate is only comparable inside the session that measured it. | One identical synthetic cell gave 1.825 and 3.163 GB/s twenty minutes apart while the engine agrees with itself to 0.3% inside a run; across sessions the same engine figure spans 3.60-6.90 GB/s. The drift is wider than the 1.57x gap the read-gap investigation exists to explain, so its published engine-vs-replay table is not a subtraction -- which is how a named discriminator was spent refuting an artifact. Every compared arm is now paired and interleaved inside one session, with a reverse-order run. |
 
 ## Important non-experiments
 
