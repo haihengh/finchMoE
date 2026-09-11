@@ -208,7 +208,7 @@ resident set size; and **NLL** is negative log-likelihood. See
 | [METH-09](summaries/09-validation-and-measurement-lessons.md#meth-09) | Detect greedy repetition loops. | Reclassified apparent cache decay as period-44 cyclic thrash. |
 | [METH-10](summaries/09-validation-and-measurement-lessons.md#meth-10) | A bucket named for a kernel prices the dispatch around it. | Qwen `cb1` split and the slot sweep: the counters moved, end-to-end did not. Kernel claims need GPU spans. |
 | [METH-11](summaries/09-validation-and-measurement-lessons.md#meth-11) | A GPU span does not license the subtraction you build from it. | Device timestamps landed and identified the GDN stack at 1.718 ms/layer against attention's 1.127; the `wait` subtraction built on them read 46.8 ms/step of dispatch tax that does not exist. |
-| [METH-12](summaries/09-validation-and-measurement-lessons.md#meth-12) | An awaited I/O window is a latency measurement, not a bandwidth one. | Six slot-sweep runs in both orders: 32 -> 16 slots cuts io time 12.9%/7.8% while reading 34% more bytes. The bytes/time quotient that closed the read side for three cycles returns 6.2 GB/s against a 2.3 GB/s ceiling. |
+| [METH-12](summaries/09-validation-and-measurement-lessons.md#meth-12) | An awaited I/O window is a latency measurement, not a bandwidth one. | Six slot-sweep runs in both orders: 32 -> 16 slots cuts io time 12.9%/7.8% while reading 34% more bytes. Direct drive probes then priced both candidate mechanisms: bandwidth saturates by depth 4-8 (~5.7 GB/s) and declines past it, while a repeated 24-expert pool runs 2-3x the rate of diverse offsets. The queue is at its knee and repetition is what pays; prefetch is not built. |
 
 ## Important non-experiments
 
