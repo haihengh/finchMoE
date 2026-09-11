@@ -370,6 +370,37 @@ exclude the wait. `io` is awaited read time and the output-head bucket wraps a
 submit-and-wait, so both are wall clocks including their waits. The two are not
 one timeline, and adding them is meaningless.
 
+### The `io` sub-buckets
+
+The same readout splits the expert-fetch window. The window is one `await` per
+layer around `fetchRoutedExperts`, and its parts are timed where they happen
+(`PreadExpertStreamer.executeExpertCachePlan`):
+
+| Field | Span | Answers |
+| --- | --- | --- |
+| `io_read_wall` | the `concurrentPerform` fan-out and the preads inside it | the read itself |
+| `io_dispatch_wall` | submit to thread entry, i.e. the price of the third dispatch level | item 2.2 |
+| `io_tail_wall` | cache bookkeeping and the view construction after the reads | item 2.2 |
+| `io_handoff_wall` | the remainder: continuation hops, `streamersQueue.sync`, `ensureLayerOpened` | item 2.2 |
+| `io_plan_cpu` | expert selection and cache plan — **outside** the window, between the router readback and the fetch | item 2.1 |
+
+The first four tile `io` and the remainder saturates at zero rather than wrapping
+to ~1.8e19. `io_plan_cpu` is deliberately not subtracted: it happens outside the
+window, and tiling the window with it would drive the remainder to zero on every
+real run — hiding exactly the per-layer fixed cost the split exists to expose.
+
+These are **wall** clocks, unlike the `cb1` buckets, because the window is a
+wait: `io_read_wall` is essentially all completion latency rather than transfer.
+On Qwen 3.8 at 16 slots the four inside-window costs total 1.18 ms/step against
+a 224.67 ms/step window, which is why the submission path is closed as an
+optimization target.
+
+Two of these are written lock-free from the single global-queue worker that
+serialises fetches — the decode loop awaits each fetch before issuing the next,
+so there is never a second writer, and they are read only at the prefill/decode
+boundary and after the run, both outside any fetch. A lock would be safe and
+would also sit inside the window these numbers exist to price.
+
 ### GPU time, and the subtraction that misleads
 
 The same readout reports GPU time, which the buckets above cannot: those are CPU
