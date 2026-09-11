@@ -90,6 +90,14 @@ extension Model {
         return slotCount
     }
 
+    /// Bytes a single routed-expert miss reads. Unlike
+    /// `routedExpertAdviceByteEstimate` this takes no lock and opens no layer:
+    /// the stride is fixed metadata, so it can be read on the reporting path
+    /// without disturbing the streaming machinery it is measuring.
+    public func routedExpertStrideBytes() -> UInt64 {
+        packedExpertsLayout.expertStride
+    }
+
     public func routedExpertBuffers(for plan: RoutedExpertFetchPlan) throws -> [TensorView] {
         try ensureLayerOpened(plan.layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }

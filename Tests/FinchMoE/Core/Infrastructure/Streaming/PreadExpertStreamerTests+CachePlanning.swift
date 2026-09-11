@@ -133,6 +133,45 @@ extension PreadExpertStreamerTests {
     #expect(avoidedBytes.allSatisfy { $0 == Self.tagByte(0) })
   }
 
+  /// The invariant the `io` counters rest on.
+  ///
+  /// `RunnerCounterValues.expertHits/expertMisses` are read off one
+  /// `planRoutedExperts` call per layer, and the byte figure is
+  /// `misses x expertStride` — which is only the *whole* routed-expert traffic
+  /// if every expert the layer routes to is either a hit or a miss. A plan that
+  /// dropped an expert (or listed one twice) would make the readout look
+  /// plausible while under- or over-counting the disk it is meant to explain.
+  ///
+  /// Every plan the streamer can return has to satisfy this, not just the
+  /// no-cache-only plan, so both the cache-warm and the cold path are checked
+  /// here — the cold one also pins that `misses` is not silently the empty set
+  /// when nothing is resident.
+  @Test func everyPlannedExpertIsEitherAHitOrAMiss() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+    let streamer = try PreadExpertStreamer(
+      layout: Self.makeLayout(path: url.path), device: device, slotCount: 4)
+
+    // Cold: nothing resident, so every expert is a miss and the miss list is
+    // the whole request.
+    let cold = streamer.planExpertsCached(experts: [0, 1, 2, 3])
+    #expect(cold.hits == 0)
+    #expect(cold.misses.count == cold.experts.count)
+    #expect(cold.hits + cold.misses.count == cold.experts.count)
+
+    // Warm: a mixed plan, where the split is the thing under test.
+    _ = try streamer.loadExpertsCached(experts: [0, 1])
+    let mixed = streamer.planExpertsCached(experts: [0, 2])
+    #expect(mixed.hits == 1)
+    #expect(mixed.misses == [1])
+    #expect(mixed.hits + mixed.misses.count == mixed.experts.count)
+
+    // And the assignment the byte figure assumes: one slot per requested
+    // expert, so `assignedSlots` and `experts` stay in step.
+    #expect(mixed.assignedSlots.count == mixed.experts.count)
+  }
+
   @Test func plannedCacheReturnsNilWhenMissesCannotAvoidInFlightSlots() throws {
     let url = try Self.writeSyntheticLayer()
     defer { try? FileManager.default.removeItem(at: url) }
