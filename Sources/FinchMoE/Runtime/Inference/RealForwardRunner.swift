@@ -316,10 +316,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     public let maxContext: Int
 
-    /// Per-instance head and RDADVISE modes. The fused head (default) skips the
-    /// 512 KB logits write and leaves a greedy argmax in `lastGreedyToken`;
-    /// callers that sample from the logits buffer (non-greedy configs) must pass
-    /// `forceLogitsHead: true` or they read a never-written buffer.
+    /// Per-instance head and RDADVISE modes. The fused head (default) folds
+    /// RMSNorm + lm_head into one kernel that skips the 512 KB logits write and
+    /// leaves a greedy argmax in `lastGreedyToken`; callers that sample from the
+    /// logits buffer (non-greedy configs) must pass `forceLogitsHead: true` or
+    /// they read a never-written buffer.
+    ///
+    /// **Unavailable on Qwen 3.8**, whose head input is the root HC mixer
+    /// collapse — a data-dependent gate, not a plain norm — so the kernel cannot
+    /// express it and the logits path (`prefillFinalRowHead.encodeLogits` /
+    /// `gFinalNorm` + `gLmHead`) runs instead. The arch check lives *here*, on
+    /// the flag, rather than at the kernel-selection site alone: `greedyTokenBuf`
+    /// is written only by the fused kernel, so every site that reads it has to
+    /// agree with the site that decides whether to run it. They did not, and
+    /// Qwen 3.8 at temperature 0 read a never-written buffer — zero-filled —
+    /// and emitted token 0 forever. Keep this the single source of truth.
     private let useFusedGreedyHead: Bool
     private let prefillAttentionPath: RuntimePrefillAttentionPath
     public let rdadviseEnabled: Bool
@@ -328,13 +339,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var rdadviseAdaptiveState: RDAdviceAdaptivePolicyState
     private var rdadviseAdaptivePosition: Int = -1
     private var rdadviseAdaptivePositionBytes: UInt64 = 0
+
+    /// The rule behind `useFusedGreedyHead`, split out so it can be tested
+    /// without building a 125B install — the mistake it guards against was
+    /// invisible for exactly that reason.
+    static func fusedGreedyHeadEnabled(headPath: RuntimeHeadPath,
+                                       config: ArchConfig) -> Bool {
+        headPath == .fusedRows && !config.isQwen3_8
+    }
+
     public init(model: Model, context: MetalContext, maxContext: Int,
                 runtimeConfiguration: RuntimeConfiguration = .production) throws {
         self.model = model
         self.ctx = context
         self.cfg = model.config
         self.maxContext = maxContext
-        self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
+        self.useFusedGreedyHead = Self.fusedGreedyHeadEnabled(
+            headPath: runtimeConfiguration.headPath, config: model.config)
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
         let useFP16Ring = runtimeConfiguration.fp16RingEnabled
         self.rdadvisePolicyMode = runtimeConfiguration.rdadvisePolicy
@@ -5453,12 +5474,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 rmsEps: eps)
         }
         if emitHead {
-            // The fused greedy head folds RMSNorm + lm_head into one kernel —
-            // unavailable on Qwen 3.8, whose head input is the root HC mixer
-            // collapse (a data-dependent gate, not a plain norm).
+            // `useFusedGreedyHead` already excludes Qwen 3.8; see its doc.
             let useFusedHeadForThisToken = useFusedGreedyHead
                 && outputMode == .greedyIfAvailable
-                && !cfg.isQwen3_8
             let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             if useFusedHeadForThisToken {
                 runSync(gFusionHead)
