@@ -93,6 +93,9 @@ struct QwenResidentFilePlan: Sendable {
     let indexSize: UInt64
     let residentSize: UInt64
     var totalSize: UInt64 { indexSize + residentSize }
+    /// The `manifest.files` key for this file. Derived here so the writer, the
+    /// manifest, and the resume journal cannot disagree about it.
+    var relativePath: String { (path as NSString).lastPathComponent }
 }
 
 /// One PLE n-gram table part: the part's source tensor copied verbatim

@@ -83,6 +83,9 @@ struct LayerFilePlan: Sendable {
     let expertStride: UInt64
     let subTensors: [PerExpertTensorSlice]  // 9 entries: gate/up/down × {weights, scales, biases}
     var fileSize: UInt64 { UInt64(expertsPerLayer) * expertStride }
+    /// The `manifest.files` key for this file. Derived here so the writer, the
+    /// manifest, and the resume journal cannot disagree about it.
+    var relativePath: String { "packed_experts/" + (path as NSString).lastPathComponent }
 
     func physicalRank(for logicalExpert: Int) -> Int {
         logicalExpert

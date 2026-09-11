@@ -16,7 +16,11 @@ authentication. A cancelled or interrupted download can be continued with
 --resume or removed with --discard-partial.
 
 With --input-snapshot, the installer quantizes a LOCAL bf16 Qwen 3.6 35B-A3B
-safetensors snapshot (int4 affine, group 64) into the .finch format.
+or Qwen 3.8 Flash-Next safetensors snapshot (int4 affine, group 64) into the
+.finch format. An interrupted run of either kind can be continued with
+--resume, which reuses the output files the partial directory's journal
+records as complete and rewrites the rest; a partial whose journal is missing
+or describes a different source is refused rather than guessed at.
 """
 
 private struct Arguments {
@@ -94,9 +98,6 @@ private struct Arguments {
                 throw ParseError.invalidMode("--input-finch requires --verify-install")
             }
             if let snapshot = parsed.inputSnapshot {
-                guard !parsed.resume else {
-                    throw ParseError.invalidMode("--resume applies to remote downloads only")
-                }
                 guard try Posix.entryKind((snapshot as NSString)
                         .appendingPathComponent("model.safetensors.index.json")) == .regular else {
                     throw ParseError.invalidMode("snapshot directory has no model.safetensors.index.json")
@@ -171,10 +172,11 @@ private func run(_ values: [String]) async -> Int32 {
         let options = LocalQwenRepackOptions(
             snapshotDir: snapshot,
             outputDir: URL(fileURLWithPath: output).path,
-            overwrite: arguments.overwrite)
+            overwrite: arguments.overwrite,
+            resume: arguments.resume)
         do {
             let result = try await LocalQwenRepacker(options: options).run()
-            print("Repacked Qwen 3.6 35B-A3B bf16 snapshot (\(snapshot))")
+            print("Repacked bf16 snapshot (\(snapshot))")
             print("Output bytes: \(result.outputBytes)")
             print("Dropped non-text tensors: \(result.excludedTensorCount)")
             print("Model: \(result.outputDir)")
