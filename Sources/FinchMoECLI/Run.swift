@@ -58,8 +58,14 @@ public func run(args: Args,
             seed: args.seed,
             stopStrings: args.stops,
             extraStopTokens: [])
+        // A dump has to force the logits head. Under `--temperature 0` the
+        // fused head never materializes logits, so the file would hold
+        // whatever the buffer last did. `Sampler` keys greedy on temperature
+        // alone, so forcing the head still yields the same argmax token — it
+        // is just reached through the logits path instead of the fused one.
+        let prefillLogitsDumpPath = environment["FQ_DUMP_PREFILL_LOGITS"]
         let runtime = RuntimeConfiguration(
-            forceLogitsHead: !config.isPureGreedy)
+            forceLogitsHead: !config.isPureGreedy || prefillLogitsDumpPath != nil)
 
         guard MTLCreateSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
