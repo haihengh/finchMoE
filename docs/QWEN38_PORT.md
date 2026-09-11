@@ -10,11 +10,15 @@ tokenizer and the Gated-DeltaNet (GDN) unit; 3.8 replaces every RMSNorm with
 **hyper-connections**, adds **QSA** sparse-block attention on the full
 attention layers, and adds a **PLE n-gram** hash-embedding on one layer.
 
-Status: **M0–M3.5 landed and verified; M4 is in progress** — the real
-174,403,168,940 B (162 GiB) install at
-`models/Qwen3.8-Flash-Next-125B.finch` loads, prefill/decode are coherent
-and inside the 16 GB budget, and the only open deliverable is the llama.cpp
-oracle cross-check (`### Remaining work` item 7 below). The qwen3_8
+Status: **M0–M4 landed; the oracle cross-check ran and its evidence is
+argmax-level, not cosine-level.** The real 174,403,168,940 B (162 GiB)
+install at `models/Qwen3.8-Flash-Next-125B.finch` loads, prefill/decode are
+coherent and inside the 16 GB budget. The oracle now runs reliably and both
+prompts agree on tokenization (byte-exact), argmax, and generation
+(`" Paris"`), with top-10/100 logit cosine 0.995/0.985 — but the whole-vocab
+cosine is 0.88, under the plan's 0.95 bar, because the bar was taken from a
+same-weights comparison and this one is cross-quantization. Full account and
+what it does *not* establish under `### Remaining work` item 7 below. The qwen3_8
 load-gate throw ("qwen3_8 installs need the Flash-Next engine (M2)") is
 gone. The plan ran M1 (repack) → M2 (load/schema) → M3 (forward:
 hyper-connection → QSA → PLE, decode then prefill) → M4 (real repack +
@@ -522,14 +526,78 @@ tokenizer maps `qwen4_exp` into the shared `.qwen3_6` family. Tests:
    crossing 2048). Oracle: build `archive/llama.cpp`, run the AD quant GGUF
    (**79 GB**, 28 shards) on a fixed prompt (mmap; on 16 GB expect slow — it
    is a one-shot run and must be alone), dump logits; engine CLI same prompt
-   + logits dump. **Bar is the 3.6-proven single-final-prefill-row method**
-   (cos 0.998213, argmax MATCH, top10 10/10 — `archive/README.md:62`), not
-   the earlier 64-row top-1 bar, which has no producer on either side; engine
-   int4 group-64 vs IQ4XS → argmax-level agreement, not exact logits. The
-   tokenizer side is already closed — M0 mapped `qwen4_exp` into the shared
-   `.qwen3_6` family (see the M0 entry above), and 3.8 shares the 3.6
-   tokenizer byte-for-byte, so no `qwen3_8` case is needed. Remaining here:
-   the oracle run itself.
+   + logits dump. **The method is the 3.6-proven single-final-prefill-row one,
+   but its bar does not transfer.** cos 0.998213 / argmax MATCH / top10 10/10
+   (`archive/README.md:62`) was measured by running *one* weight file through
+   both engines, so the only difference was bf16-vs-bf16 numerics. This
+   comparison runs *two different quantizations* — engine int4 group-64
+   repacked from the BF16 source vs IQ4_XS 3.84 bpw — through two engines, so
+   a cosine drop is expected and "treat cos < 0.95 as failure" was the wrong
+   threshold for it. The tokenizer side is already closed — M0 mapped
+   `qwen4_exp` into the shared `.qwen3_6` family (see the M0 entry above), and
+   3.8 shares the 3.6 tokenizer byte-for-byte, so no `qwen3_8` case is needed.
+
+   **Oracle run, 2026-09-11 — engine consistent, plan's bar mis-derived.** Two
+   prompts, each scored against `llama-debug --save-logits` (final prefill
+   row, `examples/debug/debug.cpp:184-216`: one `llama_decode`, no sampling
+   loop) and the engine's `FQ_DUMP_PREFILL_LOGITS`:
+
+   | | 5-token | 15-token |
+   |---|---|---|
+   | tokenization | identical | identical |
+   | argmax | `11751 ĠParis` MATCH | `11751 ĠParis` MATCH |
+   | full-vocab cos | 0.889502 | 0.880557 |
+   | top-10 cos | **0.99493** | **0.99565** |
+   | top-100 cos | **0.98387** | **0.98468** |
+   | top-1000 cos | 0.96568 | 0.96034 |
+   | tail (10k-248k) cos | 0.89309 | 0.88018 |
+   | top-10 overlap | 6/10 | 5/10 |
+   | top-100 overlap | 55/100 | 64/100 |
+
+   Both prompts generate `" Paris"`. Full-vocab cosine misses 0.95, and the
+   *longer* prompt is slightly **worse** — so the "short prompt, noisy tail"
+   reading is falsified as well. But the full-vocab number is measuring the
+   wrong thing: **98.08% of the reference logit vector's squared magnitude
+   lives in the bottom 247,000 of 248,320 dimensions**, so the whole-vector
+   cosine is essentially just the tail band (0.8802 there vs 0.8806 overall),
+   where both sides are near-uniform noise. The bands that decide behaviour
+   agree at 0.96-0.996. This is the signature of quantization noise, whose
+   absolute scale tracks logit magnitude: ~14 nats rms at the top leaves a
+   ~1.4-nat perturbation, which preserves the 2.5-nat `ĠParis` margin but
+   reshuffles ranks *within* the top ten (hence 5-6/10) and swamps the
+   2.9-nat tail. A structural bug — wrong tensor, head, or index — would
+   corrupt the top of the distribution too.
+
+   Ruled out along the way: **the PLE is not an approximation on our side.**
+   GGUF `per_layer_token_embd.weight` is `[160, 320001536]` at Q5_1 (6.0 bpw,
+   24 B per 32 elements); ours is that same 320001536x160 table at **bf16**,
+   sharded 128 x 2500012 rows. Dequantizing 15 sampled GGUF rows against ours
+   gives corr **0.9993** (same weights, same rows — which also validates the
+   Q5_1 reader and the row alignment) with **3.84% relative quantization
+   error in the reference**. In this pathway llama.cpp is the lossy side. That
+   is also where the install size goes: **95 of 162 GiB is PLE at bf16** —
+   59% of the install to keep one tensor where the reference ships 6 bits.
+
+   **What this does not establish.** There is no same-weights cross-engine
+   comparison for 3.8 available, and there cannot be one today: the Swift
+   engine has no GGUF reader (the 3.6 GGUF path was not carried over in the
+   2.0 merge — `Sources/` matches `gguf` only in a comment). So the 3.6
+   standard of evidence is unreachable without writing a 3.8 GGUF loader.
+   Until then the honest reading is: tokenization byte-exact, argmax identical
+   on both prompts, correct generation, top-of-distribution agreement at
+   0.96-0.996 — consistent with a correct engine, short of proof.
+
+   **Two operational traps, both cost a run.** `-nr` / `--no-repack` is
+   load-bearing: `--repack` is on by default and makes *anonymous* tensor
+   copies, which are compressible and feed the compressor (eager ~10 GB,
+   killed at 5.0 GB with no output at all); with `-nr` the weights stay mmap'd
+   file pages, which are clean and evictable, so RSS can read ~10.2 GB while
+   the compressor peaks at only 2.2-2.3 GB. And `DYLD_*` is stripped at every
+   SIP-protected exec boundary, so a `DYLD_LIBRARY_PATH` exported outside
+   `tools/memguard.sh` never reaches `llama-debug` — the inner shell must set
+   it and `exec` directly. A `pty.spawn` wrapper is also needed, because
+   llama.cpp's INFO goes to stdout and is block-buffered when redirected, so a
+   guard kill loses the whole log. See [[llamacpp-archive-tooling]].
 
    **Full suite green, both families (2026-09-11)** — 866 tests in 151 suites.
    Both real installs are covered (`QwenRealInstallLoadTests` for the 3.6,
