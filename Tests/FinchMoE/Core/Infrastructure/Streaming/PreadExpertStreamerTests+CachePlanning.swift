@@ -104,6 +104,67 @@ extension PreadExpertStreamerTests {
     }
   }
 
+  /// Staging must be byte-for-byte invisible.
+  ///
+  /// The staged path reads into a thread-local scratch page and `memcpy`s it
+  /// into the slot, so it is a second route for the bytes and a second place
+  /// for an offset or length error to hide. Comparing against the unstaged
+  /// streamer's own output is the only check that covers both -- asserting the
+  /// staged buffer alone would pass just as well if the unstaged path were the
+  /// one that had broken.
+  ///
+  /// The accounting has to hold in both modes, and that is the other half of
+  /// the test: with staging off the whole read is charged to `pread` and the
+  /// copy is zero, so `pread + copy` equals `io_thread_wall` whichever mode ran
+  /// and a reader never sees part of a read charged to nothing. `threadNanos`
+  /// is the outer envelope here: it also contains the per-iteration bounds
+  /// check and the offset arithmetic, so the pair sums to *at most* the thread
+  /// time rather than to exactly it.
+  @Test func stagedReadsAreByteIdenticalAndKeepTheAccountingWhole() throws {
+    let url = try Self.writeOffsetTaggedLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+    let requested = [3, 1, 2]
+
+    // A fresh streamer per mode, so every batch is all misses in both.
+    func readAll(staging: Bool) throws -> ([[UInt8]], UInt64, UInt64, UInt64) {
+      let streamer = try PreadExpertStreamer(
+        layout: Self.makeLayout(path: url.path), device: device, slotCount: 4,
+        fileDescriptor: nil, stageReads: staging)
+      let results = try streamer.loadExpertsCached(experts: requested)
+      let bytes = results.map { Self.bytes(of: $0.buffer, offset: 0, count: Self.expertStride) }
+      return (
+        bytes, streamer.lastReadPreadNanos, streamer.lastReadCopyNanos,
+        streamer.lastReadThreadNanos
+      )
+    }
+
+    let (plain, plainPread, plainCopy, plainThread) = try readAll(staging: false)
+    let (staged, stagedPread, stagedCopy, stagedThread) = try readAll(staging: true)
+
+    for (index, expert) in requested.enumerated() {
+      let base = Int(Self.streamOffset) + expert * Self.expertStride
+      let expected = (0..<Self.expertStride).map { Self.patternByte(base + $0) }
+      #expect(plain[index] == expected, "unstaged slot \(index) is not the tagged expert")
+      #expect(staged[index] == expected, "staged slot \(index) is not the tagged expert")
+      let mismatch = (0..<Self.expertStride).first { staged[index][$0] != plain[index][$0] }
+      if let j = mismatch {
+        Issue.record(
+          "slot \(index) byte \(j): staged \(staged[index][j]) against unstaged \(plain[index][j])")
+      }
+    }
+
+    // Staging off: nothing was copied, and nothing was dropped either.
+    #expect(plainCopy == 0, "with staging off there is no copy to charge")
+    #expect(plainPread == plainThread, "with staging off the whole read is pread")
+    #expect(plainPread + plainCopy <= plainThread)
+
+    // Staging on: the copy is real (the knob engaged rather than falling back)
+    // and the pair still fits inside the thread envelope it was taken from.
+    #expect(stagedCopy > 0, "staging on must charge a copy, or it did not stage")
+    #expect(stagedPread + stagedCopy <= stagedThread)
+  }
+
   /// An all-hits plan has no misses to fan out, so there is no first entry to
   /// measure and the whole window is drain. It must still tile: a zero-miss plan
   /// that reported a nonzero fanout would be inventing dispatch cost that was

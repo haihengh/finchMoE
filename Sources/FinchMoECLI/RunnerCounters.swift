@@ -29,6 +29,8 @@ public struct RunnerCounterValues: Equatable, Sendable {
     public var ioSpanNanos: UInt64
     public var ioDrainNanos: UInt64
     public var ioThreadNanos: UInt64
+    public var ioPreadNanos: UInt64
+    public var ioCopyNanos: UInt64
     public var headNanos: UInt64
     public var expertHits: UInt64
     public var expertMisses: UInt64
@@ -61,6 +63,8 @@ public struct RunnerCounterValues: Equatable, Sendable {
                 ioSpanNanos: UInt64 = 0,
                 ioDrainNanos: UInt64 = 0,
                 ioThreadNanos: UInt64 = 0,
+                ioPreadNanos: UInt64 = 0,
+                ioCopyNanos: UInt64 = 0,
                 headNanos: UInt64 = 0,
                 expertHits: UInt64 = 0,
                 expertMisses: UInt64 = 0,
@@ -92,6 +96,8 @@ public struct RunnerCounterValues: Equatable, Sendable {
         self.ioSpanNanos = ioSpanNanos
         self.ioDrainNanos = ioDrainNanos
         self.ioThreadNanos = ioThreadNanos
+        self.ioPreadNanos = ioPreadNanos
+        self.ioCopyNanos = ioCopyNanos
         self.headNanos = headNanos
         self.expertHits = expertHits
         self.expertMisses = expertMisses
@@ -136,6 +142,8 @@ public struct RunnerCounterValues: Equatable, Sendable {
             ioSpanNanos: d(ioSpanNanos, base.ioSpanNanos),
             ioDrainNanos: d(ioDrainNanos, base.ioDrainNanos),
             ioThreadNanos: d(ioThreadNanos, base.ioThreadNanos),
+            ioPreadNanos: d(ioPreadNanos, base.ioPreadNanos),
+            ioCopyNanos: d(ioCopyNanos, base.ioCopyNanos),
             headNanos: d(headNanos, base.headNanos),
             expertHits: d(expertHits, base.expertHits),
             expertMisses: d(expertMisses, base.expertMisses),
@@ -174,6 +182,8 @@ extension RunnerCounterValues {
                   ioSpanNanos: runner.totalIoSpanNanos,
                   ioDrainNanos: runner.totalIoDrainNanos,
                   ioThreadNanos: runner.totalIoThreadNanos,
+                  ioPreadNanos: runner.totalIoPreadNanos,
+                  ioCopyNanos: runner.totalIoCopyNanos,
                   // Summed, as the app does: which of the two carries the head
                   // depends on whether the run took the fused-greedy path, and
                   // a reader wants the cost, not the path.
@@ -338,6 +348,11 @@ public enum RunnerCounters {
             "io_thread_wall_ms/step=\(msPerStep(values.ioThreadNanos))",
             "io_conc=\(ioConcurrency(values))",
             "io_read_identity=\(ioReadIdentity(values))",
+            // The read split by operation rather than by thread. With
+            // staging off the whole of `io_thread_wall` is charged to
+            // `pread` and `copy` is zero, because there was no copy.
+            "io_pread_wall_ms/step=\(msPerStep(values.ioPreadNanos))",
+            "io_copy_wall_ms/step=\(msPerStep(values.ioCopyNanos))",
             "io_tail_wall_ms/step=\(msPerStep(values.ioTailNanos))",
             "io_handoff_wall_ms/step=\(msPerStep(ioHandoff(values)))",
             "head_wall_ms/step=\(msPerStep(values.headNanos))",

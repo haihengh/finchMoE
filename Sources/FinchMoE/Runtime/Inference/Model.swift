@@ -87,6 +87,11 @@ public struct Model {
         var ioSpanNanos: UInt64 = 0
         var ioDrainNanos: UInt64 = 0
         var ioThreadNanos: UInt64 = 0
+        /// The read split by operation instead of by thread, and only as a
+        /// pair: with staging off the whole read is charged to `pread` and
+        /// `copy` is zero, because there was no copy to charge.
+        var ioPreadNanos: UInt64 = 0
+        var ioCopyNanos: UInt64 = 0
         init(numLayers: Int) {
             self.streamers = Array(repeating: nil, count: numLayers)
             self.layerVerified = Array(repeating: false, count: numLayers)
