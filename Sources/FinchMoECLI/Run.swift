@@ -95,7 +95,8 @@ public func run(args: Args,
             config: config,
             context: context,
             scratch: scratch,
-            prefillConfig: runtime.prefillConfig) { progress in
+            prefillConfig: runtime.prefillConfig,
+            prefillLogitsDumpPath: prefillLogitsDumpPath) { progress in
                 switch progress {
                 case .prefill:
                     break
