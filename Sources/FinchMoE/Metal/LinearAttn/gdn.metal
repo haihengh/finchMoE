@@ -15,7 +15,11 @@ using namespace metal;
 // persistent device buffer — it exceeds the 32 KB threadgroup memory, so it
 // is read/written through a buffer, not staged in threadgroup memory.
 //
-// GQA: value head `hv` uses key head `hv / 2` (repeat_interleave(2)).
+// GQA: value head `hv` uses key head `hv / vPerK` (repeat_interleave), where
+// `vPerK = numValueHeads / numKeyHeads` is a runtime parameter — 2 on Qwen 3.6
+// (32 V / 16 K), 3 on Qwen 3.8 (48 V / 16 K). The checkpoint stores the
+// grouped order (`hv = kHead * vPerK + j`), so the divisor is the mapping;
+// hardcoding 2 made every 3.8 GDN layer read a neighbouring head's q/k.
 //
 // Dispatch:
 //   gdn_conv_update  — one thread per channel (32-thread groups).
@@ -93,10 +97,10 @@ static inline void gdn_block_sum(
 // ----------------------------------------------------------------------------
 // Recurrent gated-delta-rule decode step for one value head (one threadgroup).
 //
-//   qn    = l2norm(q[hv/2]) * scale   // scale AFTER the norm — torch l2norms
-//                                      // then applies 1/sqrt(head_dim); scaling
-//                                      // inside the norm would cancel it out
-//   kn    = l2norm(k[hv/2])
+//   qn    = l2norm(q[hv/vPerK]) * scale   // scale AFTER the norm — torch
+//                                      // l2norms then applies 1/sqrt(head_dim);
+//                                      // scaling inside the norm cancels it out
+//   kn    = l2norm(k[hv/vPerK])
 //   decay = exp(g[hv])
 //   S     = S * decay
 //   r[v]  = sum_k S[v,k]*kn[k]
@@ -120,6 +124,7 @@ void gdn_recurrent(
     constant     uint&  D          [[buffer(7)]],
     constant     float& scale      [[buffer(8)]],   // 1/sqrt(head_dim)
     constant     float& l2eps      [[buffer(9)]],
+    constant     uint&  vPerK      [[buffer(10)]], // value heads per key head
     uint  hv                       [[threadgroup_position_in_grid]],
     uint  lid                      [[thread_position_in_threadgroup]],
     uint  lsize                    [[threads_per_threadgroup]],
@@ -128,7 +133,7 @@ void gdn_recurrent(
     uint  simdgroups               [[simdgroups_per_threadgroup]]
 ) {
     const uint K = D * D;                 // per-head state element count
-    const uint kh = hv / 2;              // key head for this value head
+    const uint kh = hv / vPerK;          // key head for this value head
     device const half* qh = q + kh * D;
     device const half* kh_ = k + kh * D;
     device const half* vh = v + hv * D;

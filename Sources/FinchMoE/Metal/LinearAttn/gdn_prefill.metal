@@ -30,7 +30,10 @@ using namespace metal;
 //   gate a|b         fp16 [T][2V]  (a rows then b rows per token — QMM output)
 //   gate g/beta      fp32 [T][V]
 //
-// GQA: value head `hv` uses key head `hv / 2` (repeat_interleave(2)).
+// GQA: value head `hv` uses key head `hv / vPerK` (repeat_interleave), where
+// `vPerK = numValueHeads / numKeyHeads` is a runtime parameter — 2 on Qwen 3.6
+// (32 V / 16 K), 3 on Qwen 3.8 (48 V / 16 K). The checkpoint stores the
+// grouped order (`hv = kHead * vPerK + j`), so the divisor is the mapping.
 //
 // Dispatch:
 //   prefill_gdn_conv_chunk     — one thread per (channel, token); the last
@@ -153,9 +156,9 @@ void prefill_gdn_conv_chunk(
 //
 // For token t (in order), with q_t/k_t/v_t the t-th rows of the conv output
 // (q at element offset 0, k at kOff, v at vOff; row stride C):
-//   qn    = l2norm(q[hv/2]_t) * scale  // scale AFTER the norm, per the torch
-//                                      // chunk rule (scaling inside cancels)
-//   kn    = l2norm(k[hv/2]_t)
+//   qn    = l2norm(q[hv/vPerK]_t) * scale  // scale AFTER the norm, per the
+//                                      // torch chunk rule (inside cancels)
+//   kn    = l2norm(k[hv/vPerK]_t)
 //   decay = exp(g[t][hv])
 //   S     = S * decay
 //   r[v]  = sum_k S[v,k]*kn[k]
@@ -182,6 +185,7 @@ void prefill_gdn_recurrent_seq(
     constant     uint&  T          [[buffer(10)]],
     constant     float& scale      [[buffer(11)]],  // 1/sqrt(head_dim)
     constant     float& l2eps      [[buffer(12)]],
+    constant     uint&  vPerK      [[buffer(13)]],  // value heads per key head
     uint  hv                       [[threadgroup_position_in_grid]],
     uint  lid                      [[thread_position_in_threadgroup]],
     uint  lsize                    [[threads_per_threadgroup]],
@@ -191,7 +195,7 @@ void prefill_gdn_recurrent_seq(
 ) {
     if (hv >= V) return;
     const uint headStateElems = D * D;    // per-head state element count
-    const uint kh = hv / 2;              // key head for this value head
+    const uint kh = hv / vPerK;          // key head for this value head
 
     device float* S = state + hv * headStateElems;  // state is [V][D][D], hv-major
 
