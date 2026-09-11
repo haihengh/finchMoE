@@ -58,6 +58,12 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public static let scratchAlignment = 2 * 1024 * 1024
     public static var cachePolicyDefault: ExpertCachePolicy { .lfu }
 
+    /// Words per miss in the read-split scratch: 16 `UInt64`s = 128 bytes, one
+    /// Apple Silicon cache line. Each miss gets its own line so that the threads
+    /// of a fan-out storing their entry and exit stamps are not also contending
+    /// for the line those stamps live on.
+    private static let markStride = 16
+
     public let layout: StreamLayout
     public let slotCount: Int
     public let cachePolicy: ExpertCachePolicy
@@ -104,10 +110,11 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
         // `F_NOCACHE` -- measured on the engine, and it loses. Replaying this
         // streamer's exact pread sequence offline says bypassing the buffer
-        // cache is worth 48-59 ms/step, 21-26% of a decode token, on identical
-        // offsets at identical depth, interleaved and run in both orders. On
-        // the engine it costs instead: 225.4 -> 261.0 ms/step of `io`, -13%
-        // tok/s, reproduced in both orders with identical token IDs.
+        // cache is worth 42-61 ms/step -- a fifth to a quarter of the engine's
+        // own read window -- on identical offsets at identical depth,
+        // interleaved and run in both orders. On the engine it costs instead:
+        // 225.4 -> 261.0 ms/step of `io`, -12% tok/s, reproduced in both orders
+        // with identical token IDs.
         //
         // The offline harness is what is wrong, and the trace says how. 41.7%
         // of this streamer's reads are repeats of a (layer, expert) pair
@@ -298,6 +305,26 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public private(set) var lastReadNanos: UInt64 = 0
     public private(set) var lastTailNanos: UInt64 = 0
 
+    /// The read's own split, in nanoseconds. `lastReadNanos` above is the whole
+    /// `concurrentPerform`; these are its parts, and they tile it exactly:
+    ///
+    /// - `fanout` -- batch start to the first iteration's entry: what the price
+    ///   of the nested dispatch actually is, measured rather than assumed. It is
+    ///   the window in which the batch has been handed to the global queue and
+    ///   no iteration has begun yet.
+    /// - `span` -- first entry to last exit: the window in which reads were
+    ///   actually in flight.
+    /// - `drain` -- last exit to the return, i.e. the straggler.
+    /// - `threadNanos` -- the sum of each iteration's own pread time across all
+    ///   threads, so `threadNanos / span` is the parallelism the fan-out
+    ///   actually achieved. Near 1.0 the reads ran one at a time however many
+    ///   threads were asked for; near the miss count they ran fully wide. That
+    ///   ratio is the one thing a wall clock around the batch cannot show.
+    public private(set) var lastReadFanoutNanos: UInt64 = 0
+    public private(set) var lastReadSpanNanos: UInt64 = 0
+    public private(set) var lastReadDrainNanos: UInt64 = 0
+    public private(set) var lastReadThreadNanos: UInt64 = 0
+
     public func executeExpertCachePlan(_ plan: ExpertCachePlan) throws
         -> [(buffer: MTLBuffer, offset: UInt64, size: UInt64)] {
         precondition(plan.experts.count <= slotCount,
@@ -307,9 +334,25 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
         let errorLock = NSLock()
         nonisolated(unsafe) var firstError: Error?
+        // Two timestamps per miss, each miss on its own cache line: the whole
+        // point is that several threads store these at once, and six stores
+        // into one line is a contention the reads would then be measured
+        // through. Raw memory rather than an array because the indices are
+        // distinct by construction. Deliberately not zeroed: the iteration that
+        // owns a miss stores its entry before entering and its exit after, so
+        // every slot is written before anything reads it.
+        // `nonisolated(unsafe)` for the same reason `firstError` carries it: the
+        // closure is `@Sendable`, and what makes the sharing safe is not the type
+        // but the disjointness of the indices, which the compiler cannot see.
+        nonisolated(unsafe) let marks = UnsafeMutablePointer<UInt64>
+            .allocate(capacity: max(plan.misses.count, 1) * Self.markStride)
+        defer { marks.deallocate() }
+
         let tRead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         DispatchQueue.concurrentPerform(iterations: plan.misses.count) { missOffset in
             let index = plan.misses[missOffset]
+            let base = missOffset * Self.markStride
+            marks[base] = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             do {
                 _ = try self.loadExpert(
                     layer: 0,
@@ -320,13 +363,46 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 if firstError == nil { firstError = error }
                 errorLock.unlock()
             }
+            // Stored on the throwing path too: an iteration that failed still
+            // consumed wall time inside the batch, and leaving its mark at zero
+            // would make the slowest iteration look instantaneous.
+            marks[base + 1] = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         }
-        // Timed around `concurrentPerform` inclusive, so this covers the fan-out
-        // itself as well as the preads: a nested dispatch that has to wake six
-        // pool threads is part of what the caller's wall clock sees, and
-        // attributing it to the reads is the honest split until it is measured
-        // apart.
-        lastReadNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- tRead
+        let tReadEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        lastReadNanos = tReadEnd &- tRead
+
+        // The split. Telescoping exactly: fanout + span + drain is
+        // (firstEnter - tRead) + (lastExit - firstEnter) + (tReadEnd - lastExit)
+        // = tReadEnd - tRead = lastReadNanos, by construction and not by
+        // assertion. An empty plan never enters the closure at all, so it has no
+        // first entry to measure and its whole window is drain.
+        if plan.misses.count == 0 {
+            lastReadFanoutNanos = 0
+            lastReadSpanNanos = 0
+            lastReadDrainNanos = lastReadNanos
+            lastReadThreadNanos = 0
+        } else {
+            var firstEnter = UInt64.max
+            var lastExit: UInt64 = 0
+            var threadNanos: UInt64 = 0
+            for missOffset in 0..<plan.misses.count {
+                let enter = marks[missOffset * Self.markStride]
+                let exit = marks[missOffset * Self.markStride + 1]
+                firstEnter = min(firstEnter, enter)
+                lastExit = max(lastExit, exit)
+                threadNanos &+= exit &- enter
+            }
+            // `CLOCK_UPTIME_RAW` is monotonic, so these three differences cannot
+            // go negative: `tRead` precedes every entry, and every exit follows
+            // its own entry, which is what bounds `firstEnter` from below. Taken
+            // as plain differences rather than clamped ones so that the tiling
+            // stays exact -- a clamp would silently hand the reader three parts
+            // that do not add up to the whole.
+            lastReadFanoutNanos = firstEnter &- tRead
+            lastReadSpanNanos = lastExit &- firstEnter
+            lastReadDrainNanos = tReadEnd &- lastExit
+            lastReadThreadNanos = threadNanos
+        }
         if let firstError { throw firstError }
 
         let tTail = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)

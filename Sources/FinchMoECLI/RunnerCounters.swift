@@ -25,6 +25,10 @@ public struct RunnerCounterValues: Equatable, Sendable {
     public var ioDispatchNanos: UInt64
     public var ioReadNanos: UInt64
     public var ioTailNanos: UInt64
+    public var ioFanoutNanos: UInt64
+    public var ioSpanNanos: UInt64
+    public var ioDrainNanos: UInt64
+    public var ioThreadNanos: UInt64
     public var headNanos: UInt64
     public var expertHits: UInt64
     public var expertMisses: UInt64
@@ -53,6 +57,10 @@ public struct RunnerCounterValues: Equatable, Sendable {
                 ioDispatchNanos: UInt64 = 0,
                 ioReadNanos: UInt64 = 0,
                 ioTailNanos: UInt64 = 0,
+                ioFanoutNanos: UInt64 = 0,
+                ioSpanNanos: UInt64 = 0,
+                ioDrainNanos: UInt64 = 0,
+                ioThreadNanos: UInt64 = 0,
                 headNanos: UInt64 = 0,
                 expertHits: UInt64 = 0,
                 expertMisses: UInt64 = 0,
@@ -80,6 +88,10 @@ public struct RunnerCounterValues: Equatable, Sendable {
         self.ioDispatchNanos = ioDispatchNanos
         self.ioReadNanos = ioReadNanos
         self.ioTailNanos = ioTailNanos
+        self.ioFanoutNanos = ioFanoutNanos
+        self.ioSpanNanos = ioSpanNanos
+        self.ioDrainNanos = ioDrainNanos
+        self.ioThreadNanos = ioThreadNanos
         self.headNanos = headNanos
         self.expertHits = expertHits
         self.expertMisses = expertMisses
@@ -120,6 +132,10 @@ public struct RunnerCounterValues: Equatable, Sendable {
             ioDispatchNanos: d(ioDispatchNanos, base.ioDispatchNanos),
             ioReadNanos: d(ioReadNanos, base.ioReadNanos),
             ioTailNanos: d(ioTailNanos, base.ioTailNanos),
+            ioFanoutNanos: d(ioFanoutNanos, base.ioFanoutNanos),
+            ioSpanNanos: d(ioSpanNanos, base.ioSpanNanos),
+            ioDrainNanos: d(ioDrainNanos, base.ioDrainNanos),
+            ioThreadNanos: d(ioThreadNanos, base.ioThreadNanos),
             headNanos: d(headNanos, base.headNanos),
             expertHits: d(expertHits, base.expertHits),
             expertMisses: d(expertMisses, base.expertMisses),
@@ -154,6 +170,10 @@ extension RunnerCounterValues {
                   ioDispatchNanos: runner.totalIoDispatchNanos,
                   ioReadNanos: runner.totalIoReadNanos,
                   ioTailNanos: runner.totalIoTailNanos,
+                  ioFanoutNanos: runner.totalIoFanoutNanos,
+                  ioSpanNanos: runner.totalIoSpanNanos,
+                  ioDrainNanos: runner.totalIoDrainNanos,
+                  ioThreadNanos: runner.totalIoThreadNanos,
                   // Summed, as the app does: which of the two carries the head
                   // depends on whether the run took the fused-greedy path, and
                   // a reader wants the cost, not the path.
@@ -186,6 +206,34 @@ public enum RunnerCounters {
         let accounted = values.ioDispatchNanos &+ values.ioReadNanos
             &+ values.ioTailNanos
         return values.ioNanos > accounted ? values.ioNanos - accounted : 0
+    }
+
+    /// `io_thread / io_span`: how many reads were in flight at once, on average.
+    ///
+    /// A ratio and not a duration, which is why it carries no `_wall` suffix —
+    /// it is not another part of the window. It is also the one quantity in the
+    /// read split that no wall clock can show on its own: a batch that ran
+    /// six-up and a batch that ran one at a time for six times as long have the
+    /// same span, and only the summed thread time tells them apart.
+    private static func ioConcurrency(_ values: RunnerCounterValues) -> String {
+        guard values.ioSpanNanos > 0 else { return "n/a" }
+        return String(format: "%.2f",
+                      Double(values.ioThreadNanos) / Double(values.ioSpanNanos))
+    }
+
+    /// Whether `io_fanout + io_span + io_drain` is exactly `io_read`.
+    ///
+    /// It always should be: the streamer computes the three from one timestamp
+    /// pair per miss, so they telescope into the batch window by construction.
+    /// That is exactly why anything other than `exact` is worth printing — it
+    /// means the snapshot was taken across a fetch in flight, and the four
+    /// numbers beside it do not all belong to the same call.
+    private static func ioReadIdentity(_ values: RunnerCounterValues) -> String {
+        let tiled = values.ioFanoutNanos &+ values.ioSpanNanos &+ values.ioDrainNanos
+        if tiled == values.ioReadNanos {
+            return tiled == 0 ? "none" : "exact"
+        }
+        return "OFF(\(Int64(bitPattern: tiled) - Int64(bitPattern: values.ioReadNanos))ns)"
     }
 
     /// Fields that are per-step are suffixed `/step`; counts are not. Every
@@ -274,6 +322,17 @@ public enum RunnerCounters {
             "io_plan_cpu_ms/step=\(msPerStep(values.ioPlanNanos))",
             "io_dispatch_wall_ms/step=\(msPerStep(values.ioDispatchNanos))",
             "io_read_wall_ms/step=\(msPerStep(values.ioReadNanos))",
+            // The read window split. `fanout + span + drain` is `io_read_wall`
+            // exactly, and `read_identity` is the check that says so; `io_conc`
+            // is the achieved parallelism, summed thread time over the span.
+            // The four together replace a single number that could not
+            // distinguish a slow drive from a fan-out that never widened.
+            "io_fanout_wall_ms/step=\(msPerStep(values.ioFanoutNanos))",
+            "io_span_wall_ms/step=\(msPerStep(values.ioSpanNanos))",
+            "io_drain_wall_ms/step=\(msPerStep(values.ioDrainNanos))",
+            "io_thread_wall_ms/step=\(msPerStep(values.ioThreadNanos))",
+            "io_conc=\(ioConcurrency(values))",
+            "io_read_identity=\(ioReadIdentity(values))",
             "io_tail_wall_ms/step=\(msPerStep(values.ioTailNanos))",
             "io_handoff_wall_ms/step=\(msPerStep(ioHandoff(values)))",
             "head_wall_ms/step=\(msPerStep(values.headNanos))",

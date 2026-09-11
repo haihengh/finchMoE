@@ -806,6 +806,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public var totalIoDispatchNanos: UInt64 { model.routedIoDispatchNanos() }
     public var totalIoReadNanos: UInt64 { model.routedIoReadNanos() }
     public var totalIoTailNanos: UInt64 { model.routedIoTailNanos() }
+    // `ioReadNanos` split, and this one *is* an exact tiling: `fanout + span +
+    // drain == read`, by construction in the streamer rather than by assertion
+    // here. `ioThreadNanos` is not a fourth part -- it is the summed thread time
+    // inside the span, so it is normally larger than the span and its ratio to
+    // it is the achieved parallelism. Reported together so a reader cannot
+    // mistake it for a part and get a total that doubles the window.
+    public var totalIoFanoutNanos: UInt64 { model.routedIoFanoutNanos() }
+    public var totalIoSpanNanos: UInt64 { model.routedIoSpanNanos() }
+    public var totalIoDrainNanos: UInt64 { model.routedIoDrainNanos() }
+    public var totalIoThreadNanos: UInt64 { model.routedIoThreadNanos() }
 
     // The engine's own pread sequence, so the drive can be priced offline on
     // the real offset pattern rather than a synthetic one: the offline probes

@@ -21,6 +21,58 @@ extension PreadExpertStreamerTests {
     }
   }
 
+  /// The read split has to tile the window it claims to split, on the real
+  /// code path and not just in the formatter.
+  ///
+  /// `fanout + span + drain == lastReadNanos` is the property the whole
+  /// measurement rests on -- if it does not hold here, the engine's `io` split
+  /// is four numbers that look reasonable and cannot be added up, which is worse
+  /// than one number that is merely coarse.
+  @Test func readSplitTilesTheBatchWindow() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+    let streamer = try PreadExpertStreamer(
+      layout: Self.makeLayout(path: url.path), device: device, slotCount: 4)
+
+    _ = try streamer.loadExpertsCached(experts: [3, 1, 2])
+
+    let read = streamer.lastReadNanos
+    let tiled = streamer.lastReadFanoutNanos
+      &+ streamer.lastReadSpanNanos &+ streamer.lastReadDrainNanos
+    #expect(read > 0, "a batch of real preads must take measurable time")
+    #expect(tiled == read, "fanout + span + drain must tile the read window")
+
+    // Every miss ran inside the span, so summed thread time is positive. It is
+    // deliberately not asserted to be at least the span: with three reads this
+    // short, skew between the pool threads can make the sum come out under the
+    // span, and a bound that holds only on the real workload is not a bound.
+    #expect(streamer.lastReadThreadNanos > 0)
+  }
+
+  /// An all-hits plan has no misses to fan out, so there is no first entry to
+  /// measure and the whole window is drain. It must still tile: a zero-miss plan
+  /// that reported a nonzero fanout would be inventing dispatch cost that was
+  /// never paid.
+  @Test func anAllHitsPlanPutsTheWholeWindowInDrain() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+    let streamer = try PreadExpertStreamer(
+      layout: Self.makeLayout(path: url.path), device: device, slotCount: 4)
+
+    // The first call is all misses; the second repeats the same experts, so
+    // with four slots and two experts the plan is entirely hits.
+    _ = try streamer.loadExpertsCached(experts: [2, 0])
+    _ = try streamer.loadExpertsCached(experts: [2, 0])
+
+    let read = streamer.lastReadNanos
+    #expect(streamer.lastReadFanoutNanos == 0)
+    #expect(streamer.lastReadSpanNanos == 0)
+    #expect(streamer.lastReadDrainNanos == read)
+    #expect(streamer.lastReadThreadNanos == 0)
+  }
+
   @Test func adviseExpertsDoesNotChangeLoadedBytes() throws {
     let url = try Self.writeSyntheticLayer()
     defer { try? FileManager.default.removeItem(at: url) }

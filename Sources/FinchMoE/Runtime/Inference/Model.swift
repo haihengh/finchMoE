@@ -78,6 +78,15 @@ public struct Model {
         var ioDispatchNanos: UInt64 = 0
         var ioReadNanos: UInt64 = 0
         var ioTailNanos: UInt64 = 0
+        /// `ioReadNanos` split four ways by the streamer that produced it. These
+        /// tile `ioReadNanos` exactly -- `ioFanoutNanos + ioSpanNanos +
+        /// ioDrainNanos` is that window, and `ioThreadNanos` is summed thread
+        /// time *inside* the span, so it exceeds the span rather than adding to
+        /// it. Its ratio to the span is the achieved read parallelism.
+        var ioFanoutNanos: UInt64 = 0
+        var ioSpanNanos: UInt64 = 0
+        var ioDrainNanos: UInt64 = 0
+        var ioThreadNanos: UInt64 = 0
         init(numLayers: Int) {
             self.streamers = Array(repeating: nil, count: numLayers)
             self.layerVerified = Array(repeating: false, count: numLayers)
