@@ -47,15 +47,33 @@ func makeCompleteModelInstall(_ tag: String,
         "hiddenActivation": arch.hiddenActivation,
         "fullAttentionLayerMask": arch.fullAttentionLayerMask.map(Int.init),
     ]
-    // GDN/linear-attention fields are required by the manifest validator only
-    // for the Qwen3.6 family (ManifestReader.validateArch).
-    if arch.modelFamily == "qwen3_6" {
+    // GDN/linear-attention fields are required by the manifest validator for
+    // both hybrid families, and the 3.8-only surface on top of them
+    // (ManifestReader.validateArch).
+    if arch.modelFamily == "qwen3_6" || arch.modelFamily == "qwen3_8" {
         archFields["attnOutputGate"] = arch.attnOutputGate
         archFields["linearNumKeyHeads"] = arch.linearNumKeyHeads
         archFields["linearNumValueHeads"] = arch.linearNumValueHeads
         archFields["linearKeyHeadDim"] = arch.linearKeyHeadDim
         archFields["linearValueHeadDim"] = arch.linearValueHeadDim
         archFields["linearConvKernelDim"] = arch.linearConvKernelDim
+    }
+    if arch.modelFamily == "qwen3_8" {
+        archFields["hyperConnectionCount"] = arch.hyperConnectionCount
+        archFields["hyperConnectionLowrank"] = arch.hyperConnectionLowrank
+        archFields["indexerNumHeads"] = arch.indexerNumHeads
+        archFields["indexerKVHeads"] = arch.indexerKVHeads
+        archFields["indexerHeadDim"] = arch.indexerHeadDim
+        archFields["indexerBudget"] = arch.indexerBudget
+        archFields["indexerCompressRatio"] = arch.indexerCompressRatio
+        archFields["ngramSize"] = arch.ngramSize
+        archFields["headsPerNgram"] = arch.headsPerNgram
+        archFields["ngramRowDim"] = arch.ngramRowDim
+        archFields["ngramPartCount"] = arch.ngramPartCount
+        archFields["ngramPartRows"] = arch.ngramPartRows
+        archFields["pleLayerIndexes"] = arch.pleLayerIndexes
+        archFields["pleConvKernelSize"] = arch.pleConvKernelSize
+        archFields["pleEosTokenId"] = arch.pleEosTokenId
     }
     let manifest: [String: Any] = [
         "magic": "FINCH",

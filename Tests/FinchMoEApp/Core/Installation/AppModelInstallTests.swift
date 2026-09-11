@@ -123,6 +123,25 @@ import FinchMoERepackCore
     #expect(descriptor.requiredFreeBytes == 20_014_114_816)
   }
 
+  /// The 3.8 counterpart. The hash is the one thing here that cannot be
+  /// re-derived from the repo — it is the sha256 of the source snapshot's
+  /// `model.safetensors.index.json`, which is what the manifest stores and
+  /// what the probe matches on, so a typo silently makes the install
+  /// unrecognisable rather than failing loudly.
+  @MainActor
+  @Test func qwen38InstallDescriptorMatchesPinnedAudit() {
+    let descriptor = AppModelInstallDescriptor.qwen3_8
+    #expect(descriptor.displayName == "Qwen 3.8 Flash-Next 125B")
+    #expect(descriptor.shortName == "Qwen 3.8 125B")
+    #expect(descriptor.repoID == "Qwen/Qwen3.8-Flash-Next")
+    #expect(descriptor.sourceIndexSHA256 == "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de")
+    #expect(descriptor.approximateDownloadBytes == 0)
+    #expect(descriptor.installedBytes == 174_403_168_940)
+    #expect(descriptor.rangeStagingBytes == 0)
+    #expect(descriptor.reserveBytes == 0)
+    #expect(descriptor.requiredFreeBytes == 174_403_168_940)
+  }
+
   @MainActor
   @Test func insufficientSpaceDisablesInstallAndExposesShortfall() {
     let requirement = AppModelInstallRequirement(

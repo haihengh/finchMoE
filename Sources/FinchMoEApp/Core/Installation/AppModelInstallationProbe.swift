@@ -13,9 +13,15 @@ public enum AppModelInstallationProbe {
     /// (no manifest, unreadable, unknown hash) resolves to `.default`, which
     /// also keeps the not-yet-installed download flow on the Gemma install.
     /// Note: a Qwen directory whose receipt is corrupt/missing still resolves
-    /// to `.qwen3_6` and surfaces `.partial` in the install UI — Qwen is never
-    /// remotely installable (repack-made installs only); repair is re-running
-    /// the repack's receipt.
+    /// to its own descriptor and surfaces `.partial` in the install UI — Qwen
+    /// is never remotely installable (repack-made installs only); repair is
+    /// re-running the repack's receipt.
+    ///
+    /// The scan is over `AppModelInstallDescriptor.installable` in order rather
+    /// than a chain of `if`s, so adding a family is one entry in one list. A
+    /// family missing from that list is not a loud failure: the directory
+    /// resolves to the Gemma default and the UI offers to download a model that
+    /// is already there.
     public static func matchingDescriptor(at directory: URL) -> AppModelInstallDescriptor {
         let directory = directory.standardizedFileURL
         let manifestURL = directory.appendingPathComponent("manifest.json")
@@ -26,10 +32,9 @@ public enum AppModelInstallationProbe {
             let manifest = try ManifestReader.load(
                 directoryURL: directory,
                 expecting: try ManifestReader.detectPreset(directoryURL: directory))
-            if manifest.sourceSnapshotHash == "sha256:" + AppModelInstallDescriptor.qwen3_6.sourceIndexSHA256 {
-                return .qwen3_6
-            }
-            return .default
+            return AppModelInstallDescriptor.installable.first {
+                manifest.sourceSnapshotHash == "sha256:" + $0.sourceIndexSHA256
+            } ?? .default
         } catch {
             return .default
         }
