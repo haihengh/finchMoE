@@ -54,10 +54,10 @@ resident set size; and **NLL** is negative log-likelihood. See
 | Prefill | [Chunking, MPP, routed MoE, overlap, attention, and allocation experiments](summaries/06-prefill.md) | 17 |
 | Fusions and orchestration | [Targeted fusions, head variants, queues, and synchronization](summaries/07-fusions-head-and-orchestration.md) | 15 |
 | Sampling and output | [Gumbel sampling, tokenizer caching, and detokenization](summaries/08-sampling-tokenization-and-output.md) | 4 |
-| Validation methodology | [False rejections, holdouts, thermal state, and benchmark artifacts](summaries/09-validation-and-measurement-lessons.md) | 12 |
-| **Total** | | **106** |
+| Validation methodology | [False rejections, holdouts, thermal state, and benchmark artifacts](summaries/09-validation-and-measurement-lessons.md) | 13 |
+| **Total** | | **107** |
 
-## All 106 experiments
+## All 107 experiments
 
 ### Model installation and expert I/O
 
@@ -209,6 +209,7 @@ resident set size; and **NLL** is negative log-likelihood. See
 | [METH-10](summaries/09-validation-and-measurement-lessons.md#meth-10) | A bucket named for a kernel prices the dispatch around it. | Qwen `cb1` split and the slot sweep: the counters moved, end-to-end did not. Kernel claims need GPU spans. |
 | [METH-11](summaries/09-validation-and-measurement-lessons.md#meth-11) | A GPU span does not license the subtraction you build from it. | Device timestamps landed and identified the GDN stack at 1.718 ms/layer against attention's 1.127; the `wait` subtraction built on them read 46.8 ms/step of dispatch tax that does not exist. |
 | [METH-12](summaries/09-validation-and-measurement-lessons.md#meth-12) | An awaited I/O window is a latency measurement, not a bandwidth one. | Six slot-sweep runs in both orders: 32 -> 16 slots cuts io time 12.9%/7.8% while reading 34% more bytes. Direct drive probes then priced both candidate mechanisms: bandwidth saturates by depth 4-8 (~5.7 GB/s) and declines past it, while a repeated 24-expert pool runs 2-3x the rate of diverse offsets. The queue is at its knee and repetition is what pays; prefetch is not built. |
+| [METH-13](summaries/09-validation-and-measurement-lessons.md#meth-13) | A near-complete serial sum bounds the overlap. | Re-reading seven captured runs: `io` plus all device time plus head and PLE is 93.0-97.8% of the token, so the pipeline's claimed read/compute overlap is a few percent at most. The mechanism is documented in the code and five times too small to matter; the read order is forced by the router readback. Device work pays 1:1, and ~84 ms/step of the read window is fixed per-batch cost rather than transfer. |
 
 ## Important non-experiments
 
