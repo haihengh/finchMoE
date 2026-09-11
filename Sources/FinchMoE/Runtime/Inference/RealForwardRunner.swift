@@ -862,6 +862,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     // contributes nothing, and a total built from a handful of samples must not
     // be read as if it covered the run.
     public private(set) var totalGpuCb1Nanos: UInt64 = 0
+    // `totalGpuCb1Nanos` split by layer kind. The CPU-side `attention` and
+    // `gdn_*` buckets are alternatives — each layer runs one stack or the other
+    // — so they are compared by dividing by the layer counts (12 full-attention
+    // / 36 GDN on Qwen 3.8; 10 / 30 on 3.6). GPU time has the same shape with
+    // larger stakes: the two stacks run different kernels, so one summed figure
+    // cannot say which owns it, and the answer decides different work. Read
+    // this as a per-layer comparison, not a per-step one.
+    public private(set) var totalGpuCb1FullAttnNanos: UInt64 = 0
+    public private(set) var totalGpuCb1GdnNanos: UInt64 = 0
     public private(set) var totalGpuRoutedNanos: UInt64 = 0
     public private(set) var totalGpuSamples: UInt64 = 0
 
@@ -3363,7 +3372,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         waitForCompletion(cb)
         let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
-        totalGpuCb1Nanos &+= recordGpuTime(cb)
+        // Read once: `recordGpuTime` counts a sample only when it returns a
+        // real number, so a second call would double `totalGpuSamples`.
+        let cb1GpuNanos = recordGpuTime(cb)
+        totalGpuCb1Nanos &+= cb1GpuNanos
+        if isFull {
+            totalGpuCb1FullAttnNanos &+= cb1GpuNanos
+        } else {
+            totalGpuCb1GdnNanos &+= cb1GpuNanos
+        }
         // cb1 subtracts this wait, so the buckets must *skip* exactly this span
         // rather than attribute it. Attributing it would put the tile sum
         // `wait` above cb1 — and that sum still looks like a plausible number,
@@ -5218,7 +5235,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         waitForCompletion(cb)
         let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
-        totalGpuCb1Nanos &+= recordGpuTime(cb)
+        // Read once: `recordGpuTime` counts a sample only when it returns a
+        // real number, so a second call would double `totalGpuSamples`.
+        let cb1GpuNanos = recordGpuTime(cb)
+        totalGpuCb1Nanos &+= cb1GpuNanos
+        if isFull {
+            totalGpuCb1FullAttnNanos &+= cb1GpuNanos
+        } else {
+            totalGpuCb1GdnNanos &+= cb1GpuNanos
+        }
         // cb1 subtracts this wait, so the buckets must *skip* exactly this span
         // rather than attribute it. Attributing it would put the tile sum
         // `wait` above cb1 — and that sum still looks like a plausible number,

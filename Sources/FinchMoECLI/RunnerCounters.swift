@@ -29,6 +29,8 @@ public struct RunnerCounterValues: Equatable, Sendable {
     public var indexerRankedLayers: UInt64
     public var commandBuffers: UInt64
     public var gpuCb1Nanos: UInt64
+    public var gpuCb1FullAttnNanos: UInt64
+    public var gpuCb1GdnNanos: UInt64
     public var gpuRoutedNanos: UInt64
     public var gpuSamples: UInt64
 
@@ -51,6 +53,8 @@ public struct RunnerCounterValues: Equatable, Sendable {
                 indexerRankedLayers: UInt64 = 0,
                 commandBuffers: UInt64 = 0,
                 gpuCb1Nanos: UInt64 = 0,
+                gpuCb1FullAttnNanos: UInt64 = 0,
+                gpuCb1GdnNanos: UInt64 = 0,
                 gpuRoutedNanos: UInt64 = 0,
                 gpuSamples: UInt64 = 0) {
         self.forwards = forwards
@@ -72,6 +76,8 @@ public struct RunnerCounterValues: Equatable, Sendable {
         self.indexerRankedLayers = indexerRankedLayers
         self.commandBuffers = commandBuffers
         self.gpuCb1Nanos = gpuCb1Nanos
+        self.gpuCb1FullAttnNanos = gpuCb1FullAttnNanos
+        self.gpuCb1GdnNanos = gpuCb1GdnNanos
         self.gpuRoutedNanos = gpuRoutedNanos
         self.gpuSamples = gpuSamples
     }
@@ -106,6 +112,8 @@ public struct RunnerCounterValues: Equatable, Sendable {
             indexerRankedLayers: d(indexerRankedLayers, base.indexerRankedLayers),
             commandBuffers: d(commandBuffers, base.commandBuffers),
             gpuCb1Nanos: d(gpuCb1Nanos, base.gpuCb1Nanos),
+            gpuCb1FullAttnNanos: d(gpuCb1FullAttnNanos, base.gpuCb1FullAttnNanos),
+            gpuCb1GdnNanos: d(gpuCb1GdnNanos, base.gpuCb1GdnNanos),
             gpuRoutedNanos: d(gpuRoutedNanos, base.gpuRoutedNanos),
             gpuSamples: d(gpuSamples, base.gpuSamples))
     }
@@ -137,6 +145,8 @@ extension RunnerCounterValues {
                   indexerRankedLayers: runner.totalIndexerRankedLayers,
                   commandBuffers: runner.totalDecodeCommandBuffers,
                   gpuCb1Nanos: runner.totalGpuCb1Nanos,
+                  gpuCb1FullAttnNanos: runner.totalGpuCb1FullAttnNanos,
+                  gpuCb1GdnNanos: runner.totalGpuCb1GdnNanos,
                   gpuRoutedNanos: runner.totalGpuRoutedNanos,
                   gpuSamples: runner.totalGpuSamples)
     }
@@ -230,6 +240,13 @@ public enum RunnerCounters {
             "cbs=\(values.commandBuffers)",
             "cbs/step=\(String(format: "%.1f", Double(values.commandBuffers) / n))",
             "gpu_cb1_wall_ms/step=\(msPerStep(values.gpuCb1Nanos))",
+            // The two stacks are alternatives, so these are compared per layer,
+            // not per step: divide by the full-attention and GDN layer counts.
+            // They sum to `gpu_cb1` on a Qwen install (and are both zero on
+            // Gemma, which is not instrumented — the same signature its CPU
+            // buckets show).
+            "gpu_cb1_fullattn_wall_ms/step=\(msPerStep(values.gpuCb1FullAttnNanos))",
+            "gpu_cb1_gdn_wall_ms/step=\(msPerStep(values.gpuCb1GdnNanos))",
             "gpu_routed_wall_ms/step=\(msPerStep(values.gpuRoutedNanos))",
             "gpu_samples=\(values.gpuSamples)",
         ])

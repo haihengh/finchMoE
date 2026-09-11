@@ -54,10 +54,10 @@ resident set size; and **NLL** is negative log-likelihood. See
 | Prefill | [Chunking, MPP, routed MoE, overlap, attention, and allocation experiments](summaries/06-prefill.md) | 17 |
 | Fusions and orchestration | [Targeted fusions, head variants, queues, and synchronization](summaries/07-fusions-head-and-orchestration.md) | 15 |
 | Sampling and output | [Gumbel sampling, tokenizer caching, and detokenization](summaries/08-sampling-tokenization-and-output.md) | 4 |
-| Validation methodology | [False rejections, holdouts, thermal state, and benchmark artifacts](summaries/09-validation-and-measurement-lessons.md) | 10 |
-| **Total** | | **104** |
+| Validation methodology | [False rejections, holdouts, thermal state, and benchmark artifacts](summaries/09-validation-and-measurement-lessons.md) | 11 |
+| **Total** | | **105** |
 
-## All 104 experiments
+## All 105 experiments
 
 ### Model installation and expert I/O
 
@@ -207,6 +207,7 @@ resident set size; and **NLL** is negative log-likelihood. See
 | [METH-08](summaries/09-validation-and-measurement-lessons.md#meth-08) | Trace-trained policies need holdouts. | Rejected packed layout and heterogeneous cache allocation. |
 | [METH-09](summaries/09-validation-and-measurement-lessons.md#meth-09) | Detect greedy repetition loops. | Reclassified apparent cache decay as period-44 cyclic thrash. |
 | [METH-10](summaries/09-validation-and-measurement-lessons.md#meth-10) | A bucket named for a kernel prices the dispatch around it. | Qwen `cb1` split and the slot sweep: the counters moved, end-to-end did not. Kernel claims need GPU spans. |
+| [METH-11](summaries/09-validation-and-measurement-lessons.md#meth-11) | A GPU span does not license the subtraction you build from it. | Device timestamps landed and identified the GDN stack at 1.718 ms/layer against attention's 1.127; the `wait` subtraction built on them read 46.8 ms/step of dispatch tax that does not exist. |
 
 ## Important non-experiments
 

@@ -194,6 +194,41 @@ from representative holdouts.
 - **Lesson:** A bucket is named for the code surrounding it, not for the
   hardware work it triggers. State the clock kind before quoting a share.
 
+<a id="meth-11"></a>
+### METH-11: A GPU span does not license the subtraction you build from it
+
+- **Hypothesis:** METH-10 closed with "kernel claims need GPU spans", so adding
+  device timestamps to the same readout would settle which of the two decode
+  stacks owns the GPU time, and `wait` minus GPU time would be dispatch overhead.
+- **Variants tested:** `MTLCommandBuffer` start/end timestamps read after
+  completion at the two existing wait sites (no extra buffer, no extra wait, no
+  change to commit order), split by layer kind, across three runs on two
+  installs and two context lengths.
+- **Evidence:** The first half worked: `gpu_cb1_fullattn + gpu_cb1_gdn ==
+  gpu_cb1` exactly on every run, GDN costs 1.718 ms/layer against attention's
+  1.127 on Qwen 3.8 and 84.3% of `gpu_cb1` on 3.6, and the two-install split
+  identified the target stack that CPU encode clocks could not. The second half
+  did not. `wait` minus `gpu_cb1` came out at 46.8 ms/step, which reads as 12.7%
+  of the token in dispatch tax. Subtracting `gpu_routed` as well leaves 10.40 /
+  5.60 / 8.69 ms/step, or 0.055 / 0.035 / 0.055 ms per command buffer -- an order
+  of magnitude *below* the ~0.26 ms a kernel-bearing buffer costs under S6.
+- **What changed the conclusion:** The commit order, not the timestamps. Layer
+  N+1's `cb1` is committed after layer N's routed tail, so N+1's wait necessarily
+  drains that tail. Any subtraction over `wait` that omits a term charges the
+  omitted block to overhead -- and the omitted block here is the largest kernel
+  group in the model, so the error is large enough to look like a finding.
+  `gpu_cb1_fullattn + gpu_cb1_gdn == gpu_cb1` held exactly throughout and did not
+  catch it; a correct internal identity is not evidence that the quantity built
+  on top of it is being read correctly.
+- **Final disposition:** The split is retained and both GPU figures are now
+  printed beside `wait`, with the subtraction warning in `SYSTEM_DESIGN.md`; item
+  2.2 is recorded as refuted rather than deferred. `gpu_samples` is the coverage
+  gate and is exact, not approximate -- `cbs - gpu_samples` was 62 on all three
+  runs, exactly two buffers per forward.
+- **Lesson:** Before subtracting two spans, name what each one covers and in what
+  order it is committed. A span that *contains* the thing you meant to exclude
+  cannot be corrected by adjusting the coefficients afterwards.
+
 ## Boundaries that were not failed experiments
 
 - ANE/Core ML offload was excluded by the platform and architecture decision;
