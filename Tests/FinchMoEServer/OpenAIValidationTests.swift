@@ -488,6 +488,21 @@ struct ServerArgumentTests {
         #expect(arguments.maxContext == 16_384)
         #expect(arguments.queueLimit == 4)
         #expect(arguments.promptCacheMode == .singlePrefix)
+        #expect(arguments.verify == .automatic)
+    }
+
+    /// `--verify` is the flag that decides whether a boot pays the full SHA-256
+    /// pass, so an unrecognized value has to fail the boot rather than land on
+    /// one of the real modes by default.
+    @Test func verifyModeParses() throws {
+        func parsed(_ mode: String) throws -> ModelIntegrityPreference {
+            try ServerArguments.parse(["--model", "model.finch",
+                                        "--verify", mode]).verify
+        }
+        #expect(try parsed("auto") == .automatic)
+        #expect(try parsed("full-sha256") == .fullSha256)
+        #expect(try parsed("trusted-install") == .sizeCheckTrustedReceipt)
+        #expect(throws: ServerArgumentError.self) { _ = try parsed("sometimes") }
     }
 
     @Test func parsesSinglePrefixModeAndRejectsUnknownMode() throws {
