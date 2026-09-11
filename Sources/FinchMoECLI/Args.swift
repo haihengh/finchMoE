@@ -13,6 +13,8 @@ public struct Args: Equatable, Sendable {
     public var seed: UInt64?
     public var stops: [String]
     public var quiet: Bool
+    public var counters: Bool
+    public var expertCacheSlots: Int?
     public var verify: ModelIntegrityPreference
 
     public init(model: String,
@@ -27,6 +29,8 @@ public struct Args: Equatable, Sendable {
                 seed: UInt64? = nil,
                 stops: [String] = [],
                 quiet: Bool = false,
+                counters: Bool = false,
+                expertCacheSlots: Int? = nil,
                 verify: ModelIntegrityPreference = .automatic) {
         self.model = model
         self.prompt = prompt
@@ -40,6 +44,8 @@ public struct Args: Equatable, Sendable {
         self.seed = seed
         self.stops = stops
         self.quiet = quiet
+        self.counters = counters
+        self.expertCacheSlots = expertCacheSlots
         self.verify = verify
     }
 }
@@ -67,6 +73,14 @@ public enum ArgsError: Error, Equatable, CustomStringConvertible {
 }
 
 extension Args {
+    /// Rendered from the runtime's own list so the help text cannot drift from
+    /// what `parse` accepts.
+    private static var slotsList: String {
+        RuntimeConfiguration.allowedExpertCacheSlots
+            .map(String.init)
+            .joined(separator: ", ")
+    }
+
     public static let usage = """
     FinchMoECLI — local text generation (instruction chat and raw completion)
 
@@ -87,6 +101,17 @@ extension Args {
       --seed <uint64>           Deterministic sampling seed (default off).
       --stop <string>           Stop substring (repeatable).
       --quiet                   Suppress the timing footer.
+      --counters                Print the decode counter breakdown to stderr,
+                                as a second line after the timing footer. Not
+                                suppressed by --quiet (which covers the footer
+                                only). The buckets are CPU encode-and-commit
+                                clocks that exclude the pipeline wait; the io
+                                and head figures are wall clocks that include
+                                theirs, so the two are not one timeline.
+      --expert-cache-slots <n>  Expert cache slots, one of \(slotsList)
+                                (default 16). Same knob the app and the server
+                                expose. A count below the model's top-k is
+                                rejected rather than left to trap.
       --verify <mode>           Integrity policy. auto (default) uses
                                 verified-install.json when one is present and
                                 valid and falls back to hashing otherwise;
@@ -116,6 +141,8 @@ extension Args {
         var seed: UInt64?
         var stops: [String] = []
         var quiet = false
+        var counters = false
+        var expertCacheSlots: Int?
         var verify = ModelIntegrityPreference.automatic
 
         var index = 0
@@ -127,6 +154,21 @@ extension Args {
             case "--quiet":
                 quiet = true
                 index += 1
+            case "--counters":
+                counters = true
+                index += 1
+            case "--expert-cache-slots":
+                let value = try takeValue(argv, &index, flag: flag)
+                // Validated against the runtime's own list rather than a
+                // restated literal: `RuntimeConfiguration.init` preconditions on
+                // that array, so a second copy here could accept a count the
+                // constructor would then trap on.
+                guard let parsed = Int(value),
+                      RuntimeConfiguration.allowedExpertCacheSlots.contains(parsed)
+                else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                expertCacheSlots = parsed
             case "--model":
                 model = try takeValue(argv, &index, flag: flag)
             case "--prompt":
@@ -216,6 +258,8 @@ extension Args {
                     seed: seed,
                     stops: stops,
                     quiet: quiet,
+                    counters: counters,
+                    expertCacheSlots: expertCacheSlots,
                     verify: verify)
     }
 
