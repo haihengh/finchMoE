@@ -46,9 +46,15 @@ final class Attention {
     static let threadsPerGroup: Int = 256
 
     /// Project ceilings for the split-KV partial scratch. `kAttnMaxHeadDim` in
-    /// attention.metal is 512; the model has 16 Q heads; `maxChunks` bounds the
-    /// split factor (and therefore the scratch size: 16·64·512 FP32 ≈ 2 MB).
-    static let maxQHeads = 16
+    /// attention.metal is 512; `maxChunks` bounds the split factor and
+    /// therefore the scratch size (32·64·512 FP32 ≈ 4 MB).
+    ///
+    /// 16 Q heads was the 3.6/Gemma4 ceiling; Qwen 3.8 has 24, which is why
+    /// this is 32. The kernels index the scratch by the *runtime* geometry
+    /// (`[num_q_heads * num_chunks * head_dim]`), so these are projections that
+    /// must cover the model, not layouts the kernel assumes — under-sizing them
+    /// is caught by the precondition rather than silently corrupting.
+    static let maxQHeads = 32
     static let maxHeadDim = 512
     static let maxChunks = 64
     /// Full attention uses 16 base chunks by default.
