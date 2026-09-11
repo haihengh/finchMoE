@@ -215,6 +215,11 @@ public enum RunnerCounters {
     /// read split that no wall clock can show on its own: a batch that ran
     /// six-up and a batch that ran one at a time for six times as long have the
     /// same span, and only the summed thread time tells them apart.
+    ///
+    /// Under `FINCHMOE_IO_READ_WAVE` this is an average over the whole window
+    /// and not the peak, because the span includes the barriers between waves
+    /// with nothing in flight. So a width of 3 prints below 3, by an amount
+    /// that is itself the cost of having waved the batch at all.
     private static func ioConcurrency(_ values: RunnerCounterValues) -> String {
         guard values.ioSpanNanos > 0 else { return "n/a" }
         return String(format: "%.2f",
