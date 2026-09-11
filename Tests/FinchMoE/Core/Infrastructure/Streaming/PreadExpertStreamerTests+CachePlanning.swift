@@ -50,6 +50,60 @@ extension PreadExpertStreamerTests {
     #expect(streamer.lastReadThreadNanos > 0)
   }
 
+  /// Waving the batch must move the same bytes to the same places as one
+  /// unbroken fan-out.
+  ///
+  /// The wave arithmetic adds a second index -- `waveBase + offset` -- on top of
+  /// the miss index, and the remainder path runs whenever the width does not
+  /// divide the miss count. Both are the kind of off-by-one a uniformly tagged
+  /// fixture cannot see, so the check is against the offset-tagged layer: every
+  /// expert carries a distinct byte, and a miss sent out in the wrong wave reads
+  /// back as the wrong expert instead of passing.
+  ///
+  /// Width 1 is also the only width with an assertion available about the read
+  /// split itself. One read at a time makes the per-miss intervals disjoint, so
+  /// their sum cannot exceed the span that contains them -- a consequence of the
+  /// width rather than of the machine's timing, which is why it is assertable
+  /// here and not for a wide batch.
+  @Test func wavedReadsDeliverTheSameBytesAndTileTheirWindow() throws {
+    let url = try Self.writeOffsetTaggedLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+    let requested = [3, 1, 2]
+
+    for width in [1, 2, 3] {
+      // A fresh streamer per width, so every batch is all misses and no wave
+      // boundary is shifted by a cache that has already seen an expert.
+      let streamer = try PreadExpertStreamer(
+        layout: Self.makeLayout(path: url.path), device: device, slotCount: 4,
+        fileDescriptor: nil, readWave: width)
+
+      let results = try streamer.loadExpertsCached(experts: requested)
+      #expect(results.count == requested.count)
+      for (index, result) in results.enumerated() {
+        let got = Self.bytes(of: result.buffer, offset: 0, count: Self.expertStride)
+        let base = Int(Self.streamOffset) + requested[index] * Self.expertStride
+        let mismatch = (0..<Self.expertStride).first {
+          got[$0] != Self.patternByte(base + $0)
+        }
+        if let j = mismatch {
+          Issue.record(
+            "width \(width): slot \(index) byte \(j) is \(got[j]), expected expert \(requested[index])")
+        }
+      }
+
+      let read = streamer.lastReadNanos
+      let tiled = streamer.lastReadFanoutNanos
+        &+ streamer.lastReadSpanNanos &+ streamer.lastReadDrainNanos
+      #expect(tiled == read, "width \(width): fanout + span + drain must tile the read")
+      if width == 1 {
+        #expect(
+          streamer.lastReadThreadNanos <= streamer.lastReadSpanNanos,
+          "one read outstanding at a time cannot sum to more time than the span holds")
+      }
+    }
+  }
+
   /// An all-hits plan has no misses to fan out, so there is no first entry to
   /// measure and the whole window is drain. It must still tile: a zero-miss plan
   /// that reported a nonzero fanout would be inventing dispatch cost that was

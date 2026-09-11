@@ -91,6 +91,51 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// file does with a knob that measures well offline and badly here.
     private let readSplit: Int
 
+    /// `FINCHMOE_IO_READ_WAVE` -- how many misses are left outstanding at once.
+    /// Zero or less means the whole batch, which is the single unbroken
+    /// `concurrentPerform` every number before this knob was measured through.
+    ///
+    /// It exists to test the one structural difference left between the two
+    /// installs' read rates, and it is a *depth* knob where `readSplit` is a
+    /// *shape* knob: this one changes nothing about which bytes are asked for,
+    /// only how many requests are in the drive at a time.
+    ///
+    /// Qwen 3.8 reads at 3.07 GB/s with 5.59 reads outstanding, 14.76 MiB in
+    /// flight; Qwen 3.6 reads at 5.95 GB/s with 2.95 outstanding, 4.99 MiB.
+    /// The deeper one is the slower one, which is backwards for a queue, and
+    /// that is the whole of the prior: two installs that differ in stride,
+    /// expert count, layer count and cache size, compared on one observation
+    /// each.
+    ///
+    /// The offline replay is *against* this, and the record should say so. It
+    /// varied the pool width over 3 to 10 on 3.8's own captured offsets and
+    /// found nothing -- 147.3 against 149.6 ms/step, a 1.6% spread
+    /// (`docs/OPTIMIZATION_PLAN.md`, the replay table). Pool width was called
+    /// flat there, and "the queue-depth knee" is its phrase. So this knob is
+    /// testing a hypothesis the best available control already discounts, and
+    /// it is worth running only because a clean negative closes the question on
+    /// the engine the way it is closed offline.
+    ///
+    /// What the replay does not explain, and what is left when depth goes: the
+    /// same captured offsets at the same per-layer depth, destination pages
+    /// shaped like the engine's, run at 149.6 ms/step offline against the
+    /// engine's own 225.4 (`io` window). Same drive, same offsets, same depth,
+    /// 1.5x apart. That gap is not a queueing effect under any reading of the
+    /// depth curve, and it is the number to chase if this comes back flat.
+    ///
+    /// This is not the `IO-04`/`IO-05` rejection. Those were a dedicated
+    /// executor and a custom worker pool -- new threading machinery on a path
+    /// whose dispatch was later measured at 0.29% of its own window. The
+    /// dispatch is unchanged here; only the number of iterations handed to it
+    /// at a time is.
+    ///
+    /// The cost is real and belongs in the reading: `concurrentPerform` returns
+    /// only when every iteration has, so each wave is a barrier. A flat result
+    /// at a low width is therefore ambiguous -- it can mean the drive does not
+    /// care, or that it liked the width and paid it back at the barriers. The
+    /// `io_conc` counter and the summed thread time are what tell those apart.
+    private let readWave: Int
+
     private var nextSlot = 0
     private let cursorLock = NSLock()
 
@@ -116,7 +161,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                  slotCount: Int,
                  cachePolicy: ExpertCachePolicy = .lfu,
                  fileDescriptor: Int32?,
-                 readSplit: Int? = nil) throws {
+                 readSplit: Int? = nil,
+                 readWave: Int? = nil) throws {
         precondition(slotCount > 0, "slotCount must be positive")
         self.layout = layout
         self.slotCount = slotCount
@@ -217,6 +263,15 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 ?? ProcessInfo.processInfo.environment["FINCHMOE_IO_READ_SPLIT"]
                     .flatMap(Int.init)
                 ?? 1)
+        // Not clamped to a positive minimum the way `readSplit` is: zero is a
+        // meaningful setting here, and it is the default. Any width at or above
+        // the miss count lands on the same single batch.
+        self.readWave = max(
+            0,
+            readWave
+                ?? ProcessInfo.processInfo.environment["FINCHMOE_IO_READ_WAVE"]
+                    .flatMap(Int.init)
+                ?? 0)
         self.slotPointers = pointers
         self.slotBuffers = buffers
         self.slotExpert = [Int](repeating: -1, count: slotCount)
@@ -350,6 +405,11 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     ///   actually achieved. Near 1.0 the reads ran one at a time however many
     ///   threads were asked for; near the miss count they ran fully wide. That
     ///   ratio is the one thing a wall clock around the batch cannot show.
+    ///
+    ///   It reads slightly differently once `readWave` caps the width: the span
+    ///   then also contains the barriers between waves, in which nothing is in
+    ///   flight, so the ratio comes out *below* the width rather than at it.
+    ///   `io_conc` is the average over the whole window, not the peak.
     public private(set) var lastReadFanoutNanos: UInt64 = 0
     public private(set) var lastReadSpanNanos: UInt64 = 0
     public private(set) var lastReadDrainNanos: UInt64 = 0
@@ -379,24 +439,41 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         defer { marks.deallocate() }
 
         let tRead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        DispatchQueue.concurrentPerform(iterations: plan.misses.count) { missOffset in
-            let index = plan.misses[missOffset]
-            let base = missOffset * Self.markStride
-            marks[base] = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            do {
-                _ = try self.loadExpert(
-                    layer: 0,
-                    expert: plan.experts[index],
-                    slot: plan.assignedSlots[index])
-            } catch {
-                errorLock.lock()
-                if firstError == nil { firstError = error }
-                errorLock.unlock()
+        // One wave, unless a width is set. `concurrentPerform` returns only
+        // once every iteration has returned, so the loop below is a barrier
+        // between waves: at most `waveWidth` reads are ever outstanding, and
+        // the price is the serialisation point. With no width the loop runs
+        // exactly once and this is the unbroken fan-out as it was.
+        //
+        // The marks stay indexed by the *global* miss offset, not by the offset
+        // within the wave, so the tiling below is unchanged by the split -- a
+        // wave boundary falls inside `span` and nowhere else.
+        let waveWidth = readWave > 0 ? min(readWave, plan.misses.count) : plan.misses.count
+        var waveStart = 0
+        while waveStart < plan.misses.count {
+            let waveCount = min(waveWidth, plan.misses.count - waveStart)
+            let waveBase = waveStart
+            DispatchQueue.concurrentPerform(iterations: waveCount) { offset in
+                let missOffset = waveBase + offset
+                let index = plan.misses[missOffset]
+                let base = missOffset * Self.markStride
+                marks[base] = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                do {
+                    _ = try self.loadExpert(
+                        layer: 0,
+                        expert: plan.experts[index],
+                        slot: plan.assignedSlots[index])
+                } catch {
+                    errorLock.lock()
+                    if firstError == nil { firstError = error }
+                    errorLock.unlock()
+                }
+                // Stored on the throwing path too: an iteration that failed still
+                // consumed wall time inside the batch, and leaving its mark at zero
+                // would make the slowest iteration look instantaneous.
+                marks[base + 1] = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             }
-            // Stored on the throwing path too: an iteration that failed still
-            // consumed wall time inside the batch, and leaving its mark at zero
-            // would make the slowest iteration look instantaneous.
-            marks[base + 1] = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            waveStart += waveCount
         }
         let tReadEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         lastReadNanos = tReadEnd &- tRead
