@@ -177,12 +177,35 @@ Note the KV cache is **not the current bottleneck it was for Gemma**: Gemma had 
 
   Alongside it: `io` 232.91 ms/step, `cb2` 0.85, head 5.39 (wall), PLE gather 3.75, 191.5 command buffers/step, 603 MB/step of routed-expert reads.
 
+- **Added 2026-09-11 — GPU attribution (`gpu_cb1`, `gpu_cb1_fullattn`, `gpu_cb1_gdn`, `gpu_routed`, `gpu_samples`).** The same readout now reports device execution time, read from `MTLCommandBuffer` timestamps after completion — no extra buffer, no extra wait, no change to commit order. This is the piece §4.1's first pass named as missing: the CPU buckets price the dispatch, so they cannot say whether a kernel is slow. `gpu_cb1_fullattn + gpu_cb1_gdn == gpu_cb1` exactly on every run below, because both halves come from one sample branched on the layer kind. Three runs, all `--temperature 0`, 31 decode forwards, all `identity=exact`:
+
+  | install / prompt | stack | layers | ms/step | **ms/layer** | share of `gpu_cb1` |
+  | --- | --- | ---: | ---: | ---: | ---: |
+  | 3.8 Flash-Next, 54 tok, 16 slots | full attention | 12 | 13.52 | **1.127** | 17.9% |
+  | | GDN | 36 | 61.85 | **1.718** | 82.1% |
+  | | *`gpu_cb1`* | 48 | 75.37 | 1.570 | |
+  | 3.6 35B, 54 tok, 32 slots | full attention | 10 | 5.30 | **0.530** | 15.7% |
+  | | GDN | 30 | 28.52 | **0.951** | 84.3% |
+  | | *`gpu_cb1`* | 40 | 33.82 | 0.846 | |
+  | 3.6 35B, 1791 tok, 32 slots | full attention | 10 | 12.81 | **1.281** | 29.9% |
+  | | GDN | 30 | 29.98 | **0.999** | 70.1% |
+  | | *`gpu_cb1`* | 40 | 42.79 | 1.070 | |
+
+  Four things follow, and they are the reason this cycle was worth its cost:
+
+  1. **GDN is where the GPU time is.** 1.718 ms/layer against attention's 1.127 on 3.8 (1.6x), 84.3% of `gpu_cb1` on 3.6. On 3.8 that is 16.8% of the whole 367 ms token in one stack.
+  2. **Attention scales with context; GDN does not.** On 3.6, going from 54 to 1791 tokens of context moves attention 0.530 -> 1.281 ms/layer (+142%) while GDN moves 0.951 -> 0.999 (+5%). Attention **overtakes GDN per layer** somewhere between those two points. It does not overtake it in aggregate, because three of every four layers are GDN — but the crossing is real and it is the lever item 3.2 (int8 KV) acts on. Two points give a slope, not a curve: 0.43 us per layer per context token, which would put attention at ~2.3 ms/layer at 4K on this install. Treat that as an extrapolation to test, not a projection.
+  3. **The `wait`-as-overhead reading was wrong, and the size of the error is the finding.** `wait` minus *both* GPU figures is 10.40 / 5.60 / 8.69 ms/step across the three runs — 0.055 / 0.035 / 0.055 ms per command buffer. That is an order of magnitude *below* the ~0.26 ms a kernel-bearing buffer costs, measured in S6. `wait` looks like a third of the token because layer N+1's `cb1` is committed after layer N's routed tail, so its wait drains that tail. Subtracting only `gpu_cb1` charges the largest kernel block in the model to overhead.
+  4. **`gpu_samples` is an exact gate, not a rough one.** In all three runs `cbs - gpu_samples` is exactly 62, i.e. exactly two buffers per forward — buffers sampled while still in flight and therefore skipped. The same value across three different installs, prompts and slot counts means the instrument is deterministic, so a shortfall that is *not* two per forward is a real defect rather than noise.
+
 - **What this decides**:
-  - **2.3 (GDN fusion) — no-go on the encode side.** The whole GDN split is 0.65 ms/step; the pair 2.3 wants to fuse (`conv_gate` + `recurrent`) is 0.53. Against a 367 ms/token that is 0.14% — fusing it cannot move throughput. The counters price the *dispatch*; a GPU-side win is not visible here and would need per-op GPU attribution, which this cycle does not have.
-  - **3.4 (router GEMV) — same shape.** The router bucket is 0.21 ms/step (0.06% of the token) on 3.8 and 0.35 (0.31%) on 3.6. The CPU-side headroom is closed; whether the *kernel* is slow stays open for the reason above.
-  - **2.2 (CB coalescing) — now has its number.** 191.5 CBs/step, i.e. 3.99 per layer: the three unconditional buffers (`cb`, `sharedCB`, `routedCB`) plus the hit-split buffer on ~45 of the 48 layers, plus two per forward. `wait` is 121.05 ms/step — a third of the token — and that is the only bucket a CB-count reduction can plausibly reach.
-  - **The frame itself is the finding**: every CPU encode bucket on the machine sums to 0.8% of the token. The token is I/O, not encode.
+  - **2.3 (GDN fusion) — reconsidered, and still not yet priced.** The first pass called this a no-go because the whole GDN split was 0.65 ms/step of *encode*. That reasoning was sound but empty on the GPU side, and the GPU side now answers the half that matters: GDN is 82% of `gpu_cb1` and 16.8% of the token, so the stack 2.3 targets is unambiguously where the time is. What is still missing is the split *within* GDN — the 1.718 ms/layer covers `gdn_proj`, `gdn_conv_gate`, `gdn_recurrent`, `gdn_rmsnorm_gated` and `gdn_o_proj` together, and 2.3 fuses a specific pair of them. Per-kernel GPU timestamps inside the GDN stack are the next instrumentation step, not a re-run of this one.
+  - **3.4 (router GEMV) — unchanged, and now for a measured reason.** The router bucket is 0.20-0.31 ms/step of encode on both installs. It is not broken out on the GPU side at all, so the kernel question stays open — but the attention curve above says where the GPU headroom is, and it is not the router.
+  - **2.2 (CB coalescing) — refuted, not merely unsized.** The first pass read `wait` = 121.05 ms/step as reachable overhead and made it 2.2's target. The corrected residue is 0.055 ms/CB: after both GPU figures are subtracted, per-buffer overhead is already an order of magnitude cheaper than a kernel dispatch. There is no three-figure pool of dispatch tax to reclaim, and the stand-alone rejections of ORCH-15 and ORCH-12 are not overturned by anything here.
+  - **3.2 (int8 KV) — promoted by the attention curve.** The earlier note that a CPU encode bucket could not price a KV-format change was correct; the GPU split prices the *stack*, and the stack grows 2.4x per layer over 1.7K tokens of context while everything else in the layer stays flat. That curve is the case for 3.2, and it is measurable with the instrument now in place.
+  - **The frame itself is still the finding**: every CPU encode bucket on the machine sums to 0.8% of the token, and the GPU work in `cb1` is 20-30% of it. The token is I/O and pipeline wait. Neither the encode split nor the GPU split touches that, because neither instrument can see a *prediction* — filling the read window with GPU work would need layer N+1's experts before layer N's router finishes, which is the decode-side prefetch question §1.3 does not cover (it is prefill-only) and which no item on this list currently owns.
 - **Note for 2.1**: `io` is *awaited* read time, so it overlaps the shared-expert GPU work rather than following it. These buckets are not a serial timeline — see the sweep result under 2.1.
+- **Method note**: `gpu_cb1_fullattn`/`gpu_cb1_gdn` are alternatives, so they are read per layer — dividing each by its own layer count (12/36 on 3.8, 10/30 on 3.6) — never per step. Comparing the two ms/step figures directly would just re-derive the layer ratio.
 
 ### 4.2 [MEDIUM impact, LOW risk] Batch/streaming decode requests — explicitly out of scope per current design, flag rather than recommend
 - **Evidence**: `SYSTEM_DESIGN.md` "Scope and limitations": "server batching... [is] outside the current scope," and the server "serializes generation." This is a legitimate throughput lever (batched decode amortizes weight reads across multiple sequences) but is a substantial architecture change — the entire LFU expert-cache design assumes one active decode stream. **Flagging, not recommending**, since it's out of scope for "accelerate this engine" in its current single-stream form and would require its own design document.
@@ -199,9 +222,9 @@ Note the KV cache is **not the current bottleneck it was for Gemma**: Gemma had 
 2. **2.1** — Expert-cache sizing/hit-rate study for 256-expert Qwen shape (highest-value unmeasured question)
 3. ~~**1.2** — Expose `--verify trusted-install` in app/server~~ — done 2026-09-11; all four call sites default to `auto`
 4. **1.1** — Prefill chunk-size sweep past 128
-5. **3.2** — Int8 KV cache for the 10 full-attention layers only, with the stronger dual quality gate (EvalPlus + 4096 soak)
-6. **2.2** — Command-buffer coalescing in decode (needs 4.1 data first to justify)
-7. **2.3** — GDN kernel fusion (gate into recurrent)
+5. **3.2** — Int8 KV cache for the 10 full-attention layers only, with the stronger dual quality gate (EvalPlus + 4096 soak) — **promoted by the GPU split**: attention is the only part of a layer that grows with context (0.530 -> 1.281 ms/layer over 1.7K tokens on 3.6, +142%, while GDN moves +5%)
+6. ~~**2.2** — Command-buffer coalescing in decode~~ — **refuted 2026-09-11**; the residual per-buffer overhead is 0.035-0.055 ms against a ~0.26 ms kernel dispatch, so there is no pool to reclaim. Do not re-open without a new mechanism.
+7. **2.3** — GDN kernel fusion (gate into recurrent) — the target stack is now identified (82% of `gpu_cb1`, 1.718 ms/layer on 3.8); what is missing is the per-kernel split inside GDN, which is the prerequisite for pricing this item
 8. **1.3** — Deeper prefill expert-prefetch pipelining
 9. **3.4** — Router GEMV load-width audit
 10. **1.4** — (folded into 4.1)

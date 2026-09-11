@@ -370,6 +370,39 @@ exclude the wait. `io` is awaited read time and the output-head bucket wraps a
 submit-and-wait, so both are wall clocks including their waits. The two are not
 one timeline, and adding them is meaningless.
 
+### GPU time, and the subtraction that misleads
+
+The same readout reports GPU time, which the buckets above cannot: those are CPU
+encode clocks, and a heavily-encoded dispatch is not a slow kernel. Two figures
+are read from `MTLCommandBuffer` timestamps after completion, with no extra
+command buffer, no extra wait, and no change to commit order:
+
+| Field | Span |
+| --- | --- |
+| `gpu_cb1` | the layer's `cb1`, split further into `gpu_cb1_fullattn` and `gpu_cb1_gdn` by layer kind |
+| `gpu_routed` | the shared-expert and routed-expert tail, plus the early-committed hit-phase buffer |
+| `gpu_samples` | completed buffers that returned a real timestamp |
+
+`gpu_cb1_fullattn + gpu_cb1_gdn == gpu_cb1` by construction: both come from one
+`recordGpuTime` sample branched on the layer kind, so calling it twice -- which
+would also double `gpu_samples` -- is the only way to break the sum. As with the
+CPU buckets the two are **alternatives**, compared per layer (twelve against
+thirty-six on 3.8, ten against thirty on 3.6), never per step.
+
+**Do not read `wait` minus `gpu_cb1` as dispatch overhead.** That subtraction
+charges the entire routed tail -- the largest kernel block in the model -- to
+overhead, because layer N+1's `cb1` is committed after layer N's tail and its
+wait therefore drains it. Subtracting both GPU figures leaves the actual
+residue: 9.18 ms/step, or 0.048 ms per command buffer, an order of magnitude
+*below* the ~0.26 ms a kernel-bearing buffer costs. The gap between the two
+readings is not a measurement error; it is the difference between "the tail is
+overhead" and "the tail is the model computing."
+
+`gpu_samples` is the gate on all of it: it should sit within about two buffers
+per forward of `cbs`. The routed tail is deliberately not waited on, so a buffer
+still in flight when it is retired reports no timestamp and is skipped, which is
+why the count is printed rather than assumed.
+
 ```mermaid
 flowchart TD
     H["hidden state"] --> C1["CB1: norm, QKV, RoPE, KV write,\nattention, O projection, router"]

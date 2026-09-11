@@ -76,12 +76,17 @@ the changed setting.
   stderr line after the timing footer: the `cb1` sub-buckets (with an
   `identity=` field that reads `exact` when they tile `cb1`), `io`, the head,
   expert-cache hits and misses, command buffers, and — when GPU timestamps are
-  readable — summed GPU time. It accumulates unconditionally and is not
+  readable — summed GPU time, split into `gpu_cb1`, `gpu_cb1_fullattn`,
+  `gpu_cb1_gdn`, and `gpu_routed`, with `gpu_samples` showing how many buffers
+  contributed a real timestamp. It accumulates unconditionally and is not
   suppressed by `--quiet`, which covers the timing footer only. Read the clock
   kinds: the `cb1` buckets are CPU encode-and-commit clocks that exclude the
   pipeline wait, while `io` and the head are wall clocks that include theirs, so
-  the figures overlap and are not a serial timeline. See
-  [System design](SYSTEM_DESIGN.md) for the bucket table.
+  the figures overlap and are not a serial timeline. The GPU figures are a third
+  kind again — kernel execution time on the device, which no encode clock can
+  see. See [System design](SYSTEM_DESIGN.md) for the bucket table, the per-layer
+  rule for reading the two stack splits, and why `wait` minus `gpu_cb1` is not
+  dispatch overhead.
 
 During chunked prefill, the phase label reports exact progress, for example
 `Prefill (128/514)`. Errors and unsupported configurations appear only when

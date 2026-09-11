@@ -131,4 +131,34 @@ import Testing
         // negative duration: saturating keeps it from printing as ~1.8e19.
         #expect(base.delta(from: now).cb1Nanos == 0)
     }
+
+    /// The GPU split reports both layer kinds, because they are alternatives: a
+    /// layer runs the attention stack or the GDN stack, never both. On Qwen 3.8
+    /// that is 12 full-attention layers against 36 GDN ones, so the pair is read
+    /// per layer — dividing each by its own layer count — and a single summed
+    /// `gpu_cb1` cannot say which stack owns the time.
+    @Test func gpuSplitReportsBothLayerKinds() {
+        var values = Self.tiled(forwards: 2, cb1: 80_000)
+        values.gpuCb1Nanos = 72_000_000
+        values.gpuCb1FullAttnNanos = 12_000_000
+        values.gpuCb1GdnNanos = 60_000_000
+        let line = RunnerCounters.line(values, expertStride: nil)
+
+        #expect(Self.field("gpu_cb1_wall_ms/step", in: line) == "36.00")
+        #expect(Self.field("gpu_cb1_fullattn_wall_ms/step", in: line) == "6.00")
+        #expect(Self.field("gpu_cb1_gdn_wall_ms/step", in: line) == "30.00")
+
+        // Both buckets come from one `recordGpuTime` sample and a branch on the
+        // layer kind, so they tile the total by construction — asserting the sum
+        // is checking the wiring, not re-deriving a number the formatter made.
+        #expect(values.gpuCb1FullAttnNanos + values.gpuCb1GdnNanos
+                    == values.gpuCb1Nanos)
+
+        // Per-counter like every other field, so a snapshot pair cannot drop
+        // the new buckets silently.
+        var later = values
+        later.gpuCb1GdnNanos = 90_000_000
+        #expect(later.delta(from: values).gpuCb1GdnNanos == 30_000_000)
+        #expect(later.delta(from: values).gpuCb1FullAttnNanos == 0)
+    }
 }
