@@ -1360,48 +1360,77 @@ private enum T38 {
     /// `tolerance`; it holds them at these numbers and asserts that no *other*
     /// stage joins them.
     ///
-    /// All of them are the last row's layer-3 chain — the one chain whose inputs
-    /// are not the row's own arithmetic but eleven rows of the full layer's KV
-    /// timeline. Row 11 is the first row past the indexer's capacity (11), so it
-    /// attends through the sparse cell selection rather than `encodeFull`, and
-    /// that selection is what makes the output discontinuous in its inputs:
-    /// measured on this toy, a 1.9e-2 relative difference in the layer's input
-    /// plane (`3|attnBlockIn`) becomes a 5.0e-1 difference in its output
-    /// (`3|attnBlockOut`, element 16, 41.5 absolute) — a ~26x amplification
-    /// inside one attention op.
+    /// Six of the seven are the last row's layer-3 chain — five stages of it and
+    /// the `logits` it produces. That chain's inputs are not the row's own
+    /// arithmetic but eleven rows of the full layer's KV timeline, which the
+    /// replay builds from its own planes. Row 11 is the first row past the
+    /// indexer's capacity (11), so it attends through the sparse cell selection
+    /// rather than `encodeFull`, and that selection is what makes the output
+    /// discontinuous in its inputs: the row's *attention input* is bit-identical
+    /// between the two paths (`3|attnBlockIn` = 0.0), yet its output leaves at
+    /// 7.4e-2 — so what the selection amplifies is the KV residue, not anything
+    /// about the row's own input.
+    ///
+    /// The seventh, `2|recState`, is the same shape one layer down: the GDN
+    /// state a chunk carries is unanchored exactly as the KV timeline is
+    /// (`Replay.planeSeeds` re-seeds planes and never the recurrence), and its
+    /// residue compounds with layer index — 1.0e-6 at layer 0, 3.7e-3 at layer
+    /// 1, 1.3e-2 at layer 2 — while the readout damps it back under `tolerance`
+    /// downstream (`2|recurrentOut` 5.5e-3). It is the only layer 0–2 stage past
+    /// the line, and it is past it barely; layer 0 holds at ≤ 7.1e-4 and layer
+    /// 1 at ≤ 3.7e-3.
+    ///
+    /// That this is carried-in residue and not a defect in the chunk's
+    /// recurrence is already settled elsewhere: `prefillChunkMatchesDecodeSteps`
+    /// holds `0|recState` **bit-exact** between one `prefillChunked` span and
+    /// twelve `produce` steps, so the prefill and decode recurrent kernels agree
+    /// exactly on the same inputs. What layer 2 has that layer 0 does not is two
+    /// layers of unanchored state upstream of it.
     ///
     /// That number is not a replay artifact, and the control is the engine
     /// itself: run the same twelve tokens through `produce` twelve times and
     /// through one `prefillChunked` chunk, and the engine's *own* two paths
-    /// differ at `3|attnBlockOut` by 0.50025904 — the same stage, the same
-    /// element, the same magnitude this replay sits at (0.49819666). The
-    /// chunk path seeds that difference at layer 0, where `MoeTailRef`'s chunked
-    /// reduce takes fp16 `routePartials` while decode's fused
-    /// `moe_phase2_down_reduce_k8` keeps the per-slot values fp32
-    /// (`Qwen38EngineLoadTests.prefillChunkMatchesDecodeSteps` documents the same
-    /// staging difference as `mlpBlockIn` nDiff 28/64 at layer 0 and calls the
-    /// resulting ~6% in the logits "correct" for this toy). Layer 0's attention
-    /// stages themselves are *bit-identical* between the two paths (diff 0/64).
+    /// differ at `3|attnBlockOut` by 0.09765625 — the same stage this replay
+    /// sits at (0.07423675), and in fact a *shorter* distance than the engine's
+    /// two paths are from each other. The chunk path seeds that difference at
+    /// layer 0, where `MoeTailRef`'s chunked reduce takes fp16 `routePartials`
+    /// while decode's fused `moe_phase2_down_reduce_k8` keeps the per-slot
+    /// values fp32 (`Qwen38EngineLoadTests.prefillChunkMatchesDecodeSteps`
+    /// documents the same staging difference as `mlpBlockIn` nDiff 28/64 at
+    /// layer 0 and calls the resulting ~6% in the logits "correct" for this
+    /// toy). Layer 0's attention stages themselves are *bit-identical* between
+    /// the two paths (diff 0/64).
     ///
     /// A reference can only reproduce a row whose state it shares. The replay
     /// shares a chunk's last row (the only row the engine snapshots, `snapRow = t
     /// − 1`) and re-anchors there at every layer, which is why the same eleven
     /// rows in *decode* — where every row is anchorable — hold this replay at
-    /// ≤ 1.9e-3 on the same stage (`3|sharedOut`, the decode test's worst) and
-    /// why layers 0–2 hold here at ≤ 8.6e-3 under the same comparison. What it
-    /// cannot share is rows 8…10 of layer 3's KV timeline, and the sparse
-    /// selection turns that residue macroscopic. Closing it would mean
-    /// snapshotting more than a chunk's last row, which is an engine change, not
-    /// a test change.
+    /// ≤ 3.4e-3 on the same stage (`3|sharedOut`) and why layers 0 and 1 hold
+    /// here under the same comparison. What it cannot share is rows 8…10 of
+    /// layer 3's KV timeline, and the sparse selection turns that residue
+    /// macroscopic. Closing it would mean snapshotting more than a chunk's last
+    /// row, which is an engine change, not a test change.
+    ///
+    /// Every ceiling here was re-measured after the repacker's `hc_norm` fold
+    /// was corrected (M4), because that gate is the residual backbone and taking
+    /// it raw had left the plane sign-scrambled — so the whole set below was
+    /// measured in a wrong-gate regime. Under it the same run measured
+    /// 0.49819666 / 0.3041551 / 0.22048835 / 0.20131938 / 0.1734365 /
+    /// 0.062440872 and the control above was 0.50025904. The corrected gate is
+    /// better conditioned as well as right: the layer-3 set shrank ~6-9x,
+    /// `3|hc.mid` dropped out of it entirely (0.05141066 → 4.9e-3, so it is now
+    /// held at `tolerance` instead — a tighter bound than the 0.06 it had), and
+    /// only `2|recState` moved the other way (0.009862052 → 0.013246425).
     static let prefillAmplified: [String: Float] = [
-        // measured (2x headroom; the values are deterministic run to run)
-        "3|attnBlockOut": 0.50,   // 0.49819666
-        "3|sharedOut": 0.31,      // 0.3041551
-        "3|ffnBlockIn": 0.23,     // 0.22048835
-        "logits": 0.21,           // 0.20131938  (keyed without the "prefill " prefix)
-        "3|mlpBlockIn": 0.18,     // 0.1734365
-        "3|hc.post": 0.07,        // 0.062440872
-        "3|hc.mid": 0.06,         // 0.05141066
+        // measured; each ceiling is its measurement rounded up to two decimals
+        // (the values are deterministic run to run)
+        "3|attnBlockOut": 0.08,   // 0.07423675
+        "3|mlpBlockIn": 0.07,     // 0.06697009
+        "3|sharedOut": 0.06,      // 0.05645851
+        "3|ffnBlockIn": 0.06,     // 0.05053381
+        "logits": 0.03,           // 0.022107244  (keyed without the "prefill " prefix)
+        "3|hc.post": 0.02,        // 0.015037594
+        "2|recState": 0.02,       // 0.013246425
     ]
 }
 
@@ -1522,15 +1551,19 @@ private enum T38 {
     /// still the sparse regime — it only resets the replay's plane to the
     /// engine's every fourth row. It buys real coverage: with one twelve-row
     /// chunk the replay's layer-2 `recState` accumulated enough of its own
-    /// residue to cross the tolerance (0.010184287); anchored every fourth row
-    /// it does not, and no layer 0–2 stage — nor layer 3's attention input —
-    /// reaches the tolerance at all. The only stages that do are the layer-3
-    /// chain listed below.
+    /// residue to cross the tolerance (0.010184287), and anchoring every fourth
+    /// row brought it back under (0.009862052) — though only just, and only
+    /// under the repacker's old raw-`hc_norm` regime. With that fold corrected
+    /// (M4) it sits at 0.013246425, so it is now the one layer 0–2 stage past
+    /// the line and `prefillAmplified` carries it rather than pretending
+    /// otherwise. Anchoring still holds every other layer 0–2 stage, and layer
+    /// 3's bit-identical attention input, at `tolerance`.
     ///
-    /// Layer 3's last-row chain does *not* converge, and cannot: `prefillAmplified`
-    /// holds the measured values, the control that shows the engine's own two
-    /// paths sit the same distance apart, and why only an engine change could
-    /// close it. The assertion below is therefore in two parts — everything at
+    /// The last row's layer-3 chain — and, one layer down, the `recState` a
+    /// chunk carries — does *not* converge, and cannot: `prefillAmplified` holds
+    /// the measured values, the control that shows the engine's own two paths
+    /// sit the same distance apart, and why only an engine change could close
+    /// it. The assertion below is therefore in two parts — everything at
     /// `tolerance`, and the documented set at its measured ceilings, with a
     /// stage that joins the set failing the test.
     @Test func prefillLastRowMatchesFP32Replay() async throws {

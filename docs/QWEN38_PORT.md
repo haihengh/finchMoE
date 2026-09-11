@@ -10,12 +10,16 @@ tokenizer and the Gated-DeltaNet (GDN) unit; 3.8 replaces every RMSNorm with
 **hyper-connections**, adds **QSA** sparse-block attention on the full
 attention layers, and adds a **PLE n-gram** hash-embedding on one layer.
 
-Status: **M0 (data model) landed 2026-09-08 (commit `4de4774`); the engine
-still refuses qwen3_8 installs at load** (`Model.validateRuntimeSchema`
-throws "qwen3_8 installs need the Flash-Next engine (M2)"). The plan below
-runs M1 (repack) → M2 (load/schema) → M3 (forward: hyper-connection → QSA →
-PLE, decode then prefill) → M4 (real 352 GB repack + llama.cpp oracle
-cross-check) under the machine protocol at the bottom. The user directive
+Status: **M0–M3.5 landed and verified; M4 is in progress** — the real
+174,403,168,940 B (162 GiB) install at
+`models/Qwen3.8-Flash-Next-125B.finch` loads, prefill/decode are coherent
+and inside the 16 GB budget, and the only open deliverable is the llama.cpp
+oracle cross-check (`### Remaining work` item 7 below). The qwen3_8
+load-gate throw ("qwen3_8 installs need the Flash-Next engine (M2)") is
+gone. The plan ran M1 (repack) → M2 (load/schema) → M3 (forward:
+hyper-connection → QSA → PLE, decode then prefill) → M4 (real repack +
+llama.cpp oracle cross-check) under the machine protocol at the bottom. The
+user directive
 (2026-09-09): full engine pass including repacking the local bf16 snapshot
 into a `.finch` install and smoke-decode on this machine; correctness bar is
 **numeric vs llama.cpp**; heavy runs happen here under the operating
@@ -470,14 +474,31 @@ tokenizer maps `qwen4_exp` into the shared `.qwen3_6` family. Tests:
    * **Layer 3's last-row prefill chain does not converge, and cannot.**
      The replay may only share a chunk's last row (`snapRow = t − 1`), never
      rows 8…10 of layer 3's KV timeline, and the QSA sparse selection turns
-     that residue macroscopic — `3|attnBlockOut` reaches 0.498. The control:
-     the engine's *own* decode and chunk paths differ at the same stage,
-     element and magnitude (0.50025904 vs 0.49819666), seeded at layer 0
+     that residue macroscopic — the row's *own* attention input is
+     bit-identical between the two paths (`3|attnBlockIn` = 0.0) yet its
+     output leaves at 0.07423675, so what the selection amplifies is the KV
+     residue, not anything about the row's input. The control is the engine
+     itself: its *own* decode and chunk paths differ at the same stage by
+     0.09765625 — a *longer* distance than the replay's — seeded at layer 0
      where `MoeTailRef`'s chunked reduce takes fp16 `routePartials` while
-     decode's fused reduce keeps fp32. `T38.prefillAmplified` pins the seven
-     measured stages with 2× headroom as a *subset* check — a stage that
-     joins the list fails — and the same stages hold at ≤1.9e-3 in decode,
-     where every row is anchorable. Closing it is an engine change.
+     decode's fused `moe_phase2_down_reduce_k8` keeps fp32.
+     `T38.prefillAmplified` pins the seven measured stages as a *subset*
+     check — each ceiling is its measurement rounded up to two decimals, and
+     a stage that joins the list fails — while the same stages hold at
+     ≤ 3.4e-3 in decode, where every row is anchorable. Closing it is an
+     engine change.
+   * **That whole set was re-measured after the `hc_norm` fold was
+     corrected (M4)**, because it had been measured in a wrong-gate regime.
+     The hyper-connection mixer is the 3.8 residual backbone *and* its output
+     norm; taking its gate raw left the residual plane sign-scrambled, so
+     every ceiling above was a wrong-gate number. Under the old gate the same
+     run measured 0.49819666 / 0.3041551 / 0.22048835 / 0.20131938 /
+     0.1734365 / 0.062440872 for the layer-3 set and 0.50025904 for the
+     control. The corrected gate is better conditioned as well as right: the
+     layer-3 set shrank ~6-9×, `3|hc.mid` dropped out of it entirely
+     (0.05141066 → 4.9e-3, so it is now held at `tolerance` — 0.010184287,
+     tighter than the 0.06 ceiling it had), and only `2|recState` moved the
+     other way (0.009862052 → 0.013246425).
    * **The toy's first greedy token is `<|im_end|>`**, so the CLI run ends
      `stop=eos new=1tok` with an empty stdout delta (a special token has no
      detokenized text). The smoke therefore asserts on the stderr footer
@@ -508,7 +529,74 @@ tokenizer maps `qwen4_exp` into the shared `.qwen3_6` family. Tests:
    tokenizer side is already closed — M0 mapped `qwen4_exp` into the shared
    `.qwen3_6` family (see the M0 entry above), and 3.8 shares the 3.6
    tokenizer byte-for-byte, so no `qwen3_8` case is needed. Remaining here:
-   full suite both families.
+   the oracle run itself.
+
+   **Full suite green, both families (2026-09-11)** — 866 tests in 151 suites.
+   Both real installs are covered (`QwenRealInstallLoadTests` for the 3.6,
+   `Qwen38RealInstallLoadTests` for the 3.8), as are `Qwen38ToyReplayTests`,
+   `Qwen38EngineLoadTests`, `Qwen38ToyCLISmokeTests` and
+   `QwenLayer0DebugTests`. It does not run green as a single
+   `swift test --no-parallel`, and the account below is the second attempt at
+   explaining why — the first two explanations were both wrong.
+
+   Three things had to be fixed before it would get there, all in
+   `QwenLayer0DebugTests`:
+
+   * **A `-1` index sentinel trapped the whole test process.** The sweep's
+     `var idx = -1` only advances when `d > m`, so when *no* element differs —
+     or every comparison is unordered because a plane carries a NaN — it stays
+     at `-1` and the report's `a[idx]` raises `Index out of range`, which
+     Swift's runtime turns into SIGTRAP: the suite dies with no `✘` line at
+     all (this is why two earlier full-suite runs reported a bare
+     `signal code 5`). Five sites subscripted arrays this way; they now route
+     through `QwenLayer0DebugTests.worstDelta` / `describeDelta`, which report
+     "no element differs (nan=…)" instead of trapping. The remaining `= -1`
+     sites in that file are print-only or already guarded.
+   * **`repackWeightsMatchBf16Checkpoint` widened 3.65 GB of bf16 into
+     7.29 GB of fp32 to compare ~20 MB of rows.** `readBF16` reads a whole
+     tensor, and three of its callers then used a handful of rows of it:
+     `lm_head` and `embed_tokens` are `[248320, 2048]` — 1.017 GB each in
+     bf16, 2.03 GB widened to `[Float]` — and the test looked at 8 rows and at
+     5 rows respectively; `experts.gate_up_proj` (all 256 experts, 1.074 GB →
+     2.15 GB) and `experts.down_proj` (0.537 GB → 1.07 GB) were read whole to
+     compare **expert 0**, with both refs live in the same scope. A
+     `readBF16Rows` sibling that bounds the widen to `rows * cols * 2` bytes
+     — which matches each of those four tensors' `data_offsets` span exactly —
+     leaves all 24 printed assertions byte-identical to the pre-fix run and
+     takes the test from 13.46 s to 9.96 s. This is a real waste, but it was
+     *not* the kill: measured alone the test peaks at 2.6-3.4 GB either way,
+     because these are sub-5-second transients and the guard samples every 5 s.
+   * **One process cannot hold all twelve heavy tests, and no ceiling fixes
+     that.** With the trap gone the suite ran to completion for the first
+     time, and four one-process runs bracketed the problem without explaining
+     it. Run 3 at the default 4 GB died at 5.2 GB. Run 4 at
+     `--max-compressed 6` was **green** — 866 tests in 151 suites, 200.1 s,
+     low-water 47% free, swap flat at 342 MB. Run 5 at the *same* 6 GB died
+     at 6.3 GB inside `multiStepStateContinuity`, right after
+     `repackWeightsMatchBf16Checkpoint` passed at 14.18 s. Run 6 at 8 GB died
+     at 8.9 GB inside `allLayerMixerSweep`. The peak tracks whatever ceiling
+     is set and the outcome varies run to run — Swift Testing randomises test
+     order — so the earlier claim here that "the ceiling that is actually
+     needed is ~6 GB" is falsified. Measured one test per process under the
+     **default** 4 GB ceiling, all twelve pass, 1.1-3.4 GB each:
+     `multiStepStateContinuity` 1.8, `allLayerMixerSweep` 1.4,
+     `layer0PostAttnMatchesFp32Reference` 1.4,
+     `prefillSweepFindsFirstDivergence` 1.4,
+     `prefillLayerTailsMatchReference` 1.3,
+     `repackWeightsMatchBf16Checkpoint` 3.4, and the other five ≤ 1.5.
+     It is cumulative, not a leak: the suite is a `struct` with no stored
+     properties, `MetalContext` keeps only a per-instance pipeline cache, and
+     the file has no static mutable state. Each test's working set is retained
+     as compressed pages — free memory stays ~78%, so macOS never has a reason
+     to drain them — and the next test allocates on top of the last.
+   * **So the suite runs in two phases** (`tools/heavy-tests.sh`, both under
+     the guard's defaults): everything except `QwenLayer0DebugTests` in one
+     process (854 tests in 150 suites, 71.9 s, **1.5 GB** peak), then each of
+     the twelve heavy tests in its own guarded process. That is the shape this
+     16 GB box can finish. The guard's real protections were never approached
+     in any run — worst **47% free** against a 12% floor, swap flat at
+     342-883 MB against a 2048 MB limit — so the compressor ceiling was the
+     only trigger that ever fired, and only for this one suite.
 
 Deferred (documented here): PLE table quant; MTP; vision; indexer cache
 compaction. `docs/QWEN36_PORT.md` remains the GDN/rope/mrope authority and
