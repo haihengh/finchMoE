@@ -27,7 +27,7 @@ public struct Args: Equatable, Sendable {
                 seed: UInt64? = nil,
                 stops: [String] = [],
                 quiet: Bool = false,
-                verify: ModelIntegrityPreference = .fullSha256) {
+                verify: ModelIntegrityPreference = .automatic) {
         self.model = model
         self.prompt = prompt
         self.messagesFile = messagesFile
@@ -87,11 +87,16 @@ extension Args {
       --seed <uint64>           Deterministic sampling seed (default off).
       --stop <string>           Stop substring (repeatable).
       --quiet                   Suppress the timing footer.
-      --verify <mode>           Integrity policy: full-sha256 (default) hashes
-                                model_weights.bin at load and each layer file on
-                                first use; trusted-install trusts the repack
-                                receipt (verified-install.json) and size-checks
-                                instead — removes the ~8 s one-time hash.
+      --verify <mode>           Integrity policy. auto (default) uses
+                                verified-install.json when one is present and
+                                valid and falls back to hashing otherwise;
+                                full-sha256 hashes model_weights.bin at load and
+                                every layer and PLE part file on first use;
+                                trusted-install requires the receipt and
+                                size-checks those files against it instead.
+                                On the 125B install the receipt path cuts
+                                prefill from ~45 s to ~2 s. model_weights.bin
+                                and the expert layout are hashed in every mode.
       --help                    Show this message.
     """
 
@@ -108,7 +113,7 @@ extension Args {
         var seed: UInt64?
         var stops: [String] = []
         var quiet = false
-        var verify = ModelIntegrityPreference.fullSha256
+        var verify = ModelIntegrityPreference.automatic
 
         var index = 0
         while index < argv.count {
@@ -172,6 +177,8 @@ extension Args {
             case "--verify":
                 let value = try takeValue(argv, &index, flag: flag)
                 switch value {
+                case "auto":
+                    verify = .automatic
                 case "full-sha256":
                     verify = .fullSha256
                 case "trusted-install":

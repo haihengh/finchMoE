@@ -80,6 +80,14 @@ public func run(args: Args,
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: args.verify)
+        // A receipt that is present but unusable is the one case worth
+        // interrupting for: the caller may have been relying on it. An absent
+        // one is silent. Goes to the injected `stderr` so tests capture it, and
+        // is not gated on `--quiet`, which documents itself as suppressing the
+        // timing footer only.
+        if let warning = model.integrityOutcome.warningMessage {
+            stderr.write(Data("warning: \(warning)\n".utf8))
+        }
         let runner = try RealForwardRunner(
             model: model,
             context: context,

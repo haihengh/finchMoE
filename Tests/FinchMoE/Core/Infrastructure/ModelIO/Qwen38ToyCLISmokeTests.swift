@@ -33,13 +33,15 @@ import FinchMoECLICore
         defer { try? FileManager.default.removeItem(atPath: out) }
         try Self.writeToyTokenizer(into: out)
 
-        // No `--verify`: the default is `.fullSha256`, which hashes the repack
-        // output against the manifest `LocalQwenRepacker` just wrote — a real
-        // integrity check, and the path a plain `finchmoe --model …` takes.
-        // `--verify trusted-install` would fail here by design: it resolves to
-        // `.sizeCheckTrustedReceipt`, which requires a `verified-install.json`
-        // receipt (`Model.swift:701-717`) that only a signed release install
-        // carries, and throws `trustedReceiptInvalid` without one.
+        // `--verify full-sha256`, explicitly, because that is the coverage this
+        // test provides: it hashes the repack output against the manifest
+        // `LocalQwenRepacker` just wrote, so a repack that produced a file the
+        // manifest does not describe fails here. The default is now `.automatic`,
+        // and this install *does* carry a `verified-install.json` — the repacker
+        // writes one unconditionally (`LocalQwenRepacker.swift:449-458`), which
+        // is what makes the `.automatic` path testable at all — so leaving the
+        // flag off would silently trade that content check for a size check.
+        //
         // Deliberately *not* `--quiet`: that flag suppresses the `stop=… new=Ntok
         // prefill=Ntok` footer (`Run.swift:114-136`), which is the only account
         // of what the generator actually did, and it goes to stderr — so with
@@ -51,39 +53,12 @@ import FinchMoECLICore
             "--max-new", "4",
             "--max-context", "64",
             "--temperature", "0",
+            "--verify", "full-sha256",
         ])
 
-        // `FINCHMOE_EXPECT_ARCH` is what makes a toy install loadable at all,
-        // and it is the reason this test could not be written without touching
-        // `Run.swift`. The CLI resolves the geometry it will validate against
-        // from the *family's built-in preset* (`Run.swift:66` →
-        // `ManifestReader.detectPreset`), so a manifest declaring `qwen3_8`
-        // is required to be 2560-wide and the toy's 64 is rejected outright —
-        // `archMismatch(field: "hiddenSize", expected: "2560", actual: "64")`.
-        // That check is right for a real install and is left exactly as it was;
-        // the override only redirects it to the arch the manifest declares
-        // about itself, and only when the variable is set. Every other toy test
-        // sidesteps the same wall by handing `Model.load` `expecting: Toy38.arch`
-        // directly, which the CLI has no way to accept. `.fullSha256` content
-        // verification is unaffected and still runs on this path.
-        //
-        // Passed as a parameter rather than via `setenv`: Swift Testing runs
-        // cases in parallel, so mutating the process environment here would
-        // race every other case that reads it.
-        let stdout = Pipe()
-        let stderr = Pipe()
-        let result = await run(args: args,
-                               stdout: stdout.fileHandleForWriting,
-                               stderr: stderr.fileHandleForWriting,
-                               environment: ["FINCHMOE_EXPECT_ARCH": "1"])
-        // Close the write ends, or the reads below block forever: `run` has
-        // returned but the pipe still has a live writer.
-        try? stdout.fileHandleForWriting.close()
-        try? stderr.fileHandleForWriting.close()
-        let text = String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(),
-                          as: UTF8.self)
-        let errors = String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(),
-                            as: UTF8.self)
+        // `--verify full-sha256` above, so this leg fails on the flipped byte
+        // rather than quietly size-checking past it.
+        let (result, text, errors) = await Self.runCLI(args)
 
         #expect(result.exitCode == 0, "CLI exited \(result.exitCode): \(errors)")
 
@@ -104,6 +79,126 @@ import FinchMoECLICore
                 "CLI did not prefill the 13-token prompt (stderr: \(errors), stdout: \(text))")
         #expect(errors.contains("stop="),
                 "CLI reported no stop reason (stderr: \(errors))")
+    }
+
+    /// The default path, end to end — and the one assertion here that *proves*
+    /// the default takes the receipt rather than merely surviving without one.
+    ///
+    /// `packed_experts/layer_00.bin` is size-checked against the receipt under
+    /// `.sizeCheckTrustedReceipt` but SHA-256'd under `.fullSha256`
+    /// (`Model.swift:632-640`), so a **size-preserving** byte flip in it —
+    /// `flipByte`, never truncation, which the size check would catch — is
+    /// invisible to one mode and fatal to the other. This leg passes no
+    /// `--verify` at all, so it fails the moment the default stops resolving to
+    /// the receipt; `prefill=13tok` is what rules out the flip being missed
+    /// because layer 0 was never opened.
+    ///
+    /// The flip lands mid-file on purpose: what this asserts is which
+    /// verification path ran, not what the toy's seeded-noise weights then
+    /// produced. Nothing reads the flipped expert at a fixed offset, and even if
+    /// it did, the run is bounded by `--max-new 4`.
+    @Test func defaultVerifyModeTakesTheInstallReceipt() async throws {
+        let out = try await Qwen38EngineLoadTests.makeInstall()
+        defer { try? FileManager.default.removeItem(atPath: out) }
+        try Self.writeToyTokenizer(into: out)
+        let layerURL = URL(fileURLWithPath: out)
+            .appendingPathComponent("packed_experts/layer_00.bin")
+        let size = try FileManager.default
+            .attributesOfItem(atPath: layerURL.path)[.size] as! NSNumber
+        try ModelLoaderTests.flipByte(in: layerURL, at: size.uint64Value / 2)
+
+        let args = try Args.parse([
+            "--model", out,
+            "--prompt", "hello world 3",
+            "--max-new", "4",
+            "--max-context", "64",
+            "--temperature", "0",
+        ])
+        let (result, text, errors) = await Self.runCLI(args)
+
+        #expect(result.exitCode == 0,
+                "the default hashed a layer the receipt already covers — exited \(result.exitCode): \(errors)")
+        #expect(errors.contains("prefill=13tok"), "stderr: \(errors), stdout: \(text)")
+    }
+
+    /// A receipt that is *present but unusable* is the one case worth
+    /// interrupting for, because the caller may have been relying on it. The
+    /// warning goes to the **injected** `stderr` (`Run.swift:88-90`) — which is
+    /// what makes it observable here at all — and is deliberately not gated on
+    /// `--quiet`, a flag that documents itself as suppressing the timing footer
+    /// and nothing else.
+    ///
+    /// The run must still succeed. Falling back to hashing is the whole point of
+    /// `.automatic`, and a receipt problem that cost availability would be a
+    /// worse bug than the verification tax this mode removes. Zeroing
+    /// `manifestSha256` is what makes `validateManifestBinding` reject it: the
+    /// receipt still parses, so this exercises the *invalid* arm rather than the
+    /// absent one, which stays silent by design.
+    @Test func invalidReceiptWarnsOnStderrAndStillRuns() async throws {
+        let out = try await Qwen38EngineLoadTests.makeInstall()
+        defer { try? FileManager.default.removeItem(atPath: out) }
+        try Self.writeToyTokenizer(into: out)
+        try ModelLoaderTests.mutateReceipt(
+            directoryURL: URL(fileURLWithPath: out)
+        ) { root in
+            root["manifestSha256"] = String(repeating: "0", count: 64)
+        }
+
+        let args = try Args.parse([
+            "--model", out,
+            "--prompt", "hello world 3",
+            "--max-new", "4",
+            "--max-context", "64",
+            "--temperature", "0",
+        ])
+        let (result, text, errors) = await Self.runCLI(args)
+
+        #expect(result.exitCode == 0, "CLI exited \(result.exitCode): \(errors)")
+        #expect(errors.contains("warning: \(VerifiedInstallReceiptReader.fileName)"
+                                + " is present but unusable"),
+                "no receipt warning reached stderr: \(errors)")
+        #expect(errors.contains("full SHA-256 instead"),
+                "the warning does not say what it did instead: \(errors)")
+        // A verification change, not a run change.
+        #expect(errors.contains("prefill=13tok"), "stderr: \(errors), stdout: \(text)")
+    }
+
+    // MARK: - CLI harness
+
+    /// Drives the CLI in-process and captures both streams.
+    ///
+    /// `FINCHMOE_EXPECT_ARCH` is what makes a toy install loadable at all, and
+    /// it is the reason these tests could not be written without touching
+    /// `Run.swift`. The CLI resolves the geometry it will validate against from
+    /// the *family's built-in preset* (`Run.swift:77` → `ManifestReader.detectPreset`),
+    /// so a manifest declaring `qwen3_8` is required to be 2560-wide and the
+    /// toy's 64 is rejected outright — `archMismatch(field: "hiddenSize",
+    /// expected: "2560", actual: "64")`. That check is right for a real install
+    /// and is left exactly as it was; the override only redirects it to the arch
+    /// the manifest declares about itself, and only when the variable is set.
+    /// Every other toy test sidesteps the same wall by handing `Model.load`
+    /// `expecting: Toy38.arch` directly, which the CLI has no way to accept.
+    ///
+    /// Passed as a parameter rather than via `setenv`: Swift Testing runs cases
+    /// in parallel, so mutating the process environment here would race every
+    /// other case that reads it.
+    private static func runCLI(_ args: Args)
+        async -> (result: RunResult, text: String, errors: String) {
+        let stdout = Pipe()
+        let stderr = Pipe()
+        let result = await run(args: args,
+                               stdout: stdout.fileHandleForWriting,
+                               stderr: stderr.fileHandleForWriting,
+                               environment: ["FINCHMOE_EXPECT_ARCH": "1"])
+        // Close the write ends, or the reads below block forever: `run` has
+        // returned but the pipe still has a live writer.
+        try? stdout.fileHandleForWriting.close()
+        try? stderr.fileHandleForWriting.close()
+        let text = String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(),
+                          as: UTF8.self)
+        let errors = String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(),
+                            as: UTF8.self)
+        return (result, text, errors)
     }
 
     // MARK: - Toy tokenizer
