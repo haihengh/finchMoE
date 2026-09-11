@@ -324,7 +324,7 @@ The implementation labels this handoff as three phases:
 
 | Phase | Work |
 | --- | --- |
-| `cb1` | Metal runs input norm, Q/K/V projections, RoPE and KV writes, attention, output projection, post-attention setup, and the router. It completes when the top-8 IDs are ready for CPU readback. |
+| `cb1` | Metal runs input norm, Q/K/V projections, RoPE and KV writes, attention, output projection, post-attention setup, and the router. It completes when the top-8 IDs are ready for CPU readback. On a Qwen install this bucket is *not* uniform across layers: the twelve full-attention layers run the clause above, while the thirty-six GDN (linear-attention) layers instead run `in_proj_qkv`/`in_proj_z`, the short convolution, the gate GEMV, the recurrent update, `rmsnorm_gated`, and `o_proj`. The same bucket, two different bodies. |
 | `io` | The CPU looks up the top-8 experts in the layer cache and fills only missing slots with `pread`. Metal starts the resident shared-expert branch after `cb1` so it overlaps these reads. Cached routed-expert work can also begin early. |
 | `cb2` | Metal finishes the routed top-8 branch, reduces it with the router weights, combines it with the shared branch, and applies the post-FFN norms, residual, and layer scalar. |
 
@@ -333,6 +333,42 @@ waiting for `cb2` while the CPU encodes and queues the next layer. The
 diagnostic counters also use different clocks: `cb1` and `cb2` record CPU
 encode-and-commit overhead, while `io` records awaited read time. They are not
 three serial or directly comparable durations.
+
+### The `cb1` sub-buckets
+
+`FinchMoECLI --counters` (and the runner's `totalCb1*Nanos` counters) break
+`cb1` down further. A cursor walks `[tCb1Start, commit]` and each lapse is
+attributed to the bucket whose work it just covered, so the buckets tile the
+span rather than sampling it:
+
+| Bucket | Span | Answers |
+| --- | --- | --- |
+| `other` | prologue, the tail's post-attention work, and the pending drain | reconciliation |
+| `attention` | the full-attention layers, `gProj` through `gOProj` | item 3.2 |
+| `gdnProj` / `gdnConvGate` / `gdnRecurrent` | the GDN layers, split at the in-projections, conv+gate, and recurrent+norm+`o_proj` | item 2.3 |
+| `router` | router encode through `commit` | item 3.4 |
+| `wait` | the pipeline wait | reported separately |
+| `cbs` | decode command-buffer count | item 2.2 |
+
+Two properties matter more than the individual numbers.
+
+The split is **exact, by construction**: the cursor *skips* the pipeline wait
+rather than attributing it, because `cb1` itself subtracts that wait —
+`other + attention + gdnProj + gdnConvGate + gdnRecurrent + router == cb1`, and
+`--counters` prints `identity=exact` when it holds. The wait is reported beside
+the sum, never inside it; attributing it would put the sum `wait` above `cb1`,
+which still looks like a plausible number.
+
+`attention` and the three GDN buckets are **alternatives**, not a breakdown of
+one another — a layer takes one path or the other. Compare them per layer:
+twelve full against thirty-six GDN on Qwen 3.8, ten against thirty on 3.6. The
+counts come from the preset, not from prose.
+
+Read the clock kinds as well as the numbers. These are **CPU encode-and-commit**
+clocks: they measure encoding the dispatch, not running the kernel, and they
+exclude the wait. `io` is awaited read time and the output-head bucket wraps a
+submit-and-wait, so both are wall clocks including their waits. The two are not
+one timeline, and adding them is meaningless.
 
 ```mermaid
 flowchart TD

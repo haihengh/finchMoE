@@ -36,7 +36,7 @@ is currently reached only by tests. Qwen 3.8 has 12 full-attention layers of 48.
 
 | Control | Values | Production default | Effect |
 | --- | --- | --- | --- |
-| Expert-cache slots | 8, 16, 24, 32 | 16 | More slots can retain more routed experts and reduce later reads, but values above 16 use more RAM. |
+| Expert-cache slots | 8, 16, 24, 32 | 16 | More slots can retain more routed experts and reduce later reads, but values above 16 use more RAM. The CLI takes the same list as `--expert-cache-slots`; a count below the model's top-k is rejected rather than left to trap. |
 | Prompt prefill | On, off | On | On processes known prompt tokens through the chunked prefill path. Off disables that path. |
 | RDADVISE | Off, Default, Bounded, Adaptive | Off | Applies experimental read advice. Its effect depends on the workload; it may help a short decode and slow a long one. |
 | Model verification | Automatic, Full SHA-256, Trust verified install | Automatic | Automatic uses `verified-install.json` when it is present and valid and hashes everything otherwise. Full SHA-256 always hashes. Trust verified install requires the receipt and fails without one. The CLI and the server take the same three modes as `--verify auto\|full-sha256\|trusted-install`. |
@@ -72,6 +72,16 @@ the changed setting.
 - **I/O / token** reports routed-expert read time per generated token.
 - **Advanced** shows decode duration and per-token cb1, cb2, and output-head
   time. When RDADVISE runs, it also shows time, calls, data, and skipped advice.
+  The CLI has the same breakdown behind `--counters`, which prints one extra
+  stderr line after the timing footer: the `cb1` sub-buckets (with an
+  `identity=` field that reads `exact` when they tile `cb1`), `io`, the head,
+  expert-cache hits and misses, command buffers, and — when GPU timestamps are
+  readable — summed GPU time. It accumulates unconditionally and is not
+  suppressed by `--quiet`, which covers the timing footer only. Read the clock
+  kinds: the `cb1` buckets are CPU encode-and-commit clocks that exclude the
+  pipeline wait, while `io` and the head are wall clocks that include theirs, so
+  the figures overlap and are not a serial timeline. See
+  [System design](SYSTEM_DESIGN.md) for the bucket table.
 
 During chunked prefill, the phase label reports exact progress, for example
 `Prefill (128/514)`. Errors and unsupported configurations appear only when

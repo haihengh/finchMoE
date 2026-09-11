@@ -54,10 +54,10 @@ resident set size; and **NLL** is negative log-likelihood. See
 | Prefill | [Chunking, MPP, routed MoE, overlap, attention, and allocation experiments](summaries/06-prefill.md) | 17 |
 | Fusions and orchestration | [Targeted fusions, head variants, queues, and synchronization](summaries/07-fusions-head-and-orchestration.md) | 15 |
 | Sampling and output | [Gumbel sampling, tokenizer caching, and detokenization](summaries/08-sampling-tokenization-and-output.md) | 4 |
-| Validation methodology | [False rejections, holdouts, thermal state, and benchmark artifacts](summaries/09-validation-and-measurement-lessons.md) | 9 |
-| **Total** | | **103** |
+| Validation methodology | [False rejections, holdouts, thermal state, and benchmark artifacts](summaries/09-validation-and-measurement-lessons.md) | 10 |
+| **Total** | | **104** |
 
-## All 103 experiments
+## All 104 experiments
 
 ### Model installation and expert I/O
 
@@ -206,6 +206,7 @@ resident set size; and **NLL** is negative log-likelihood. See
 | [METH-07](summaries/09-validation-and-measurement-lessons.md#meth-07) | Mechanism counts are not outcomes. | Allocation and submission reductions still lost end to end. |
 | [METH-08](summaries/09-validation-and-measurement-lessons.md#meth-08) | Trace-trained policies need holdouts. | Rejected packed layout and heterogeneous cache allocation. |
 | [METH-09](summaries/09-validation-and-measurement-lessons.md#meth-09) | Detect greedy repetition loops. | Reclassified apparent cache decay as period-44 cyclic thrash. |
+| [METH-10](summaries/09-validation-and-measurement-lessons.md#meth-10) | A bucket named for a kernel prices the dispatch around it. | Qwen `cb1` split and the slot sweep: the counters moved, end-to-end did not. Kernel claims need GPU spans. |
 
 ## Important non-experiments
 
