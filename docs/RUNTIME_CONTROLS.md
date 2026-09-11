@@ -11,7 +11,7 @@ The Mac app and CLI expose these generation controls:
 | Control | Mac values | CLI flag | Default | Effect |
 | --- | --- | --- | --- | --- |
 | Maximum response | Automatic | `--max-new` | App: remaining context; CLI: 1,024 tokens | The app can use the context space left after formatting the prompt. The CLI uses its explicit or default `--max-new` limit. |
-| Maximum context | 4K, 8K, 16K, 32K, 64K | `--max-context` | 4K | Sets prompt plus response capacity. The app shows the FP16 KV-memory delta. |
+| Maximum context | 4K, 8K, 16K, 32K, 64K | `--max-context` | 4K | Sets prompt plus response capacity. The app shows an FP16 KV-memory delta — see the caveat below. |
 | Temperature | 0...2 in 0.05 steps | `--temperature` | 0.2 | `0` is greedy; positive values sample. |
 | Top-K | Off or 1...256 | `--top-k` | 64 | Keeps at most K candidates. CLI `0` turns it off. |
 | Top-P | Off or 0.01...1 | `--top-p` | 0.95 | Applies nucleus truncation before Top-K and is effective only while Top-K is enabled. |
@@ -21,6 +21,16 @@ and `256`. To disable both truncation controls, pass `--top-k 0 --top-p 1`.
 Generation controls apply to the next request and do not require a model
 reload. They are interactive product settings, not the fixed community
 benchmark protocol.
+
+**KV-memory caveat.** "FP16" is accurate — the Swift engine has no other KV
+format (the `--kv-fp16` / `--kv-turbo` flags are archive-era and absent here).
+But the context menu's `+85 MB` / `+250 MB` / `+590 MB` / `+1.26 GB` labels are
+literals computed for Gemma 4 26B-A4B (`AppContextLengthOption.menuLabel`), and
+the instance property behind them pins `.gemma4_26B_A4B`. So for a Qwen 3.6 or
+3.8 install the menu under-reports the real delta —
+`AppContextLengthOption.fp16KVBytes(tokens:architecture:)` is architecture-correct
+(counting full-attention layers only, since Qwen's linear layers hold no KV) but
+is currently reached only by tests. Qwen 3.8 has 12 full-attention layers of 48.
 
 ## Runtime settings
 
