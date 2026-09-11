@@ -170,6 +170,30 @@ from representative holdouts.
 - **Lesson:** Label repetition onset before treating a
   greedy long run as representative generation.
 
+<a id="meth-10"></a>
+### METH-10: A bucket named for a kernel prices the dispatch around it
+
+- **Hypothesis:** A `cb1` sub-bucket named for a subsystem reports that
+  subsystem's cost, so it can price the subsystem's kernels.
+- **Variants tested:** The Qwen decode split — attention, GDN
+  projections/conv-gate/recurrent, router, and an `io` hit/miss count — on both
+  installs; then the expert-cache slot sweep those counters made measurable.
+- **Evidence:** Every CPU encode bucket together summed to 0.8% of a token
+  (2.82 ms of `cb1` against 367 ms/token), because `cb1` is an encode-and-commit
+  clock that excludes the pipeline wait. The sweep is the matching case on the
+  `io` side: 16 to 32 slots cut reads 21% (766.6 to 603.4 MB/step) and raised the
+  hit rate 39.5% to 52.4% for +0.8% throughput, inside the run-to-run spread.
+- **What changed the conclusion:** In both cases the instrument moved as
+  designed and the end-to-end number did not. The counters closed the *encode*
+  question and left the *kernel* question open — they were read as an answer to
+  something they cannot see.
+- **Final disposition:** Buckets are for attribution, not for pricing kernels;
+  kernel claims need GPU spans. Both families reconcile exactly
+  (`identity=exact`), the instrumented build reproduces the baseline token
+  stream, and slot counts 16/24/32 produce byte-identical output.
+- **Lesson:** A bucket is named for the code surrounding it, not for the
+  hardware work it triggers. State the clock kind before quoting a share.
+
 ## Boundaries that were not failed experiments
 
 - ANE/Core ML offload was excluded by the platform and architecture decision;

@@ -68,6 +68,24 @@ Grounded in: `docs/SYSTEM_DESIGN.md`, `docs/OPTIMIZATION_JOURNEY.md`, `docs/QWEN
 - **Risk**: medium — memory growth must be bounded and verified; LFU/LRU policy itself needs no change, only capacity.
 - **Validate**: decode tok/s at fixed prompt/response length across slot counts 16/24/32, RSS via the Mac app's "Peak memory" HUD metric or `sysctl`, and confirm no quality change (expert selection is unaffected by cache size — this only changes I/O cost, not values — so output should be byte-identical across slot counts; use that as a correctness check, not just a benchmark).
 
+- **Measured 2026-09-11 (4.1's counters), Qwen 3.8, 54-token prompt, 64 tokens, `--temperature 0`:**
+
+  | slots | hit rate | misses/step | `io` MB/step | tok/s (interleaved, warm) |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 16 | 39.5% | 290.3 | 766.6 | 2.738 |
+  | 24 | 46.8% | 255.3 | 674.1 | — |
+  | 32 | 52.4% | 228.5 | 603.4 | 2.760 |
+
+  For reference, the 3.6 install at 32 slots hits **68.2%** (top-k 8 on 40 layers) and decodes at 8.72 tok/s.
+
+  **The hit-rate curve is not flat — and it does not matter.** Widening 16→32 removes 21% of read bytes and 21% of reads per step for **+0.8% throughput**, which is below the run-to-run spread (individual 64-token runs ranged 2.39-2.95 tok/s; of three interleaved rounds the two warm ones gave 2.707 and 2.768 at 16 slots against 2.744 and 2.775 at 32, means 2.738 and 2.760). The reason is visible in the same counters: `io` is *awaited* read time on a path whose misses are issued in parallel, so removing a fifth of them does not shorten the critical path. This is the shape of METH-07 — a mechanism count that is not an outcome.
+
+  **The memory cost is real, though.** 32 slots is 32 x 2,768,896 B = 88.6 MB per layer against 16 slots' 44.3 MB, and two independent runs put the observed cost at ~15 points of free memory and ~2.5 GB more compressed (16 slots: 36-37% low-water, 2.2-2.9 GB; 32 slots: 22% low-water, 4.8-5.6 GB) for no throughput.
+
+  **Recommendation: keep 16 slots.** Action 2's conditional ("if the hit-rate curve is flat past 16-24 slots, don't take the memory hit") is not met literally — the curve is not flat — but the *decision* it was guarding is the same, and is now made on throughput rather than on hit rate. Action 3 (per-layer-tier policy) has no support here: the sweep shows cache capacity is not a throughput lever on this workload at all, so repartitioning it cannot be either. What would change this is a demonstration that the miss path is byte-serial rather than latency-parallel — e.g. a workload with far more misses per step, or a far slower disk.
+
+  **Correctness check passed**: 16, 24 and 32 slots produced byte-identical generated text (995 bytes each, identical payload), confirming cache capacity changes I/O cost only.
+
 ### 2.2 [MEDIUM impact, MEDIUM-HIGH risk] Reduce per-layer command-buffer count in the decode hot path
 - **Evidence**: `RealForwardRunner.swift` shows the Qwen decode path issuing multiple `makeCommandBuffer()`/`commit()` pairs per layer per token — a `cb1`-equivalent, a `sharedCB`, one or more `tileCB` per miss-tile (in `executeExpertCachePlan`-driven decode paths near lines 1046-1305, 2135-2271), and a `tailCB`. At 40 layers this is potentially 3-5+ command buffers × 40 = 120-200+ command buffer commits per generated token. `SYSTEM_DESIGN.md`'s own "Metal execution" section says decode already stays on custom GEMV to avoid MPP overhead — but doesn't discuss CB-count overhead itself, and the OPTIMIZATION_JOURNEY.md doesn't record a CB-batching experiment for Qwen (all the historical fusion experiments — QKV, layer-tail, head — reduced *kernel* count within a CB, not CB count across layers).
 - **Action**: profile actual CB commit/encode overhead via Instruments (`cb1`/`cb2` counters already exist per `SYSTEM_DESIGN.md`'s phase table — extend them to report raw CB count per token). If encode+commit overhead is a meaningful fraction of the ~55-95ms/token step (16GB Mac mini ~95ms/token at 10.5 tok/s; 24GiB M4 Pro ~55ms/token at 18 tok/s), investigate coalescing the miss-tile CBs into a single CB per layer using multiple encoders/wait-events instead of separate command buffers, since Metal command buffer submission has fixed per-CB CPU-side overhead independent of GPU work size — this would matter most on the *faster* M4 Pro machine where the CB floor is a larger fraction of a per-token budget that's already only ~55ms.
@@ -139,10 +157,32 @@ Note the KV cache is **not the current bottleneck it was for Gemma**: Gemma had 
 
 ## 4. Other performance opportunities
 
-### 4.1 [Prerequisite for everything above] Extend the `cb1`/`io`/`cb2` diagnostic counters with a Qwen-specific breakdown
+### 4.1 [DONE 2026-09-11] Extend the `cb1`/`io`/`cb2` diagnostic counters with a Qwen-specific breakdown
 - **Evidence**: `SYSTEM_DESIGN.md`'s phase table and `RUNTIME_CONTROLS.md`'s "Advanced" HUD already report `cb1`/`cb2`/output-head time and I/O-per-token — but none of the Qwen-specific docs (`QWEN36_PORT.md`) report a GDN-vs-full-attention-layer cost breakdown, or a routed-MoE-vs-shared-expert-vs-attention breakdown *for Qwen specifically*. Every "expected impact" estimate in this document (1.4, 2.1, 2.2, 3.4) is bounded by not having this data yet.
 - **Action**: before implementing 1.1/2.1/2.2/3.2, spend a short cycle extending the existing counters (they're described as already itemized per-phase in `RUNTIME_CONTROLS.md`) to break down `cb1` into router/attention/GDN-recurrent sub-costs, and `io` into hit-vs-miss-count and bytes-per-token, specifically on the Qwen install. This turns every "if material" caveat above into a go/no-go decision made with real numbers instead of the Gemma-era priors this whole engine was tuned against.
 - **Risk**: none — pure instrumentation.
+- **Landed**: `FinchMoECLI --counters` prints one extra stderr line; the buckets accumulate unconditionally so the measured path is the shipped path. The `cb1` split is cursor-tiled (`identity=exact`), and `--expert-cache-slots` exposes item 2.1's sweep variable on the CLI for the first time. See `SYSTEM_DESIGN.md` "The `cb1` sub-buckets".
+- **Measured 2026-09-11**, Qwen 3.8 Flash-Next (48 layers, 12 full / 36 GDN, 512 experts, top-k 10), 32 slots, 54-token prompt, 64 tokens, `--temperature 0`, warm cache:
+
+  | bucket | ms/step | share of cb1 |
+  | --- | ---: | ---: |
+  | **`cb1` (CPU encode, total)** | **2.82** | — |
+  | `other` (prologue, layer tail, drain) | 1.66 | 59% |
+  | `attention` (12 full layers) | 0.29 | 10% |
+  | `gdn_conv_gate` (36 GDN layers) | 0.33 | 12% |
+  | `router` | 0.21 | 7% |
+  | `gdn_recurrent` | 0.20 | 7% |
+  | `gdn_proj` | 0.12 | 4% |
+  | `wait` (pipeline wait, *excluded from `cb1`*) | 121.05 | — |
+
+  Alongside it: `io` 232.91 ms/step, `cb2` 0.85, head 5.39 (wall), PLE gather 3.75, 191.5 command buffers/step, 603 MB/step of routed-expert reads.
+
+- **What this decides**:
+  - **2.3 (GDN fusion) — no-go on the encode side.** The whole GDN split is 0.65 ms/step; the pair 2.3 wants to fuse (`conv_gate` + `recurrent`) is 0.53. Against a 367 ms/token that is 0.14% — fusing it cannot move throughput. The counters price the *dispatch*; a GPU-side win is not visible here and would need per-op GPU attribution, which this cycle does not have.
+  - **3.4 (router GEMV) — same shape.** The router bucket is 0.21 ms/step (0.06% of the token) on 3.8 and 0.35 (0.31%) on 3.6. The CPU-side headroom is closed; whether the *kernel* is slow stays open for the reason above.
+  - **2.2 (CB coalescing) — now has its number.** 191.5 CBs/step, i.e. 3.99 per layer: the three unconditional buffers (`cb`, `sharedCB`, `routedCB`) plus the hit-split buffer on ~45 of the 48 layers, plus two per forward. `wait` is 121.05 ms/step — a third of the token — and that is the only bucket a CB-count reduction can plausibly reach.
+  - **The frame itself is the finding**: every CPU encode bucket on the machine sums to 0.8% of the token. The token is I/O, not encode.
+- **Note for 2.1**: `io` is *awaited* read time, so it overlaps the shared-expert GPU work rather than following it. These buckets are not a serial timeline — see the sweep result under 2.1.
 
 ### 4.2 [MEDIUM impact, LOW risk] Batch/streaming decode requests — explicitly out of scope per current design, flag rather than recommend
 - **Evidence**: `SYSTEM_DESIGN.md` "Scope and limitations": "server batching... [is] outside the current scope," and the server "serializes generation." This is a legitimate throughput lever (batched decode amortizes weight reads across multiple sequences) but is a substantial architecture change — the entire LFU expert-cache design assumes one active decode stream. **Flagging, not recommending**, since it's out of scope for "accelerate this engine" in its current single-stream form and would require its own design document.
