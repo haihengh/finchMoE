@@ -31,7 +31,14 @@ public struct Model {
     public let config: ArchConfig
     public let streamingMode: ExpertStreamingMode
     public let expertCachePolicy: ExpertCachePolicy
+    /// The policy the loader *resolved to*. Under
+    /// `ModelIntegrityPreference.automatic` this is the answer, not the request;
+    /// see `integrityOutcome` for which it was.
     public let integrityPolicy: ModelIntegrityPolicy
+    /// How `integrityPolicy` was chosen. Carried on the model rather than in
+    /// `ModelLoadStats` because every production call site passes no
+    /// `loadStats`, so a stats field would be unreadable in practice.
+    public let integrityOutcome: ModelIntegrityOutcome
     public var modelID: String { manifest.modelID }
     public var sourceSnapshotHash: String? { manifest.sourceSnapshotHash }
     public var sharedExpertWeightBits: Int { manifest.quant?.sharedExpert.weightBits ?? 8 }
@@ -80,6 +87,7 @@ public struct Model {
          streamingMode: ExpertStreamingMode,
          expertCachePolicy: ExpertCachePolicy,
          integrityPolicy: ModelIntegrityPolicy,
+         integrityOutcome: ModelIntegrityOutcome,
          residentBuffer: ResidentBuffer,
          residentIndex: ResidentIndex,
          packedExpertsLayout: PackedExpertsLayout,
@@ -91,6 +99,7 @@ public struct Model {
         self.streamingMode = streamingMode
         self.expertCachePolicy = expertCachePolicy
         self.integrityPolicy = integrityPolicy
+        self.integrityOutcome = integrityOutcome
         self.residentBuffer = residentBuffer
         self.residentIndex = residentIndex
         self.packedExpertsLayout = packedExpertsLayout
@@ -678,13 +687,12 @@ extension Model {
                             expecting: ArchConfig = .gemma4_26B_A4B,
                             streamingMode: ExpertStreamingMode = .pread(slotCount: 16),
                             expertCachePolicy: ExpertCachePolicy = PreadExpertStreamer.cachePolicyDefault,
-                            integrityPolicy: ModelIntegrityPolicy? = nil,
+                            integrityPolicy: ModelIntegrityPreference = .fullSha256,
                             loadStats: UnsafeMutablePointer<ModelLoadStats>? = nil) throws -> Model {
         var stats = ModelLoadStats()
         defer {
             loadStats?.pointee = stats
         }
-        let resolvedIntegrityPolicy = integrityPolicy ?? .fullSha256
         let modelDirectory = try FinchModelDirectory(rootURL: directoryURL)
         let manifestFD: Int32
         do { manifestFD = try modelDirectory.openFile("manifest.json") }
@@ -697,35 +705,17 @@ extension Model {
         let manifestShaStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let manifestSha = Sha256Verifier.hashData(manifestData)
         stats.manifestSha256Nanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - manifestShaStart
-        let receipt: VerifiedInstallReceipt?
-        if resolvedIntegrityPolicy == .sizeCheckTrustedReceipt {
-            let receiptStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            let receiptFD: Int32
-            do {
-                receiptFD = try modelDirectory.openFile(VerifiedInstallReceiptReader.fileName)
-            } catch ModelError.missingFile {
-                throw ModelError.trustedReceiptInvalid(
-                    detail: "\(VerifiedInstallReceiptReader.fileName) is missing")
-            }
-            defer { close(receiptFD) }
-            let receiptData = try modelDirectory.readMetadata(
-                fileDescriptor: receiptFD,
-                relativePath: VerifiedInstallReceiptReader.fileName,
-                maxBytes: VerifiedInstallReceiptReader.defaultMaxBytes)
-            let loadedReceipt = try VerifiedInstallReceiptReader.decode(data: receiptData)
-            try VerifiedInstallReceiptReader.validateManifestBinding(
-                loadedReceipt,
-                directoryURL: directoryURL,
-                manifestSha256: manifestSha)
-            stats.receiptValidationNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - receiptStart
-            receipt = loadedReceipt
-        } else {
-            receipt = nil
-        }
+        let resolution = try Self.resolveIntegrity(
+            preference: integrityPolicy,
+            directoryURL: directoryURL,
+            manifestSha256: manifestSha,
+            stats: &stats)
+        let effectivePolicy = resolution.policy
+        let receipt = resolution.receipt
 
         let manifest = try ManifestReader.decode(
             data: manifestData, expecting: expecting)
-        if let receipt {
+        if effectivePolicy == .sizeCheckTrustedReceipt, let receipt {
             let receiptStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try VerifiedInstallReceiptReader.validate(receipt,
                                                       directoryURL: directoryURL,
@@ -776,7 +766,7 @@ extension Model {
 
         let layout = try PackedExpertsLayoutReader.decode(data: layoutData,
                                                           manifest: manifest)
-        if resolvedIntegrityPolicy == .sizeCheckTrustedReceipt {
+        if effectivePolicy == .sizeCheckTrustedReceipt {
             let receiptStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try validateTrustedReceiptLayerLayout(modelDirectory: modelDirectory,
                                                   manifest: manifest,
@@ -815,13 +805,88 @@ extension Model {
             config: expecting,
             streamingMode: streamingMode,
             expertCachePolicy: expertCachePolicy,
-            integrityPolicy: resolvedIntegrityPolicy,
+            integrityPolicy: effectivePolicy,
+            integrityOutcome: resolution.outcome,
             residentBuffer: residentBuffer,
             residentIndex: residentIndex,
             packedExpertsLayout: layout,
             manifest: manifest,
             directoryURL: directoryURL,
             modelDirectory: modelDirectory)
+    }
+
+    /// The policy a load actually runs under, paired with the receipt that
+    /// justified it.
+    ///
+    /// These two must never be chosen independently. The receipt-validate gate
+    /// keys off `receipt`, the lazy layer/PLE gates and the stored
+    /// `Model.integrityPolicy` key off the policy — so a fallback that cleared
+    /// the receipt but left the policy at `.sizeCheckTrustedReceipt` would skip
+    /// the lazy hashes *and* validate no receipt, verifying less than either
+    /// mode alone. Producing both from one `let` makes that state
+    /// unrepresentable instead of merely commented against.
+    private struct IntegrityResolution {
+        let policy: ModelIntegrityPolicy
+        let receipt: VerifiedInstallReceipt?
+        let outcome: ModelIntegrityOutcome
+    }
+
+    /// Resolve `preference` against what is actually on disk.
+    ///
+    /// The `do` body touches nothing but the receipt, so everything it can throw
+    /// is receipt-scoped — which is what licenses catching it and continuing.
+    /// Anything else (I/O on the model directory, a decoding failure that
+    /// escapes the reader's wrap) propagates rather than being downgraded into a
+    /// silent "assume the receipt is bad".
+    private static func resolveIntegrity(preference: ModelIntegrityPreference,
+                                         directoryURL: URL,
+                                         manifestSha256: String,
+                                         stats: inout ModelLoadStats) throws -> IntegrityResolution {
+        switch preference {
+        case .fullSha256:
+            return IntegrityResolution(policy: .fullSha256,
+                                       receipt: nil,
+                                       outcome: .explicitFullSha256)
+        case .sizeCheckTrustedReceipt:
+            // Explicit stays strict: no receipt is an error, as before.
+            let receipt = try Self.loadReceipt(directoryURL: directoryURL,
+                                               manifestSha256: manifestSha256,
+                                               stats: &stats)
+            return IntegrityResolution(policy: .sizeCheckTrustedReceipt,
+                                       receipt: receipt,
+                                       outcome: .explicitTrustedReceipt)
+        case .automatic:
+            do {
+                let receipt = try Self.loadReceipt(directoryURL: directoryURL,
+                                                   manifestSha256: manifestSha256,
+                                                   stats: &stats)
+                return IntegrityResolution(policy: .sizeCheckTrustedReceipt,
+                                           receipt: receipt,
+                                           outcome: .automaticUsedReceipt)
+            } catch ModelError.trustedReceiptInvalid(let detail) {
+                // Falling back hashes *more*, never less, so this is safe to do
+                // silently; `isPresent` decides whether it is worth a warning.
+                return IntegrityResolution(
+                    policy: .fullSha256,
+                    receipt: nil,
+                    outcome: VerifiedInstallReceiptReader.isPresent(directoryURL: directoryURL)
+                        ? .automaticFellBackInvalid(detail: detail)
+                        : .automaticFellBackAbsent)
+            }
+        }
+    }
+
+    private static func loadReceipt(directoryURL: URL,
+                                    manifestSha256: String,
+                                    stats: inout ModelLoadStats) throws -> VerifiedInstallReceipt {
+        let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        // `defer` so a failed attempt is still counted as receipt-validation
+        // time rather than vanishing from the stats.
+        defer { stats.receiptValidationNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start }
+        let receipt = try VerifiedInstallReceiptReader.load(directoryURL: directoryURL)
+        try VerifiedInstallReceiptReader.validateManifestBinding(
+            receipt, directoryURL: directoryURL, manifestSha256: manifestSha256)
+        return receipt
     }
 
     private static func validateTrustedReceiptLayerLayout(modelDirectory: FinchModelDirectory,

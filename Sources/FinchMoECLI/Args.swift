@@ -13,7 +13,7 @@ public struct Args: Equatable, Sendable {
     public var seed: UInt64?
     public var stops: [String]
     public var quiet: Bool
-    public var verify: ModelIntegrityPolicy
+    public var verify: ModelIntegrityPreference
 
     public init(model: String,
                 prompt: String? = nil,
@@ -27,7 +27,7 @@ public struct Args: Equatable, Sendable {
                 seed: UInt64? = nil,
                 stops: [String] = [],
                 quiet: Bool = false,
-                verify: ModelIntegrityPolicy = .fullSha256) {
+                verify: ModelIntegrityPreference = .fullSha256) {
         self.model = model
         self.prompt = prompt
         self.messagesFile = messagesFile
@@ -108,7 +108,7 @@ extension Args {
         var seed: UInt64?
         var stops: [String] = []
         var quiet = false
-        var verify = ModelIntegrityPolicy.fullSha256
+        var verify = ModelIntegrityPreference.fullSha256
 
         var index = 0
         while index < argv.count {
