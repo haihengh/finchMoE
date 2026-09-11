@@ -284,6 +284,54 @@ from representative holdouts.
   building on it: a mechanism that is real in the aggregate can still be one the
   system is already sitting on.
 
+<a id="meth-13"></a>
+### METH-13: A near-complete serial sum bounds the overlap, without instrumenting it
+
+- **Hypothesis:** The decode pipeline's stated design — the shared expert on an
+  early-committed buffer overlapping the expert pread, cross-layer pipelining —
+  means reads and device execution overlap, so the two costs are partly
+  alternatives rather than additive, and improving either buys less than its
+  share of the token.
+- **Variants tested:** None. All seven captured counter runs were re-read rather
+  than re-run: `io`, `gpu_cb1`, `gpu_routed`, `head_wall` and `ple_wall` summed
+  against the token, across two installs, three context lengths and three slot
+  counts.
+- **Evidence:** The sum lands at **93.0-97.8%** of the token on every run. The
+  device term is complete rather than a sample — `totalGpuRoutedNanos`
+  accumulates the routed, shared and phase-1-hit buffers, and `gpu_samples`
+  covers 5821 of 5883 buffers, the two per forward it misses being the embed and
+  head syncs — so `gpu_cb1 + gpu_routed` is every GPU nanosecond a layer spends.
+  The 2.2-7.0% remainder has to hold the CPU encode (1.7-2.6 ms/step), sampling
+  and detokenization. Overlap is therefore bounded at a few percent of the
+  token. The mechanism is real and documented in the code — `encodeRoutedTail`
+  says so in its own comment (`RealForwardRunner.swift:2794-2795`) — but
+  undersized: all three tail buffers total 0.87 ms/layer of device time against
+  a 4.74 ms/layer read window, so perfect overlap of every one of them fills 18%
+  of it. The order is forced, not incidental: the CPU readback of the router's
+  top-k indices (`:2813-2819`) is gated by the blocking `waitForCompletion(cb)`
+  at `:5236`, and layer N+1 cannot be encoded before layer N's routed output
+  exists because that output is its input.
+- **What changed the conclusion:** Nothing was re-measured; the numbers were
+  already on the counters line. What changed is which arithmetic was done with
+  them. Every earlier cycle asked what the read *share* was. Adding the device
+  share to it answers a different and more useful question — how much of the
+  token is *sequential*.
+- **Final disposition:** The serial model replaces the overlap model. Device work
+  pays 1:1 against the token, which re-promotes GDN's 61.85 ms/step (17.1% of a
+  3.8 token) as a target and demotes int8 KV to a VRAM play on the smaller
+  stack, and it exposes the largest unexplained quantity left: 773.7 MiB in
+  227.36 ms is 3.57 GB/s against a drive delivering 5.4-5.7 GB/s at this depth,
+  so ~84 ms/step (23% of the token) is fixed per-batch cost rather than
+  transfer.
+- **Lesson:** When two spans are claimed to overlap, sum them. A sum that
+  approaches the whole bounds the overlap at the complement, needs no new
+  instrumentation, and is not fooled by a span whose *name* says it overlaps.
+  Then check that sum against the design comment that promises the overlap: a
+  mechanism can be present, documented in the code, and five times too small to
+  matter. Corollary, from the same cycle — an argument that prices a change on
+  one axis (bytes) while the win would land on another (latency) is not a
+  refutation, and reading it as one nearly discarded a live hypothesis.
+
 ## Boundaries that were not failed experiments
 
 - ANE/Core ML offload was excluded by the platform and architecture decision;
