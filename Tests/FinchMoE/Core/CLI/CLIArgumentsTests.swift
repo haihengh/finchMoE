@@ -17,7 +17,30 @@ import Testing
         #expect(arguments.seed == nil)
         #expect(arguments.stops.isEmpty)
         #expect(!arguments.quiet)
-        #expect(arguments.verify == .fullSha256)
+        #expect(arguments.verify == .automatic)
+    }
+
+    /// All three modes parse, and the two explicit ones keep their meaning.
+    /// `auto` being the default is what the test above pins; this pins that it
+    /// is reachable by name and that spelling an explicit mode still wins.
+    ///
+    /// The rejection asserts the exact `ArgsError`, not just that *something*
+    /// threw: `--verify` is the one flag whose value the loader resolves into a
+    /// security policy, so a typo silently landing on one of the two real modes
+    /// is the failure worth pinning.
+    @Test func verifyModeParses() throws {
+        func parsed(_ mode: String?) throws -> ModelIntegrityPreference {
+            var argv = ["--model", "m.finch", "--prompt", "hi"]
+            if let mode { argv += ["--verify", mode] }
+            return try Args.parse(argv).verify
+        }
+        #expect(try parsed(nil) == .automatic)
+        #expect(try parsed("auto") == .automatic)
+        #expect(try parsed("full-sha256") == .fullSha256)
+        #expect(try parsed("trusted-install") == .sizeCheckTrustedReceipt)
+        #expect(throws: ArgsError.invalidValue(flag: "--verify", value: "size-only")) {
+            _ = try parsed("size-only")
+        }
     }
 
     @Test func generationOptionsParseAndStopsRepeat() throws {
@@ -87,20 +110,6 @@ import Testing
         }
         #expect(throws: ArgsError.modeMissing) {
             _ = try Args.parse(["--model", "m.finch"])
-        }
-    }
-
-    @Test func verifyPolicyParsesAndRejectsUnknownModes() throws {
-        let full = try Args.parse(["--model", "m.finch", "--prompt", "hi",
-                                    "--verify", "full-sha256"])
-        #expect(full.verify == .fullSha256)
-        let trusted = try Args.parse(["--model", "m.finch", "--prompt", "hi",
-                                      "--verify", "trusted-install"])
-        #expect(trusted.verify == .sizeCheckTrustedReceipt)
-
-        #expect(throws: ArgsError.invalidValue(flag: "--verify", value: "size-only")) {
-            _ = try Args.parse(["--model", "m.finch", "--prompt", "hi",
-                                "--verify", "size-only"])
         }
     }
 
