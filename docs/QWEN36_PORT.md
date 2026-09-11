@@ -493,8 +493,11 @@ family, sampling softcap, and stop tokens are wired (see below).
      lands inside the first prefill chunk regardless of prompt length;
      debug = release because it is a C library. Not an engine-path defect.
    - Fix: the CLI gained `--verify <full-sha256|trusted-install>` (default
-     unchanged: full-sha256), mirroring the Mac app's "Trust verified
-     install" setting. `trusted-install` validates the repack receipt
+     unchanged: full-sha256 — superseded 2026-09-11: all four call sites now
+     default to `auto`, see `OPTIMIZATION_PLAN.md` §1.2), mirroring the Mac
+     app's "Trust verified install" setting (which the app did not actually
+     expose at the time — the enum case existed with no way to select it).
+     `trusted-install` validates the repack receipt
      (`verified-install.json`) against the manifest at load and size-checks
      layer files at open. Measured on the real install (5-token prompt,
      warm cache): prefill **8.08 s → 0.92 s**, total wall **14.42 s →
@@ -637,6 +640,10 @@ family, sampling softcap, and stop tokens are wired (see below).
      expert touch — exposing `trusted-install` in the app mirrors the CLI
      `--verify` story and remains an open follow-up, along with the
      context-picker KV labels (still Gemma-arch footnote values).
+     **Resolved 2026-09-11**: the app has a three-way picker (Automatic,
+     defaults on) persisted in `mac-app-settings.json`, the decode service
+     carries the resolved outcome back on its load response, and the
+     diagnostics pane shows it. `OPTIMIZATION_PLAN.md` §1.2.
    - Test-infrastructure fix discovered while enabling Qwen: the app
      install fixture predated the mandatory `linearAttention` quant slot
      (added with the GDN int8 repack, 8004779) and every fixture-based app
