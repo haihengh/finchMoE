@@ -64,6 +64,37 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         rangeStagingBytes: 0,
         reserveBytes: 0,
         shortDisplayName: "Qwen 3.6 35B-A3B")
+
+    /// Local Qwen 3.8 Flash-Next 125B install made by `FinchMoERepack`. Like
+    /// 3.6 it is probe-only — the range-streaming installer targets the mlx
+    /// Gemma layout, so repo/revision are informational and there is nothing to
+    /// download.
+    ///
+    /// `installedBytes` is measured from the install directory rather than
+    /// estimated: 174 403 168 940 bytes, of which 102.4 GB is the PLE n-gram
+    /// shards (128 × 800 003 840 B) and 68.0 GB the packed experts for 512
+    /// experts over 48 layers. It
+    /// feeds only `requiredFreeBytes`, which gates an install path this model
+    /// does not use — but a wrong value there is the kind of number that gets
+    /// trusted later. `revision` is the Hugging Face commit the snapshot was
+    /// fetched at, taken from the local snapshot's download metadata.
+    public static let qwen3_8 = AppModelInstallDescriptor(
+        displayName: "Qwen 3.8 Flash-Next 125B",
+        repoID: "Qwen/Qwen3.8-Flash-Next",
+        revision: "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+        sourceIndexSHA256: "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
+        approximateDownloadBytes: 0,
+        installedBytes: 174_403_168_940,
+        rangeStagingBytes: 0,
+        reserveBytes: 0,
+        shortDisplayName: "Qwen 3.8 125B")
+
+    /// Every descriptor the app can identify a local directory as, in probe
+    /// order. `matchingDescriptor` scans this rather than testing each hash
+    /// inline: the second family is what makes a list worth having, and a
+    /// missed entry here reads as "unknown checkpoint" and silently resolves
+    /// the directory to the Gemma default.
+    public static let installable: [AppModelInstallDescriptor] = [.qwen3_6, .qwen3_8]
 }
 
 public struct AppModelInstallRequirement: Equatable, Sendable {

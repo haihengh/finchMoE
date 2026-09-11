@@ -39,18 +39,27 @@ enum AppModelLocation {
             .standardizedFileURL
     }
 
-    /// The app's default model inside a package checkout: the repack-made
-    /// Qwen install under `models/` when present, else the Gemma target under
+    /// The app's default model inside a package checkout: a repack-made Qwen
+    /// install under `models/` when present, else the Gemma target under
     /// `scratch/` (which is also the in-app download destination when nothing
     /// is installed yet). Outside a checkout the Application Support Gemma
     /// target above remains the fallback.
+    ///
+    /// Order matters, and 3.6 stays first: 3.8 is a 174 GB, 512-expert model
+    /// that needs far more memory than 3.6 to run, so a checkout holding both
+    /// must keep starting on 3.6. 3.8 is the entry for a checkout that holds
+    /// only it.
     private static func preferredInstallURL(inPackageRoot root: URL,
                                             fileExists: (String) -> Bool) -> URL {
-        let qwen = root
-            .appendingPathComponent("models/Qwen3.6-35B-A3B-4bit.finch", isDirectory: true)
-        let qwenManifest = qwen.appendingPathComponent("manifest.json").path
-        if fileExists(qwenManifest) {
-            return qwen.standardizedFileURL
+        let installed = [
+            "models/Qwen3.6-35B-A3B-4bit.finch",
+            "models/Qwen3.8-Flash-Next-125B.finch",
+        ]
+        for relative in installed {
+            let candidate = root.appendingPathComponent(relative, isDirectory: true)
+            if fileExists(candidate.appendingPathComponent("manifest.json").path) {
+                return candidate.standardizedFileURL
+            }
         }
         return root.appendingPathComponent("scratch/gemma4.finch", isDirectory: true)
             .standardizedFileURL
