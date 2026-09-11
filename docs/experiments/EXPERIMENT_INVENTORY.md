@@ -54,10 +54,10 @@ resident set size; and **NLL** is negative log-likelihood. See
 | Prefill | [Chunking, MPP, routed MoE, overlap, attention, and allocation experiments](summaries/06-prefill.md) | 17 |
 | Fusions and orchestration | [Targeted fusions, head variants, queues, and synchronization](summaries/07-fusions-head-and-orchestration.md) | 15 |
 | Sampling and output | [Gumbel sampling, tokenizer caching, and detokenization](summaries/08-sampling-tokenization-and-output.md) | 4 |
-| Validation methodology | [False rejections, holdouts, thermal state, and benchmark artifacts](summaries/09-validation-and-measurement-lessons.md) | 11 |
-| **Total** | | **105** |
+| Validation methodology | [False rejections, holdouts, thermal state, and benchmark artifacts](summaries/09-validation-and-measurement-lessons.md) | 12 |
+| **Total** | | **106** |
 
-## All 105 experiments
+## All 106 experiments
 
 ### Model installation and expert I/O
 
@@ -208,6 +208,7 @@ resident set size; and **NLL** is negative log-likelihood. See
 | [METH-09](summaries/09-validation-and-measurement-lessons.md#meth-09) | Detect greedy repetition loops. | Reclassified apparent cache decay as period-44 cyclic thrash. |
 | [METH-10](summaries/09-validation-and-measurement-lessons.md#meth-10) | A bucket named for a kernel prices the dispatch around it. | Qwen `cb1` split and the slot sweep: the counters moved, end-to-end did not. Kernel claims need GPU spans. |
 | [METH-11](summaries/09-validation-and-measurement-lessons.md#meth-11) | A GPU span does not license the subtraction you build from it. | Device timestamps landed and identified the GDN stack at 1.718 ms/layer against attention's 1.127; the `wait` subtraction built on them read 46.8 ms/step of dispatch tax that does not exist. |
+| [METH-12](summaries/09-validation-and-measurement-lessons.md#meth-12) | An awaited I/O window is a latency measurement, not a bandwidth one. | Six slot-sweep runs in both orders: 32 -> 16 slots cuts io time 12.9%/7.8% while reading 34% more bytes. The bytes/time quotient that closed the read side for three cycles returns 6.2 GB/s against a 2.3 GB/s ceiling. |
 
 ## Important non-experiments
 
