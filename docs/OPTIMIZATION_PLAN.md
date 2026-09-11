@@ -25,12 +25,20 @@ Grounded in: `docs/SYSTEM_DESIGN.md`, `docs/OPTIMIZATION_JOURNEY.md`, `docs/QWEN
 - **Risk**: low — this is a config sweep, not new code; the runtime already supports variable chunk size. Regression risk is in scratch memory growth and MPP tile-size mismatches.
 - **Validate**: re-run the prefill-only benchmark protocol in `RUNTIME_CONTROLS.md` ("Run an experiment") at each chunk size on both the 16GB and 24GiB machines; confirm output token-for-token identical to the 128-chunk baseline (prefill math must be exact, not reordered, per the "Correctness and safety invariants" in `SYSTEM_DESIGN.md`).
 
-### 1.2 [MEDIUM impact, LOW risk] Default `--verify trusted-install` in the Mac app and `FinchMoEServer`
-- **Evidence**: `QWEN36_PORT.md` items 5 and 7 explicitly flag this as an **open gap**: the CLI already exposes `--verify trusted-install` (cuts fixed per-run cost from ~8s to <1s per README), but the Mac app "verification default stays `full-sha256` (no UI setting)" and the server "has no `--verify` flag" — every server process eats the full layer-SHA256 pass on first expert touch (`QWEN36_PORT.md` item 5: "8.79s wall, of which ~8s is the first-use layer-SHA pass"). Relevant files: `Sources/FinchMoECLI/Args.swift`, `Sources/FinchMoEApp/Core/Configuration/AppRuntimeOptions.swift`, `Sources/FinchMoEServer/Core/ServerInference.swift`, `Sources/FinchMoE/Runtime/Inference/Model.swift`.
-- **Action**: plumb the same `VerificationPolicy` choice into `AppRuntimeOptions` (surfaced as the existing "verification setting" UI slot already used for other runtime toggles per `RUNTIME_CONTROLS.md`) and add a `--verify` CLI flag to `FinchMoEServer`'s argument parser, defaulting production deployments to `trusted-install` once a repack receipt exists.
-- **Expected impact**: ~8s fixed removed from first-token latency on every server boot and every fresh Mac-app model load — this is a constant-cost win, not a throughput one, but it dominates for short prompts (this is literally the "short prompts pay SHA-256 verification" line in the README).
-- **Risk**: low (already-shipped, tested code path in the CLI; this is exposing it elsewhere) but note the integrity trade-off — `trusted-install` trusts the repack receipt instead of hashing every layer file; this is a security/robustness knob, not just perf, so it should stay opt-in/configurable, not silently forced.
-- **Validate**: re-run the `--verify-install` acceptance check (already exists per `QWEN36_PORT.md` item 8) plus a manual timing comparison of server/app boot-to-first-token with each policy.
+### 1.2 [DONE 2026-09-11] Default the trusted-install receipt in the CLI, the server and the Mac app
+- **Original evidence**: `QWEN36_PORT.md` items 5 and 7 flagged this as an **open gap** — the CLI exposed `--verify trusted-install` (cuts fixed per-run cost from ~8s to <1s per README), but the Mac app's "verification default stays `full-sha256` (no UI setting)" and the server had no `--verify` flag at all, so every server process ate the full layer-SHA256 pass on first expert touch ("8.79s wall, of which ~8s is the first-use layer-SHA pass").
+- **Shipped**: `ModelIntegrityPreference` (`.automatic` / `.fullSha256` / `.sizeCheckTrustedReceipt`) is resolved at load by one function that returns the resolved policy, the receipt, *and* the outcome together, so a fallback can never set one half without the other. All four call sites — CLI, server, decode service, Mac app — default to `.automatic`, each keeps an explicit override, and each reports what actually happened through the single `ModelIntegrityOutcome.logDescription`, so no two of them can describe the same load differently.
+- **On the original risk note — "a security/robustness knob, not just perf, so it should stay opt-in/configurable, not silently forced"**: automatic mode never verifies *less* than `.fullSha256` would have. It skips only the hashing a **validated** receipt independently covers, and every failure — absent, unreadable, symlinked, wrong manifest, wrong size — falls back to hashing more. An absent receipt stays silent (the normal state of an install made without one); a present-but-unusable receipt warns and falls back. Explicit `trusted-install` keeps the strict semantics: no receipt is an error.
+- **Measured** (release CLI, `models/Qwen3.8-Flash-Next-125B.finch`, 19-token prompt, `--max-new 24 --temperature 0`, 2026-09-11; the default row is the current source, debug CLI — prefill at this length is I/O-bound, not compute-bound):
+
+  | `--verify`        | prefill  | peak memory |
+  |-------------------|----------|-------------|
+  | `full-sha256`     | 63.5 s   | 3.9 GB      |
+  | `trusted-install` | 4.6 s    | 2.1 GB      |
+  | default (`auto`)  | 4.7 s    | 2.6 GB      |
+
+  All three produced the same text and the same 9 output tokens. On a warm page cache the receipt path measures ~2.2 s; the spread across runs is the file cache, not the policy. **The saving is the hash pass only** — the eager `manifest.json` + `model_weights.bin` + `packed_experts/layout.json` hash runs in *both* modes and is not part of it.
+- **Validate**: done — `ModelLoaderTests+IntegrityPreference.swift` discriminates the two paths by flipping a byte in a layer file (a size-preserving change only SHA can catch, so a suppressed hash and a wrong stored policy each fail a different assertion); the CLI smoke tests cover the default end-to-end plus the stderr warning for an unusable receipt; the server logs `model integrity ...` at boot and carries `integrity=...` on the ready line; the app persists the choice and shows the resolved outcome in its diagnostics pane.
 
 ### 1.3 [MEDIUM impact, MEDIUM risk] Parallelize expert prefetch across prefill tiles further
 - **Evidence**: `SYSTEM_DESIGN.md` "Prefill" section: the runtime already "may fetch the next tile while GPU work for the current tile remains queued, with both tiles fitting in the 16-slot cache" and streams "in tiles of at most eight." `docs/OPTIMIZATION_JOURNEY.md` shows fine-grained overlap failed for decode (regressed 4.799→4.648 tok/s) specifically because per-read launches broke synchronization — but that experiment was against single-token decode granularity, not the larger multi-row prefill tiles where read latency can be hidden behind a bigger GEMM.
@@ -149,7 +157,7 @@ Note the KV cache is **not the current bottleneck it was for Gemma**: Gemma had 
 
 1. **4.1** — Extend Qwen-specific profiling counters (prerequisite, no risk)
 2. **2.1** — Expert-cache sizing/hit-rate study for 256-expert Qwen shape (highest-value unmeasured question)
-3. **1.2** — Expose `--verify trusted-install` in app/server (cheap, already-proven code path)
+3. ~~**1.2** — Expose `--verify trusted-install` in app/server~~ — done 2026-09-11; all four call sites default to `auto`
 4. **1.1** — Prefill chunk-size sweep past 128
 5. **3.2** — Int8 KV cache for the 10 full-attention layers only, with the stronger dual quality gate (EvalPlus + 4096 soak)
 6. **2.2** — Command-buffer coalescing in decode (needs 4.1 data first to justify)

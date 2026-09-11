@@ -39,8 +39,9 @@ is currently reached only by tests. Qwen 3.8 has 12 full-attention layers of 48.
 | Expert-cache slots | 8, 16, 24, 32 | 16 | More slots can retain more routed experts and reduce later reads, but values above 16 use more RAM. |
 | Prompt prefill | On, off | On | On processes known prompt tokens through the chunked prefill path. Off disables that path. |
 | RDADVISE | Off, Default, Bounded, Adaptive | Off | Applies experimental read advice. Its effect depends on the workload; it may help a short decode and slow a long one. |
+| Model verification | Automatic, Full SHA-256, Trust verified install | Automatic | Automatic uses `verified-install.json` when it is present and valid and hashes everything otherwise. Full SHA-256 always hashes. Trust verified install requires the receipt and fails without one. The CLI and the server take the same three modes as `--verify auto\|full-sha256\|trusted-install`. |
 
-Changing context length, expert-cache slots, or RDADVISE requires a reload.
+Changing context length, expert-cache slots, RDADVISE, or model verification requires a reload.
 Some sampling changes also require a reload because greedy and sampled
 generation use different output-head paths. Prompt-prefill settings apply to
 each request and do not require a reload.

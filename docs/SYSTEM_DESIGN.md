@@ -140,14 +140,27 @@ The model path itself may be a symlink. FinchMoE resolves it once when
 the model opens, then rejects any symlinks inside the model directory. Changing
 the original symlink later cannot switch files under a running model.
 
-By default, FinchMoE hashes `manifest.json`, `model_weights.bin`, and
-`packed_experts/layout.json` at load, then hashes each routed-expert layer file
-on first use. The trusted-receipt policy is an explicit alternative. It still
-hashes the same three common files. For large layer files, it checks the
-receipt binding, manifest metadata, layout, and current file size instead of
-hashing the complete file again.
+By default, FinchMoE chooses the policy when the model opens: it uses the
+trusted receipt when `verified-install.json` is present and valid, and hashes
+otherwise. The choice is resolved once, together with the receipt, so the
+recorded policy and the receipt in hand cannot disagree.
 
-In both modes, the runtime rejects unknown format flags, incompatible
+Both paths always hash `manifest.json`, `model_weights.bin`, and
+`packed_experts/layout.json` at load. They differ in the layer and PLE part
+files. Hashing reads every one of them on first use; the receipt path checks
+the receipt binding, manifest metadata, layout, and current file size instead
+of hashing the complete file again. So the automatic choice never verifies
+less than a full hash would — it skips only what a validated receipt already
+covers, and any receipt failure (absent, unreadable, a symlink, a stale
+manifest, a changed size) falls back to hashing. A receipt that is present but
+unusable is reported as a warning; an absent one is silent, because that is the
+normal state of an install that was never verified.
+
+Both policies are also selectable explicitly — `--verify` on the CLI and the
+server, a picker in the Mac app — and `trusted-install` is strict there: it
+fails when the receipt is missing rather than falling back.
+
+In every mode, the runtime rejects unknown format flags, incompatible
 architecture values, missing layer files, invalid alignment, and failed
 integrity checks.
 
