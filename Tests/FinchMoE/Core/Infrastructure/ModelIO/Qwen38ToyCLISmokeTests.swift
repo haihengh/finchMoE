@@ -163,6 +163,111 @@ import FinchMoECLICore
         #expect(errors.contains("prefill=13tok"), "stderr: \(errors), stdout: \(text)")
     }
 
+    /// The `--counters` line, end to end on the toy.
+    ///
+    /// The toy is the only install where the *predicted* numbers can be
+    /// checked, which is what makes this worth its runtime: 4 layers, top-k 2,
+    /// and one full-attention layer against three GDN (`Toy38.fullMask`), so
+    /// every count below is derived from the fixture rather than measured.
+    ///
+    /// `--temperature 0.8 --seed 1`, not the greedy the other legs use: greedy's
+    /// first argmax on the toy lands on `<|im_end|>` and the run stops at
+    /// `new=1tok`, which leaves `forwards` at its degenerate value and most of
+    /// the line at zero. Sampling keeps the loop turning so the per-step
+    /// divisions and the counts have something to divide.
+    ///
+    /// What this can and cannot see: it proves the counters are wired to the CLI
+    /// and that the tiling reconciles on a real Metal run. The *magnitudes* are
+    /// meaningless here — the toy's weights are seeded noise and its geometry is
+    /// nothing like the 125B install.
+    @Test func countersLineReportsADecodeOnlySplit() async throws {
+        let out = try await Qwen38EngineLoadTests.makeInstall()
+        defer { try? FileManager.default.removeItem(atPath: out) }
+        try Self.writeToyTokenizer(into: out)
+
+        let args = try Args.parse([
+            "--model", out,
+            "--prompt", "hello world 3",
+            "--max-new", "8",
+            "--max-context", "64",
+            "--temperature", "0.8",
+            "--seed", "1",
+            "--counters",
+            "--verify", "full-sha256",
+        ])
+        let (result, text, errors) = await Self.runCLI(args)
+
+        #expect(result.exitCode == 0, "CLI exited \(result.exitCode): \(errors)")
+        guard let line = errors.split(separator: "\n")
+            .first(where: { $0.hasPrefix("[counters ") }) else {
+            Issue.record("no counters line on stderr: \(errors), stdout: \(text)")
+            return
+        }
+
+        func field(_ key: String) -> String? {
+            for token in line.split(separator: " ") {
+                let trimmed = token.hasSuffix("]") ? token.dropLast() : token[...]
+                let parts = trimmed.split(separator: "=", maxSplits: 1)
+                if parts.count == 2, parts[0] == Substring(key) { return String(parts[1]) }
+            }
+            return nil
+        }
+
+        // The snapshot at the prefill/decode boundary fired, so the numbers
+        // exclude prefill. A `whole-run` here would mean the boundary callback
+        // never reported `done == total`.
+        #expect(field("scope") == "decode", "line: \(line)")
+        // The tiling identity, on a real run rather than a synthetic snapshot.
+        #expect(field("identity") == "exact", "line: \(line)")
+
+        // Bound to locals rather than coalesced inline: `??` binds looser than
+        // `+` and `>`, so `field(a) ?? 0 + field(b)` is `field(a) ?? (0 + …)`
+        // and silently drops the second field.
+        guard let forwards = field("forwards").flatMap(UInt64.init), forwards > 0,
+              let hits = field("hits").flatMap(UInt64.init),
+              let misses = field("misses").flatMap(UInt64.init),
+              let cbs = field("cbs").flatMap(UInt64.init),
+              let pleOpens = field("ple_opens").flatMap(UInt64.init) else {
+            Issue.record("counters line is missing fields: \(line)")
+            return
+        }
+
+        // 2 experts out of 4 per layer, 4 layers, once per forward.
+        #expect(hits + misses == forwards * 8,
+                "hits+misses should be top-k x layers x forwards: \(line)")
+
+        // 3 command buffers per layer, plus the hit-split CB on the layers whose
+        // plan had a hit (0...4), plus the two `runSync` buffers (embed, head).
+        #expect(cbs >= forwards * 14 && cbs <= forwards * 18,
+                "command buffers outside the predicted 14-18 per forward: \(line)")
+
+        // Both layer kinds ran, so both buckets are live. Only layer 3 is full,
+        // so attention accumulates once per forward against the GDN buckets'
+        // three — and the toy is small enough that either could round to 0.00
+        // at two decimals, so this checks the difference is measurable at all
+        // rather than that it is larger.
+        let gdn = ["gdn_proj_cpu_ms/step", "gdn_conv_gate_cpu_ms/step",
+                   "gdn_recurrent_cpu_ms/step"]
+            .reduce(0.0) { $0 + (Double(field($1) ?? "") ?? 0) }
+        #expect(gdn > 0, "GDN buckets never accumulated: \(line)")
+
+        // The PLE head is on layer 1 of the toy and gathers once per forward.
+        #expect(pleOpens > 0, "the PLE gather was never counted: \(line)")
+    }
+
+    @Test func slotCountBelowTopKFailsInsteadOfTrapping() {
+        // The real Qwen 3.8 install: top-k 10 against an allowed list that
+        // includes 8. This is the case that would otherwise reach
+        // `preconditionFailure` inside `makeExpertCachePlan`.
+        #expect(ExpertCacheSlotCheck.error(slots: 8, topKExperts: 10) != nil)
+        // Exactly enough is enough, and 3.6's top-k 8 leaves all four legal.
+        #expect(ExpertCacheSlotCheck.error(slots: 8, topKExperts: 8) == nil)
+        #expect(ExpertCacheSlotCheck.error(slots: 16, topKExperts: 10) == nil)
+        // The toy's top-k 2 makes every allowed count legal, which is why this
+        // is a pure-function test: no install reachable from a test can trap.
+        #expect(ExpertCacheSlotCheck.error(slots: 8, topKExperts: 2) == nil)
+    }
+
     // MARK: - CLI harness
 
     /// Drives the CLI in-process and captures both streams.

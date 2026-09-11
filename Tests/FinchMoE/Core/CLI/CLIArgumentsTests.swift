@@ -17,6 +17,8 @@ import Testing
         #expect(arguments.seed == nil)
         #expect(arguments.stops.isEmpty)
         #expect(!arguments.quiet)
+        #expect(!arguments.counters)
+        #expect(arguments.expertCacheSlots == nil)
         #expect(arguments.verify == .automatic)
     }
 
@@ -89,7 +91,8 @@ import Testing
         let expected: Set<String> = [
             "--model", "--prompt", "--messages-file", "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
-            "--seed", "--stop", "--quiet", "--verify", "--help",
+            "--seed", "--stop", "--quiet", "--counters", "--expert-cache-slots",
+            "--verify", "--help",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })
@@ -119,6 +122,41 @@ import Testing
         ])
         #expect(arguments.prompt == nil)
         #expect(arguments.messagesFile == "chat.json")
+    }
+
+    @Test func expertCacheSlotsAcceptTheRuntimesOwnList() throws {
+        for slots in RuntimeConfiguration.allowedExpertCacheSlots {
+            let arguments = try Args.parse([
+                "--model", "m.finch", "--prompt", "hi",
+                "--expert-cache-slots", String(slots),
+            ])
+            #expect(arguments.expertCacheSlots == slots)
+        }
+    }
+
+    /// The rejections matter more than the acceptances: `RuntimeConfiguration.init`
+    /// `precondition`s on the same list, so anything `parse` lets through that is
+    /// not on it would trap the process rather than print an error.
+    @Test func expertCacheSlotsRejectAnythingOffTheList() {
+        for value in ["7", "12", "0", "-16", "64", "sixteen"] {
+            #expect(throws: ArgsError.invalidValue(flag: "--expert-cache-slots",
+                                                   value: value)) {
+                _ = try Args.parse([
+                    "--model", "m.finch", "--prompt", "hi",
+                    "--expert-cache-slots", value,
+                ])
+            }
+        }
+    }
+
+    @Test func countersIsAFlagWithNoValue() throws {
+        let arguments = try Args.parse([
+            "--model", "m.finch", "--prompt", "hi", "--counters",
+        ])
+        #expect(arguments.counters)
+        // A flag, so the next argument is not consumed as its value.
+        #expect(arguments.prompt == "hi")
+        #expect(arguments.model == "m.finch")
     }
 
     @Test func promptAndMessagesFileAreMutuallyExclusive() {
