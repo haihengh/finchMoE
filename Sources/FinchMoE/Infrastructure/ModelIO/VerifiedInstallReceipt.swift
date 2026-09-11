@@ -49,6 +49,26 @@ public enum ModelIntegrityOutcome: Sendable, Equatable {
     }
 
     public var isWarning: Bool { warningMessage != nil }
+
+    /// The same fact as `warningMessage`, for callers that want to state which
+    /// verification ran whether or not anything went wrong.
+    ///
+    /// `warningMessage` is user-facing and only exists for the one bad case; a
+    /// server's startup line wants the mode on every run, including the quiet
+    /// ones. Both live here for the same reason: three call sites rendering the
+    /// same five cases independently is three chances to disagree about what
+    /// "auto" resolved to.
+    public var logDescription: String {
+        switch self {
+        case .explicitFullSha256: return "full-sha256 (explicit)"
+        case .explicitTrustedReceipt: return "trusted-install (explicit)"
+        case .automaticUsedReceipt: return "auto (verified-install.json)"
+        case .automaticFellBackAbsent: return "auto (no verified-install.json; hashed)"
+        case .automaticFellBackInvalid(let detail):
+            return "auto (\(VerifiedInstallReceiptReader.fileName) unusable: "
+                + "\(detail); hashed)"
+        }
+    }
 }
 
 public struct VerifiedInstallReceipt: Codable, Equatable, Sendable {
