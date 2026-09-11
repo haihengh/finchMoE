@@ -9,17 +9,25 @@ public struct LocalQwenRepackOptions: Sendable {
     public let snapshotDir: String
     public let outputDir: String
     public let overwrite: Bool
+    /// Continue a partial directory left by an interrupted run instead of
+    /// refusing it. Output files the journal records as complete — and that
+    /// still hash to their recorded digest — are reused; everything else is
+    /// rewritten. Without this flag a stale partial is refused exactly as it
+    /// was before resume existed.
+    public let resume: Bool
     public let copyAuditPath: String?
     public let minFreeReserveBytes: UInt64
 
     public init(snapshotDir: String,
                 outputDir: String,
                 overwrite: Bool = false,
+                resume: Bool = false,
                 copyAuditPath: String? = nil,
                 minFreeReserveBytes: UInt64 = 1 * 1024 * 1024 * 1024) {
         self.snapshotDir = snapshotDir
         self.outputDir = outputDir
         self.overwrite = overwrite
+        self.resume = resume
         self.copyAuditPath = copyAuditPath
         self.minFreeReserveBytes = minFreeReserveBytes
     }
@@ -38,6 +46,10 @@ public final class LocalQwenRepacker {
     private let options: LocalQwenRepackOptions
     private let audit: RepackAudit
     private let startTime = Date()
+    /// Resume state, established by `runPrepared` before the first output file
+    /// is written. Nil for any run that never reached that point.
+    private var journal: LocalRepackJournal?
+    private var journalPath: String?
 
     public init(options: LocalQwenRepackOptions,
                 audit: RepackAudit = RepackAudit()) {
@@ -55,29 +67,75 @@ public final class LocalQwenRepacker {
             throw RepackError.configurationInvalid(detail:
                 "output directory already exists: \(paths.finalDirectory)")
         }
-        let hasPartial = try Posix.entryKind(paths.partialDirectory) == .directory
-        if hasPartial {
-            throw RepackError.installStateCorrupt(
-                path: paths.partialDirectory,
-                detail: "stale partial directory from a previous run; remove it first")
+
+        // Everything that decides whether an existing partial directory may be
+        // written into is settled here, before a byte is written or deleted.
+        var resumeJournal: LocalRepackJournal? = nil
+        if try Posix.entryKind(paths.partialDirectory) == .directory {
+            guard options.resume else {
+                throw RepackError.installStateCorrupt(
+                    path: paths.partialDirectory,
+                    detail: "stale partial directory from a previous run; "
+                        + "pass --resume to continue it, or remove it first")
+            }
+            let journalPath = LocalRepackJournal.path(inPartialDirectory: paths.partialDirectory)
+            // The journal is written before the first payload byte, so its
+            // absence means this partial carries no record of what is finished
+            // — an older run's leftover, or a directory that lost its state.
+            // Resuming onto it would mean guessing, so refuse instead.
+            guard try Posix.entryKind(journalPath) == .regular else {
+                throw RepackError.installStateCorrupt(
+                    path: paths.partialDirectory,
+                    detail: "partial directory has no \(LocalRepackJournal.fileName), "
+                        + "so none of its files are known complete; remove it first")
+            }
+            resumeJournal = try LocalRepackJournal.load(from: journalPath)
         }
 
         do {
-            return try await runPrepared(paths: paths, progress: progress)
+            return try await runPrepared(paths: paths,
+                                         resumeJournal: resumeJournal,
+                                         progress: progress)
         } catch {
-            // No resume support on the local path — a failed run leaves no
-            // reusable state, so drop the partial directory.
-            try? FileManager.default.removeItem(atPath: paths.partialDirectory)
+            // A resumed run keeps its partial directory — that state is the
+            // whole point of --resume, and the journal lets the next attempt
+            // pick up where this one stopped. Without --resume the behaviour
+            // is unchanged: a failed run leaves nothing behind.
+            if !options.resume {
+                try? FileManager.default.removeItem(atPath: paths.partialDirectory)
+            }
             throw error
         }
     }
 
     private func runPrepared(paths: RemoteInstallPaths,
+                             resumeJournal: LocalRepackJournal?,
                              progress: @escaping @Sendable (ModelInstallProgress) -> Void) async throws
         -> LocalQwenRepackResult {
         progress(.downloadingMetadata)
         let snapshot = try QwenLocalSnapshot.load(snapshotDir: options.snapshotDir)
         try Task.checkCancellation()
+
+        let fingerprint = LocalRepackJournal.Fingerprint(
+            sourceDirectory: URL(fileURLWithPath: options.snapshotDir).path,
+            sourceIndexSha256: snapshot.metadata.indexSha256Hex,
+            outputDirectory: URL(fileURLWithPath: options.outputDir).path,
+            modelFamily: snapshot.arch.modelFamily,
+            numLayers: snapshot.arch.numLayers)
+        if let resumeJournal, resumeJournal.fingerprint != fingerprint {
+            // This is the property the old unconditional refusal protected: a
+            // partial is never written into by a run that would produce
+            // different bytes, so a resumed install can never be a mixture of
+            // two models.
+            let previous = resumeJournal.fingerprint
+            let indexPrefix = previous.sourceIndexSha256.prefix(12)
+            let family = previous.modelFamily ?? "no family"
+            throw RepackError.installStateIncompatible(
+                detail: "partial directory was written from a different source: "
+                    + "\(previous.sourceDirectory), index \(indexPrefix)…, "
+                    + "\(family), \(previous.numLayers) layers; "
+                    + "remove it first")
+        }
 
         let plan = try QwenRepackPlanner.plan(meta: snapshot.metadata,
                                               arch: snapshot.arch,
@@ -109,27 +167,49 @@ public final class LocalQwenRepacker {
         try Posix.mkdirP((paths.partialDirectory as NSString)
             .appendingPathComponent("packed_experts"))
 
+        // The journal exists before the first output file does, so any kill
+        // from here on leaves a partial that can be resumed rather than
+        // discarded. A resumed run adopts the journal it already has.
+        let journalPath = LocalRepackJournal.path(inPartialDirectory: paths.partialDirectory)
+        if let resumeJournal {
+            self.journal = resumeJournal
+        } else {
+            let fresh = LocalRepackJournal(fingerprint: fingerprint)
+            try fresh.write(to: journalPath)
+            self.journal = fresh
+        }
+        self.journalPath = journalPath
+
         progress(.copyingPayload(
             reusedBytes: 0, downloadedThisRunBytes: 0, totalBytes: outputBytes))
-        _ = try QwenQuantizedWriter.writeResident(
-            plan: plan.resident,
-            audit: audit,
-            cancellationCheck: Task.checkCancellation)
-        for layer in plan.layers where layer.expertsPerLayer > 0 {
-            try Task.checkCancellation()
-            progress(.hashingOutput("packed_experts/" + (layer.path as NSString).lastPathComponent))
-            _ = try QwenQuantizedWriter.writeLayer(
-                plan: layer,
+        _ = try produce(relativePath: plan.resident.relativePath,
+                        path: plan.resident.path) {
+            try QwenQuantizedWriter.writeResident(
+                plan: plan.resident,
                 audit: audit,
                 cancellationCheck: Task.checkCancellation)
+        }
+        for layer in plan.layers where layer.expertsPerLayer > 0 {
+            try Task.checkCancellation()
+            progress(.hashingOutput(layer.relativePath))
+            _ = try produce(relativePath: layer.relativePath,
+                            path: layer.path) {
+                try QwenQuantizedWriter.writeLayer(
+                    plan: layer,
+                    audit: audit,
+                    cancellationCheck: Task.checkCancellation)
+            }
         }
         for part in plan.pleParts {
             try Task.checkCancellation()
             progress(.hashingOutput(part.relativePath))
-            _ = try QwenQuantizedWriter.writePLEPart(
-                plan: part,
-                audit: audit,
-                cancellationCheck: Task.checkCancellation)
+            _ = try produce(relativePath: part.relativePath,
+                            path: part.path) {
+                try QwenQuantizedWriter.writePLEPart(
+                    plan: part,
+                    audit: audit,
+                    cancellationCheck: Task.checkCancellation)
+            }
         }
 
         try Task.checkCancellation()
@@ -141,11 +221,18 @@ public final class LocalQwenRepacker {
             layers: plan.layers,
             numLayers: plan.arch.numLayers,
             expertStride: expertStride)
-        try writeSmall(path: layoutPath, data: layoutData)
-        try FinchLayoutValidator.validate(path: layoutPath, layers: plan.layers)
-        try recordOutputFile(relativePath: "packed_experts/layout.json",
-                             path: layoutPath,
-                             progress: progress)
+        // The validator runs before the file is hashed, so a journal entry for
+        // this path is proof the layout validated: a resumed run reuses an
+        // artifact whose digest was recorded only after that check passed, and
+        // need not repeat it.
+        _ = try produce(relativePath: "packed_experts/layout.json",
+                        path: layoutPath) {
+            try writeSmall(path: layoutPath, data: layoutData)
+            try FinchLayoutValidator.validate(path: layoutPath, layers: plan.layers)
+            return try recordOutputFile(relativePath: "packed_experts/layout.json",
+                                        path: layoutPath,
+                                        progress: progress)
+        }
 
         try Task.checkCancellation()
         try copyTokenizers(snapshotDir: options.snapshotDir,
@@ -160,6 +247,13 @@ public final class LocalQwenRepacker {
                           expertStride: expertStride)
 
         try Task.checkCancellation()
+        // The journal is run bookkeeping, not install content. Drop it before
+        // the partial directory is promoted, or the install would carry a file
+        // the manifest does not list. The cost of dying inside this window is
+        // a partial that must be discarded rather than resumed — one syscall
+        // wide, and it fails loudly rather than silently.
+        try? FileManager.default.removeItem(atPath: journalPath)
+        try? Posix.fsyncDirectory(paths.partialDirectory)
         if try Posix.entryKind(paths.finalDirectory) == .directory {
             try Posix.renameSwap(paths.partialDirectory, paths.finalDirectory)
             try Posix.fsyncDirectory(paths.parentDirectory)
@@ -195,9 +289,70 @@ public final class LocalQwenRepacker {
         }
     }
 
+    /// Writes one output file — or, on `--resume`, reuses the one a previous
+    /// run already wrote and journaled.
+    ///
+    /// `relativePath` is the `manifest.files` key, so the journal, the audit
+    /// and the manifest all name the same file the same way.
+    ///
+    /// Ordering is the correctness argument. `write` returns only after the
+    /// file is complete *and* hashed, and the journal entry is appended after
+    /// that, so an entry means "finished", never "started". Durability is not
+    /// assumed of it: a couple of these writers (`writeSmall`, the tokenizer
+    /// copies) never `fsync` at all, and on macOS an `fsync` does not promise
+    /// the platter caught up either. Which is why reuse re-reads the bytes
+    /// instead of trusting the entry — see `reuseIfIntact`.
+    private func produce(relativePath: String,
+                         path: String,
+                         write: () throws -> RepackAudit.OutputFile) throws
+        -> RepackAudit.OutputFile {
+        guard let journalPath, var journal = self.journal else {
+            // Unreachable in practice: `runPrepared` establishes the journal
+            // before the first write.
+            return try write()
+        }
+        if let entry = journal.entry(for: relativePath),
+           let reused = try reuseIfIntact(entry: entry, path: path) {
+            audit.outputFiles.append(reused)
+            return reused
+        }
+        let written = try write()
+        journal.record(LocalRepackJournal.Entry(relativePath: written.relativePath,
+                                                size: written.size,
+                                                sha256: written.sha256))
+        try journal.write(to: journalPath)
+        self.journal = journal
+        return written
+    }
+
+    /// Returns the recorded file when the bytes on disk still match the
+    /// journal, or nil when the file has to be written again.
+    ///
+    /// Cheapest check first. Existence and size settle most cases; the digest
+    /// is what settles the one that matters, because every writer here
+    /// `ftruncate`s to the final size before filling, so a file interrupted
+    /// mid-write is exactly the right length and wrong in its tail.
+    private func reuseIfIntact(entry: LocalRepackJournal.Entry,
+                               path: String) throws -> RepackAudit.OutputFile? {
+        guard try Posix.entryKind(path) == .regular else { return nil }
+        let fd = try Posix.openRead(path)
+        defer { close(fd) }
+        let size = try Posix.fileSize(fd: fd, path: path)
+        guard size == entry.size else { return nil }
+        let sha = try WriterCore.hashEntireFile(path: path,
+                                                size: size,
+                                                audit: audit,
+                                                cancellationCheck: Task.checkCancellation)
+        guard sha == entry.sha256 else { return nil }
+        return RepackAudit.OutputFile(relativePath: entry.relativePath,
+                                      size: size, sha256: sha)
+    }
+
+    @discardableResult
     private func recordOutputFile(relativePath: String,
                                   path: String,
-                                  progress: @Sendable (ModelInstallProgress) -> Void) throws {
+                                  progress: @Sendable (ModelInstallProgress) -> Void) throws
+        -> RepackAudit.OutputFile {
         progress(.hashingOutput(relativePath))
         try Task.checkCancellation()
         let fd = try Posix.openRead(path)
@@ -207,7 +362,9 @@ public final class LocalQwenRepacker {
                                                 size: size,
                                                 audit: audit,
                                                 cancellationCheck: Task.checkCancellation)
-        audit.outputFiles.append(.init(relativePath: relativePath, size: size, sha256: sha))
+        let file = RepackAudit.OutputFile(relativePath: relativePath, size: size, sha256: sha)
+        audit.outputFiles.append(file)
+        return file
     }
 
     private func writeSmall(path: String, data: Data) throws {
@@ -241,13 +398,17 @@ public final class LocalQwenRepacker {
             }
             try Posix.mkdirP(tokenizerDir)
             let dst = (tokenizerDir as NSString).appendingPathComponent(file.name)
-            if try Posix.entryKind(dst) == .regular {
-                try FileManager.default.removeItem(atPath: dst)
+            _ = try produce(relativePath: "tokenizer/\(file.name)", path: dst) {
+                // `copyItem` refuses an existing destination, and an
+                // interrupted run leaves one behind.
+                if try Posix.entryKind(dst) == .regular {
+                    try FileManager.default.removeItem(atPath: dst)
+                }
+                try FileManager.default.copyItem(atPath: src, toPath: dst)
+                return try recordOutputFile(relativePath: "tokenizer/\(file.name)",
+                                            path: dst,
+                                            progress: progress)
             }
-            try FileManager.default.copyItem(atPath: src, toPath: dst)
-            try recordOutputFile(relativePath: "tokenizer/\(file.name)",
-                                 path: dst,
-                                 progress: progress)
         }
     }
 

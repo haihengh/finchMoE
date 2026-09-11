@@ -68,7 +68,7 @@ enum QwenQuantizedWriter {
         let sha = try WriterCore.hashEntireFile(path: plan.path, size: size,
                                                 audit: audit,
                                                 cancellationCheck: cancellationCheck)
-        let rel = (plan.path as NSString).lastPathComponent
+        let rel = plan.relativePath
         let outFile = RepackAudit.OutputFile(relativePath: rel, size: size, sha256: sha)
         audit.outputFiles.append(outFile)
         return outFile
@@ -387,7 +387,7 @@ enum QwenQuantizedWriter {
         let sha = try WriterCore.hashEntireFile(path: plan.path, size: size,
                                                 audit: audit,
                                                 cancellationCheck: cancellationCheck)
-        let rel = "packed_experts/" + (plan.path as NSString).lastPathComponent
+        let rel = plan.relativePath
         let outFile = RepackAudit.OutputFile(relativePath: rel, size: size, sha256: sha)
         audit.outputFiles.append(outFile)
         return outFile
