@@ -164,9 +164,20 @@ humaneval_evalplus/
   run_cell.sh            one tier end-to-end with tier-load assertion + teardown
   run_all.sh             sequential sweep (lockfile + port guards; one engine at a time)
                          (run_cell.sh also takes a `gguf3090` tier for the 3090's file)
+  run_server_cell.sh     one cell against a FinchMoEServer install — the Swift engine,
+                         no shim; the 3.6/3.8 `.finch` cells, which are NOT in the
+                         matrix above (that matrix is the archive C engine). Publishes
+                         to quality/humaneval/. See its header for usage.
   reference/             the 3090's published qwen3.6-35b-a3b samples, for cross-checking
   results/               evalplus output per tier
 ```
+
+The `.finch` cells use this same EvalPlus install, the same `humaneval_gen.py`,
+and the same scoring — only the engine on port 8080 differs, which is what lets
+a 3.8 cell be read against a 3.6 one. Scores, and the two harness traps they hit
+(the 4 GB compressor ceiling is *binding* for a 3.8 server run; scoring itself is
+the memory hog, so score standalone with `--parallel 2`), are recorded in
+`docs/QWEN38_PORT.md` §8.
 
 ## Reproduce
 
