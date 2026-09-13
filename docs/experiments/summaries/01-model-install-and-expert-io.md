@@ -553,6 +553,129 @@ the wrong place for a refuted hypothesis to live.
   sweep's position, not its variable, and only a reverse-order run can tell
   you which one you measured.
 
+### IO-18: Pricing the slot destination working set, and finding the replay must be run cold
+
+**The measurement IO-17 named, run, and answered no.** IO-17 closed with a bounded
+instruction: the engine holds one `PreadExpertStreamer` per layer
+(`Model.swift:689` is inside the layer loop), each with its own `slotCount` slots
+allocated once at init, so at 16 slots it rotates **48 x 16 x 2,768,896 B = 1.98 GiB**
+of anonymous pages on 3.8 against **1.05 GiB** on 3.6 -- price that on the new traces
+with the span-sum metric, and if it does not account for 1.3-1.4x, the next step is a
+GPU-overlap experiment and not a read-side one.
+
+**Two things were wrong with the price the plan already had.** §2.1's table carried an
+engine-shaped-destination row at 149.6 against 130.3 warm, "+19.3 ms/step, real and
+small" -- but that row was measured with the page cache **bypassed**, and the engine
+does not bypass the cache. The cell that matches what the engine actually does,
+`allowed + engine-shaped`, had never been run. It is also the only cell where the
+interaction can appear: 2 GiB of *resident* destinations competes with the page cache,
+and 3.8's 11 GiB working set does not fit in the first place.
+
+**The harness is committed this time.** IO-17's replay was never checked in, so the
+plan's read-side numbers could not be re-derived from the repo -- `tools/read-sweep/README.md`
+told the reader to replay `FQ_EXPERT_TRACE` and no committed tool could. Now
+`tools/read-sweep/replay_dest.py` takes a trace and a layout, builds the ring the way
+the engine builds it (one page-aligned buffer per `(layer, slot)`, pre-faulted outside
+every timed span, freed between installs so only one ring is ever live),
+`capture-traces.sh` re-captures the engine half, and `paired-engine-replay.sh`
+alternates the two. Conditions, at each install's own read concurrency:
+
+| condition | what it isolates |
+| --- | --- |
+| `allowed, warm dest` | IO-17's condition, reproduced |
+| `bypassed, warm dest` | IO-17's condition with the page cache removed |
+| **`allowed, slot dest`** | **the engine's own condition AND its own destination shape** |
+| `bypassed, slot dest` | both ablations together |
+| `bypassed, slot dest, depth 3` | pool width |
+
+**Result: +1.5 ms/step, not +19.3.** Engine and replay were interleaved round by round
+(`paired-engine-replay.sh 3.8 ... 5 6`), the engine's `io_read_wall_ms/step` read against
+a replay that ran within a minute of it, with condition order alternated by round parity
+so the position bias separates from the effect. Solving the paired deltas for the two
+unknowns (`D` = true slot cost, `A` = the cost of running second):
+
+| round | engine `io_read_wall` | `io_thread_wall` | `io_conc` | replay, in run order |
+| --- | ---: | ---: | ---: | --- |
+| 2 | 215.11 | 1142.21 | 5.32 | warm 128.64, slot 129.68 |
+| 3 | 215.48 | 1154.09 | 5.36 | slot 129.62, warm 130.73 |
+| 4 | 216.09 | 1157.11 | 5.36 | warm 129.48, slot 131.90 |
+| 5 | 216.62 | 1169.36 | 5.41 | slot 129.73, warm 130.25 |
+| 6 | 216.01 | 1170.38 | 5.43 | warm 129.32, slot 132.28 |
+
+`D` = **+1.5 ms/step** -- 1.2% of the replay window and 1.7% of the 86 ms/step gap it
+would have to explain. The destination working set is exonerated a second time, and
+this time in the condition the engine actually runs in.
+
+**The engine / replay ratio is tighter than the record had it, and the same on every
+round: 1.66x** (215.11/128.64, 215.48/129.62, 216.09/129.48, 216.62/129.73,
+216.01/129.32), against IO-17's 1.31-1.43x.
+
+**Three more read-side candidates, all negative, all cold.** The engine's 48 per-layer
+batches take 4.48 ms each where the replay's take 3.06 -- so the next question was what
+the engine does *between* its batches:
+
+| variable | tested | result |
+| --- | --- | --- |
+| inter-batch idle (the engine's ~1.5 ms of GPU work) | 0 / 1.5 / 3.0 ms, cold | 152.2 / 155.1 / 165.8 -- a 3 ms idle costs the next batch **0.28 ms**, not the 1.3 ms needed. The drive does not re-ramp. |
+| memory pressure | 0 / 2 / 4 / 6 GiB resident ballast | flat within noise (145-164), and the slot ring's ~80,000 re-faults per pass cost nothing in wall time -- they hide inside the drive wait at 5 workers |
+| the 3.8-only PLE stream | `ple_wall_ms/step` 3.84, 496 opens / 31 steps | open-dominated, ~16 opens/step; far too few bytes to cost the expert window 63 ms |
+
+**The find of the session is a method error, and it changes how the older numbers read.**
+`F_NOCACHE` is not honoured on this volume and `sudo purge` is unavailable, so the only
+way to get a genuinely cold pass is to push the trace's pages out by reading something
+else. `--evict-gib` streams 17 GB of the *other* install's experts before every pass.
+On 3.6, the same condition, in one session:
+
+| 3.6 replay, `allowed, warm dest` | ms/step | GB/s |
+| --- | ---: | ---: |
+| cold (first run) | 56.71 | 4.21 |
+| **evict = on** | **56.96** | **4.19** |
+| warm (second run, warmed by the first) | **8.99** | **26.53** |
+| evict = on | 56.73 | 4.20 |
+
+**6.3x, from the cache alone, on this box's own 4.3 GiB working set.** The plan's "3.6's
+working set fits in 16 GB and warms completely -- a fifth replay pass reaches 21.4 GB/s"
+is a property of the *replay*, not of the engine, and the engine -- **51-57 ms/step cold,
+the same session** -- is sitting on the cold rate. On 3.8 the same eviction moves the
+replay only 144.7 -> 149.1 (3.1%), so 3.8's replay was never cache-inflated and its 4.6 GB/s
+is real NAND throughput.
+
+**Which corrects IO-17's headline for 3.6.** IO-17 recorded the 3.6 engine as 1.20-1.33x
+*faster* than a faithful replay of its own reads. Cold, the two are at parity
+(51-57 against 56.7-57.0). The engine does not beat its replay on 3.6 and it does not
+need to; the replay only appeared faster or slower depending on how warm it was run.
+**The 3.8 deficit survives the correction and is the only one left: 1.42-1.46x against a
+cold replay** (215 against 147-153).
+
+**And it is now a per-request number rather than a window.** `io_thread_wall / misses`
+is the average pread, and both arms were at the same achieved concurrency:
+
+| | per-read service time | concurrency |
+| --- | ---: | ---: |
+| 3.6 engine | 1.22 ms | 3.23 |
+| 3.6 replay, cold | 1.26 ms | 3.0 |
+| 3.8 engine | **4.65 ms** | 5.32 |
+| 3.8 replay, cold | **2.62 ms** | 5.0 |
+
+Same request size, same offsets, same session, same depth: **3.6's engine and its replay
+agree to 3% per request, and 3.8's engine takes 1.78x as long as its replay for the same
+2.64 MiB read.** That is not queueing, not a pattern, not a destination and not dispatch
+-- six candidates have now been priced and removed -- it is the read itself, and it is
+specific to the 3.8 install.
+
+- **Disposition:** the destination working set does not account for the deficit
+  (+1.5 ms/step of 86), so §2.1's named branch is taken -- but the branch it named, a
+  GPU-overlap experiment, is worth at most the device work it could hide (0.87 ms/layer
+  of a 4.48 ms read window, §2.1's own sum), while the read window is 1.42-1.46x what a
+  cold replay of the identical reads achieves. The next discriminator is the per-read
+  service time above: 4.65 against 2.62 ms at equal depth on 3.8, and in agreement on
+  3.6. What differs between the installs inside the read is the open question.
+- **Lesson:** a replay harness is only as good as its cache state, and a warm one
+  flatters itself, not the engine. Quote a replay number with the cache state it was
+  measured in, and control it by eviction when the volume will not honour `F_NOCACHE`
+  and `purge` is unavailable -- three of the numbers this section used to rest on were
+  warm-pass readings of a 4.3 GiB working set on a 16 GB box.
+
 [Experiment inventory](../EXPERIMENT_INVENTORY.md) |
 [Optimization journey](../../OPTIMIZATION_JOURNEY.md) |
 [Next: Decode, MoE, INT4, and router](02-decode-moe-int4-and-router.md)
