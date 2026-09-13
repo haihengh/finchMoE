@@ -75,7 +75,8 @@ struct InspectorView: View {
             LabeledContent("Context") {
                 Picker("Context", selection: $model.maxContextTokens) {
                     ForEach(AppContextLengthOption.allCases) { option in
-                        Text(option.menuLabel).tag(option.tokens)
+                        Text(option.menuLabel(architecture: model.installDescriptor.architecture))
+                            .tag(option.tokens)
                     }
                 }
                 .pickerStyle(.menu)
