@@ -283,7 +283,39 @@ Grounded in: `docs/SYSTEM_DESIGN.md`, `docs/OPTIMIZATION_JOURNEY.md`, `docs/QWEN
 | Activations | — | FP16 | — | — |
 | Metal accumulators | — | FP32 | — | — |
 
-Note the KV cache is **not the current bottleneck it was for Gemma**: Gemma had 30 attention layers with a growing cache; Qwen has only 10 full-attention layers (the other 30 are the fixed-size GDN state). This changes the cost/benefit math versus the rejected Gemma K4/V4 experiment substantially — there is 3x less KV-cache surface to quantize, and the potential win is smaller in absolute terms but also smaller in risk (less exposure to the "grows past FP16 at long context" failure mode, since Qwen's cache is already 1/3 the layer count of Gemma's).
+Note the KV cache is **not the current bottleneck it was for Gemma**: Gemma had 30 attention layers with a growing cache; Qwen has only 10 full-attention layers (the other 30 are the fixed-size GDN state). This changes the cost/benefit math versus the rejected Gemma K4/V4 experiment substantially — there is 3x less KV-cache surface to quantize, and the potential win is smaller in absolute terms but also smaller in risk (less exposure to the "grows past FP16 at long context" failure mode, since Qwen's cache is already 1/3 the layer count of Gemma's). (The rows above are 3.6-specific; 3.8 Flash-Next has 12 full-attention layers of 48 and an extra indexer timeline — see §3.1b.)
+
+### 3.1b Memory vs context length, both Qwen models (derived from the allocation code, not measured)
+
+§3.1's figures are 3.6-specific and stop at 4K. Completed 2026-09-12 for both models across 4K/8K/16K/32K/64K, from `KVCacheManager.swift`, `QSAIndexerState.swift`, `RealForwardRunner.swift` and the per-family `ArchConfig` presets. **Arithmetic from the allocation code — no run above 4K exists anywhere in this repo.** Read it as what the engine *will* allocate, not what has been observed.
+
+Both models are hybrid, and that is the whole story: only every 4th layer is full attention, and the rest are GatedDeltaNet, which holds a **fixed** recurrent state and **no KV cache at all**. The per-token stride is identical for both (`numFullKVHeads=2 × fullHeadDim=256 × 2B`, K and V each = 1,024 B/token/layer), so the entire KV difference between the two models is the layer count, 10 vs 12.
+
+| Store @ 65,536 tokens | 3.6 35B-A3B | 3.8 Flash-Next 125B |
+|---|---|---|
+| Full-attention layers (of 40 / 48) | 10 | 12 |
+| KV cache, FP16 | 1.342 GB | 1.611 GB |
+| QSA indexer (rawKeys + pooled + scores + cells) | — | 0.253 GB |
+| GDN recurrent state, FP32 — context-independent | 60 MiB | 108 MiB |
+| GDN conv state, FP16 — context-independent | 1.41 MiB | 2.11 MiB |
+| PLE conv history, FP16 — context-independent | — | 360 KiB |
+| **Persistent total @ 64K** | **1.31 GiB** | **1.84 GiB** |
+
+KV alone, per context length — the term that actually scales:
+
+| Context | 3.6 | 3.8 |
+|---|---|---|
+| 4K | 80 MiB | 96 MiB |
+| 8K | 160 MiB | 192 MiB |
+| 16K | 320 MiB | 384 MiB |
+| 32K | 640 MiB | 768 MiB |
+| 64K | 1.25 GiB | 1.50 GiB |
+
+Three consequences for the §3.2 proposal. **(a)** The quantizable surface is 10–12 layers of 40–48, so the KV store is roughly a **quarter** of what a dense model of the same shape would carry — at 64K, 1.34 GB instead of 5.37 GB for 3.6, and 1.61 GB instead of 6.44 GB for 3.8. **(b)** 3.8 pays a **QSA indexer on top** (`QSAIndexerState.swift:136-145`: `rawKeys` = `maxContext × 128` fp16 per full layer, plus pooled/scores/cells), ~13% of its KV at 64K and absent from §3.1's table entirely. Any int8 KV proposal must state which of these two timelines it quantizes. **(c)** The store is small in absolute terms at every context this engine supports, which is the case for treating §3.2 as low priority rather than high.
+
+**Not in the table, and not small:** the streaming working set. The PLE table is 95.4 GiB on disk but is `pread`-gathered 5 KB/token with nothing resident (`PLEHost.swift:11-14`); the experts (18.1 GB / 68.1 GB on disk) stream through rotating slot pages — 2.03 GiB resident for 3.8 vs 1.08 GiB for 3.6 (EXPERIMENT summary 01). At ≤4K the process peaks at ~0.5–0.85 GiB RSS (3.6) and ~3.1 GB compressed (3.8), so a 3.8 64K run should land near 5 GB. That sum is an extrapolation across an unmeasured region; the state figures above are not.
+
+**KV is preallocated at `--max-context`, never grown.** `KVCacheManager.init` sizes every layer at `capacity = maxContext`, and `advance` *traps* rather than growing (`precondition(position + count <= maxContext)`). Asking for 64K pays 64K of KV at init even for a 10-token prompt. Defaults differ per surface: CLI 4096 (no cap), HTTP server 16384 (max 65536), Mac app 4K (max 64K). The Mac app's context-menu byte labels are now computed from the loaded `ArchConfig` rather than hardcoded — before 2026-09-12 they showed 3.6's 1.26 GB delta at 64K for every model, under-reporting 3.8 by 0.25 GB.
 
 ### 3.2 [LOW-MEDIUM impact, MEDIUM risk] Full-attention KV cache: int8 per-block-scale quantization, revisit only with a stronger quality gate than before
 - **Rationale for revisiting despite the rejected precedent**: the earlier failure (`OPTIMIZATION_JOURNEY.md`) was specifically the **packed K4/V4** (4-bit) scheme across **all 30** Gemma attention layers, where the packing overhead ate the savings at long context because most of those layers used a bounded *ring* buffer already (only 5 full-attention layers grew unbounded). For Qwen, apply this only to the **10 full-attention layers**, at **int8** (not int4 — int4 KV cache has a well-documented larger perplexity risk in the broader literature, and this codebase's own experiment history shows int4-class quantization schemes need the most validation scrutiny — e.g., Bug 9-style silent correctness bugs are exactly the class of risk this project has already been burned by more than once for 4-bit paths).
@@ -293,7 +325,7 @@ Note the KV cache is **not the current bottleneck it was for Gemma**: Gemma had 
   1. Gate on the *same* trusted-reference quality comparison used before (the "failed the full quality evaluation" bar in the journey doc) — rerun the EvalPlus HumanEval harness (`quality/humaneval/`, the 90.9%/87.8% baseline from `QWEN36_PORT.md` item 6) with int8 KV enabled and require the pass@1 delta to be within noise (±1-2 problems, matching the existing "within 1-2 problems of the 3090 cell" tolerance already accepted as parity in this project).
   2. Gate on the 4096-context soak reproduction (`QWEN36_PORT.md` item 4: pinned-recall quote-exact answers) — any KV quantization must preserve quote-exact recall at full context depth, since that's the existing acceptance bar.
   3. Confirm asymptotic memory behavior explicitly (the size-crossover bug that killed the last attempt) — model bytes/token at int8+scale-overhead vs FP16 across the full context range (4K→64K) before shipping, not just at one context length.
-- **Validate**: EvalPlus HumanEval rerun, 4096-context soak rerun, explicit memory-vs-context-length table across 4K/8K/16K/32K/64K.
+- **Validate**: EvalPlus HumanEval rerun, 4096-context soak rerun, and the memory-vs-context-length table across 4K/8K/16K/32K/64K. **The derived half of that table now exists in §3.1b** (FP16, both models, arithmetic from the allocation code). What remains owed here is its *measured* counterpart: run the sweep with int8 KV enabled and diff it against §3.1b's FP16 column, since the whole point is the size crossover that killed the last attempt.
 
 ### 3.3 [LOW impact, HIGH risk — do not pursue without strong justification] GDN recurrent-state quantization
 - **Evidence**: `QWEN36_PORT.md` explicitly notes the recurrent state is fp32 because it mirrors `mamba_ssm_dtype` in the reference implementation, and separately notes "the recurrence order... is the part most likely to be subtly wrong" — this state accumulates via repeated decay-multiply and rank-1-update across the *entire* generation (unlike KV cache, which is read-only after being written once), so quantization error compounds multiplicatively across the whole decode sequence rather than being read-order-independent. This is fundamentally a different risk profile than KV-cache quantization.
