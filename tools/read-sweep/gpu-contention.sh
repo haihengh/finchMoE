@@ -37,8 +37,8 @@ ROUNDS=${2:-3}
 shift $(( $# > 1 ? 2 : 1 ))
 
 case "$INSTALL" in
-    3.6) DOSE="--gib 1.05 --burst-mb 227.5 --gbps 11.9 --period-ms 57" ;;
-    3.8) DOSE="--gib 1.98 --burst-mb ${BURST38:-648.8} --gbps 16.7 --period-ms 147" ;;
+    3.6) D_GIB=1.05; D_BURST=227.5; D_GBPS=11.9; D_PERIOD=57 ;;
+    3.8) D_GIB=1.98; D_BURST=${BURST38:-648.8}; D_GBPS=${GBP38:-16.7}; D_PERIOD=147 ;;
     *)   echo "unknown install $INSTALL" >&2; exit 2 ;;
 esac
 
@@ -48,11 +48,21 @@ esac
 LOAD_PROG=${LOAD_PROG:-gpu_load}
 LOAD=${LOAD_PROG:+tools/read-sweep/$LOAD_PROG}
 [ -x "$LOAD" ] || { echo "build $LOAD_PROG first" >&2; exit 2; }
+
+# The flag set is per-program, not shared. mem_load has no --gbps (its rate is
+# whatever the CPUs deliver, not a throttle) and no --quiet, and passing it
+# gpu_load's DOSE made it exit 2 on the *first* argument -- so the "loaded" arm
+# ran with nothing in it and reported a clean null. That is the failure this
+# case statement exists to prevent: an instrument that refuses to start and an
+# instrument that changes nothing are the same reading otherwise.
 case "$LOAD_PROG" in
-    mem_load) DOSE="$DOSE --threads 4" ;;
+    gpu_load) DOSE="--gib $D_GIB --burst-mb $D_BURST --gbps $D_GBPS \
+--period-ms $D_PERIOD ${LOAD_EXTRA:-} --quiet" ;;
+    mem_load) DOSE="--gib $D_GIB --burst-mb $D_BURST --period-ms $D_PERIOD \
+--threads 4 ${LOAD_EXTRA:-}" ;;
+    *)        DOSE="--gib $D_GIB --burst-mb $D_BURST --period-ms $D_PERIOD \
+${LOAD_EXTRA:-}" ;;
 esac
-# LOAD_EXTRA carries flags a control needs, e.g. gpu_load's --no-dispatch.
-DOSE="$DOSE ${LOAD_EXTRA:-}"
 
 # Condition 3 only: "allowed, slot dest" is the engine's own shape -- the ring
 # allocated and the pread landing in it -- which is what IO-20's 1.05 ms p50 was
@@ -77,14 +87,28 @@ for r in $(seq 1 "$ROUNDS"); do
 
   for a in $arms; do
     if [ "$a" = loaded ]; then
-      "$LOAD" $DOSE --seconds 600 --quiet >/dev/null 2>&1 &
+      "$LOAD" $DOSE --seconds 600 >/dev/null 2>&1 &
       LOADPID=$!
       sleep 2                      # let the ring fault in before the replay starts
+      # Fail loudly instead of measuring an empty arm. A loader that died on
+      # its own arguments leaves an arm holding a plain unloaded run, and
+      # nothing downstream can tell that reading from a real null.
+      if ! kill -0 "$LOADPID" 2>/dev/null; then
+        echo "!! $LOAD_PROG exited during startup -- this arm would be a false" \
+             "null, so the run is stopping. Flags were: $DOSE" >&2
+        exit 2
+      fi
     fi
     out=$("${REPLAY[@]}" 2>&1 | line)
     if [ "$a" = loaded ]; then
       kill "$LOADPID" 2>/dev/null
       wait "$LOADPID" 2>/dev/null
+      # The pilot for IO-21 read 2.10 ms in an `alone` arm that ran immediately
+      # after a kill -- the load still winding down, since killing the process
+      # does not drain work already queued on the GPU. That is the failure this
+      # sleep exists to prevent: it is short enough to cost nothing and long
+      # enough that an arm which follows a kill is not measuring the last one.
+      sleep 3
     fi
     printf '%-6s %-8s %s\n' "$r" "$a" "$out"
   done

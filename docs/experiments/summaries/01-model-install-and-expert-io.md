@@ -903,8 +903,10 @@ over depth 3-10, and the engine here runs **deeper** than its own replay (conc 5
 loaded GPU.~~ **Withdrawn -- [IO-21](#io-21) refutes it.** The duty-cycle argument is sound
 about how *long* the GPU is busy and blind to what it does to the memory the drive is writing
 into; adding a GPU to the replay at the engine's own dose costs the drive 12% on 3.8 and 8% on
-3.6. A ratio of busy-time cannot see a per-byte cost. PLE cannot be it (IO-19's ordering
-argument). Destination shape was priced at +1.5 ms/step (IO-18) and destination kind eliminated
+3.6, and a ladder spanning 16x in delivered GPU bandwidth shows that price is **flat**. So what a
+busy-time ratio cannot see is not a per-byte cost but a fixed one -- the elimination failed for
+the same reason, whether the price is charged per byte or once per activation. PLE cannot be it
+(IO-19's ordering argument). Destination shape was priced at +1.5 ms/step (IO-18) and destination kind eliminated
 (IO-15).
 
 **What this does not say.** The replay's arms are harness-limited -- 3.6's batches average 4.35
@@ -971,27 +973,49 @@ GPU-contention elimination above is withdrawn.
   scatter. 3.6 under its own (smaller) dose separates 6/6 the same way: 43.7 -> 47.2 ms/step,
   **+8.0%**, 5.46 -> 5.05 GB/s. The alternation is what makes it causal: the state follows the
   arm, not the clock, in every round of both installs.
-- **Specificity, by two nulls that dissociate.** A CPU loop (`mem_load.c`) reading the same bytes
-  in the same burst shape from the same kind of allocation, with *more* threads and *more*
-  delivered bandwidth (4.37 against 3.52 GB/s), moves nothing: span 147-150 ms/step, `minflt`
-  15-34, in all six arms. And `gpu_load --no-dispatch` -- the Metal ring allocated, page-touched,
-  and never read by the GPU -- produces the **full** fault storm (77,993 / 79,429 / 79,422
-  `minflt`) with **no slowdown at all** (149.93-150.30 ms/step, rate 4.53). So the minor-fault
-  population belongs to the Metal *allocation* and the slowdown belongs to the GPU *reading*:
-  they are independent, which also retires the memory-pressure explanation the fault counts
-  first suggested. CPU is not it either -- `gpu_load` runs at 1.1%.
+- **Specificity: one null holds, and the other had to be withdrawn.** `gpu_load --no-dispatch` --
+  the Metal ring allocated, page-touched, and never read by the GPU -- produces the **full** fault
+  storm (77,993 / 79,429 / 79,422 `minflt`) with **no slowdown at all** (149.93-150.30 ms/step,
+  rate 4.53), so the minor-fault population belongs to the Metal *allocation* and the slowdown to
+  the GPU *reading*. That one stands.
+  **The CPU half does not.** `mem_load.c` was handed `gpu_load`'s flag set, which contains
+  `--gbps` -- a flag it does not have -- so it exited 2 on its **first argument** and every
+  "loaded" arm of it ran with nothing in it. Span 147-150, `minflt` 15-34, six arms: a null that
+  was never a measurement, and the fault count is what gives it away (a loader that holds and
+  reads 1.98 GiB cannot fault like a process running alone). Re-run through a harness that builds
+  the flag set per program -- and now refuses to report an arm whose loader died at startup --
+  the matched doses come back at **+7.2 ms/step at 3.40 GB/s and +9.5 at 13.57**, against the
+  GPU's **+15.4 and +15.9** at the same delivered rates. So CPU traffic is **not null**, at
+  roughly half the GPU's price.
+  It is not a *matched* control either, which is why this re-opens the question rather than
+  answering it: `mem_load` burns four CPU cores where `gpu_load` runs at 1.1%, and it ran while
+  the box was in a slower state (alone arms 184-194 ms/step against 167-173 in the GPU runs). What
+  survives is the allocation/reading split, which the dead loader never touched; what does not
+  survive is "DRAM bandwidth is retired".
 - **How much of the engine this explains.** Replay alone 1.97 ms per read -> replay + GPU dose
   2.27 -> engine 4.13 (`io_thread_wall/misses` = 1013.62/245.7 this session). The cell accounts
   for **0.30 of the 2.16 ms gap, ~14%**, and that is a *lower bound*: the generator models only
   the routed ring reads, while the engine's GPU also runs `gpu_cb1` (75.2 ms/step of attention
   and GDN) over the same memory system.
-- **The dose does not scale.** Doubling 3.8's burst to 1297.6 MiB/period leaves the loaded arm at
-  198.05 / 165.25 / 164.93 ms/step against an unloaded arm that wandered 146-172 -- rounds 2 and
-  3 land on the 1x dose's 165 to 0.2%, and round 1 is high on both arms, consistent with the
-  drive drifting into a slow state rather than with a larger effect. Either the cost is a fixed
-  price for the GPU being active in the window rather than a per-byte one, or it saturates. n=3
-  with that much wander makes this suggestive, not measured, and it is the sharpest open
-  question this experiment leaves -- it decides whether ~14% is a floor or a ceiling.
+- **The dose does not scale, so the price is per-activation rather than per-byte.** A five-rung
+  ladder at a fixed 147 ms period with one burst per replay pass, spanning **16x in delivered GPU
+  read bandwidth** -- 0.86, 1.72, 3.46, 6.90 and 13.80 GB/s, each rung calibrated by its own
+  standalone run, five order-alternated rounds each -- moves the penalty by **+15.59 / +15.28 /
+  +15.40 / +15.60 / +15.93 ms/step** (+9.0% to +9.5%), with per-read `thread_mean` going 2.33-2.44
+  -> 2.58-2.70 at every rung. A per-byte mechanism would have carried the 0.86 GB/s rung's +15.6
+  to roughly **+250 ms** at 13.80; the measured drift across the whole range is **+0.34 ms, 2% of
+  the effect**. The engine's unmodelled `gpu_cb1` traffic therefore buys nothing, and **~14% is a
+  ceiling, not a floor**.
+  What the ladder does *not* settle is the mechanism, because two different fixed costs predict the
+  same flatness: a per-activation price for the GPU read engine being active at all, and a
+  per-DMA-write price on pages the GPU has touched (the drive writes into slots the GPU reads back,
+  so any GPU access could be what marks them). Separating those needs the GPU reading a buffer the
+  drive is *not* writing into -- a different experiment, not a bigger dose.
+  Two harness notes, since the earlier 2x attempt is superseded: a burst that does not divide the
+  ring leaves a sliver burst at the wrap (`min(burstUint4, nUint4 - offset)`), so the *delivered*
+  dose is not the commanded one and must be calibrated -- it is why 1297.6 and 2027.5 MiB/period
+  delivered the same 7.05 GB/s. And the first rung of the ladder was discarded and re-run: with
+  `alone` drifting 180.6 -> 168.6 across its five rounds it read +18.6, which is warm-up, not dose.
 - **Final disposition:** Recorded, and it **refutes IO-20's GPU-contention elimination**. That
   elimination argued from duty cycle -- 3.6 carries 126% of GPU work per unit read wall against
   3.8's 60%, and 3.6 is the install that matches its replay -- which is sound about *how long*
@@ -999,9 +1023,11 @@ GPU-contention elimination above is withdrawn.
   A duty-cycle ratio cannot see a coherence or fabric cost per byte DMA'd into a GPU-shared
   page, which is the mechanism at issue. Tools: `tools/read-sweep/gpu_load.swift`,
   `mem_load.c`, `gpu-contention.sh`.
-- **What is left.** ~86% of the gap. And the dose question above: if the cost is per-byte rather
-  than per-activation, the engine's unmodelled `gpu_cb1` traffic means the true share is larger
-  than 14%; if it is per-activation, 14% is the ceiling.
+- **What is left.** ~86% of the gap, and the GPU cell is now bounded from *above* as well as below:
+  it cannot grow with more GPU traffic, so ~14% is the whole of it. The open question this
+  experiment leaves is no longer the dose but the specificity one named above -- whether the price
+  is the GPU's or any sufficiently heavy traffic's -- and it is open because the control that would
+  have answered it did not run.
 - **An unplanned finding, and it changes how IO-20's numbers should be read.** The replay's per-read
   distribution is **bimodal** -- a bulk at 0.13-0.52 ms and another at 2.1-8.4 ms, with the median
   sitting in the empty valley between them (bucket 19, [0.524, 1.049), holds 4.1%): `b17 13.5%,
