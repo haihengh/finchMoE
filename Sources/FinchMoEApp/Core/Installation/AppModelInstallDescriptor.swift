@@ -43,6 +43,8 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
 
     public var shortName: String { shortDisplayName ?? displayName }
 
+    public var supportsRemoteInstall: Bool { approximateDownloadBytes > 0 }
+
     public var requiredFreeBytes: UInt64 {
         installedBytes + rangeStagingBytes + reserveBytes
     }

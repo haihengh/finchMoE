@@ -5,7 +5,7 @@ import FinchMoE
 @Suite struct AppContextLengthOptionTests {
     @Test func optionsUseSupportedContextLengthsInAscendingOrder() {
         #expect(AppContextLengthOption.allCases.map(\.tokens)
-            == [4_096, 8_192, 16_384, 32_768, 65_536])
+            == [4_096, 8_192, 16_384, 32_768, 65_536, 131_072, 262_144])
     }
 
     /// Gemma has a sliding window, so only its full-attention layers grow with
@@ -14,7 +14,7 @@ import FinchMoE
         let mebibytes = AppContextLengthOption.allCases.map {
             $0.fp16KVBytes(architecture: .gemma4_26B_A4B) / 1_048_576
         }
-        #expect(mebibytes == [305, 385, 545, 865, 1_505])
+        #expect(mebibytes == [305, 385, 545, 865, 1_505, 2_785, 5_345])
     }
 
     /// Qwen 3.6 has no sliding-window layers: 10 full-attention layers ×
@@ -51,6 +51,8 @@ import FinchMoE
             "16K, +252 MB",
             "32K, +587 MB",
             "64K, +1.26 GB",
+            "128K, +2.60 GB",
+            "256K, +5.28 GB",
         ])
         #expect(AppContextLengthOption.allCases.map {
             $0.menuLabel(architecture: .qwen3_8_flashNext_125B)
@@ -60,6 +62,8 @@ import FinchMoE
             "16K, +302 MB",
             "32K, +705 MB",
             "64K, +1.51 GB",
+            "128K, +3.12 GB",
+            "256K, +6.34 GB",
         ])
     }
 

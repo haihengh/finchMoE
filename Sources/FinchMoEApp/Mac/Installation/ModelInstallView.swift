@@ -1,3 +1,4 @@
+import AppKit
 import FinchMoEAppCore
 import FinchMoEMacPresentation
 import SwiftUI
@@ -46,6 +47,12 @@ struct ModelInstallView: View {
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+            if !model.installDescriptor.supportsRemoteInstall {
+                Text("This model is loaded from an existing .finch directory.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
         }
     }
 
@@ -177,6 +184,14 @@ struct ModelInstallView: View {
                 .buttonStyle(.bordered)
                 .disabled(model.isInstallingModel)
 
+                Button {
+                    chooseLocalModelDirectory()
+                } label: {
+                    Label("Choose Local", systemImage: "folder")
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.isRunning || model.isInstallingModel)
+
                 Button(model.hasPartialModelDownload ? "Resume" : "Download",
                        action: model.installModel)
                     .buttonStyle(.borderedProminent)
@@ -201,6 +216,17 @@ struct ModelInstallView: View {
         let percent = MetricFormat.percent(fraction * 100)
         guard let eta = model.installETAText else { return percent }
         return "\(percent), \(eta)"
+    }
+
+    private func chooseLocalModelDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        if panel.runModal() == .OK, let url = panel.url {
+            model.setModelURL(url)
+        }
     }
 }
 
