@@ -1,3 +1,5 @@
 read_sweep
 read_batch
+gpu_load
+mem_load
 __pycache__/

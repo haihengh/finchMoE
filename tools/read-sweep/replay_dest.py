@@ -64,21 +64,105 @@ round, because this drive drifts within a session by more than the effect
 being measured (METH-15). Report per-round values; do not subtract a figure
 measured in another round ordering.
 
-  usage: replay_dest.py [--rounds N] [--depth36 N] [--depth38 N]
+The engine-vs-replay comparison this file was built for is a ratio of **means**
+(`io_thread_wall / misses`, against the harness's span-sum per read). A mean
+cannot say whether a difference is in every read or in a tail of them, and the
+two sides can differ in shape as easily as in level, so a mean ratio is not by
+itself evidence of a per-read service difference. The engine now prints its
+shape as `io_read_latency_ms` -- p50/p90/p99 over a log2 histogram of per-read
+thread time, filled in `PreadExpertStreamer`. `--hist` gives this harness the
+same instrument, over the same quantity (the per-read `preadv` call on a worker
+thread), with the engine's own bucket edges and lower-edge reporting, so the
+two can be read p50-to-p50 instead of mean-to-mean.
+
+  usage: replay_dest.py [--rounds N] [--depth36 N] [--depth38 N] [--hist]
                         [--tag NAME] [--trace36 PATH] [--trace38 PATH]
                         [--only 36|38] [--model36 PATH] [--model38 PATH]
 
 Pass --trace38 /tmp/trace38.txt --depth38 10 to reproduce the published table.
 """
-import argparse, fcntl, json, mmap, os, resource, sys, threading, time
+import argparse, fcntl, json, math, mmap, os, resource, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor
 
 F_NOCACHE = 48
 PAGE = 16384
 SLOTS = 16          # RuntimeConfiguration.expertCacheSlots, as captured
 STEPS = 31          # decode forwards in the captured runs
+BUCKETS = 34        # 2^0 .. 2^33 ns, PreadExpertStreamer.latencyBucketCount
 HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = "/Volumes/samsung 2t/code/finchMoE/models"
+
+
+def edges(hist):
+    """(p50, p90, p99, n) in ms, as bucket **lower** edges.
+
+    A bucket spans a factor of two, so its lower edge is the only part of the
+    answer that is a measurement rather than an interpolation -- the same
+    convention the engine reports under, and the reason a p50 here is a bound
+    (`>= 0.52 ms`) rather than a point.
+    """
+    n = sum(hist)
+    if n == 0:
+        return None
+    out = []
+    for q in (0.50, 0.90, 0.99):
+        target, seen = math.ceil(n * q), 0
+        for b, c in enumerate(hist):
+            seen += c
+            if seen >= target:
+                out.append((1 << b) / 1e6)
+                break
+        else:
+            out.append(0.0)
+    return (out[0], out[1], out[2], n)
+
+
+def dump_hist(hist, label=""):
+    """Every non-empty bucket, as [lower, upper) in ms with its share.
+
+    The percentiles say where the distribution's edges are; this says what it
+    is made of. They answer different questions and only the second one can
+    tell a mean held constant by a reshuffle from a mean held constant by
+    nothing happening -- three of five percentile fields are blind to a change
+    confined to the middle of the distribution.
+    """
+    n = sum(hist)
+    if n == 0:
+        return
+    print(f"      buckets {label} n={n}")
+    for b, c in enumerate(hist):
+        if c == 0:
+            continue
+        print(f"        b{b:<3d} [{((1 << b) / 1e6):>8.3f}, "
+              f"{((1 << (b + 1)) / 1e6):>9.3f}) ms  {c:>6d}  "
+              f"{100.0 * c / n:>5.1f}%")
+
+
+def fmt_hist(hist):
+    """Same fields the engine prints, including `fast`.
+
+    `fast` is the share of reads under 0.262 ms -- bucket 18's lower edge,
+    which no cold read on this volume can reach (a cold 1.69 MiB expert read is
+    ~0.48 ms). It exists because percentiles cannot prove an arm was read from
+    the drive: a half-cached run puts p50 exactly on that boundary, which a
+    fully cold run also produces.
+
+    It is **not** a measure of the evictable page cache, which is what the
+    threshold was first taken to mean. `--evict-gib 17` (more than RAM, and
+    from a directory neither arm's trace reads) removes only the wholly cached
+    round: 3.6 stays at 38.7% and 3.8 at 11.4%, stable to 0.3 points over four
+    rounds. Whatever serves those reads is not pushed out by read pressure, and
+    the mechanism is unidentified. So `fast` is best read as "this share of the
+    arm was not the drive's to charge for" -- and since it differs by install
+    (38.7% against 11.4%) and by process (the engine sees 17.0% and 2.2%), two
+    rates cannot be compared until it is accounted for. See IO-20.
+    """
+    e = edges(hist)
+    if e is None:
+        return "none"
+    n = sum(hist)
+    fast = 100.0 * sum(hist[:18]) / n
+    return "p50=%.2f p90=%.2f p99=%.2f fast=%.1f%% n=%d" % (e[0], e[1], e[2], fast, n)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--rounds", type=int, default=4)
@@ -99,6 +183,14 @@ ap.add_argument("--evict-from", default=None,
 ap.add_argument("--gap-ms", type=float, default=0.0,
                 help="idle this long between layer-batches, standing in for the "
                      "engine's GPU work, to test whether the drive re-ramps")
+ap.add_argument("--hist-dump", action="store_true",
+                help="with --hist, print every non-empty bucket and its "
+                     "share, to say what the distribution is made of rather "
+                     "than only where its edges are")
+ap.add_argument("--hist", action="store_true",
+                help="time each read and report the engine's own log2-bucketed "
+                     "read-latency percentiles, for p50-to-p50 comparison "
+                     "against io_read_latency_ms")
 ap.add_argument("--model36", default=f"{BASE}/Qwen3.6-35B-A3B-4bit.finch")
 ap.add_argument("--model38", default=f"{BASE}/Qwen3.8-Flash-Next-125B.finch")
 ap.add_argument("--trace36", default=f"{HERE}/traces/trace-36-t1.txt")
@@ -198,7 +290,7 @@ def free_ring(ring):
 
 def replay(stride, nlayers, offs, paths, batches, depth, nocache, use_ring,
            ring, alt_depth=None):
-    """One pass. Returns (span_sum, wall, faults, ring_bytes)."""
+    """One pass. Returns (span_sum, wall, faults, latency histogram)."""
     opened = [os.open(p, os.O_RDONLY) for p in paths]
     for fd in opened:
         fcntl.fcntl(fd, F_NOCACHE, nocache)
@@ -215,12 +307,27 @@ def replay(stride, nlayers, offs, paths, batches, depth, nocache, use_ring,
         return buf
 
     width = alt_depth if alt_depth else depth
+    hist_on = A.hist
 
     def read_one(job):
+        # The engine's mark is thread time around one read, so the analogue is
+        # thread time around one `preadv`. The clock reads are ~120 ns against
+        # a read of at least half a millisecond, and they are inside the very
+        # interval being measured on both sides.
         L, e, s = job
+        if hist_on:
+            t0 = time.perf_counter_ns()
+            got = os.preadv(opened[L], [dest_for(L, s)], offs[L][e])
+            dt = time.perf_counter_ns() - t0
+            if got != stride:
+                raise RuntimeError("short read")
+            return dt
         if os.preadv(opened[L], [dest_for(L, s)], offs[L][e]) != stride:
             raise RuntimeError("short read")
+        return 0
 
+    hist = [0] * BUCKETS
+    thread_ns = 0
     span_sum = 0.0
     f0 = resource.getrusage(resource.RUSAGE_SELF).ru_minflt
     wall0 = time.perf_counter()
@@ -230,8 +337,12 @@ def replay(stride, nlayers, offs, paths, batches, depth, nocache, use_ring,
                 if not miss:
                     continue
                 t0 = time.perf_counter()
-                list(pool.map(read_one, [(L, e, s) for s, e in enumerate(miss)]))
+                times = list(pool.map(read_one, [(L, e, s) for s, e in enumerate(miss)]))
                 span_sum += time.perf_counter() - t0
+                if hist_on:                 # outside the span: counting the
+                    for dt in times:        # reads must not join the timed
+                        hist[min(dt.bit_length() - 1, BUCKETS - 1) if dt else 0] += 1
+                        thread_ns += dt     # interval they are being read from
                 if A.gap_ms > 0:
                     time.sleep(A.gap_ms / 1000.0)   # outside the span on purpose:
                                                     # io_read_wall is the sum of
@@ -242,7 +353,7 @@ def replay(stride, nlayers, offs, paths, batches, depth, nocache, use_ring,
         faults = resource.getrusage(resource.RUSAGE_SELF).ru_minflt - f0
         for fd in opened:
             os.close(fd)
-    return span_sum, wall, faults
+    return span_sum, wall, faults, hist, thread_ns
 
 
 BALLAST = None
@@ -267,6 +378,7 @@ for name, model, trace, depth in ARMS:
 
 print()
 res = {(n, c[0]): [] for n, *_ in ARMS for c in CONDS}
+hres = {(n, c[0]): [] for n, *_ in ARMS for c in CONDS}
 for r in range(A.rounds):
     arms = ARMS if r % 2 == 0 else list(reversed(ARMS))
     for name, model, trace, depth in arms:
@@ -278,13 +390,30 @@ for r in range(A.rounds):
             for cname, (nc, use_ring, alt) in conds:
                 if EVICT_FDS and A.evict_gib > 0:
                     evict(A.evict_gib, stride)
-                ss, wall, faults = replay(stride, nlayers, offs, paths, batches,
-                                          depth, nc, use_ring, ring, alt)
+                ss, wall, faults, hist, thread_ns = replay(
+                    stride, nlayers, offs, paths, batches, depth, nc, use_ring,
+                    ring, alt)
                 ms = ss / STEPS * 1000
                 res[(name, cname)].append(ms)
+                hres[(name, cname)].append(hist)
                 print(f"  r{r} {name}  {cname:<30} span {ms:8.2f} ms/step  "
                       f"wall {wall/STEPS*1000:8.2f}  minflt {faults:>10,}  "
                       f"{n*stride/ss/1e9:5.2f} GB/s")
+                if A.hist:
+                    # Mean and median of the SAME quantity -- per-read thread
+                    # time, which is what the engine's io_thread_wall/misses
+                    # reports. The span-derived mean (`ss/n`) is deliberately
+                    # NOT used here: it is wall per read, lower than thread
+                    # time per read by the concurrency factor, so dividing it
+                    # by a thread-time p50 yields a ratio below 1 that says
+                    # nothing. thread_ns/ss is that factor, printed so the two
+                    # views can be reconciled.
+                    e = edges(hist)
+                    mean_ms = thread_ns / n / 1e6
+                    print(f"      reads {fmt_hist(hist)}  thread_mean={mean_ms:.2f} "
+                          f"mean/p50={mean_ms/e[0]:.2f}x  conc={thread_ns/(ss*1e9):.2f}")
+                    if A.hist_dump:
+                        dump_hist(hist, f"{name} {cname} r{r}")
         finally:
             free_ring(ring)
 
@@ -296,6 +425,9 @@ for name, *_ in ARMS:
         v = res[(name, cname)]
         print(f"  {cname:<30} " + "  ".join(f"{x:7.2f}" for x in v) +
               f"   min {min(v):7.2f}")
+        if A.hist:
+            for i, h in enumerate(hres[(name, cname)]):
+                print(f"      r{i} reads {fmt_hist(h)}")
 have = {n for n, *_ in ARMS}
 if have == {"3.6", "3.8"}:
     print()
@@ -303,3 +435,31 @@ if have == {"3.6", "3.8"}:
         a = min(res[("3.6", cname)])
         b = min(res[("3.8", cname)])
         print(f"  {cname:<30} 3.6 {a:7.2f}   3.8 {b:7.2f}   ratio {b/a:5.3f}x")
+    # `min` is the reducer above, and it is only valid while every round read
+    # from the drive. An install whose working set fits in RAM can serve a
+    # whole round out of the page cache -- one order of magnitude faster -- and
+    # `min` will then silently report the cached round as the install's cost.
+    # That is not a hypothetical: 3.6's 4.3 GiB does it and 3.8's ~32 GiB
+    # cannot, so the artefact lands on one arm only and inflates the ratio.
+    # The 2x threshold is well below a cache round and well above drive drift.
+    print()
+    for name, *_ in ARMS:
+        for cname, _ in CONDS:
+            v = res[(name, cname)]
+            if len(v) > 1 and min(v) > 0 and max(v) / min(v) > 2.0:
+                print(f"  !! {name} {cname}: rounds span {min(v):.2f}-{max(v):.2f} "
+                      f"ms/step ({max(v)/min(v):.1f}x) -- the fast round is almost "
+                      f"certainly page-cache served, and `min` is reducing to it. "
+                      f"Compare medians of the slow rounds, not mins.")
+    if A.hist:
+        print()
+        for cname, _ in CONDS:
+            v36 = [edges(h) for h in hres[("3.6", cname)]]
+            v38 = [edges(h) for h in hres[("3.8", cname)]]
+            if not all(v36) or not all(v38):
+                continue
+            # min over rounds, matching how the spans above are reduced
+            m36 = min(e[0] for e in v36)
+            m38 = min(e[0] for e in v38)
+            print(f"  {cname:<30} p50: 3.6 {m36:7.2f}   3.8 {m38:7.2f}   "
+                  f"ratio {m38/m36:5.3f}x")

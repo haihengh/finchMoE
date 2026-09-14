@@ -818,6 +818,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public var totalIoThreadNanos: UInt64 { model.routedIoThreadNanos() }
     public var totalIoPreadNanos: UInt64 { model.routedIoPreadNanos() }
     public var totalIoCopyNanos: UInt64 { model.routedIoCopyNanos() }
+    /// Per-read latency, log2-bucketed. The sums above give the mean; this is
+    /// what says whether the mean is the reads or a tail among them.
+    public var totalIoLatencyHistogram: [UInt64] { model.routedIoLatencyHistogram() }
 
     // The engine's own pread sequence, so the drive can be priced offline on
     // the real offset pattern rather than a synthetic one: the offline probes

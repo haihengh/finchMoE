@@ -31,6 +31,10 @@ public struct RunnerCounterValues: Equatable, Sendable {
     public var ioThreadNanos: UInt64
     public var ioPreadNanos: UInt64
     public var ioCopyNanos: UInt64
+    /// Per-read latency, log2-bucketed by nanosecond. The only field here that
+    /// is a distribution rather than a sum, and the only one that can say
+    /// whether a mean is made of its reads or of a tail among them.
+    public var ioLatencyHistogram: [UInt64]
     public var headNanos: UInt64
     public var expertHits: UInt64
     public var expertMisses: UInt64
@@ -65,6 +69,7 @@ public struct RunnerCounterValues: Equatable, Sendable {
                 ioThreadNanos: UInt64 = 0,
                 ioPreadNanos: UInt64 = 0,
                 ioCopyNanos: UInt64 = 0,
+                ioLatencyHistogram: [UInt64] = [],
                 headNanos: UInt64 = 0,
                 expertHits: UInt64 = 0,
                 expertMisses: UInt64 = 0,
@@ -98,6 +103,7 @@ public struct RunnerCounterValues: Equatable, Sendable {
         self.ioThreadNanos = ioThreadNanos
         self.ioPreadNanos = ioPreadNanos
         self.ioCopyNanos = ioCopyNanos
+        self.ioLatencyHistogram = ioLatencyHistogram
         self.headNanos = headNanos
         self.expertHits = expertHits
         self.expertMisses = expertMisses
@@ -122,6 +128,14 @@ public struct RunnerCounterValues: Equatable, Sendable {
     /// the mistake it is. Zero is at least visibly wrong for a timing field.
     public func delta(from base: RunnerCounterValues) -> RunnerCounterValues {
         func d(_ now: UInt64, _ was: UInt64) -> UInt64 { now > was ? now - was : 0 }
+        // Bucket-wise for the histogram: the same saturating rule, applied per
+        // bucket rather than to the array as a whole. A length mismatch means
+        // the two snapshots were taken by different builds, and returning the
+        // later one whole is the least misleading thing to do with it.
+        func dh(_ now: [UInt64], _ was: [UInt64]) -> [UInt64] {
+            guard now.count == was.count else { return now }
+            return zip(now, was).map { d($0, $1) }
+        }
         return RunnerCounterValues(
             forwards: d(forwards, base.forwards),
             cb1Nanos: d(cb1Nanos, base.cb1Nanos),
@@ -144,6 +158,7 @@ public struct RunnerCounterValues: Equatable, Sendable {
             ioThreadNanos: d(ioThreadNanos, base.ioThreadNanos),
             ioPreadNanos: d(ioPreadNanos, base.ioPreadNanos),
             ioCopyNanos: d(ioCopyNanos, base.ioCopyNanos),
+            ioLatencyHistogram: dh(ioLatencyHistogram, base.ioLatencyHistogram),
             headNanos: d(headNanos, base.headNanos),
             expertHits: d(expertHits, base.expertHits),
             expertMisses: d(expertMisses, base.expertMisses),
@@ -184,6 +199,7 @@ extension RunnerCounterValues {
                   ioThreadNanos: runner.totalIoThreadNanos,
                   ioPreadNanos: runner.totalIoPreadNanos,
                   ioCopyNanos: runner.totalIoCopyNanos,
+                  ioLatencyHistogram: runner.totalIoLatencyHistogram,
                   // Summed, as the app does: which of the two carries the head
                   // depends on whether the run took the fused-greedy path, and
                   // a reader wants the cost, not the path.
@@ -234,6 +250,64 @@ public enum RunnerCounters {
         guard values.ioSpanNanos > 0 else { return "n/a" }
         return String(format: "%.2f",
                       Double(values.ioThreadNanos) / Double(values.ioSpanNanos))
+    }
+
+    /// p50/p90/p99 of the per-read latency, in milliseconds, off the log2
+    /// histogram — the shape behind `io_thread_wall / misses`.
+    ///
+    /// Every other read number in this line is a sum, and a sum cannot say
+    /// whether 4.65 ms per read is every read or a few of them. The count is
+    /// printed with the percentiles because it is a *different* denominator
+    /// from `misses` when a wave is set: it counts iterations that took a mark,
+    /// which is what the percentiles are actually over.
+    ///
+    /// Each bucket spans a factor of two, so the reported value is the bucket's
+    /// **lower edge** — the only part of the bucket that is a measurement
+    /// rather than an interpolation. Read it as "the median read is at least
+    /// this slow", never as an estimate of the median. A uniform shift moves
+    /// these numbers; a tail moves only p90/p99.
+    ///
+    /// `fast=` is the share of reads below 0.262 ms, and it is a *population*
+    /// check rather than a latency one. Nothing this volume serves cold can
+    /// land there: a cold 1.69 MiB expert read is ~0.48 ms at its 3.5 GB/s
+    /// single-queue rate, and a cold 2.64 MiB one is ~0.75 ms. So `fast`
+    /// counts reads that something other than the drive answered.
+    ///
+    /// That something is **not** the evictable page cache, which is what the
+    /// threshold was first taken to mean. 17 GiB of unrelated streaming
+    /// through the cache -- more than RAM -- leaves 3.6 at 38.7% and 3.8 at
+    /// 11.4%, stable to 0.3 points across four rounds, and it only removes the
+    /// *wholly* cached round (98.9% -> 38.7%). The mechanism is unidentified;
+    /// what matters here is that the share is a cache benefit that differs by
+    /// install, by working-set-to-RAM ratio, and by process -- the engine sees
+    /// 17.0% and 2.2% where a bare replay of the same trace sees 38.7% and
+    /// 11.4% -- so two rates are not comparable until this is out of the way.
+    ///
+    /// Percentiles alone cannot substitute for it: a run that is half cached
+    /// puts p50 exactly on the boundary bucket, which is a shape a fully
+    /// drive-served run also produces. See IO-20.
+    private static func ioReadLatency(_ values: RunnerCounterValues) -> String {
+        let histogram = values.ioLatencyHistogram
+        let count = histogram.reduce(0, &+)
+        guard count > 0 else { return "none" }
+        func edge(_ quantile: Double) -> Double {
+            let target = UInt64((Double(count) * quantile).rounded(.up))
+            var seen: UInt64 = 0
+            for (bucket, n) in histogram.enumerated() {
+                seen &+= n
+                if seen >= target {
+                    return Double(UInt64(1) << UInt64(bucket)) / 1_000_000.0
+                }
+            }
+            return 0
+        }
+        // 2^18 ns = 0.262 ms, the first bucket a cold read of an expert this
+        // install's size can reach. Buckets are lower edges, so <= 17 is
+        // "strictly under".
+        let fast = histogram.prefix(18).reduce(0, &+)
+        let share = 100.0 * Double(fast) / Double(count)
+        return String(format: "p50=%.2f p90=%.2f p99=%.2f fast=%.1f%% n=%llu",
+                      edge(0.50), edge(0.90), edge(0.99), share, count)
     }
 
     /// Whether `io_fanout + io_span + io_drain` is exactly `io_read`.
@@ -353,6 +427,11 @@ public enum RunnerCounters {
             // `pread` and `copy` is zero, because there was no copy.
             "io_pread_wall_ms/step=\(msPerStep(values.ioPreadNanos))",
             "io_copy_wall_ms/step=\(msPerStep(values.ioCopyNanos))",
+            // The shape behind `io_thread_wall / misses`. On 3.8 that mean is
+            // 4.65 ms per read where an offline replay of the identical offsets
+            // at the same depth reads at 2.62 ms, and only these say whether
+            // the difference is in every read or in a tail of them.
+            "io_read_latency_ms=\(ioReadLatency(values))",
             "io_tail_wall_ms/step=\(msPerStep(values.ioTailNanos))",
             "io_handoff_wall_ms/step=\(msPerStep(ioHandoff(values)))",
             "head_wall_ms/step=\(msPerStep(values.headNanos))",

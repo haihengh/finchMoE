@@ -137,6 +137,7 @@ extension Model {
                     box.ioThreadNanos &+= streamer.lastReadThreadNanos
                     box.ioPreadNanos &+= streamer.lastReadPreadNanos
                     box.ioCopyNanos &+= streamer.lastReadCopyNanos
+                    box.addIoLatency(streamer.lastReadLatencyHistogram)
                     continuation.resume(returning: Self.makeExpertViews(
                         buffers,
                         layer: plan.layer,
@@ -168,6 +169,7 @@ extension Model {
                     box.ioThreadNanos &+= streamer.lastReadThreadNanos
                     box.ioPreadNanos &+= streamer.lastReadPreadNanos
                     box.ioCopyNanos &+= streamer.lastReadCopyNanos
+                    box.addIoLatency(streamer.lastReadLatencyHistogram)
                     continuation.resume(returning: Self.makeExpertViews(
                         buffers,
                         layer: layer,
@@ -193,6 +195,7 @@ extension Model {
     public func routedIoThreadNanos() -> UInt64 { streamersBox.ioThreadNanos }
     public func routedIoPreadNanos() -> UInt64 { streamersBox.ioPreadNanos }
     public func routedIoCopyNanos() -> UInt64 { streamersBox.ioCopyNanos }
+    public func routedIoLatencyHistogram() -> [UInt64] { streamersBox.ioLatencyHistogram }
 
     private static func makeExpertViews(
         _ buffers: [(buffer: MTLBuffer, offset: UInt64, size: UInt64)],
