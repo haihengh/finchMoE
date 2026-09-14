@@ -1,0 +1,4 @@
+### Critical Risks
+
+1.  **Data Corruption (Race Condition):** The assumption that concurrent misses choosing the same slot are "harmless" is incorrect. If two threads select the same slot, they will concurrently write to the same buffer. This causes data corruption, checksum failures, or undefined behavior. The "immutable object" guarantee is violated during the race window.
+2.  **Unbounded Memory & OOM:** There is no upper bound on payload length. A malicious or corrupted file with a huge header length will cause the service to allocate excessive memory, leading to Out-Of-Memory (OOM) crashes.
