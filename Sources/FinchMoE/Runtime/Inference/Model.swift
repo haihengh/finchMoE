@@ -92,6 +92,22 @@ public struct Model {
         /// `copy` is zero, because there was no copy to charge.
         var ioPreadNanos: UInt64 = 0
         var ioCopyNanos: UInt64 = 0
+        /// Per-read latency, bucketed by log2 nanoseconds and accumulated the
+        /// same way and for the same reason as the sums above: the mean they
+        /// produce cannot separate a uniformly slow read path from a slow tail,
+        /// and the one measurement that has to separate them is a per-read
+        /// comparison between this engine and an offline replay of its own
+        /// reads at the same depth.
+        var ioLatencyHistogram =
+            [UInt64](repeating: 0, count: PreadExpertStreamer.latencyBucketCount)
+        /// Component-wise, called on the fetch's own worker thread -- the same
+        /// one that writes every field above, so the no-lock argument is the
+        /// same argument.
+        func addIoLatency(_ histogram: [UInt64]) {
+            for bucket in 0..<min(ioLatencyHistogram.count, histogram.count) {
+                ioLatencyHistogram[bucket] &+= histogram[bucket]
+            }
+        }
         init(numLayers: Int) {
             self.streamers = Array(repeating: nil, count: numLayers)
             self.layerVerified = Array(repeating: false, count: numLayers)

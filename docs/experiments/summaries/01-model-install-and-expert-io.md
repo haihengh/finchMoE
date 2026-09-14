@@ -676,6 +676,350 @@ specific to the 3.8 install.
   and `purge` is unavailable -- three of the numbers this section used to rest on were
   warm-pass readings of a 4.3 GiB working set on a 16 GB box.
 
+### IO-19: The read window is a per-layer round-trip floor, and caching more of it changes nothing
+
+**IO-18 left a per-read service time with no mechanism under it.** The read window is
+40-48 strictly serialized per-layer batches, so the simplest hypothesis that could close
+§2.1's read side is that the drive charges per **command** rather than per **byte** -- in
+which case cutting the number of reads should leave the window where it is. Three
+measurements, then the two predictor families that floor implies.
+
+**1. A ring-free control, to establish that read count is visible at all.** Served from
+RAM rather than from the drive (`read_batch` at 22-34 GB/s, so this says nothing about
+NAND), a batch's span **does** scale with the reads in it: **0.078 / 0.111 / 0.171 ms for
+1 / 2 / 3.33 reads**, in both orderings. The fixed per-batch cost is therefore ~0.05 ms,
+and a flat span curve measured against the drive is the drive's flatness and not the
+harness's or the barrier's. That control is what licenses reading the next two results as
+NAND behaviour.
+
+**2. The engine's own slot count, A/B'd.** Same prompt, same session,
+`--expert-cache-slots` the only variable, three rounds, arms interleaved with the order
+alternating by round (METH-15):
+
+| slots | misses | MiB/step | `io_read_wall` ms/step | tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| 16 | 4,179 | 227.5 | 53.10 / 43.22 / 45.85 | 7.417 / 9.324 / 9.003 |
+| 32 | **2,934 (-29.8%)** | 159.7 | 50.50 / 45.00 / 51.04 | 8.157 / 9.259 / 8.070 |
+
+**-29.8% reads, +3% wall time** (pooled means 47.39 -> 48.85 ms/step). The read reduction
+reproduces exactly, round after round; the time change is noise around it. `io_conc` moves
+only 3.14 -> 2.93, and `io_thread_wall` 165.32 -> 147.09 (-11%) -- real, and not the
+window. **A 30% cut in transferred bytes and in miss count is worth 0 +/- 5% of the read
+window.**
+
+**3. The same, at fixed cache size, across four prompt domains.** 16 slots, one trace each:
+
+| prompt | misses | `io_read_wall` ms/step |
+| --- | ---: | ---: |
+| a-coastal wetlands | 4,179 | **61.13** |
+| b-debt covenants | 4,433 | 53.94 |
+| c-protein folding | 4,659 | 59.81 |
+| d-counterpoint | 4,829 | **52.57** |
+
+The prompt with the **fewest** misses has the **highest** window and the one with the most
+has the lowest -- read count does not order the window even in the direction its own sign
+predicts.
+
+**The confound, named and bounded rather than waved away.** The 16-vs-32 arm moves two
+things: bytes read, and the destination ring those reads land in -- 48 x 32 x 2,768,896 B
+= **2.11 GiB** at 32 slots against **1.05 GiB** at 16. IO-18 priced exactly that
+destination shape in the engine's own condition at **+1.5 ms/step**, measured on 3.8,
+whose ring is twice 3.6's, so on 3.6 it is an upper bound. A 30% cut in bytes, converting
+at the cold rate, would be worth ~14 ms/step of a ~47 ms window. **1.5 ms cannot absorb
+14 ms**, so the destination is not the explanation and the flatness belongs to the drive.
+
+**What the floor is.** ~**1.2 ms per batch** on 3.6, flat across batch widths of 2.37 to
+3.14 reads: **40 batches x ~1.2 ms = 47.4 ms** of a 47-52 ms window. It is per-layer
+round-trip latency, not bytes and not read count -- and it says the lever is **fewer round
+trips**, which needs a *prediction*, not a cache.
+
+**Which is what the two prefetch families are, so both were priced.** First, a fact about
+the instrument that had been read the wrong way: `FQ_EXPERT_TRACE` is the **miss list**
+(`RealForwardRunner.swift:830` -- `[layer, missCount, expert...]`), conditioned on the
+16-slot LRU ring's policy, so an expert the ring served never appears. The ring already
+takes **48.8%** of 3.8's routed experts (7,263 hits / 7,617 misses of 14,880) and **57.9%**
+of 3.6's (5,741 / 4,179 of 9,920), matching the engine's own counters. What is left after
+the ring is small and unpredictable:
+
+| family | how it would work | coverage of the remaining reads |
+| --- | --- | --- |
+| temporal, layer L -> L+1 (the S7 lever) | predicts the next layer's set from this one's | **1.00%** on 3.8, **1.84%** on 3.6 |
+| static per-layer hot set (the `8c9b496` family) | pins the most-used experts, no prediction | see the matrix below |
+
+The temporal result is a **negative** rather than a small number: expected overlap under
+pure independence is 5.12^2/512 = 0.0512 experts per batch against a measured 0.0497 --
+the residual read stream after the ring is statistically independent across layers.
+
+**The static family, leave-one-domain-out.** Four prompts in one register, so domain is the
+only variable. The traces are a *deterministic* function of the prompt (byte-identical
+across runs -- `cmp` clean against the committed captures), so the in-sample/out-of-sample
+gap is pure domain shift with zero run-to-run noise to subtract. Table built from three
+prompts, scored on the held-out fourth:
+
+| model | top-8 | top-16 | **top-32** | top-64 |
+| --- | ---: | ---: | ---: | ---: |
+| 3.6, out-of-sample | 15.3% | 26.4% | **42.3%** | 62.6% |
+| 3.6, in-sample ceiling | 24.4% | 42.1% | 67.6% | 93.6% |
+| 3.8, out-of-sample | 11.1% | 19.1% | **31.5%** | 48.3% |
+| 3.8, in-sample ceiling | -- | -- | 52.4% | -- |
+
+Fold spread is 5.5 pp at top-32 on 3.6 and 3.6 pp on 3.8, so the margin is not one odd
+prompt. Coverage is sublinear in pinned size (32.7%/GiB at top-4 falling to 20.0%/GiB at
+top-32). **The archived engine's independently measured 39.5% lands within 3 points of
+3.6's 42.3%** -- two engines, two corpora, one answer for this family.
+
+**The decision rule was satisfied and then overridden by its own premise.** The rule as
+set: >=40% out-of-sample at top-32 build the pinning; <25% fall through to the CB1-overlap
+probe. 3.6 reads 42.3% and clears the bar; 3.8 reads 31.5%, between them. But **coverage
+does not convert** -- that is measurement 2 above, in the engine's own condition with the
+engine's own slot knob: removing 30% of the reads removed none of the time. So the
+satisfied bar does not license the build.
+
+**Disposition: close both families, and close the CB1-overlap branch of the rule as well.**
+The pinning path would pay **2.11 GiB resident** (top-32 alongside the ring, not replacing
+it) plus a shipped table for approximately no speedup, and on 3.8 it is memory-blocked
+outright -- top-32 alongside the ring is **5.94 GiB** on a box whose memguard kills 3.8
+runs at 1.98 GiB compressed. The rule's own fallback does not survive either: CB1 overlap
+could hide at most the 0.87 ms/layer of device work inside a 4.48 ms read window that is
+itself 1.42-1.46x a cold replay, so its ceiling is inside the unexplained deficit, not
+beside it. **Nothing on the read side is left to build.** What would reopen it is a
+mechanism for **fewer round trips** (a deeper per-layer read that the router's readback
+does not currently permit) or a drive whose per-command cost is lower than this USB4
+bridge's -- neither of which is a cache.
+
+- **Lesson:** two families can have *measurably different* coverage and identical value,
+  if the resource being saved is not the resource being spent. Price the saving in the
+  currency of the bottleneck *before* setting a coverage bar, or the bar will be met by
+  something that does not help.
+- **Lesson:** the archived negative (`8c9b496`, prefill, on the C engine) and the S7
+  negative (GGUF decode) were both about *other paths*. This is the first verdict on the
+  Swift Qwen decode read path, and it agrees with them for a different reason -- not that
+  prefetch is subtle, but that these reads are round trips.
+
+### IO-20: The in-engine gap is a throughput deficit, not a latency shape, and the fast reads are not the page cache
+
+IO-18 left the 3.8 engine-side access gap as a **mean**: `io_thread_wall / misses` is 4.65 ms
+per read in the engine against 2.62 ms for an offline replay of the identical offsets at the
+same depth. A mean cannot say whether every read is slower or a few of them are, so the
+question "where does the 4.65 ms sit inside the engine" was not answerable from any counter
+in the line. It is now, and the answer moved the question twice.
+
+**The instrument.** A 34-bucket log2 histogram of per-read thread time (2^0 .. 2^33 ns,
+clamped at the top so a hang cannot be silently dropped), filled from the `marks` walk that
+`PreadExpertStreamer.executeExpertCachePlan` already does to compute `lastReadThreadNanos` --
+so the read path pays nothing for it, and `io_pread == io_thread_wall` as before since
+`stageReads` and `readSplit` are both at their defaults. It prints as
+`io_read_latency_ms=p50=.. p90=.. p99=.. fast=..% n=..` on the `--counters` line, at bucket
+**lower** edges: a bucket spans a factor of two, so its lower edge is the only part that is a
+measurement rather than an interpolation. Read every percentile as "at least this slow".
+
+The same histogram was added to `tools/read-sweep/replay_dest.py` behind `--hist`, timing the
+`preadv` on the worker thread -- the same quantity the engine marks -- with the engine's own
+bucket edges and reporting convention. Without it the comparison is mean-to-mean, and IO-17's
+1.20-1.33x / 1.31-1.43x ratios could not be told apart from a shape difference.
+
+**Shape: it is a shift, not a tail.** Four engine runs each, `--max-context 2048 --max-new 32
+--temperature 0 --expert-cache-slots 16`, the short-explanation prompt, 31 decode steps:
+
+| | misses/step | mean ms | p50 | p90 | p99 | fast | conc |
+|---|---|---|---|---|---|---|---|
+| 3.6 run 1 | 134.8 | 1.19 | 0.52 | 2.10 | 4.19 | -- | 3.25 |
+| 3.6 run 2 | 134.8 | 1.22 | 0.52 | 2.10 | 4.19 | -- | 3.27 |
+| 3.6 run 3 | 134.8 | -- | 0.52 | 2.10 | 4.19 | 17.0% | -- |
+| 3.6 run 4 | 134.8 | 0.99 | **0.26** | 2.10 | 4.19 | 16.3% | 3.22 |
+| 3.8 run 1 | 245.7 | 4.15 | 2.10 | 4.19 | 8.39 | -- | 5.22 |
+| 3.8 run 2 | 245.7 | 4.53 | **2.10** | 8.39 | 8.39 | -- | 5.31 |
+| 3.8 run 3 | 245.7 | -- | 2.10 | 4.19 | 8.39 | 2.2% | -- |
+| 3.8 run 4 | 245.7 | 4.33 | **2.10** | 8.39 | 8.39 | 2.2% | 5.37 |
+
+Every percentile moves about one bucket between the installs, and p50/p90/p99 move *together*
+-- the signature of a uniform shift. The 3.7-4.0x gap in the mean is therefore not a tail of
+slow reads on top of a normal population. 3.8's p50 is 2.10 ms in all four runs; **3.6's is
+not a stable number** -- it read 0.52 in three runs and 0.26 in the fourth, because the
+fast/slow boundary sits on its median -- so quote the contrast, not 3.6's p50.
+
+**Correction to my own first reading of this table.** I first decomposed the gap as
+`mean = conc x (size / aggregate rate)` using the engine's 4.65 ms thread mean against a
+*span-derived* mean, and concluded the engine's tail was 2x its median while the replay's was
+below 1 -- an engine-vs-harness shape difference. That was a quantity error: `ss/n` is wall
+per read and `io_thread_wall/misses` is thread time per read, and they differ by the
+concurrency factor. Comparing thread-time mean to thread-time p50 in all four cells gives
+**mean/p50 = 1.7-2.3 everywhere** (engine 2.30/1.98, replay 1.75-2.08/1.51-1.85). There is no
+engine-vs-harness shape difference. The replay harness now prints the thread-time mean and the
+concurrency it implies, and no longer prints the mixed ratio.
+
+**`fast`, and the control that killed its first explanation.** `fast=` is the share of reads
+under 0.262 ms. No cold read can land there: this volume's single-queue cold rate is 3.4-3.6
+GB/s, so a cold 1.69 MiB expert read is ~0.48 ms and a cold 2.64 MiB one ~0.75 ms. It is
+printed as a share rather than inferred from percentiles because a *half*-cached run puts p50
+exactly on the boundary bucket -- the same shape a fully drive-served run produces.
+
+The first reading of `fast` was "the page cache", and the record's own `purge-null` note
+supported it. **A 17 GiB eviction control refutes it.** `replay_dest.py --evict-gib 17
+--evict-from models/Qwen3.8-.../ple_shards` streams more than RAM from a directory neither
+arm's trace reads, before every pass, and the fast population does not move:
+
+| | engine fast | replay fast (4 rounds, evicted) | replay span/step |
+|---|---|---|---|
+| 3.6 | 16.3-17.0% | 38.5 / 38.8 / 38.8 / 38.7% | 57.39 / 57.63 / 57.43 / 57.53 |
+| 3.8 | 2.2% | 11.8 / 11.4 / 11.7 / 10.7% | 136.87 / 136.86 / 143.38 / 143.53 |
+
+It removes only the *wholly* cached round -- 3.6's 98.9%-fast, 11 ms/step round from IO-18
+becomes 38.7% -- and leaves the rest stable to 0.3 points across four rounds. Whatever serves
+those reads is not pushed out by read pressure, and **the mechanism is unidentified**: a
+device-side cache would be flushed by a 17 GiB scan on the same volume, and a host cache would
+be evicted by it, and neither happened. What is established is only that it is a cache benefit
+which **differs by install (38.7% vs 11.4%), by working-set-to-RAM ratio, and by process (the
+engine sees 17.0% and 2.2% where the bare replay sees 38.7% and 11.4%)** -- so no two rates in
+this record are comparable until it is accounted for.
+
+**Cold-corrected rates, and what survives.** Taking the fast reads as costing 0.1 ms each and
+inverting `mean = f*t_fast + (1-f)*t_slow` gives a cold per-read service time and, with the
+measured concurrency, an all-cold rate (`n*t_slow/conc` per step, against `n*stride`):
+
+| | t_slow | conc | all-cold rate | raw rate |
+|---|---|---|---|---|
+| 3.6 engine | 1.16 ms | 3.22 | **4.68 GB/s** | 5.47 |
+| 3.6 replay | 1.45 ms | 2.18 | **2.54 GB/s** | 4.16 |
+| 3.8 engine | 4.43 ms | 5.37 | **3.20 GB/s** | 3.27 |
+| 3.8 replay | 2.05 ms | 3.26 | **4.20 GB/s** | 4.97 |
+
+The correction is insensitive where it matters -- 3.8's engine arm is 2.2% fast, so `t_fast` is
+nearly irrelevant there; doubling it moves 3.6's replay arm by 4%, the most sensitive cell.
+
+The surviving statement is then a single one: **the drive serves 3.8's colder, larger-read
+stream 1.65x faster than 3.6's (4.20 against 2.54), and the engine turns that into a 1.46x
+deficit (3.20 against 4.68) -- a 2.4x swing.** That is IO-17's sign flip ("the engine flips
+the sign of its own traces") with the cache population removed, and it is no longer expressible
+as a per-read latency curiosity: it is a **throughput** deficit, in the engine, on 3.8.
+
+**Eliminated, with the numbers that do it.** `fast` = 2.2% on the engine's 3.8 arm, so the page
+cache is not it. Depth is not it twice over: IO-14 swept the engine's own `FINCHMOE_IO_READ_WAVE`
+over a 2.9x range for a 6% window move at a pinned 2.87-2.97 GB/s, the offline replay is flat
+over depth 3-10, and the engine here runs **deeper** than its own replay (conc 5.37 against
+3.26) while still losing. ~~**GPU contention is not it**: per unit read-window time 3.6 carries
+52.5 ms of GPU work against a 41.59 ms read wall (126%) where 3.8 carries 112.8 against 189.58
+(60%), so the install that *matches or beats* its replay is the one with the more heavily
+loaded GPU.~~ **Withdrawn -- [IO-21](#io-21) refutes it.** The duty-cycle argument is sound
+about how *long* the GPU is busy and blind to what it does to the memory the drive is writing
+into; adding a GPU to the replay at the engine's own dose costs the drive 12% on 3.8 and 8% on
+3.6. A ratio of busy-time cannot see a per-byte cost. PLE cannot be it (IO-19's ordering
+argument). Destination shape was priced at +1.5 ms/step (IO-18) and destination kind eliminated
+(IO-15).
+
+**What this does not say.** The replay's arms are harness-limited -- 3.6's batches average 4.35
+reads at pool width 3 and reach conc 2.18, 3.8's average 5.1 at width 5 and reach 3.26, so
+neither saturates its width -- which *strengthens* the 3.8 claim (the engine is deeper and still
+slower than a shallow replay) and *weakens* the 3.6 one (its 4.68 GB/s is a lower bound, so the
+engine's apparent win there is partly the harness). The load-bearing comparison is 3.8, and it
+does not depend on the limitation. Also unmeasured: whether `fast` is the drive's own cache,
+the bridge's, or a compressor path -- `fast` is a share, not a mechanism, and it should not be
+quoted as "cache hits".
+
+**What is left.** One structural difference had never been tested with the GPU *running*: 3.8's
+648.8 MiB/step is DMA'd into a 1.98 GiB ring of `makeBuffer(bytesNoCopy:)` shared allocations
+**while the GPU reads expert weights back out of those same slots** (`gpu_routed` 38.8 ms/step,
+against 3.6's 19.1 over 227.5 MiB/step into 1.05 GiB). IO-15 eliminated the destination *kind*;
+if that ran with the GPU idle, "drive writing the page while the GPU reads it" is the cell still
+open, and it is the only one left that is both install-correlated and inside the read. **That
+cell was tested in [IO-21](#io-21) and it is positive**: +12.0% on the 3.8 replay's read window,
++8.0% on 3.6's, worth ~14% of the engine's gap as a lower bound. It is no longer open, and the
+GPU-contention elimination above is withdrawn.
+
+- **Lesson:** the mean was not hiding a tail, it was hiding a *population*. The histogram was
+  built to answer "shift or tail" and it answered that, then immediately raised a second
+  question the mean had also been hiding -- what fraction of these reads was never the drive's.
+- **Lesson:** `fast` was interpreted as the page cache because the interpretation was
+  plausible and the memory note agreed. The 17 GiB eviction cost ten minutes and refuted it. A
+  threshold that classifies reads needs a control that moves it, or it is a story about a
+  number rather than a measurement of one.
+
+<a id="io-21"></a>
+### IO-21: Adding the GPU to the replay costs the drive 12%, and the per-read median is not a stable statistic
+
+- **Hypothesis:** IO-20 left exactly one cell open -- the drive DMA-ing bytes into a slot ring
+  while the GPU reads expert weights back out of it. 3.8 does 648.8 MiB/step into a 1.98 GiB
+  ring of `makeBuffer(bytesNoCopy:)` with `gpu_routed` at 38.8 ms/step; 3.6 does 227.5 MiB into
+  1.05 GiB at 19.1. If that interaction is what costs the engine throughput, it is the only
+  remaining difference that is both install-correlated and inside the read.
+- **Why the engine cannot be asked.** `FQ_EXPERT_TRACE` is capture-only -- there is no playback,
+  so nop'ing the routed readback makes the model emit garbage at step 1, routing diverges, and
+  the arm stops reading the trace it is being compared against. Worse, a degenerate loop warms
+  the ring, so the read *population* changes rather than just its timing.
+- **The inversion.** The replay already holds the engine's ring (`makeBuffer(bytesNoCopy:)` over
+  the same `posix_memalign`) and issues the engine's own preads, and has no GPU at all. So
+  instead of removing the GPU from the engine, add one to the replay: the trace is then fixed by
+  construction and only the GPU varies. `tools/read-sweep/gpu_load.swift` reads a shared buffer
+  in a burst/period loop; `gpu-contention.sh` interleaves loaded and unloaded arms, alternating
+  which goes first.
+- **The dose is bytes and burst length, not a rate.** 3.8's 16.7 GB/s is compute-bound -- 648.8
+  MiB is all it has to read and it spends 38.8 ms reading it -- so a generator reading the same
+  bytes flat out would hit the memory system at 95 GB/s over a 7 ms window, a dose no engine run
+  produces. Matched: 648.8 MiB per 147 ms at 16.7 GB/s (a 42 ms window) for 3.8, 227.5 MiB per
+  57 ms at 11.9 for 3.6.
+- **Evidence.** Five rounds on 3.8, arms alternating in order, every round unambiguous:
+
+  | round | order | alone span | loaded span |
+  |---|---|---|---|
+  | 1 | loaded first | 147.18 | 165.04 |
+  | 2 | alone first | 148.24 | 165.11 |
+  | 3 | loaded first | 146.64 | 165.17 |
+
+  **+17.7 ms/step, +12.0%**, achieved rate **4.62 -> 4.12 GB/s**, per-read thread time 1.97 ->
+  2.27 ms, `fast` ~12% -> ~10%. The loaded arm reproduced to 0.08% across three rounds while
+  the unloaded arm reproduced to 1.1%, so the effect is an order of magnitude larger than the
+  scatter. 3.6 under its own (smaller) dose separates 6/6 the same way: 43.7 -> 47.2 ms/step,
+  **+8.0%**, 5.46 -> 5.05 GB/s. The alternation is what makes it causal: the state follows the
+  arm, not the clock, in every round of both installs.
+- **Specificity, by two nulls that dissociate.** A CPU loop (`mem_load.c`) reading the same bytes
+  in the same burst shape from the same kind of allocation, with *more* threads and *more*
+  delivered bandwidth (4.37 against 3.52 GB/s), moves nothing: span 147-150 ms/step, `minflt`
+  15-34, in all six arms. And `gpu_load --no-dispatch` -- the Metal ring allocated, page-touched,
+  and never read by the GPU -- produces the **full** fault storm (77,993 / 79,429 / 79,422
+  `minflt`) with **no slowdown at all** (149.93-150.30 ms/step, rate 4.53). So the minor-fault
+  population belongs to the Metal *allocation* and the slowdown belongs to the GPU *reading*:
+  they are independent, which also retires the memory-pressure explanation the fault counts
+  first suggested. CPU is not it either -- `gpu_load` runs at 1.1%.
+- **How much of the engine this explains.** Replay alone 1.97 ms per read -> replay + GPU dose
+  2.27 -> engine 4.13 (`io_thread_wall/misses` = 1013.62/245.7 this session). The cell accounts
+  for **0.30 of the 2.16 ms gap, ~14%**, and that is a *lower bound*: the generator models only
+  the routed ring reads, while the engine's GPU also runs `gpu_cb1` (75.2 ms/step of attention
+  and GDN) over the same memory system.
+- **The dose does not scale.** Doubling 3.8's burst to 1297.6 MiB/period leaves the loaded arm at
+  198.05 / 165.25 / 164.93 ms/step against an unloaded arm that wandered 146-172 -- rounds 2 and
+  3 land on the 1x dose's 165 to 0.2%, and round 1 is high on both arms, consistent with the
+  drive drifting into a slow state rather than with a larger effect. Either the cost is a fixed
+  price for the GPU being active in the window rather than a per-byte one, or it saturates. n=3
+  with that much wander makes this suggestive, not measured, and it is the sharpest open
+  question this experiment leaves -- it decides whether ~14% is a floor or a ceiling.
+- **Final disposition:** Recorded, and it **refutes IO-20's GPU-contention elimination**. That
+  elimination argued from duty cycle -- 3.6 carries 126% of GPU work per unit read wall against
+  3.8's 60%, and 3.6 is the install that matches its replay -- which is sound about *how long*
+  the GPU is busy and silent about *what it is doing to the memory the drive is writing into*.
+  A duty-cycle ratio cannot see a coherence or fabric cost per byte DMA'd into a GPU-shared
+  page, which is the mechanism at issue. Tools: `tools/read-sweep/gpu_load.swift`,
+  `mem_load.c`, `gpu-contention.sh`.
+- **What is left.** ~86% of the gap. And the dose question above: if the cost is per-byte rather
+  than per-activation, the engine's unmodelled `gpu_cb1` traffic means the true share is larger
+  than 14%; if it is per-activation, 14% is the ceiling.
+- **An unplanned finding, and it changes how IO-20's numbers should be read.** The replay's per-read
+  distribution is **bimodal** -- a bulk at 0.13-0.52 ms and another at 2.1-8.4 ms, with the median
+  sitting in the empty valley between them (bucket 19, [0.524, 1.049), holds 4.1%): `b17 13.5%,
+  b18 25.6%, b19 4.1%, b20 12.6%, b21 34.7%, b22 9.4%`. A few points of mixture change therefore
+  hops the reported p50 a full bucket -- 1.05 -> 2.10 -- while the mean moves 3%. IO-20's
+  shift-to-p50 was the right instrument for "shift or tail" and remains so, but p50 on this
+  volume is a knife-edge statistic and must never be quoted alone; `thread_mean` is the stable
+  quantity, and `--hist-dump` (added here) is what shows the mixture. Both the p50 contrast and
+  the mean are reported for every arm above for that reason.
+- **Lesson:** a ratio can be arithmetically sound and still not speak to the mechanism. The
+  duty-cycle argument was true, relevant-looking, and invisible to the thing being asked about.
+  When an elimination reasons about *when* a resource is busy, check whether the hypothesis is
+  about *what* it does while busy.
+- **Lesson:** the control that mattered was not another arm of the same experiment but a second
+  program that removes the suspected ingredient while keeping everything else -- and then a
+  third that keeps the allocation and removes only the work. The first null would have left
+  "Metal allocation" standing; only the pair separates them.
+
 [Experiment inventory](../EXPERIMENT_INVENTORY.md) |
 [Optimization journey](../../OPTIMIZATION_JOURNEY.md) |
 [Next: Decode, MoE, INT4, and router](02-decode-moe-int4-and-router.md)

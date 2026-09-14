@@ -516,6 +516,33 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public private(set) var lastReadPreadNanos: UInt64 = 0
     public private(set) var lastReadCopyNanos: UInt64 = 0
 
+    /// Per-read latency as a log2 histogram, because every other read number
+    /// here is a sum, and a sum cannot say what shape its mean has.
+    ///
+    /// `io_thread_wall / misses` is 4.65 ms on 3.8 against an offline replay's
+    /// 2.62 ms on the identical offsets at the same depth, and no aggregate
+    /// distinguishes "every read is slower" from "the same reads plus a tail".
+    /// Bucket `b` counts the reads whose iteration took `2^b ..< 2^(b+1)`
+    /// nanoseconds, so the two shapes separate on sight: a uniform shift moves
+    /// the median, a tail leaves the median where it was and stretches the p99.
+    ///
+    /// Filled from the same walk over `marks` that computes
+    /// `lastReadThreadNanos` -- on the calling thread, after the fan-out has
+    /// returned -- so the read path pays nothing for it. An iteration's span is
+    /// the slot bounds check, the offset arithmetic, the pread and, when
+    /// staging is on, the copy: exactly the quantity `io_thread_wall` sums, so
+    /// the histogram and the mean describe the same reads.
+    public private(set) var lastReadLatencyHistogram =
+        [UInt64](repeating: 0, count: PreadExpertStreamer.latencyBucketCount)
+    /// `2^0 .. 2^33` ns, i.e. up to 8.6 s. A read slower than that is a hang
+    /// rather than a read, and it clamps into the top bucket instead of being
+    /// dropped -- a dropped read would silently pull every percentile down.
+    public static let latencyBucketCount = 34
+
+    /// Reads counted in `lastReadLatencyHistogram`, so a percentile can be
+    /// quoted against its own denominator rather than against `misses`.
+    public private(set) var lastReadLatencyCount: UInt64 = 0
+
     public func executeExpertCachePlan(_ plan: ExpertCachePlan) throws
         -> [(buffer: MTLBuffer, offset: UInt64, size: UInt64)] {
         precondition(plan.experts.count <= slotCount,
@@ -588,6 +615,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         // = tReadEnd - tRead = lastReadNanos, by construction and not by
         // assertion. An empty plan never enters the closure at all, so it has no
         // first entry to measure and its whole window is drain.
+        for bucket in 0..<Self.latencyBucketCount { lastReadLatencyHistogram[bucket] = 0 }
+        lastReadLatencyCount = 0
         if plan.misses.count == 0 {
             lastReadFanoutNanos = 0
             lastReadSpanNanos = 0
@@ -602,7 +631,16 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 let exit = marks[missOffset * Self.markStride + 1]
                 firstEnter = min(firstEnter, enter)
                 lastExit = max(lastExit, exit)
-                threadNanos &+= exit &- enter
+                let nanos = exit &- enter
+                threadNanos &+= nanos
+                // `floor(log2(nanos))`, zero-safe: `leadingZeroBitCount` of 0 is
+                // 64, which would index below the array. The clamp is the hang
+                // case the bucket count documents.
+                let bucket = nanos == 0
+                    ? 0
+                    : min(63 - nanos.leadingZeroBitCount, Self.latencyBucketCount - 1)
+                lastReadLatencyHistogram[bucket] &+= 1
+                lastReadLatencyCount &+= 1
             }
             // `CLOCK_UPTIME_RAW` is monotonic, so these three differences cannot
             // go negative: `tRead` precedes every entry, and every exit follows
