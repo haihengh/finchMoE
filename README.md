@@ -20,6 +20,7 @@
   <a href="#try-it">Quick start</a> ·
   <a href="#model-performance-comparison">Model performance</a> ·
   <a href="#qwen-36-35b-a3b-port">Qwen 3.6 port</a> ·
+  <a href="#qwen-38-flash-next-125b-port">Qwen 3.8 port</a> ·
   <a href="docs/OPENAI_SERVER.md">Local server</a> ·
   <a href="docs/BENCHMARKS.md">Benchmarks</a> ·
   <a href="docs/SYSTEM_DESIGN.md">How it works</a> ·
@@ -74,11 +75,20 @@ both from the same binary.
   context soak have all landed. The Qwen 3.6 install built and validated
   locally is the working reference model today; the Gemma 4 26B-A4B path
   stays intact and family dispatch runs both from the same binary.
+- The **Qwen 3.8 Flash-Next 125B path is wired and validated** behind
+  `ArchConfig.modelFamily == "qwen3_8"`: hyper-connections replace RMSNorm,
+  QSA sparse-block attention runs on the full-attention layers, the PLE
+  n-gram head is served from bf16 shard files, and the 174,403,168,940-byte
+  `.finch` install loads and decodes coherently inside the 16 GB operating
+  budget. EvalPlus HumanEval on that install scored **94.5% base / 92.1%
+  HumanEval+**.
 - The pristine upstream TurboFieldfare source is archived in `reference/`
   (gitignored, alongside `models/`).
 
 The Qwen 3.6 port is documented end-to-end — target model, locked GDN math,
 and the phase plan — in [docs/QWEN36_PORT.md](docs/QWEN36_PORT.md).
+The Qwen 3.8 Flash-Next port is documented in
+[docs/QWEN38_PORT.md](docs/QWEN38_PORT.md).
 
 ## Try it
 
@@ -123,6 +133,19 @@ checkpoint.
 | Hardware | Apple Silicon Mac (validated on 16 GB and 24 GiB RAM)                                                                                                |
 | Platform | macOS 26, Metal 4, Swift 6.3                                                                                                              |
 
+### M4 Mac mini performance
+
+This repo's 16 GB M4 Mac mini reference run is for the Qwen 3.6 35B-A3B
+install. It used the release CLI with greedy decode, a local verified install,
+and warm page cache. A matching Qwen 3.8 125B throughput run on that Mac mini is
+not published yet; the 3.8 port docs record that the 162 GiB install loads and
+decodes coherently inside the same 16 GB operating budget.
+
+| Host | Model | Workload | Prefill tok/s | Decode tok/s | Peak resident |
+| --- | --- | --- | ---: | ---: | ---: |
+| 16 GB M4 Mac mini | Qwen 3.6 35B-A3B | 705-token prompt; 200-300 token greedy decode | ~20 | ~10.5 | ~1.1 GiB |
+| 16 GB M4 Mac mini | Qwen 3.8 Flash-Next 125B | Load + smoke decode | not yet published | not yet published | inside 16 GB budget |
+
 Prompt length, generated length, page-cache state, and hardware all affect
 throughput. See [benchmarks](docs/BENCHMARKS.md) for the upstream Gemma
 measurements the fork started from.
@@ -157,6 +180,31 @@ points** on HumanEval base and **+4.3 points** on HumanEval+. The dominant
 runtime difference is routed-expert I/O: the 125B install reads roughly
 607-719 MB of expert data per generated token here, versus 215-244 MB/token for
 the 35B install.
+
+## The Qwen 3.8 Flash-Next 125B port
+
+Qwen 3.8 Flash-Next 125B (`qwen4_exp_text`, GGUF `qwen4exp`, Finch family
+`qwen3_8`) extends the Qwen runtime beyond the 3.6 Gated-DeltaNet baseline.
+The text path has 48 layers: 36 GDN layers and 12 full-attention layers at
+layers 3, 7, ..., 47. It keeps the Qwen tokenizer family and GDN foundation,
+but adds the model-specific pieces that make Flash-Next different:
+
+| Component | Qwen 3.8 Flash-Next detail |
+| --- | --- |
+| Hyper-connections | 4 parallel 2,560-wide streams replace every RMSNorm path, including final norm |
+| QSA indexer | 4 query heads plus 1 shared key head select sparse attention blocks on full-attention layers |
+| PLE n-gram head | Layer 1 uses 128 bf16 shard files, 3-gram hashing, 8 heads per n-gram, and 160-wide rows |
+| MoE | 512 experts, top-10 routing, 640-wide routed/shared experts, sigmoid shared gate, per-expert router scale |
+| Install | 174,403,168,940 bytes measured on disk; 95 GiB of the 162 GiB payload is the bf16 PLE table |
+
+The real install at `models/Qwen3.8-Flash-Next-125B.finch` has completed the
+M1-M4 port path: local repack, schema/load support, hyper-connection + QSA +
+PLE forward wiring, prefill/decode smoke, and llama.cpp oracle checks. The
+available oracle evidence is argmax-level rather than whole-vocab cosine-level:
+tokenization is byte-exact, argmax and generation match on the checked prompts,
+and top-10/top-100 logit cosine reached 0.995/0.985, while whole-vocab cosine
+is 0.88 under cross-quantization. See [docs/QWEN38_PORT.md](docs/QWEN38_PORT.md)
+for the full validation notes and caveats.
 
 ## The Qwen 3.6 35B-A3B port
 
