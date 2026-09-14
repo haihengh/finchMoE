@@ -20,7 +20,10 @@ cosine is 0.88, under the plan's 0.95 bar, because the bar was taken from a
 same-weights comparison and this one is cross-quantization. Full account and
 what it does *not* establish under `### Remaining work` item 7 below. The qwen3_8
 load-gate throw ("qwen3_8 installs need the Flash-Next engine (M2)") is
-gone. The plan ran M1 (repack) → M2 (load/schema) → M3 (forward:
+gone. **EvalPlus HumanEval on that install: base pass@1 0.945 (155/164),
+HumanEval+ 0.921 (151/164)** — +3.7/+4.3 pt over the 3.6 install, with 3.8's
+failure set a strict subset of 3.6's; the one apparent regression is a
+768-token truncation artifact (item 8 below). The plan ran M1 (repack) → M2 (load/schema) → M3 (forward:
 hyper-connection → QSA → PLE, decode then prefill) → M4 (real repack +
 llama.cpp oracle cross-check) under the machine protocol at the bottom. The
 user directive
@@ -666,6 +669,77 @@ tokenizer maps `qwen4_exp` into the shared `.qwen3_6` family. Tests:
      342-883 MB against a 2048 MB limit — so the compressor ceiling was the
      only trigger that ever fired, and only for this one suite.
 
+8. **EvalPlus HumanEval on the 3.8 install — DONE (2026-09-13).** The 3.6
+   reference protocol (`QWEN36_PORT.md` §6) re-run against the 3.8 install
+   through `archive/humaneval_evalplus/run_server_cell.sh` — a driver written
+   for this run because the 3.6 cell was hand-driven and its command was never
+   recorded, so neither that run nor its protocol could be re-checked
+   afterwards. The protocol is deliberately *not* in the driver: it lives in
+   `humaneval_gen.py` (system "You are a helpful assistant good at coding.",
+   greedy T=0, 1 sample, top_p 0.95, 768-token cap via evalplus's
+   `OpenAIChatDecoder`), and sharing that one file is what makes a 3.8 cell
+   readable against a 3.6 one at all. EvalPlus 0.3.1, OpenAI backend on
+   127.0.0.1:8080, no shim — `FinchMoEServer` is already OpenAI-compatible.
+   - **Base pass@1 0.945 (155/164); HumanEval+ 0.921 (151/164)** — +3.7 pt and
+     +4.3 pt over the 3.6 install's 0.909 (149/164) / 0.878 (144/164) on the
+     identical rig.
+   - Base fails (9): 32, 93, 116, 129, 130, 132, 145, 147, 163. 3.6 failed 15;
+     the 7 it failed and 3.8 passes are 62, 95, 99, 113, 124, 134, 160. The
+     only problem 3.8 fails that 3.6 passed is **116 — and that one is a
+     truncation artifact, not a regression**: its solution ends mid-sentence
+     on "Let me look at the", its `base_fail_tests` is `[]` (a crash
+     signature, not a failed assertion — a truncated sample has nothing to
+     fail on), and the server log puts it among the length-capped. **3.8's
+     true failure set is a strict subset of 3.6's, so the larger model
+     regresses nowhere.**
+   - Reading the caps is the whole result. Of the 9 base fails, 5 are
+     length-capped (32, 116, 129, 130, 147) and the other 4 (93, 132, 145,
+     163) 3.6 failed too. Skip that check and 116 reads as the 125B
+     regressing on a problem the 35B solved.
+   - Generation: 164/164 in **23,771 s (~146 s/problem)**, against 3.6's
+     6,786 s (41.4 s/problem) — 3.5× slower, which is the honest cost of the
+     larger model at this decode path and worth stating plainly before anyone
+     budgets another sweep. One continuous server instance, no restart: the
+     164 per-request durations sum to 23,871 s over a 23,771 s wall-clock
+     span, so there is no dead time to explain. 157 `finish=stop`, 7
+     `length`-capped at 768 (3.6: 136 / 8); the capped set is 32, 64, 76,
+     116, 129, 130, 147, from mapping the log's ordered `finish=` events onto
+     task IDs (164 events, clean 1:1).
+   - **What this is not.** There is no same-weights cross-engine comparison
+     available for 3.8 and there cannot be one today — the Swift engine has no
+     GGUF reader (see item 7) — so this is an engine-internal before/after,
+     not the 3.6 standard of parity evidence. A larger model scoring higher
+     through a correct engine and a larger model scoring higher through a
+     subtly wrong one both look exactly like this.
+   - Evidence: `quality/humaneval/finchmoe-qwen38_openai_temp_0.0.jsonl`,
+     `.raw.jsonl`, `_eval_results.json`; scoring log and server log at
+     `archive/humaneval_evalplus/results/finchmoe-qwen38_{eval.txt,server.log}`.
+     The file is 164 lines with 164 unique task IDs — one clean sweep, no
+     composed partial — because evalplus codegen **appends** rather than
+     overwrites (the smoke slice's artifacts were moved to
+     `results/humaneval/smoke_0_20/` first). The upside of that append is what
+     made resume-by-range viable after a kill.
+   - **Two harness findings, both cost a run.** (i) `tools/memguard.sh`'s
+     default 4 GB compressor ceiling is *binding* for a 3.8 server run, not
+     conservative: the server's steady-state working set is ~3.2 GB and this
+     run started from a 0.8 GB baseline, so a pristine start lands at ~4.0 GB
+     — exactly the ceiling — and the full sweep was killed at 4.1 GB a minute
+     in. `FinchMoEServer` exposes no lever for it: `ServerArguments.swift` has
+     no cache-slot flag and `--max-context` accepts only
+     4096/8192/16384/32768/65536, so the 3.6-era `--max-context 2048` escape
+     does not transfer — 4096 is the floor, not a tunable. This run therefore
+     used a per-run `MEMGUARD_MAX_COMPRESSED_GB=6` env override with
+     `tools/memguard.sh` itself unmodified, keeping the 12% free floor and the
+     2 GB swap cap: the compressor holding more is a *symptom*, free% is the
+     danger signal. (ii) **evalplus scoring, not the model, is the memory
+     hog.** `evaluate.py` sets `n_workers = parallel or cpu_count() // 2` —
+     five workers on this ten-core box, each compiling and executing test code
+     — and run on top of the live server it reached **8.3 GB** and was killed
+     at 161/164 on the progress bar. No data was lost (scoring re-executes
+     stored solutions), and rescoring standalone with `--parallel 2`, no
+     server, took **1:31 at a 2.0 GB peak**. Any future cell should score that
+     way rather than inside the generation run.
+
 Deferred (documented here): PLE table quant; MTP; vision; indexer cache
 compaction. `docs/QWEN36_PORT.md` remains the GDN/rope/mrope authority and
 the 3.6 hardware findings carry over.
@@ -716,7 +790,11 @@ every step, so there is nothing to shrink it to.
   the QSA cell/block fills.
 - `models/Qwen3.8-Flash-Next-bf16/` — 352 GB bf16 checkpoint (131 shards).
 - `models/Qwen3.8-Flash-Next-AD-3.84bpw-IQ4_XS-M64/` — 79 GB oracle GGUF.
-- `models/Qwen3.8-Flash-Next-125B.finch/` — M4 output (does not exist yet).
+- `models/Qwen3.8-Flash-Next-125B.finch/` — the M4 output, now built and
+  installable: 162 GiB (`manifest.json`, `model_weights.bin`,
+  `packed_experts/`, `ple_shards/`, `tokenizer/`, `verified-install.json`).
+  This is the install every measurement in item 7 and item 8 ran against.
+  Untracked (weights), as are the two checkpoints above.
 
 ## References
 

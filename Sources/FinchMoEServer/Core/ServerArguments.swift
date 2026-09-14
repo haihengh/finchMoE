@@ -1,4 +1,5 @@
 import Foundation
+import FinchMoE
 
 public struct ServerArguments: Equatable, Sendable {
     public let model: String
@@ -7,6 +8,7 @@ public struct ServerArguments: Equatable, Sendable {
     public let maxContext: Int
     public let queueLimit: Int
     public let promptCacheMode: ServerPromptCacheMode
+    public let verify: ModelIntegrityPreference
 
     public static let usage = """
     usage: FinchMoEServer --model <completed .finch directory> [options]
@@ -18,6 +20,10 @@ public struct ServerArguments: Equatable, Sendable {
       --queue-limit <count>  Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>
                              Prompt KV reuse mode (default single-prefix).
+      --verify <mode>        Model integrity policy: auto (default) uses
+                             verified-install.json when it is present and valid
+                             and hashes otherwise; full-sha256 always hashes;
+                             trusted-install requires the receipt.
       --help                 Show this help.
     """
 
@@ -28,6 +34,7 @@ public struct ServerArguments: Equatable, Sendable {
         var maxContext = 16_384
         var queueLimit = 4
         var promptCacheMode: ServerPromptCacheMode = .singlePrefix
+        var verify: ModelIntegrityPreference = .automatic
         var index = 0
         while index < input.count {
             let flag = input[index]
@@ -67,6 +74,15 @@ public struct ServerArguments: Equatable, Sendable {
                         "--prompt-cache-mode must be off or single-prefix")
                 }
                 promptCacheMode = parsed
+            case "--verify":
+                switch value {
+                case "auto": verify = .automatic
+                case "full-sha256": verify = .fullSha256
+                case "trusted-install": verify = .sizeCheckTrustedReceipt
+                default:
+                    throw ServerArgumentError.invalid(
+                        "--verify must be auto, full-sha256 or trusted-install")
+                }
             default:
                 throw ServerArgumentError.invalid("unknown flag: \(flag)")
             }
@@ -77,7 +93,8 @@ public struct ServerArguments: Equatable, Sendable {
                                modelID: modelID,
                                maxContext: maxContext,
                                queueLimit: queueLimit,
-                               promptCacheMode: promptCacheMode)
+                               promptCacheMode: promptCacheMode,
+                               verify: verify)
     }
 }
 

@@ -1,6 +1,16 @@
 import Foundation
+import FinchMoE
 
 enum ServerLog {
+    /// The one line here that is not about a request: which verification the
+    /// model load actually performed. It is resolved once at startup, and it is
+    /// the only record of whether the trusted-install receipt was used or
+    /// silently abandoned for hashing — the difference between a 2 s and a 45 s
+    /// prefill on the large install.
+    static func integrity(_ outcome: ModelIntegrityOutcome) {
+        write("model integrity \(outcome.logDescription)")
+    }
+
     static func accepted(id: String, streaming: Bool) {
         write("request \(id) accepted streaming=\(streaming)")
     }

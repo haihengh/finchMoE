@@ -17,7 +17,32 @@ import Testing
         #expect(arguments.seed == nil)
         #expect(arguments.stops.isEmpty)
         #expect(!arguments.quiet)
-        #expect(arguments.verify == .fullSha256)
+        #expect(!arguments.counters)
+        #expect(arguments.expertCacheSlots == nil)
+        #expect(arguments.verify == .automatic)
+    }
+
+    /// All three modes parse, and the two explicit ones keep their meaning.
+    /// `auto` being the default is what the test above pins; this pins that it
+    /// is reachable by name and that spelling an explicit mode still wins.
+    ///
+    /// The rejection asserts the exact `ArgsError`, not just that *something*
+    /// threw: `--verify` is the one flag whose value the loader resolves into a
+    /// security policy, so a typo silently landing on one of the two real modes
+    /// is the failure worth pinning.
+    @Test func verifyModeParses() throws {
+        func parsed(_ mode: String?) throws -> ModelIntegrityPreference {
+            var argv = ["--model", "m.finch", "--prompt", "hi"]
+            if let mode { argv += ["--verify", mode] }
+            return try Args.parse(argv).verify
+        }
+        #expect(try parsed(nil) == .automatic)
+        #expect(try parsed("auto") == .automatic)
+        #expect(try parsed("full-sha256") == .fullSha256)
+        #expect(try parsed("trusted-install") == .sizeCheckTrustedReceipt)
+        #expect(throws: ArgsError.invalidValue(flag: "--verify", value: "size-only")) {
+            _ = try parsed("size-only")
+        }
     }
 
     @Test func generationOptionsParseAndStopsRepeat() throws {
@@ -66,7 +91,8 @@ import Testing
         let expected: Set<String> = [
             "--model", "--prompt", "--messages-file", "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
-            "--seed", "--stop", "--quiet", "--verify", "--help",
+            "--seed", "--stop", "--quiet", "--counters", "--expert-cache-slots",
+            "--verify", "--help",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })
@@ -90,26 +116,47 @@ import Testing
         }
     }
 
-    @Test func verifyPolicyParsesAndRejectsUnknownModes() throws {
-        let full = try Args.parse(["--model", "m.finch", "--prompt", "hi",
-                                    "--verify", "full-sha256"])
-        #expect(full.verify == .fullSha256)
-        let trusted = try Args.parse(["--model", "m.finch", "--prompt", "hi",
-                                      "--verify", "trusted-install"])
-        #expect(trusted.verify == .sizeCheckTrustedReceipt)
-
-        #expect(throws: ArgsError.invalidValue(flag: "--verify", value: "size-only")) {
-            _ = try Args.parse(["--model", "m.finch", "--prompt", "hi",
-                                "--verify", "size-only"])
-        }
-    }
-
     @Test func messagesFileSelectsChatMode() throws {
         let arguments = try Args.parse([
             "--model", "m.finch", "--messages-file", "chat.json",
         ])
         #expect(arguments.prompt == nil)
         #expect(arguments.messagesFile == "chat.json")
+    }
+
+    @Test func expertCacheSlotsAcceptTheRuntimesOwnList() throws {
+        for slots in RuntimeConfiguration.allowedExpertCacheSlots {
+            let arguments = try Args.parse([
+                "--model", "m.finch", "--prompt", "hi",
+                "--expert-cache-slots", String(slots),
+            ])
+            #expect(arguments.expertCacheSlots == slots)
+        }
+    }
+
+    /// The rejections matter more than the acceptances: `RuntimeConfiguration.init`
+    /// `precondition`s on the same list, so anything `parse` lets through that is
+    /// not on it would trap the process rather than print an error.
+    @Test func expertCacheSlotsRejectAnythingOffTheList() {
+        for value in ["7", "12", "0", "-16", "64", "sixteen"] {
+            #expect(throws: ArgsError.invalidValue(flag: "--expert-cache-slots",
+                                                   value: value)) {
+                _ = try Args.parse([
+                    "--model", "m.finch", "--prompt", "hi",
+                    "--expert-cache-slots", value,
+                ])
+            }
+        }
+    }
+
+    @Test func countersIsAFlagWithNoValue() throws {
+        let arguments = try Args.parse([
+            "--model", "m.finch", "--prompt", "hi", "--counters",
+        ])
+        #expect(arguments.counters)
+        // A flag, so the next argument is not consumed as its value.
+        #expect(arguments.prompt == "hi")
+        #expect(arguments.model == "m.finch")
     }
 
     @Test func promptAndMessagesFileAreMutuallyExclusive() {

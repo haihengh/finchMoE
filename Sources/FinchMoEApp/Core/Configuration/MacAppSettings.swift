@@ -13,6 +13,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var topPEnabled: Bool = true
     var topP: Double = 0.95
     var prefillEnabled: Bool = true
+    var modelVerification: AppModelVerification = .automatic
     var newlineShortcut: AppNewlineShortcut = .return
     var showPromptExamples: Bool = true
     var sentPromptBehavior: AppSentPromptBehavior = .keep
@@ -27,6 +28,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case topPEnabled
         case topP
         case prefillEnabled
+        case modelVerification
         case newlineShortcut
         case showPromptExamples
         case sentPromptBehavior
@@ -41,6 +43,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          topPEnabled: Bool = true,
          topP: Double = 0.95,
          prefillEnabled: Bool = true,
+         modelVerification: AppModelVerification = .automatic,
          newlineShortcut: AppNewlineShortcut = .return,
          showPromptExamples: Bool = true,
          sentPromptBehavior: AppSentPromptBehavior = .keep) {
@@ -53,6 +56,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.topPEnabled = topPEnabled
         self.topP = topP
         self.prefillEnabled = prefillEnabled
+        self.modelVerification = modelVerification
         self.newlineShortcut = newlineShortcut
         self.showPromptExamples = showPromptExamples
         self.sentPromptBehavior = sentPromptBehavior
@@ -69,6 +73,16 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         topPEnabled = try container.decode(Bool.self, forKey: .topPEnabled)
         topP = try container.decode(Double.self, forKey: .topP)
         prefillEnabled = try container.decode(Bool.self, forKey: .prefillEnabled)
+        // Decoded as a raw `String`, not through the enum: `decode` of a
+        // RawRepresentable throws `dataCorrupted` on a value it does not know,
+        // and `loadOrCreate` answers *any* throw by deleting the file -- so one
+        // unrecognized verification mode would silently reset every other
+        // setting the user has. `decodeIfPresent` also covers a file written
+        // before this field existed, which is why `currentVersion` stays 1.
+        modelVerification = (try container.decodeIfPresent(
+            String.self,
+            forKey: .modelVerification))
+            .flatMap(AppModelVerification.init(rawValue:)) ?? .automatic
         newlineShortcut = try container.decodeIfPresent(
             AppNewlineShortcut.self,
             forKey: .newlineShortcut) ?? .return

@@ -5,6 +5,72 @@ public enum ModelIntegrityPolicy: Sendable, Equatable {
     case sizeCheckTrustedReceipt
 }
 
+/// What the caller *asks* for. Distinct from `ModelIntegrityPolicy`, which is
+/// what the loader *resolved to*: `automatic` is not a policy, it is a rule for
+/// choosing one, and the choice depends on state only the loader can see (whether
+/// a usable receipt exists on disk).
+///
+/// Keeping `automatic` out of `ModelIntegrityPolicy` is deliberate. Both lazy
+/// verification gates (`Model.swift` layer + PLE part) switch exhaustively over
+/// the policy, so a third case would force a third arm at each — and the obvious
+/// thing to write there (`case .automatic: break`) is precisely the bug:
+/// "unresolved" would then mean "skip the hash".
+public enum ModelIntegrityPreference: Sendable, Equatable {
+    /// Use the trusted-install receipt when one is present and valid; otherwise
+    /// fall back to hashing. Never verifies less than `.fullSha256` — the
+    /// fallback hashes, and the receipt path only skips hashing that a
+    /// validated receipt independently covers.
+    case automatic
+    case fullSha256
+    case sizeCheckTrustedReceipt
+}
+
+/// What actually happened, for callers that want to report it. A `Model` whose
+/// `integrityPolicy == .fullSha256` may have reached that policy by explicit
+/// request or by falling back, and only this tells them apart.
+public enum ModelIntegrityOutcome: Sendable, Equatable {
+    case explicitFullSha256
+    case explicitTrustedReceipt
+    case automaticUsedReceipt
+    case automaticFellBackAbsent
+    case automaticFellBackInvalid(detail: String)
+
+    /// The message to emit, or `nil` when the caller should stay quiet.
+    ///
+    /// Only a *present but unusable* receipt is a signal: an absent one is the
+    /// normal state of an install that was never `--verify-install`ed, and
+    /// warning on it would be noise on every fresh checkout. Keeping the
+    /// silent-vs-warn rule here is what stops the CLI, the server and the app
+    /// from disagreeing about which cases are worth surfacing.
+    public var warningMessage: String? {
+        guard case .automaticFellBackInvalid(let detail) = self else { return nil }
+        return "\(VerifiedInstallReceiptReader.fileName) is present but unusable "
+            + "(\(detail)); verified with full SHA-256 instead"
+    }
+
+    public var isWarning: Bool { warningMessage != nil }
+
+    /// The same fact as `warningMessage`, for callers that want to state which
+    /// verification ran whether or not anything went wrong.
+    ///
+    /// `warningMessage` is user-facing and only exists for the one bad case; a
+    /// server's startup line wants the mode on every run, including the quiet
+    /// ones. Both live here for the same reason: three call sites rendering the
+    /// same five cases independently is three chances to disagree about what
+    /// "auto" resolved to.
+    public var logDescription: String {
+        switch self {
+        case .explicitFullSha256: return "full-sha256 (explicit)"
+        case .explicitTrustedReceipt: return "trusted-install (explicit)"
+        case .automaticUsedReceipt: return "auto (verified-install.json)"
+        case .automaticFellBackAbsent: return "auto (no verified-install.json; hashed)"
+        case .automaticFellBackInvalid(let detail):
+            return "auto (\(VerifiedInstallReceiptReader.fileName) unusable: "
+                + "\(detail); hashed)"
+        }
+    }
+}
+
 public struct VerifiedInstallReceipt: Codable, Equatable, Sendable {
     public struct FileEntry: Codable, Equatable, Sendable {
         public let size: UInt64
@@ -61,6 +127,31 @@ public enum VerifiedInstallReceiptReader {
             throw ModelError.trustedReceiptInvalid(detail: "\(fileName): \(error)")
         } catch {
             throw ModelError.trustedReceiptInvalid(detail: "\(fileName): \(error)")
+        }
+    }
+
+    /// Is a receipt file there at all?
+    ///
+    /// `load` collapses every failure into `.trustedReceiptInvalid`, so the error
+    /// alone cannot tell "no receipt in this install" from "a receipt that is
+    /// broken, unreadable, or not a regular file" — and those want opposite
+    /// treatment (silence vs. a warning). Rather than string-matching `detail`,
+    /// ask the filesystem. Only ENOENT counts as absent; a symlink, FIFO,
+    /// directory or unreadable file is a *presence* signal, because something
+    /// deliberately put something at that path.
+    ///
+    /// Inherits `openFile`'s `O_NOFOLLOW`, so a symlinked receipt reports present
+    /// (and then fails the load) instead of silently following it.
+    package static func isPresent(directoryURL: URL) -> Bool {
+        do {
+            let directory = try FinchModelDirectory(rootURL: directoryURL)
+            let fd = try directory.openFile(fileName)
+            close(fd)
+            return true
+        } catch ModelError.missingFile {
+            return false
+        } catch {
+            return true
         }
     }
 

@@ -60,7 +60,8 @@ import FinchMoEDecodeProtocol
                     let memory = AppMemorySampler().sample()
                     try write(DecodeServiceEvent(
                         kind: .ready, generationID: request.requestID,
-                        currentMemoryBytes: memory, peakMemoryBytes: memory),
+                        currentMemoryBytes: memory, peakMemoryBytes: memory,
+                        integrityOutcome: client.modelIntegrityDescription),
                         to: handles.output)
                 } catch {
                     try? write(DecodeServiceEvent(

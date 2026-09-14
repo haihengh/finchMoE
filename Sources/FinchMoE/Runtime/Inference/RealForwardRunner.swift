@@ -316,10 +316,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     public let maxContext: Int
 
-    /// Per-instance head and RDADVISE modes. The fused head (default) skips the
-    /// 512 KB logits write and leaves a greedy argmax in `lastGreedyToken`;
-    /// callers that sample from the logits buffer (non-greedy configs) must pass
-    /// `forceLogitsHead: true` or they read a never-written buffer.
+    /// Per-instance head and RDADVISE modes. The fused head (default) folds
+    /// RMSNorm + lm_head into one kernel that skips the 512 KB logits write and
+    /// leaves a greedy argmax in `lastGreedyToken`; callers that sample from the
+    /// logits buffer (non-greedy configs) must pass `forceLogitsHead: true` or
+    /// they read a never-written buffer.
+    ///
+    /// **Unavailable on Qwen 3.8**, whose head input is the root HC mixer
+    /// collapse — a data-dependent gate, not a plain norm — so the kernel cannot
+    /// express it and the logits path (`prefillFinalRowHead.encodeLogits` /
+    /// `gFinalNorm` + `gLmHead`) runs instead. The arch check lives *here*, on
+    /// the flag, rather than at the kernel-selection site alone: `greedyTokenBuf`
+    /// is written only by the fused kernel, so every site that reads it has to
+    /// agree with the site that decides whether to run it. They did not, and
+    /// Qwen 3.8 at temperature 0 read a never-written buffer — zero-filled —
+    /// and emitted token 0 forever. Keep this the single source of truth.
     private let useFusedGreedyHead: Bool
     private let prefillAttentionPath: RuntimePrefillAttentionPath
     public let rdadviseEnabled: Bool
@@ -328,13 +339,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var rdadviseAdaptiveState: RDAdviceAdaptivePolicyState
     private var rdadviseAdaptivePosition: Int = -1
     private var rdadviseAdaptivePositionBytes: UInt64 = 0
+
+    /// The rule behind `useFusedGreedyHead`, split out so it can be tested
+    /// without building a 125B install — the mistake it guards against was
+    /// invisible for exactly that reason.
+    static func fusedGreedyHeadEnabled(headPath: RuntimeHeadPath,
+                                       config: ArchConfig) -> Bool {
+        headPath == .fusedRows && !config.isQwen3_8
+    }
+
     public init(model: Model, context: MetalContext, maxContext: Int,
                 runtimeConfiguration: RuntimeConfiguration = .production) throws {
         self.model = model
         self.ctx = context
         self.cfg = model.config
         self.maxContext = maxContext
-        self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
+        self.useFusedGreedyHead = Self.fusedGreedyHeadEnabled(
+            headPath: runtimeConfiguration.headPath, config: model.config)
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
         let useFP16Ring = runtimeConfiguration.fp16RingEnabled
         self.rdadvisePolicyMode = runtimeConfiguration.rdadvisePolicy
@@ -771,7 +792,155 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     public private(set) var totalIoNanos: UInt64 = 0
+    // Expert selection, which is CPU planning on the critical path. It sits
+    // *outside* the `io` window -- `tIoStart` is read after this returns -- and
+    // inside no `cb1` bucket either, so before this counter it landed in the
+    // serial sum's unexplained remainder rather than in any measured span.
+    public private(set) var totalIoPlanNanos: UInt64 = 0
+    // The `io` window's parts, held on the model because two of the three are
+    // only visible inside the fetch. `io - plan` is not the identity here:
+    // `plan` is outside the window, and the three parts below do not tile it --
+    // what remains after subtracting them is the continuation hops, the
+    // `streamersQueue.sync` and the `ensureLayerOpened` check, all of which are
+    // the per-layer fixed cost this split exists to find.
+    public var totalIoDispatchNanos: UInt64 { model.routedIoDispatchNanos() }
+    public var totalIoReadNanos: UInt64 { model.routedIoReadNanos() }
+    public var totalIoTailNanos: UInt64 { model.routedIoTailNanos() }
+    // `ioReadNanos` split, and this one *is* an exact tiling: `fanout + span +
+    // drain == read`, by construction in the streamer rather than by assertion
+    // here. `ioThreadNanos` is not a fourth part -- it is the summed thread time
+    // inside the span, so it is normally larger than the span and its ratio to
+    // it is the achieved parallelism. Reported together so a reader cannot
+    // mistake it for a part and get a total that doubles the window.
+    public var totalIoFanoutNanos: UInt64 { model.routedIoFanoutNanos() }
+    public var totalIoSpanNanos: UInt64 { model.routedIoSpanNanos() }
+    public var totalIoDrainNanos: UInt64 { model.routedIoDrainNanos() }
+    public var totalIoThreadNanos: UInt64 { model.routedIoThreadNanos() }
+    public var totalIoPreadNanos: UInt64 { model.routedIoPreadNanos() }
+    public var totalIoCopyNanos: UInt64 { model.routedIoCopyNanos() }
+    /// Per-read latency, log2-bucketed. The sums above give the mean; this is
+    /// what says whether the mean is the reads or a tail among them.
+    public var totalIoLatencyHistogram: [UInt64] { model.routedIoLatencyHistogram() }
+
+    // The engine's own pread sequence, so the drive can be priced offline on
+    // the real offset pattern rather than a synthetic one: the offline probes
+    // bracket this workload at 7.1 GB/s for diverse offsets and 14.4 GB/s for a
+    // repeated pool, and the engine's actual sequence is neither. Collected
+    // only when `FQ_EXPERT_TRACE` names a path, so the default run allocates
+    // nothing and the append costs one branch per miss.
+    private let expertTracePath: String? =
+        ProcessInfo.processInfo.environment["FQ_EXPERT_TRACE"]
+    /// Flat, because the replay harness only ever reads it forward: `[layer,
+    /// missCount, expert...]` repeated per layer per step. The expert ids are
+    /// the router's, not slot indices, so the harness can rebuild file offsets
+    /// from the layout alone.
+    public private(set) var expertTrace: [Int32] = []
+
+    /// Writes the collected pread sequence for offline replay, as one integer
+    /// per line. Expert ids only: the harness rebuilds byte offsets from the
+    /// install's own layout, so nothing here depends on the trace being taken
+    /// on the machine that replays it.
+    public func writeExpertTrace(to path: String) throws {
+        var out = Data()
+        out.reserveCapacity(expertTrace.count * 6)
+        for value in expertTrace {
+            out.append(contentsOf: Array("\(value)\n".utf8))
+        }
+        try out.write(to: URL(fileURLWithPath: path))
+    }
+    // Expert-cache hit/miss counts, accumulated once per layer in
+    // `encodeRoutedTail`. Deliberately counts rather than bytes: the byte
+    // figure is `misses * expertStride` exactly, but obtaining the stride per
+    // layer costs a lock in the very window this instrumentation exists to
+    // measure, so the multiplication happens once at print time instead.
+    public private(set) var totalExpertHits: UInt64 = 0
+    public private(set) var totalExpertMisses: UInt64 = 0
+    // Full-attention layers whose QSA indexer ran the ranked path rather than
+    // the dense one. The indexer budget is a position threshold (~2048 on the
+    // real 3.8 install), so a soak long enough to cross it shows a step in the
+    // attention bucket; without this count that step has no explanation.
+    public private(set) var totalIndexerRankedLayers: UInt64 = 0
     public private(set) var totalCb1Nanos: UInt64 = 0
+    // Sub-buckets of `totalCb1Nanos`, tiled by a cursor so that gaps and
+    // double-counts are structurally impossible rather than merely intended:
+    // the six spans below sum to `totalCb1Nanos` exactly, and
+    // `totalCb1WaitNanos` is the pipeline wait that `totalCb1Nanos` subtracts
+    // and therefore excludes. `lapseCb1` is the only way the cursor moves.
+    //
+    // `totalCb1AttentionNanos` and the three GDN spans are alternatives, not
+    // peers: a layer is one kind or the other, so compare them per layer
+    // (12:36 on Qwen 3.8, 10:30 on 3.6), never as a ratio of the raw sums.
+    //
+    // Only the Qwen decode paths are instrumented. A Gemma run reports every
+    // bucket here as 0 against a nonzero `cb1` — an unmistakable "not
+    // instrumented" signal rather than a measured zero.
+    public private(set) var totalCb1OtherNanos: UInt64 = 0
+    public private(set) var totalCb1AttentionNanos: UInt64 = 0
+    // The GDN core is split three ways because item 2.3's entire action list is
+    // to fuse `gdn_gate` into `gdn_recurrent`, and to let `gdn_rmsnorm_gated`
+    // read `gdn_recurrent`'s output inside a single encoder. One lumped "GDN"
+    // number cannot separate "the in-projections dominate" from "the
+    // gate+recurrent dispatch pair dominates", and only the second of those
+    // justifies that work — so the split is what makes 2.3 decidable at all.
+    public private(set) var totalCb1GdnProjNanos: UInt64 = 0
+    public private(set) var totalCb1GdnConvGateNanos: UInt64 = 0
+    public private(set) var totalCb1GdnRecurrentNanos: UInt64 = 0
+    public private(set) var totalCb1RouterNanos: UInt64 = 0
+    public private(set) var totalCb1WaitNanos: UInt64 = 0
+
+    // How many command buffers one decode actually commits — item 2.2's
+    // missing number, and the only counter here with a value that can be
+    // predicted from the source before the run. Counted at the commit sites
+    // themselves rather than globally: the prefill bodies commit through the
+    // same `ctx.queue`, so a global count would fold two profiles together.
+    public private(set) var totalDecodeCommandBuffers: UInt64 = 0
+
+    // One per `produceToken`, i.e. per decode step. Every other counter here is
+    // read against this denominator, and it is counted rather than inferred
+    // from the token count because the two are not the same number: a greedy
+    // prefill seed produces a token without a forward, and an `.off` prefill
+    // runs the decode path once per prompt token.
+    public private(set) var totalForwards: UInt64 = 0
+
+    // GPU-side time, the one thing the encode clocks above cannot see. Read
+    // from `gpuStartTime`/`gpuEndTime` after completion: no extra command
+    // buffer, no extra wait, no change to commit order.
+    //
+    // Provisional by nature, and the caller must treat it that way. Metal
+    // documents these as coarse, and on some Apple GPUs they are synthetic. The
+    // validity gate is that the summed GPU time lands at a plausible fraction
+    // of token wall time (40-70% here, given the deliberate overlap) — a total
+    // of 0, or several times the token time, means the timestamps are not
+    // usable and the finding is *that*, not the number.
+    //
+    // `totalGpuSamples` is the other half of the gate: the routed tail is
+    // deliberately never waited on, so a buffer that has not completed yet
+    // contributes nothing, and a total built from a handful of samples must not
+    // be read as if it covered the run.
+    public private(set) var totalGpuCb1Nanos: UInt64 = 0
+    // `totalGpuCb1Nanos` split by layer kind. The CPU-side `attention` and
+    // `gdn_*` buckets are alternatives — each layer runs one stack or the other
+    // — so they are compared by dividing by the layer counts (12 full-attention
+    // / 36 GDN on Qwen 3.8; 10 / 30 on 3.6). GPU time has the same shape with
+    // larger stakes: the two stacks run different kernels, so one summed figure
+    // cannot say which owns it, and the answer decides different work. Read
+    // this as a per-layer comparison, not a per-step one.
+    public private(set) var totalGpuCb1FullAttnNanos: UInt64 = 0
+    public private(set) var totalGpuCb1GdnNanos: UInt64 = 0
+    public private(set) var totalGpuRoutedNanos: UInt64 = 0
+    public private(set) var totalGpuSamples: UInt64 = 0
+
+    // The PLE n-gram gather, which is Qwen-3.8-only and appears in no other
+    // counter: it runs before the layer loop, once per head, and reads rows
+    // straight off disk from a table far too large to cache. Wall clock, not
+    // an encode clock — it is a synchronous host-side read, not a dispatch.
+    //
+    // `totalPlePartOpens` counts `open` calls the gather makes — one per head,
+    // each followed by a single-row pread — not *distinct* parts: a cached
+    // handle still costs a pread, and the preads are the thing that costs.
+    public private(set) var totalPleGatherNanos: UInt64 = 0
+    public private(set) var totalPleGathers: UInt64 = 0
+    public private(set) var totalPlePartOpens: UInt64 = 0
     public private(set) var totalCb2Nanos: UInt64 = 0
     public private(set) var totalHeadNanos: UInt64 = 0
     public private(set) var totalHeadFusedNanos: UInt64 = 0
@@ -782,6 +951,43 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalRDAdviseBytes: UInt64 = 0
     public private(set) var totalRDAdviseFailures: UInt64 = 0
     public private(set) var totalRDAdviseSkipped: UInt64 = 0
+
+    /// Advances `cursor` to now and returns the elapsed nanoseconds, so that
+    /// consecutive calls tile a span with no gap and no overlap.
+    ///
+    /// The shared cursor is the mechanism, not a convenience. Mixing a cursor
+    /// with independently-taken `now` readings is exactly what lets a span go
+    /// missing or get counted twice — and either error still prints a
+    /// plausible-looking number, which is worse than an obviously broken one.
+    ///
+    /// The single place the cursor moves without attributing anything is the
+    /// pipeline wait: `totalCb1Nanos` subtracts `waitNanos`, so the buckets must
+    /// skip precisely that span or the sum comes out `wait` too high.
+    private func lapseCb1(_ cursor: inout UInt64) -> UInt64 {
+        let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        defer { cursor = now }
+        return now &- cursor
+    }
+
+    /// Commit a command buffer and count it. Used at the decode commit sites
+    /// only — see `totalDecodeCommandBuffers`.
+    private func commitCounting(_ cb: MTLCommandBuffer) {
+        totalDecodeCommandBuffers &+= 1
+        cb.commit()
+    }
+
+    /// GPU time a completed buffer reports, or 0 if the driver has not
+    /// published one. Counts a sample only when it returns a real number, so
+    /// `totalGpuSamples` can be checked against the buffer count — a partial
+    /// total is visible rather than passing for a whole one.
+    private func recordGpuTime(_ cb: MTLCommandBuffer) -> UInt64 {
+        guard cb.status == .completed else { return 0 }
+        let start = cb.gpuStartTime
+        let end = cb.gpuEndTime
+        guard start.isFinite, end.isFinite, start > 0, end > start else { return 0 }
+        totalGpuSamples &+= 1
+        return UInt64((end - start) * 1_000_000_000)
+    }
 
     private func recordRDAdvice(_ result: ExpertIOAdviceResult, wallNanos: UInt64) {
         totalRDAdviseNanos &+= wallNanos
@@ -2616,6 +2822,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
            let err = phase1HitCB.error {
             print("CB error: \(err)")
         }
+        // The routed tail is deliberately not waited on, so whether these
+        // buffers have completed by the time they are retired is a race with
+        // the GPU — on the decode path a whole layer's CPU encode runs between
+        // one layer's commit and its drain, which is usually (not always)
+        // enough. `recordGpuTime` returns 0 for the ones still in flight and
+        // `totalGpuSamples` shows how partial the total is.
+        totalGpuRoutedNanos &+= recordGpuTime(pending.cb)
+        if let sharedCB = pending.sharedCB {
+            totalGpuRoutedNanos &+= recordGpuTime(sharedCB)
+        }
+        if let phase1HitCB = pending.phase1HitCB {
+            totalGpuRoutedNanos &+= recordGpuTime(phase1HitCB)
+        }
         totalCb2Nanos &+= pending.encodeAndCommitNanos
     }
 
@@ -2659,9 +2878,45 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let topK = UInt32(cfg.topKExperts)
         let canPlanPhase1HitSplit =
             cfg.topKExperts <= MoE.maxStreamedExperts
+        // Expert selection runs on the critical path between the router readback
+        // above and the preads below, and it is inside neither the `cb1` buckets
+        // nor the `io` window (`tIoStart` is read after this returns). Before
+        // this timer it fell into the serial sum's unexplained remainder.
+        let tPlan = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let plannedFetch = canPlanPhase1HitSplit
             ? try model.planRoutedExperts(layer: L, experts: experts)
             : nil
+        totalIoPlanNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- tPlan
+        // Expert-cache accounting for this layer, counted here and nowhere
+        // else: this is the one and only `planRoutedExperts` call per layer, and
+        // the plan below is consumed by several branches. Counting inside any of
+        // them would multiply every total by the number of consumers.
+        //
+        // Never call `planRoutedExperts` a second time for accounting either —
+        // `makeExpertCachePlan` mutates `useClock`, `expertUseCount`,
+        // `slotLastUse` and `slotExpert`, so a second call would double every
+        // expert's use count, change eviction order, and move the very hit rate
+        // it was measuring.
+        if let plan = plannedFetch {
+            totalExpertHits &+= UInt64(plan.hits)
+            totalExpertMisses &+= UInt64(plan.misses.count)
+            if expertTracePath != nil {
+                // Layer, miss count, then the expert ids: enough for the
+                // harness to rebuild every pread offset in order without
+                // reproducing the cache.
+                expertTrace.append(Int32(L))
+                expertTrace.append(Int32(plan.misses.count))
+                for index in plan.misses {
+                    expertTrace.append(Int32(experts[index]))
+                }
+            }
+        } else {
+            // Unreachable while the router's `topK <= maxStreamedExperts`
+            // precondition holds, but instrumentation must not be the thing
+            // that traps a decode: count an unplannable layer the way the fetch
+            // path treats it, as all-miss.
+            totalExpertMisses &+= UInt64(experts.count)
+        }
         var phase1HitCB: MTLCommandBuffer?
         var phase1HitSplitArgBuf: MTLBuffer?
         var phase1HitSplitRoutedBufs: [MTLBuffer] = []
@@ -2757,9 +3012,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let sharedCB = ctx.queue.makeCommandBuffer()!
         gSharedFFN(sharedCB)
         sharedPostEncoder(sharedCB)
-        sharedCB.commit()
+        commitCounting(sharedCB)
         if let cb = phase1HitCB {
-            cb.commit()
+            commitCounting(cb)
         }
         if rdadviseEnabled && rdadvisePolicyMode != .off {
             let requestedMisses = plannedFetch?.misses.count ?? experts.count
@@ -2831,7 +3086,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                f: FmoE,
                                                topK: topK)
         tailEncoder(routedCB)
-        routedCB.commit()
+        commitCounting(routedCB)
         precondition(pending == nil,
                      "routed command-buffer pipeline drained before queuing the next layer")
         pending = PendingRoutedCommand(
@@ -2867,6 +3122,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         let tCb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        // Every cb1 sub-bucket is measured by advancing this one cursor, so the
+        // spans tile the layer's cb1 exactly. See `lapseCb1`.
+        var cb1Cursor = tCb1Start
         let cb = ctx.queue.makeCommandBuffer()!
 
         if let hook = qwenLayerDebugHook {
@@ -2985,11 +3243,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             m: D, n: qRows)
             }
             gInputNorm(cb)
+            totalCb1OtherNanos &+= lapseCb1(&cb1Cursor)
             gProj(cb)
             gEpilogue(cb)
             gAttention(cb)
             gGate(cb)
             gOProj(cb)
+            totalCb1AttentionNanos &+= lapseCb1(&cb1Cursor)
             gPostAttn(cb)
         } else {
             // GDN (linear-attention) layer: in_proj_qkv → silu causal conv →
@@ -3150,18 +3410,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 }
             }
             gInputNorm(cb)
+            totalCb1OtherNanos &+= lapseCb1(&cb1Cursor)
             gProj(cb)
+            totalCb1GdnProjNanos &+= lapseCb1(&cb1Cursor)
             gConv(cb)
             gGateGEMV(cb)
+            totalCb1GdnConvGateNanos &+= lapseCb1(&cb1Cursor)
             gRecurrent(cb)
             gNormGated(cb)
             gOProj(cb)
+            totalCb1GdnRecurrentNanos &+= lapseCb1(&cb1Cursor)
             gPostAttn(cb)
         }
 
         // Router (both layer types): plain softmax over all experts, top-8
         // renormalized — mathematically identical to the kernel's top-8
         // softmax, so the Gemma kernel is reused with ones-filled scales.
+        // The router is the last work encoded into this layer's cb1, so its
+        // span runs through the commit call inclusive.
+        totalCb1OtherNanos &+= lapseCb1(&cb1Cursor)
         moe.encodeRouterGemma4(commandBuffer: cb,
                                weights: routerW.buffer, weightsOffset: Int(routerW.offset),
                                scales: routerW.buffer, scalesOffset: Int(routerW.scaleOffset),
@@ -3172,10 +3439,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                outIndices: outIndices, outWeights: outWeights,
                                numExperts: UInt32(cfg.numExperts), d: D,
                                topK: UInt32(cfg.topKExperts))
-        cb.commit()
+        commitCounting(cb)
+        totalCb1RouterNanos &+= lapseCb1(&cb1Cursor)
         let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         waitForCompletion(cb)
         let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
+        // Read once: `recordGpuTime` counts a sample only when it returns a
+        // real number, so a second call would double `totalGpuSamples`.
+        let cb1GpuNanos = recordGpuTime(cb)
+        totalGpuCb1Nanos &+= cb1GpuNanos
+        if isFull {
+            totalGpuCb1FullAttnNanos &+= cb1GpuNanos
+        } else {
+            totalGpuCb1GdnNanos &+= cb1GpuNanos
+        }
+        // cb1 subtracts this wait, so the buckets must *skip* exactly this span
+        // rather than attribute it. Attributing it would put the tile sum
+        // `wait` above cb1 — and that sum still looks like a plausible number,
+        // which is why this has to be structural rather than remembered.
+        cb1Cursor &+= waitNanos
         if let previous = pending {
             // The debug hook snapshots read shared buffers on the CPU — wait
             // out the deferred tail so the snapshots are race-free. Without a
@@ -3184,7 +3466,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                        waitIfNeeded: qwenLayerDebugHook != nil)
             pending = nil
         }
-        totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
+        // Final lapse, then cb1 from that same reading, so
+        // `other + attention + gdn + router == cb1` holds by construction
+        // rather than to within the gap between two separate clock reads.
+        totalCb1OtherNanos &+= lapseCb1(&cb1Cursor)
+        totalCb1Nanos &+= cb1Cursor &- tCb1Start &- waitNanos
+        totalCb1WaitNanos &+= waitNanos
 
         if let hook = qwenLayerDebugHook {
             func snap(_ name: String, _ buf: MTLBuffer, _ count: Int) {
@@ -4442,6 +4729,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         let tCb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        // Every cb1 sub-bucket is measured by advancing this one cursor, so the
+        // spans tile the layer's cb1 exactly. See `lapseCb1`.
+        var cb1Cursor = tCb1Start
         let cb = ctx.queue.makeCommandBuffer()!
 
         if let hook = qwenLayerDebugHook {
@@ -4799,12 +5089,27 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             gPLE?(cb)
             gAttnMix(cb)
+            // Anchor on gProj … gOProj only. `gAttnMix` above is the *second*
+            // call in this list, not the last: a lapse placed "after gAttnMix"
+            // would land before gProj and silently fold the q/k/v in-projection,
+            // the QSA indexer, attention itself and o_proj into `other`.
+            totalCb1OtherNanos &+= lapseCb1(&cb1Cursor)
             gProj(cb)
+            if gIndexer != nil, !idxDense {
+                // Ranking — `encodeBlockScores` + `encodeSelectCells` — only
+                // runs once the timeline outgrows the QSA state's capacity;
+                // the closure returns early below that (the `guard` inside it).
+                // On the 3.8 install that is a *step* partway through a long
+                // soak: attention changes character mid-run, and without this
+                // count the step has no explanation.
+                totalIndexerRankedLayers &+= 1
+            }
             gIndexer?(cb)
             gEpilogue(cb)
             gAttention(cb)
             gGate(cb)
             gOProj(cb)
+            totalCb1AttentionNanos &+= lapseCb1(&cb1Cursor)
             gAttnCombine(cb)
             gFfnMix(cb)
         } else {
@@ -4967,12 +5272,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             gPLE?(cb)
             gAttnMix(cb)
+            totalCb1OtherNanos &+= lapseCb1(&cb1Cursor)
             gProj(cb)
+            totalCb1GdnProjNanos &+= lapseCb1(&cb1Cursor)
             gConv(cb)
             gGateGEMV(cb)
+            totalCb1GdnConvGateNanos &+= lapseCb1(&cb1Cursor)
             gRecurrent(cb)
             gNormGated(cb)
             gOProj(cb)
+            totalCb1GdnRecurrentNanos &+= lapseCb1(&cb1Cursor)
             gAttnCombine(cb)
             gFfnMix(cb)
         }
@@ -4980,6 +5289,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // Router (both layer types): plain softmax over all experts, top-8
         // renormalized — mathematically identical to the kernel's top-8
         // softmax, so the Gemma kernel is reused with ones-filled scales.
+        // The router is the last work encoded into this layer's cb1, so its
+        // span runs through the commit call inclusive.
+        totalCb1OtherNanos &+= lapseCb1(&cb1Cursor)
         moe.encodeRouterGemma4(commandBuffer: cb,
                                weights: routerW.buffer, weightsOffset: Int(routerW.offset),
                                scales: routerW.buffer, scalesOffset: Int(routerW.scaleOffset),
@@ -4990,10 +5302,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                outIndices: outIndices, outWeights: outWeights,
                                numExperts: UInt32(cfg.numExperts), d: D,
                                topK: UInt32(cfg.topKExperts))
-        cb.commit()
+        commitCounting(cb)
+        totalCb1RouterNanos &+= lapseCb1(&cb1Cursor)
         let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         waitForCompletion(cb)
         let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
+        // Read once: `recordGpuTime` counts a sample only when it returns a
+        // real number, so a second call would double `totalGpuSamples`.
+        let cb1GpuNanos = recordGpuTime(cb)
+        totalGpuCb1Nanos &+= cb1GpuNanos
+        if isFull {
+            totalGpuCb1FullAttnNanos &+= cb1GpuNanos
+        } else {
+            totalGpuCb1GdnNanos &+= cb1GpuNanos
+        }
+        // cb1 subtracts this wait, so the buckets must *skip* exactly this span
+        // rather than attribute it. Attributing it would put the tile sum
+        // `wait` above cb1 — and that sum still looks like a plausible number,
+        // which is why this has to be structural rather than remembered.
+        cb1Cursor &+= waitNanos
         if let previous = pending {
             // The debug hook snapshots read shared buffers on the CPU — wait
             // out the deferred tail so the snapshots are race-free. Without a
@@ -5002,7 +5329,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                        waitIfNeeded: qwenLayerDebugHook != nil)
             pending = nil
         }
-        totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
+        // Final lapse, then cb1 from that same reading, so
+        // `other + attention + gdn + router == cb1` holds by construction
+        // rather than to within the gap between two separate clock reads.
+        totalCb1OtherNanos &+= lapseCb1(&cb1Cursor)
+        totalCb1Nanos &+= cb1Cursor &- tCb1Start &- waitNanos
+        totalCb1WaitNanos &+= waitNanos
 
         if let hook = qwenLayerDebugHook {
             func snap(_ name: String, _ buf: MTLBuffer, _ count: Int) {
@@ -5122,6 +5454,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         let D    = UInt32(cfg.hiddenSize)
         let eps: Float = 1e-6
+        totalForwards &+= 1
         // Qwen hybrid families do not scale embeddings (see prefillChunked).
         let sqrtHidden = cfg.isQwenHybrid ? 1.0 : Float(cfg.hiddenSize).squareRoot()
         var pendingRoutedCommand: PendingRoutedCommand?
@@ -5161,9 +5494,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // `apply_ubatch` has already stored the ubatch.
         if let pleHost {
             pleHost.record(position: position, token: token)
+            // Timed as a wall clock, unlike the cb1 buckets: this is a
+            // synchronous host-side read that blocks the decode, not an
+            // encode-and-commit. Under `full-sha256` the first touch of each
+            // shard also hashes 800 MB *here*, inside a decode step, so a cold
+            // run and a warm one do not measure the same thing.
+            let tPle = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let gathered = try pleHost.gather(atPosition: position) { part in
-                try model.openPLEPart(part)
+                totalPlePartOpens &+= 1
+                return try model.openPLEPart(part)
             }
+            totalPleGatherNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- tPle
+            totalPleGathers &+= 1
             gathered.withUnsafeBytes { src in
                 memcpy(pleGathered.contents(), src.baseAddress!, src.count)
             }
@@ -5342,10 +5684,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             gOProj(cb)
             gPostAttnSetup(cb)
             gRouter(cb)
-            cb.commit()
+            commitCounting(cb)
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             waitForCompletion(cb)
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
+            totalGpuCb1Nanos &+= recordGpuTime(cb)
             if let pending = pendingRoutedCommand {
                 finishPendingRoutedCommand(pending, waitIfNeeded: false)
                 pendingRoutedCommand = nil
@@ -5453,12 +5796,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 rmsEps: eps)
         }
         if emitHead {
-            // The fused greedy head folds RMSNorm + lm_head into one kernel —
-            // unavailable on Qwen 3.8, whose head input is the root HC mixer
-            // collapse (a data-dependent gate, not a plain norm).
+            // `useFusedGreedyHead` already excludes Qwen 3.8; see its doc.
             let useFusedHeadForThisToken = useFusedGreedyHead
                 && outputMode == .greedyIfAvailable
-                && !cfg.isQwen3_8
             let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             if useFusedHeadForThisToken {
                 runSync(gFusionHead)
@@ -5479,7 +5819,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private func runSync(_ body: (MTLCommandBuffer) -> Void) {
         let cb = ctx.queue.makeCommandBuffer()!
         body(cb)
-        cb.commit()
+        // Every `runSync` call site is a decode site (embed, and the two head
+        // variants), so this counts toward the decode total.
+        commitCounting(cb)
         cb.waitUntilCompleted()
         if let err = cb.error {
             print("CB error: \(err)")

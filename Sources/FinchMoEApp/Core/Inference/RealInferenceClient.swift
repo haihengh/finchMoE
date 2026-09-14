@@ -55,14 +55,20 @@ final class GenerationTaskRegistry: Sendable {
 /// loop the CLI uses (`runRawCompletion`, BOS + verbatim encode, no chat
 /// template) behind the `AppInferenceClient` event stream, with an explicit
 /// load lifecycle so the resident weights stay warm across generations.
-public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Sendable {
+public final class RealInferenceClient: AppModelLifecycleClient,
+    AppModelIntegrityReporting, @unchecked Sendable {
     private let session: RealInferenceSession
     private let memorySampler: AppMemorySampler
     private let generationTasks = GenerationTaskRegistry()
+    private let integrity = Mutex<String?>(nil)
 
     public init(memorySampler: AppMemorySampler = AppMemorySampler()) {
         self.memorySampler = memorySampler
         self.session = RealInferenceSession()
+    }
+
+    public var modelIntegrityDescription: String? {
+        integrity.withLock { $0 }
     }
 
     public func ensureLoaded(modelDirectory: URL,
@@ -76,10 +82,16 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
                                 options: options,
                                 forceLogitsHead: forceLogitsHead),
             onState: onState)
+        // Copied out of the actor rather than read on demand: the session
+        // outlives this call, and a caller that asks later should see what the
+        // *current* load decided, not what a previous one did.
+        let description = await session.integrityDescription
+        integrity.withLock { $0 = description }
     }
 
     public func unload() async {
         await session.unload()
+        integrity.withLock { $0 = nil }
     }
 
     public func generate(_ request: AppGenerationRequest) -> AsyncThrowingStream<AppInferenceEvent, Error> {
@@ -156,6 +168,10 @@ actor RealInferenceSession {
     private var tokenizerDirectoryCache = TokenizerDirectoryCache()
     private var runner: RealForwardRunner?
     private var scratch: RawCompletionScratch?
+    /// What the last successful load resolved the verification policy to. Held
+    /// here because the `Model` that knows is released on the next reload, and
+    /// the diagnostics pane reports on the load that is still resident.
+    private(set) var integrityDescription: String?
 
     func ensureLoaded(key: SessionLoadKey,
                       onState: @Sendable (AppModelLoadState) -> Void) async throws {
@@ -217,6 +233,7 @@ actor RealInferenceSession {
             runner = loadedRunner
             scratch = loadedScratch
             loadedKey = key
+            integrityDescription = loadedModel.integrityOutcome.logDescription
             onState(.ready(modelDirectory: key.directory,
                            loadSeconds: Date().timeIntervalSince(start)))
         } catch is CancellationError {
@@ -260,6 +277,7 @@ actor RealInferenceSession {
         tokenizer = nil
         tokenizerDirectoryCache.clear()
         loadedKey = nil
+        integrityDescription = nil
     }
 
     func run(request: AppGenerationRequest,
@@ -422,7 +440,8 @@ actor RealInferenceSession {
             peakMemoryBytes: memorySampler.peakBytes,
             runtimeOptions: request.runtimeOptions,
             prefill: prefill,
-            runner: runnerDiagnostics(progress: progress, generated: generated))
+            runner: runnerDiagnostics(progress: progress, generated: generated),
+            integrityOutcome: integrityDescription)
     }
 
     /// Per-token buckets as diffs of the runner's cumulative counters from the

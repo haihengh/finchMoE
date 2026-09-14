@@ -78,9 +78,7 @@ public final class AppModel {
             ? MacAppSettingsFileStore.loadOrCreate(forModelDirectory: directory)
             : MacAppSettings()
         self.modelPathText = directory.path
-        self.runtimeOptions = AppRuntimeOptions(
-            expertCacheSlots: settings.expertCacheSlots,
-            prefillEnabled: settings.prefillEnabled)
+        self.runtimeOptions = AppRuntimeOptions(persisted: settings)
         self.maxContextTokens = settings.contextTokens
         self.temperature = settings.temperature
         self.topKEnabled = settings.topKEnabled
@@ -632,9 +630,7 @@ public final class AppModel {
         guard settingsPersistenceEnabled else { return }
         let settings = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: modelDirectory)
-        runtimeOptions = AppRuntimeOptions(
-            expertCacheSlots: settings.expertCacheSlots,
-            prefillEnabled: settings.prefillEnabled)
+        runtimeOptions = AppRuntimeOptions(persisted: settings)
         maxContextTokens = settings.contextTokens
         temperature = settings.temperature
         topKEnabled = settings.topKEnabled
@@ -657,6 +653,7 @@ public final class AppModel {
             topPEnabled: topPEnabled,
             topP: topP,
             prefillEnabled: runtimeOptions.prefillEnabled,
+            modelVerification: runtimeOptions.modelVerification,
             newlineShortcut: newlineShortcut,
             showPromptExamples: showPromptExamples,
             sentPromptBehavior: sentPromptBehavior)
