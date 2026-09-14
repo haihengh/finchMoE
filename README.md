@@ -118,7 +118,7 @@ checkpoint.
 | Storage  | ~20.0 GB installed text-only `.finch` (streamed from disk during decode)                                                           |
 | Memory   | ~1.1-1.2 GiB peak resident while decoding (out-of-core expert streaming; OS page cache additional)                                            |
 | Decode   | ~10.5 tok/s (16 GB Mac mini) / ~17-19 tok/s (24 GiB M4 Pro), greedy, flat over 100-300 tokens                                                                                             |
-| Prefill  | ~20 tok/s on long prompts (705 tok, Mac mini) / ~44 tok/s (1,020 tok, M4 Pro); short prompts pay SHA-256 verification unless `--verify trusted-install` (~1 s vs ~8 s)            |
+| Prefill  | ~20 tok/s on long prompts (705 tok, Mac mini) / ~44 tok/s (1,020 tok, M4 Pro); short prompts skip the SHA-256 pass when a verified-install receipt is present (`--verify auto`, the default)            |
 | Hardware | Apple Silicon Mac (validated on 16 GB and 24 GiB RAM)                                                                                                |
 | Platform | macOS 26, Metal 4, Swift 6.3                                                                                                              |
 
@@ -283,13 +283,19 @@ CLI uses production runtime defaults — run `FinchMoECLI --help` for the full
 list. Generated text goes to standard output; timing statistics go to standard
 error, with `--quiet` to suppress the footer.
 
-Model files are verified with `--verify full-sha256` by default: the CLI
-hashes `model_weights.bin` at load and every `packed_experts` layer file on
-first use (~8 s one-time cost for a large install). Pass
-`--verify trusted-install` to trust the repack receipt
-(`verified-install.json`) and size-check instead — on a ~20 GB Qwen install
-this cuts the fixed per-run cost before the first token from ~8 s to under a
-second. Same choice the Mac app exposes as its verification setting.
+Model files are verified with `--verify auto` by default. When a repack
+receipt (`verified-install.json`) is present and valid it is used: the CLI
+still hashes `manifest.json`, `model_weights.bin` and `packed_experts/layout.json`
+at load, but size-checks the layer and PLE files against the receipt instead of
+hashing them on first use. Without a usable receipt it falls back to hashing
+everything, so the default never verifies less than `--verify full-sha256`
+would. On the 125B Qwen install that is prefill **63.5 s → 4.6 s** for a
+19-token prompt, with identical output.
+
+`--verify full-sha256` forces the full hash and `--verify trusted-install`
+requires the receipt instead of falling back (it fails when there is none).
+The Mac app exposes the same three modes as a picker, and its diagnostics pane
+reports which one the load actually took.
 
 ### Local OpenAI-compatible server
 

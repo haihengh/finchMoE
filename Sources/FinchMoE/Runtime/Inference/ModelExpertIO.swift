@@ -90,6 +90,14 @@ extension Model {
         return slotCount
     }
 
+    /// Bytes a single routed-expert miss reads. Unlike
+    /// `routedExpertAdviceByteEstimate` this takes no lock and opens no layer:
+    /// the stride is fixed metadata, so it can be read on the reporting path
+    /// without disturbing the streaming machinery it is measuring.
+    public func routedExpertStrideBytes() -> UInt64 {
+        packedExpertsLayout.expertStride
+    }
+
     public func routedExpertBuffers(for plan: RoutedExpertFetchPlan) throws -> [TensorView] {
         try ensureLayerOpened(plan.layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
@@ -108,15 +116,34 @@ extension Model {
     public func fetchRoutedExperts(plan: RoutedExpertFetchPlan) async throws -> [TensorView] {
         try ensureLayerOpened(plan.layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
+        // Hoisted out of the closure: capturing `self` there would capture the
+        // whole non-Sendable `Model`, where the box is the only part needed.
+        let box = streamersBox
+        // The submit-to-entry gap is the price of the third dispatch level: the
+        // caller's wall clock starts before the `await`, and this closure does
+        // not run until the global queue has a thread for it.
+        let dispatched = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
+                let entered = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
                 do {
                     let buffers = try streamer.executeExpertCachePlan(plan.cachePlan)
+                    box.ioDispatchNanos &+= entered &- dispatched
+                    box.ioReadNanos &+= streamer.lastReadNanos
+                    box.ioTailNanos &+= streamer.lastTailNanos
+                    box.ioFanoutNanos &+= streamer.lastReadFanoutNanos
+                    box.ioSpanNanos &+= streamer.lastReadSpanNanos
+                    box.ioDrainNanos &+= streamer.lastReadDrainNanos
+                    box.ioThreadNanos &+= streamer.lastReadThreadNanos
+                    box.ioPreadNanos &+= streamer.lastReadPreadNanos
+                    box.ioCopyNanos &+= streamer.lastReadCopyNanos
+                    box.addIoLatency(streamer.lastReadLatencyHistogram)
                     continuation.resume(returning: Self.makeExpertViews(
                         buffers,
                         layer: plan.layer,
                         experts: plan.experts))
                 } catch {
+                    box.ioDispatchNanos &+= entered &- dispatched
                     continuation.resume(throwing: error)
                 }
             }
@@ -126,20 +153,49 @@ extension Model {
     public func fetchRoutedExperts(layer: Int, experts: [Int]) async throws -> [TensorView] {
         try ensureLayerOpened(layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
+        let box = streamersBox
+        let dispatched = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
+                let entered = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
                 do {
                     let buffers = try streamer.loadExpertsCached(experts: experts)
+                    box.ioDispatchNanos &+= entered &- dispatched
+                    box.ioReadNanos &+= streamer.lastReadNanos
+                    box.ioTailNanos &+= streamer.lastTailNanos
+                    box.ioFanoutNanos &+= streamer.lastReadFanoutNanos
+                    box.ioSpanNanos &+= streamer.lastReadSpanNanos
+                    box.ioDrainNanos &+= streamer.lastReadDrainNanos
+                    box.ioThreadNanos &+= streamer.lastReadThreadNanos
+                    box.ioPreadNanos &+= streamer.lastReadPreadNanos
+                    box.ioCopyNanos &+= streamer.lastReadCopyNanos
+                    box.addIoLatency(streamer.lastReadLatencyHistogram)
                     continuation.resume(returning: Self.makeExpertViews(
                         buffers,
                         layer: layer,
                         experts: experts))
                 } catch {
+                    box.ioDispatchNanos &+= entered &- dispatched
                     continuation.resume(throwing: error)
                 }
             }
         }
     }
+
+    /// The `io` window's parts. Unlike the fetches above these take no lock:
+    /// they are read at the prefill/decode boundary and after the run, both of
+    /// which are outside any fetch, which is also why the box's fields need no
+    /// atomic.
+    public func routedIoDispatchNanos() -> UInt64 { streamersBox.ioDispatchNanos }
+    public func routedIoReadNanos() -> UInt64 { streamersBox.ioReadNanos }
+    public func routedIoTailNanos() -> UInt64 { streamersBox.ioTailNanos }
+    public func routedIoFanoutNanos() -> UInt64 { streamersBox.ioFanoutNanos }
+    public func routedIoSpanNanos() -> UInt64 { streamersBox.ioSpanNanos }
+    public func routedIoDrainNanos() -> UInt64 { streamersBox.ioDrainNanos }
+    public func routedIoThreadNanos() -> UInt64 { streamersBox.ioThreadNanos }
+    public func routedIoPreadNanos() -> UInt64 { streamersBox.ioPreadNanos }
+    public func routedIoCopyNanos() -> UInt64 { streamersBox.ioCopyNanos }
+    public func routedIoLatencyHistogram() -> [UInt64] { streamersBox.ioLatencyHistogram }
 
     private static func makeExpertViews(
         _ buffers: [(buffer: MTLBuffer, offset: UInt64, size: UInt64)],

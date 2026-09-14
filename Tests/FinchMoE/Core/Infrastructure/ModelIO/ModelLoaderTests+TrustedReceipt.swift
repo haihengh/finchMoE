@@ -59,12 +59,18 @@ extension ModelLoaderTests {
     try Self.flipByte(in: layerURL, at: 64)
     let device = try #require(MTLCreateSystemDefaultDevice())
 
+    // Pinned to `.fullSha256` rather than relying on the default: this leg is
+    // the *contrast* to the trusted path, so it has to name the hashing mode
+    // explicitly. (Under `.automatic` the valid receipt would be taken, the
+    // size-preserving flip would sail through the size check, and this would
+    // stop testing anything.)
     #expect {
-      let defaultModel = try Model.load(
+      let hashingModel = try Model.load(
         directoryURL: dir,
         device: device,
-        expecting: .gemma4Toy())
-      _ = try defaultModel.routedExpert(layer: 0, expert: 0)
+        expecting: .gemma4Toy(),
+        integrityPolicy: .fullSha256)
+      _ = try hashingModel.routedExpert(layer: 0, expert: 0)
     } throws: { error in
       if case ModelError.checksumMismatch = error { return true }
       return false

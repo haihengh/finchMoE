@@ -71,6 +71,38 @@ extension PreadExpertStreamerTests {
     }
   }
 
+  /// Splitting one expert read into K `pread`s must move the same bytes to the
+  /// same places -- it changes how many syscalls carry them, not which ones.
+  ///
+  /// The splits include 3 and 7, which do not divide the 2-page stride evenly,
+  /// so the remainder-spreading path is exercised rather than assumed. The
+  /// assertion is position-by-position against the file's own offset-tagged
+  /// pattern, because the uniform-tag fixture would report a one-byte gap as
+  /// valid data.
+  @Test func splitReadsTileTheExpertWithoutGapsOrOverlap() throws {
+    let url = try Self.writeOffsetTaggedLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+
+    for split in [1, 2, 3, 7] {
+      // The `package` init, because the public one is signature-pinned by
+      // `PublicAPISignatureCompatibilityTests` and rightly so: this knob is an
+      // experiment, not API.
+      let streamer = try PreadExpertStreamer(
+        layout: Self.makeLayout(path: url.path), device: device, slotCount: 1,
+        fileDescriptor: nil, readSplit: split)
+      for expert in 0..<Self.numExperts {
+        let r = try streamer.loadExpert(layer: 0, expert: expert)
+        let got = Self.bytes(of: r.buffer, offset: 0, count: Self.expertStride)
+        let base = Int(Self.streamOffset) + expert * Self.expertStride
+        let mismatch = (0..<Self.expertStride).first { got[$0] != Self.patternByte(base + $0) }
+        if let j = mismatch {
+          Issue.record("split \(split): expert \(expert) byte \(j) is \(got[j]), expected \(Self.patternByte(base + j))")
+        }
+      }
+    }
+  }
+
   @Test func slotReuse_roundRobinOverwrites() throws {
     let url = try Self.writeSyntheticLayer()
     defer { try? FileManager.default.removeItem(at: url) }

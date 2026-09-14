@@ -13,7 +13,9 @@ public struct Args: Equatable, Sendable {
     public var seed: UInt64?
     public var stops: [String]
     public var quiet: Bool
-    public var verify: ModelIntegrityPolicy
+    public var counters: Bool
+    public var expertCacheSlots: Int?
+    public var verify: ModelIntegrityPreference
 
     public init(model: String,
                 prompt: String? = nil,
@@ -27,7 +29,9 @@ public struct Args: Equatable, Sendable {
                 seed: UInt64? = nil,
                 stops: [String] = [],
                 quiet: Bool = false,
-                verify: ModelIntegrityPolicy = .fullSha256) {
+                counters: Bool = false,
+                expertCacheSlots: Int? = nil,
+                verify: ModelIntegrityPreference = .automatic) {
         self.model = model
         self.prompt = prompt
         self.messagesFile = messagesFile
@@ -40,6 +44,8 @@ public struct Args: Equatable, Sendable {
         self.seed = seed
         self.stops = stops
         self.quiet = quiet
+        self.counters = counters
+        self.expertCacheSlots = expertCacheSlots
         self.verify = verify
     }
 }
@@ -67,6 +73,14 @@ public enum ArgsError: Error, Equatable, CustomStringConvertible {
 }
 
 extension Args {
+    /// Rendered from the runtime's own list so the help text cannot drift from
+    /// what `parse` accepts.
+    private static var slotsList: String {
+        RuntimeConfiguration.allowedExpertCacheSlots
+            .map(String.init)
+            .joined(separator: ", ")
+    }
+
     public static let usage = """
     FinchMoECLI — local text generation (instruction chat and raw completion)
 
@@ -87,11 +101,30 @@ extension Args {
       --seed <uint64>           Deterministic sampling seed (default off).
       --stop <string>           Stop substring (repeatable).
       --quiet                   Suppress the timing footer.
-      --verify <mode>           Integrity policy: full-sha256 (default) hashes
-                                model_weights.bin at load and each layer file on
-                                first use; trusted-install trusts the repack
-                                receipt (verified-install.json) and size-checks
-                                instead — removes the ~8 s one-time hash.
+      --counters                Print the decode counter breakdown to stderr,
+                                as a second line after the timing footer. Not
+                                suppressed by --quiet (which covers the footer
+                                only). The buckets are CPU encode-and-commit
+                                clocks that exclude the pipeline wait; the io
+                                and head figures are wall clocks that include
+                                theirs, so the two are not one timeline.
+      --expert-cache-slots <n>  Expert cache slots, one of \(slotsList)
+                                (default 16). Same knob the app and the server
+                                expose. A count below the model's top-k is
+                                rejected rather than left to trap.
+      --verify <mode>           Integrity policy. auto (default) uses
+                                verified-install.json when one is present and
+                                valid and falls back to hashing otherwise;
+                                full-sha256 hashes model_weights.bin at load and
+                                every layer and PLE part file on first use;
+                                trusted-install requires the receipt and
+                                size-checks those files against it instead.
+                                On the 125B install the receipt path cuts
+                                prefill from ~63 s to ~5 s cold, ~2 s warm (a
+                                19-token prompt; the spread is the page cache,
+                                not the policy). model_weights.bin and the
+                                expert layout are hashed in every mode, so none
+                                of that saving is theirs.
       --help                    Show this message.
     """
 
@@ -108,7 +141,9 @@ extension Args {
         var seed: UInt64?
         var stops: [String] = []
         var quiet = false
-        var verify = ModelIntegrityPolicy.fullSha256
+        var counters = false
+        var expertCacheSlots: Int?
+        var verify = ModelIntegrityPreference.automatic
 
         var index = 0
         while index < argv.count {
@@ -119,6 +154,21 @@ extension Args {
             case "--quiet":
                 quiet = true
                 index += 1
+            case "--counters":
+                counters = true
+                index += 1
+            case "--expert-cache-slots":
+                let value = try takeValue(argv, &index, flag: flag)
+                // Validated against the runtime's own list rather than a
+                // restated literal: `RuntimeConfiguration.init` preconditions on
+                // that array, so a second copy here could accept a count the
+                // constructor would then trap on.
+                guard let parsed = Int(value),
+                      RuntimeConfiguration.allowedExpertCacheSlots.contains(parsed)
+                else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                expertCacheSlots = parsed
             case "--model":
                 model = try takeValue(argv, &index, flag: flag)
             case "--prompt":
@@ -172,6 +222,8 @@ extension Args {
             case "--verify":
                 let value = try takeValue(argv, &index, flag: flag)
                 switch value {
+                case "auto":
+                    verify = .automatic
                 case "full-sha256":
                     verify = .fullSha256
                 case "trusted-install":
@@ -206,6 +258,8 @@ extension Args {
                     seed: seed,
                     stops: stops,
                     quiet: quiet,
+                    counters: counters,
+                    expertCacheSlots: expertCacheSlots,
                     verify: verify)
     }
 

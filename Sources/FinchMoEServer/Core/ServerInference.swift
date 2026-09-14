@@ -386,9 +386,17 @@ public actor ServerModelSession: ServerInferenceBackend {
     private let promptCacheDomain: ServerPromptCacheDomain
     private var promptCache = ServerPromptCache()
 
+    /// What the loader resolved the verification policy to, as one line. A
+    /// `String` rather than the enum so the executable target can put it on the
+    /// ready line without importing FinchMoE for a single log field, and
+    /// rendered by `ModelIntegrityOutcome.logDescription` so the server, the
+    /// CLI and the app cannot describe the same run differently.
+    public nonisolated let integrityDescription: String
+
     public static func load(modelDirectory: URL,
                             maxContext: Int,
-                            promptCacheMode: ServerPromptCacheMode = .singlePrefix) async throws -> ServerModelSession {
+                            promptCacheMode: ServerPromptCacheMode = .singlePrefix,
+                            verify: ModelIntegrityPreference = .automatic) async throws -> ServerModelSession {
         let tokenizerFolder = GFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
             throw GFTokenizerError.missingToolTemplate
@@ -406,7 +414,11 @@ public actor ServerModelSession: ServerInferenceBackend {
             expecting: try ManifestReader.detectPreset(directoryURL: modelDirectory),
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
-            integrityPolicy: .fullSha256)
+            integrityPolicy: verify)
+        // Startup, not per-request: which verification ran is resolved once, and
+        // it is the first thing a post-mortem reaches for — it is also the only
+        // outward sign that the receipt path was taken or quietly abandoned.
+        ServerLog.integrity(model.integrityOutcome)
         let runner = try RealForwardRunner(model: model,
                                            context: context,
                                            maxContext: maxContext,
@@ -442,7 +454,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                                   prefillConfig: runtime.prefillConfig,
                                   maxContext: maxContext,
                                   promptCacheMode: promptCacheMode,
-                                  promptCacheDomain: promptCacheDomain)
+                                  promptCacheDomain: promptCacheDomain,
+                                  integrityDescription: model.integrityOutcome.logDescription)
     }
 
     private init(context: MetalContext,
@@ -453,7 +466,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                  prefillConfig: PrefillRuntimeConfig,
                  maxContext: Int,
                  promptCacheMode: ServerPromptCacheMode,
-                 promptCacheDomain: ServerPromptCacheDomain) {
+                 promptCacheDomain: ServerPromptCacheDomain,
+                 integrityDescription: String) {
         self.context = context
         self.model = model
         self.tokenizer = tokenizer
@@ -463,6 +477,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.maxContext = maxContext
         self.promptCacheMode = promptCacheMode
         self.promptCacheDomain = promptCacheDomain
+        self.integrityDescription = integrityDescription
     }
 
     public func generate(

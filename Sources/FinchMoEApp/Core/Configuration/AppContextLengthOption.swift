@@ -1,3 +1,4 @@
+import Foundation
 import FinchMoE
 
 public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
@@ -14,8 +15,11 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
         "\(tokens / 1_024)K"
     }
 
-    public var fp16KVBytes: UInt64 {
-        Self.fp16KVBytes(tokens: tokens, architecture: .gemma4_26B_A4B)
+    /// FP16 K+V cache bytes this context length allocates under `architecture`.
+    /// The architecture is required rather than defaulted — a default here is
+    /// what previously reported Gemma's sizes against a Qwen install.
+    public func fp16KVBytes(architecture: ArchConfig) -> UInt64 {
+        Self.fp16KVBytes(tokens: tokens, architecture: architecture)
     }
 
     /// FP16 K+V cache bytes for `tokens` context positions under the given
@@ -44,13 +48,23 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
             + UInt64(fullLayers * tokens * fullBytesPerRow)
     }
 
-    public var menuLabel: String {
-        switch self {
-        case .fourK: "4K, Default"
-        case .eightK: "8K, +85 MB"
-        case .sixteenK: "16K, +250 MB"
-        case .thirtyTwoK: "32K, +590 MB"
-        case .sixtyFourK: "64K, +1.26 GB"
+    /// Menu text for this option under `architecture`: the label plus the KV
+    /// bytes it adds over the 4K default. Computed rather than hardcoded — the
+    /// previous literals were sized for 3.6's 10 full-attention layers, so 3.8
+    /// (12 layers) displayed 1.26 GB where it actually allocates 1.51 GB.
+    public func menuLabel(architecture: ArchConfig) -> String {
+        guard self != .fourK else { return "\(shortLabel), Default" }
+        let baseline = Self.fourK.fp16KVBytes(architecture: architecture)
+        let value = fp16KVBytes(architecture: architecture)
+        let delta = value > baseline ? value - baseline : 0
+        return "\(shortLabel), +\(Self.byteLabel(delta))"
+    }
+
+    static func byteLabel(_ bytes: UInt64) -> String {
+        let megabytes = Double(bytes) / 1_000_000
+        guard megabytes < 1_000 else {
+            return String(format: "%.2f GB", megabytes / 1_000)
         }
+        return "\(Int(megabytes.rounded())) MB"
     }
 }

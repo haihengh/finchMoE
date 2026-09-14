@@ -1,4 +1,5 @@
 import Foundation
+import FinchMoE
 import FinchMoERepackCore
 
 public struct AppModelInstallDescriptor: Equatable, Sendable {
@@ -10,6 +11,11 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     public let installedBytes: UInt64
     public let rangeStagingBytes: UInt64
     public let reserveBytes: UInt64
+    /// The architecture this checkpoint loads as. Required rather than
+    /// defaulted: the context-length menu sizes its KV figures off this, and a
+    /// default here is what previously reported Gemma's numbers against a Qwen
+    /// install.
+    public let architecture: ArchConfig
     /// Short label for tight UI (status badge); falls back to `displayName`.
     public let shortDisplayName: String?
 
@@ -21,6 +27,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
                 installedBytes: UInt64,
                 rangeStagingBytes: UInt64,
                 reserveBytes: UInt64,
+                architecture: ArchConfig,
                 shortDisplayName: String? = nil) {
         self.displayName = displayName
         self.repoID = repoID
@@ -30,6 +37,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         self.installedBytes = installedBytes
         self.rangeStagingBytes = rangeStagingBytes
         self.reserveBytes = reserveBytes
+        self.architecture = architecture
         self.shortDisplayName = shortDisplayName
     }
 
@@ -48,6 +56,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         installedBytes: 14_291_921_884,
         rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
         reserveBytes: 1_073_741_824,
+        architecture: .gemma4_26B_A4B,
         shortDisplayName: "Gemma 4 26B")
 
     /// Local Qwen 3.6 install made by `FinchMoERepack`. The app only ever
@@ -63,6 +72,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         installedBytes: 20_014_114_816,
         rangeStagingBytes: 0,
         reserveBytes: 0,
+        architecture: .qwen3_6_35B_A3B,
         shortDisplayName: "Qwen 3.6 35B-A3B")
 
     /// Local Qwen 3.8 Flash-Next 125B install made by `FinchMoERepack`. Like
@@ -87,6 +97,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         installedBytes: 174_403_168_940,
         rangeStagingBytes: 0,
         reserveBytes: 0,
+        architecture: .qwen3_8_flashNext_125B,
         shortDisplayName: "Qwen 3.8 125B")
 
     /// Every descriptor the app can identify a local directory as, in probe

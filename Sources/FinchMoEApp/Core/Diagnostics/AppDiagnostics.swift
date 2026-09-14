@@ -55,6 +55,12 @@ public struct AppDiagnostics: Equatable, Sendable {
     public var runtimeOptions: AppRuntimeOptions
     public var prefill: PrefillExecutionDiagnostics?
     public var runner: AppRunnerDiagnostics?
+    /// Which verification the *load* performed, as one line. Reported here
+    /// rather than derived from `runtimeOptions.modelVerification` because the
+    /// request is not the outcome: with `Automatic` the two differ whenever the
+    /// receipt is missing or unusable, and that difference is the whole point of
+    /// the mode.
+    public var integrityOutcome: String?
 
     public var requestStartTimeToFirstTokenSeconds: Double? {
         guard let prefillSeconds, let timeToFirstTokenSeconds else { return nil }
@@ -83,7 +89,8 @@ public struct AppDiagnostics: Equatable, Sendable {
                 peakMemoryBytes: UInt64?,
                 runtimeOptions: AppRuntimeOptions,
                 prefill: PrefillExecutionDiagnostics? = nil,
-                runner: AppRunnerDiagnostics? = nil) {
+                runner: AppRunnerDiagnostics? = nil,
+                integrityOutcome: String? = nil) {
         self.generatedTokens = generatedTokens
         self.stopReason = stopReason
         self.promptTokenCount = promptTokenCount
@@ -95,6 +102,7 @@ public struct AppDiagnostics: Equatable, Sendable {
         self.runtimeOptions = runtimeOptions
         self.prefill = prefill
         self.runner = runner
+        self.integrityOutcome = integrityOutcome
     }
 }
 

@@ -1,4 +1,5 @@
 import Foundation
+import FinchMoE
 @testable import FinchMoERepackCore
 import Synchronization
 import Testing
@@ -91,7 +92,8 @@ import Testing
             approximateDownloadBytes: 100,
             installedBytes: 100,
             rangeStagingBytes: 0,
-            reserveBytes: 0)
+            reserveBytes: 0,
+            architecture: .gemma4_26B_A4B)
         let output = FileManager.default.temporaryDirectory
             .appendingPathComponent("checkpoint-bytes-\(UUID().uuidString).finch")
         let paths = try RemoteInstallPaths(outputDirectory: output.path)

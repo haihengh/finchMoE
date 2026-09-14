@@ -140,14 +140,27 @@ The model path itself may be a symlink. FinchMoE resolves it once when
 the model opens, then rejects any symlinks inside the model directory. Changing
 the original symlink later cannot switch files under a running model.
 
-By default, FinchMoE hashes `manifest.json`, `model_weights.bin`, and
-`packed_experts/layout.json` at load, then hashes each routed-expert layer file
-on first use. The trusted-receipt policy is an explicit alternative. It still
-hashes the same three common files. For large layer files, it checks the
-receipt binding, manifest metadata, layout, and current file size instead of
-hashing the complete file again.
+By default, FinchMoE chooses the policy when the model opens: it uses the
+trusted receipt when `verified-install.json` is present and valid, and hashes
+otherwise. The choice is resolved once, together with the receipt, so the
+recorded policy and the receipt in hand cannot disagree.
 
-In both modes, the runtime rejects unknown format flags, incompatible
+Both paths always hash `manifest.json`, `model_weights.bin`, and
+`packed_experts/layout.json` at load. They differ in the layer and PLE part
+files. Hashing reads every one of them on first use; the receipt path checks
+the receipt binding, manifest metadata, layout, and current file size instead
+of hashing the complete file again. So the automatic choice never verifies
+less than a full hash would — it skips only what a validated receipt already
+covers, and any receipt failure (absent, unreadable, a symlink, a stale
+manifest, a changed size) falls back to hashing. A receipt that is present but
+unusable is reported as a warning; an absent one is silent, because that is the
+normal state of an install that was never verified.
+
+Both policies are also selectable explicitly — `--verify` on the CLI and the
+server, a picker in the Mac app — and `trusted-install` is strict there: it
+fails when the receipt is missing rather than falling back.
+
+In every mode, the runtime rejects unknown format flags, incompatible
 architecture values, missing layer files, invalid alignment, and failed
 integrity checks.
 
@@ -311,7 +324,7 @@ The implementation labels this handoff as three phases:
 
 | Phase | Work |
 | --- | --- |
-| `cb1` | Metal runs input norm, Q/K/V projections, RoPE and KV writes, attention, output projection, post-attention setup, and the router. It completes when the top-8 IDs are ready for CPU readback. |
+| `cb1` | Metal runs input norm, Q/K/V projections, RoPE and KV writes, attention, output projection, post-attention setup, and the router. It completes when the top-8 IDs are ready for CPU readback. On a Qwen install this bucket is *not* uniform across layers: the twelve full-attention layers run the clause above, while the thirty-six GDN (linear-attention) layers instead run `in_proj_qkv`/`in_proj_z`, the short convolution, the gate GEMV, the recurrent update, `rmsnorm_gated`, and `o_proj`. The same bucket, two different bodies. |
 | `io` | The CPU looks up the top-8 experts in the layer cache and fills only missing slots with `pread`. Metal starts the resident shared-expert branch after `cb1` so it overlaps these reads. Cached routed-expert work can also begin early. |
 | `cb2` | Metal finishes the routed top-8 branch, reduces it with the router weights, combines it with the shared branch, and applies the post-FFN norms, residual, and layer scalar. |
 
@@ -320,6 +333,106 @@ waiting for `cb2` while the CPU encodes and queues the next layer. The
 diagnostic counters also use different clocks: `cb1` and `cb2` record CPU
 encode-and-commit overhead, while `io` records awaited read time. They are not
 three serial or directly comparable durations.
+
+### The `cb1` sub-buckets
+
+`FinchMoECLI --counters` (and the runner's `totalCb1*Nanos` counters) break
+`cb1` down further. A cursor walks `[tCb1Start, commit]` and each lapse is
+attributed to the bucket whose work it just covered, so the buckets tile the
+span rather than sampling it:
+
+| Bucket | Span | Answers |
+| --- | --- | --- |
+| `other` | prologue, the tail's post-attention work, and the pending drain | reconciliation |
+| `attention` | the full-attention layers, `gProj` through `gOProj` | item 3.2 |
+| `gdnProj` / `gdnConvGate` / `gdnRecurrent` | the GDN layers, split at the in-projections, conv+gate, and recurrent+norm+`o_proj` | item 2.3 |
+| `router` | router encode through `commit` | item 3.4 |
+| `wait` | the pipeline wait | reported separately |
+| `cbs` | decode command-buffer count | item 2.2 |
+
+Two properties matter more than the individual numbers.
+
+The split is **exact, by construction**: the cursor *skips* the pipeline wait
+rather than attributing it, because `cb1` itself subtracts that wait —
+`other + attention + gdnProj + gdnConvGate + gdnRecurrent + router == cb1`, and
+`--counters` prints `identity=exact` when it holds. The wait is reported beside
+the sum, never inside it; attributing it would put the sum `wait` above `cb1`,
+which still looks like a plausible number.
+
+`attention` and the three GDN buckets are **alternatives**, not a breakdown of
+one another — a layer takes one path or the other. Compare them per layer:
+twelve full against thirty-six GDN on Qwen 3.8, ten against thirty on 3.6. The
+counts come from the preset, not from prose.
+
+Read the clock kinds as well as the numbers. These are **CPU encode-and-commit**
+clocks: they measure encoding the dispatch, not running the kernel, and they
+exclude the wait. `io` is awaited read time and the output-head bucket wraps a
+submit-and-wait, so both are wall clocks including their waits. The two are not
+one timeline, and adding them is meaningless.
+
+### The `io` sub-buckets
+
+The same readout splits the expert-fetch window. The window is one `await` per
+layer around `fetchRoutedExperts`, and its parts are timed where they happen
+(`PreadExpertStreamer.executeExpertCachePlan`):
+
+| Field | Span | Answers |
+| --- | --- | --- |
+| `io_read_wall` | the `concurrentPerform` fan-out and the preads inside it | the read itself |
+| `io_dispatch_wall` | submit to thread entry, i.e. the price of the third dispatch level | item 2.2 |
+| `io_tail_wall` | cache bookkeeping and the view construction after the reads | item 2.2 |
+| `io_handoff_wall` | the remainder: continuation hops, `streamersQueue.sync`, `ensureLayerOpened` | item 2.2 |
+| `io_plan_cpu` | expert selection and cache plan — **outside** the window, between the router readback and the fetch | item 2.1 |
+
+The first four tile `io` and the remainder saturates at zero rather than wrapping
+to ~1.8e19. `io_plan_cpu` is deliberately not subtracted: it happens outside the
+window, and tiling the window with it would drive the remainder to zero on every
+real run — hiding exactly the per-layer fixed cost the split exists to expose.
+
+These are **wall** clocks, unlike the `cb1` buckets, because the window is a
+wait: `io_read_wall` is essentially all completion latency rather than transfer.
+On Qwen 3.8 at 16 slots the four inside-window costs total 1.18 ms/step against
+a 224.67 ms/step window, which is why the submission path is closed as an
+optimization target.
+
+Two of these are written lock-free from the single global-queue worker that
+serialises fetches — the decode loop awaits each fetch before issuing the next,
+so there is never a second writer, and they are read only at the prefill/decode
+boundary and after the run, both outside any fetch. A lock would be safe and
+would also sit inside the window these numbers exist to price.
+
+### GPU time, and the subtraction that misleads
+
+The same readout reports GPU time, which the buckets above cannot: those are CPU
+encode clocks, and a heavily-encoded dispatch is not a slow kernel. Two figures
+are read from `MTLCommandBuffer` timestamps after completion, with no extra
+command buffer, no extra wait, and no change to commit order:
+
+| Field | Span |
+| --- | --- |
+| `gpu_cb1` | the layer's `cb1`, split further into `gpu_cb1_fullattn` and `gpu_cb1_gdn` by layer kind |
+| `gpu_routed` | the shared-expert and routed-expert tail, plus the early-committed hit-phase buffer |
+| `gpu_samples` | completed buffers that returned a real timestamp |
+
+`gpu_cb1_fullattn + gpu_cb1_gdn == gpu_cb1` by construction: both come from one
+`recordGpuTime` sample branched on the layer kind, so calling it twice -- which
+would also double `gpu_samples` -- is the only way to break the sum. As with the
+CPU buckets the two are **alternatives**, compared per layer (twelve against
+thirty-six on 3.8, ten against thirty on 3.6), never per step.
+
+**Do not read `wait` minus `gpu_cb1` as dispatch overhead.** That subtraction
+charges the entire routed tail -- the largest kernel block in the model -- to
+overhead, because layer N+1's `cb1` is committed after layer N's tail and its
+wait therefore drains it. Subtracting both GPU figures leaves the actual
+residue: 9.18 ms/step, or 0.048 ms per command buffer, an order of magnitude
+*below* the ~0.26 ms a kernel-bearing buffer costs. The gap between the two
+readings is not a measurement error; it is the difference between "the tail is
+overhead" and "the tail is the model computing."
+
+`gpu_samples` is the gate on all of it: it should sit within about two buffers
+per forward of `cbs`. The routed tail is deliberately not waited on, so a buffer
+still in flight when it is retired reports no timestamp and is skipped, which is
+why the count is printed rather than assumed.
 
 ```mermaid
 flowchart TD

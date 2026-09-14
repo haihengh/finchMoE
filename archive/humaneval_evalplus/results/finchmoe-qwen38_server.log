@@ -1,0 +1,658 @@
+[2026-09-13T12:46:26Z] model integrity trusted-install (explicit)
+[2026-09-13T12:46:28Z] request chatcmpl-e1e1b0f0cc364bd3af7bd36f32abb5ff accepted streaming=false
+[2026-09-13T12:46:28Z] request chatcmpl-e1e1b0f0cc364bd3af7bd36f32abb5ff prepared prompt=172
+[2026-09-13T12:46:28Z] request chatcmpl-e1e1b0f0cc364bd3af7bd36f32abb5ff generating
+[2026-09-13T12:48:09Z] request chatcmpl-e1e1b0f0cc364bd3af7bd36f32abb5ff completed in 101.566s prompt=172 cached=0 completion=173 finish=stop
+[2026-09-13T12:48:09Z] request chatcmpl-7a8ed6331e6d43dfa225a79aea6e8baf accepted streaming=false
+[2026-09-13T12:48:09Z] request chatcmpl-7a8ed6331e6d43dfa225a79aea6e8baf prepared prompt=164
+[2026-09-13T12:48:09Z] request chatcmpl-7a8ed6331e6d43dfa225a79aea6e8baf generating
+[2026-09-13T12:50:13Z] request chatcmpl-7a8ed6331e6d43dfa225a79aea6e8baf completed in 123.598s prompt=164 cached=0 completion=245 finish=stop
+[2026-09-13T12:50:13Z] request chatcmpl-94be3828f7a14f58a7ae531976dd908c accepted streaming=false
+[2026-09-13T12:50:13Z] request chatcmpl-94be3828f7a14f58a7ae531976dd908c prepared prompt=133
+[2026-09-13T12:50:13Z] request chatcmpl-94be3828f7a14f58a7ae531976dd908c generating
+[2026-09-13T12:51:16Z] request chatcmpl-94be3828f7a14f58a7ae531976dd908c completed in 63.221s prompt=133 cached=0 completion=97 finish=stop
+[2026-09-13T12:51:16Z] request chatcmpl-30369f88ee7a48c59dbc3dd003a7440f accepted streaming=false
+[2026-09-13T12:51:16Z] request chatcmpl-30369f88ee7a48c59dbc3dd003a7440f prepared prompt=167
+[2026-09-13T12:51:16Z] request chatcmpl-30369f88ee7a48c59dbc3dd003a7440f generating
+[2026-09-13T12:52:55Z] request chatcmpl-30369f88ee7a48c59dbc3dd003a7440f completed in 98.268s prompt=167 cached=0 completion=156 finish=stop
+[2026-09-13T12:52:55Z] request chatcmpl-59e09694f78140228370f9d4d27d5b3f accepted streaming=false
+[2026-09-13T12:52:55Z] request chatcmpl-59e09694f78140228370f9d4d27d5b3f prepared prompt=166
+[2026-09-13T12:52:55Z] request chatcmpl-59e09694f78140228370f9d4d27d5b3f generating
+[2026-09-13T12:54:27Z] request chatcmpl-59e09694f78140228370f9d4d27d5b3f completed in 92.377s prompt=166 cached=0 completion=169 finish=stop
+[2026-09-13T12:54:27Z] request chatcmpl-714c121ea2f1481c82cd34fb3bbecbcb accepted streaming=false
+[2026-09-13T12:54:27Z] request chatcmpl-714c121ea2f1481c82cd34fb3bbecbcb prepared prompt=142
+[2026-09-13T12:54:27Z] request chatcmpl-714c121ea2f1481c82cd34fb3bbecbcb generating
+[2026-09-13T12:55:47Z] request chatcmpl-714c121ea2f1481c82cd34fb3bbecbcb completed in 80.398s prompt=142 cached=0 completion=154 finish=stop
+[2026-09-13T12:55:47Z] request chatcmpl-58723b221a3d4cf88601315d1c44262d accepted streaming=false
+[2026-09-13T12:55:47Z] request chatcmpl-58723b221a3d4cf88601315d1c44262d prepared prompt=162
+[2026-09-13T12:55:47Z] request chatcmpl-58723b221a3d4cf88601315d1c44262d generating
+[2026-09-13T12:57:47Z] request chatcmpl-58723b221a3d4cf88601315d1c44262d completed in 120.128s prompt=162 cached=0 completion=221 finish=stop
+[2026-09-13T12:57:47Z] request chatcmpl-54dccfc648b04689ab02f9e1e401f975 accepted streaming=false
+[2026-09-13T12:57:47Z] request chatcmpl-54dccfc648b04689ab02f9e1e401f975 prepared prompt=142
+[2026-09-13T12:57:47Z] request chatcmpl-54dccfc648b04689ab02f9e1e401f975 generating
+[2026-09-13T12:58:59Z] request chatcmpl-54dccfc648b04689ab02f9e1e401f975 completed in 71.989s prompt=142 cached=0 completion=112 finish=stop
+[2026-09-13T12:58:59Z] request chatcmpl-d6bfc7c34ce0494695cce99e0a7fe503 accepted streaming=false
+[2026-09-13T12:58:59Z] request chatcmpl-d6bfc7c34ce0494695cce99e0a7fe503 prepared prompt=164
+[2026-09-13T12:58:59Z] request chatcmpl-d6bfc7c34ce0494695cce99e0a7fe503 generating
+[2026-09-13T13:00:49Z] request chatcmpl-d6bfc7c34ce0494695cce99e0a7fe503 completed in 109.298s prompt=164 cached=0 completion=163 finish=stop
+[2026-09-13T13:00:49Z] request chatcmpl-8205ccdd9aca4b9eb54b381603396ce1 accepted streaming=false
+[2026-09-13T13:00:49Z] request chatcmpl-8205ccdd9aca4b9eb54b381603396ce1 prepared prompt=148
+[2026-09-13T13:00:49Z] request chatcmpl-8205ccdd9aca4b9eb54b381603396ce1 generating
+[2026-09-13T13:02:24Z] request chatcmpl-8205ccdd9aca4b9eb54b381603396ce1 completed in 94.866s prompt=148 cached=0 completion=160 finish=stop
+[2026-09-13T13:02:24Z] request chatcmpl-5792811ac457437191e85b0131f97f1b accepted streaming=false
+[2026-09-13T13:02:24Z] request chatcmpl-5792811ac457437191e85b0131f97f1b prepared prompt=198
+[2026-09-13T13:02:24Z] request chatcmpl-5792811ac457437191e85b0131f97f1b generating
+[2026-09-13T13:04:51Z] request chatcmpl-5792811ac457437191e85b0131f97f1b completed in 147.771s prompt=198 cached=0 completion=271 finish=stop
+[2026-09-13T13:04:51Z] request chatcmpl-ac729eb3b8fe45e48292d943c51b0c8f accepted streaming=false
+[2026-09-13T13:04:51Z] request chatcmpl-ac729eb3b8fe45e48292d943c51b0c8f prepared prompt=131
+[2026-09-13T13:04:51Z] request chatcmpl-ac729eb3b8fe45e48292d943c51b0c8f generating
+[2026-09-13T13:06:33Z] request chatcmpl-ac729eb3b8fe45e48292d943c51b0c8f completed in 101.212s prompt=131 cached=0 completion=159 finish=stop
+[2026-09-13T13:06:33Z] request chatcmpl-b559e175feef4790b425a527397a33a7 accepted streaming=false
+[2026-09-13T13:06:33Z] request chatcmpl-b559e175feef4790b425a527397a33a7 prepared prompt=153
+[2026-09-13T13:06:33Z] request chatcmpl-b559e175feef4790b425a527397a33a7 generating
+[2026-09-13T13:08:09Z] request chatcmpl-b559e175feef4790b425a527397a33a7 completed in 96.901s prompt=153 cached=0 completion=161 finish=stop
+[2026-09-13T13:08:09Z] request chatcmpl-cdd3efe4cf2e4cbcbc5974efec9a972c accepted streaming=false
+[2026-09-13T13:08:09Z] request chatcmpl-cdd3efe4cf2e4cbcbc5974efec9a972c prepared prompt=119
+[2026-09-13T13:08:09Z] request chatcmpl-cdd3efe4cf2e4cbcbc5974efec9a972c generating
+[2026-09-13T13:09:10Z] request chatcmpl-cdd3efe4cf2e4cbcbc5974efec9a972c completed in 60.317s prompt=119 cached=0 completion=95 finish=stop
+[2026-09-13T13:09:10Z] request chatcmpl-4b707743d2154fdf866ce647a8b8bbe4 accepted streaming=false
+[2026-09-13T13:09:10Z] request chatcmpl-4b707743d2154fdf866ce647a8b8bbe4 prepared prompt=106
+[2026-09-13T13:09:10Z] request chatcmpl-4b707743d2154fdf866ce647a8b8bbe4 generating
+[2026-09-13T13:09:56Z] request chatcmpl-4b707743d2154fdf866ce647a8b8bbe4 completed in 45.866s prompt=106 cached=0 completion=79 finish=stop
+[2026-09-13T13:09:56Z] request chatcmpl-a9b58f3d69b74c46a58728f96bf7f687 accepted streaming=false
+[2026-09-13T13:09:56Z] request chatcmpl-a9b58f3d69b74c46a58728f96bf7f687 prepared prompt=118
+[2026-09-13T13:09:56Z] request chatcmpl-a9b58f3d69b74c46a58728f96bf7f687 generating
+[2026-09-13T13:10:52Z] request chatcmpl-a9b58f3d69b74c46a58728f96bf7f687 completed in 55.884s prompt=118 cached=0 completion=92 finish=stop
+[2026-09-13T13:10:52Z] request chatcmpl-36c530a4d32548e18b0bdbae3252274b accepted streaming=false
+[2026-09-13T13:10:52Z] request chatcmpl-36c530a4d32548e18b0bdbae3252274b prepared prompt=117
+[2026-09-13T13:10:52Z] request chatcmpl-36c530a4d32548e18b0bdbae3252274b generating
+[2026-09-13T13:11:44Z] request chatcmpl-36c530a4d32548e18b0bdbae3252274b completed in 52.665s prompt=117 cached=0 completion=81 finish=stop
+[2026-09-13T13:11:44Z] request chatcmpl-0aadfdd429784309a1d3da006da5f369 accepted streaming=false
+[2026-09-13T13:11:44Z] request chatcmpl-0aadfdd429784309a1d3da006da5f369 prepared prompt=222
+[2026-09-13T13:11:44Z] request chatcmpl-0aadfdd429784309a1d3da006da5f369 generating
+[2026-09-13T13:14:49Z] request chatcmpl-0aadfdd429784309a1d3da006da5f369 completed in 184.642s prompt=222 cached=0 completion=329 finish=stop
+[2026-09-13T13:14:49Z] request chatcmpl-e015aeec68c14f249ddaf16a6f6c7b8b accepted streaming=false
+[2026-09-13T13:14:49Z] request chatcmpl-e015aeec68c14f249ddaf16a6f6c7b8b prepared prompt=137
+[2026-09-13T13:14:49Z] request chatcmpl-e015aeec68c14f249ddaf16a6f6c7b8b generating
+[2026-09-13T13:16:23Z] request chatcmpl-e015aeec68c14f249ddaf16a6f6c7b8b completed in 93.756s prompt=137 cached=0 completion=172 finish=stop
+[2026-09-13T13:16:23Z] request chatcmpl-f680c33810504014b87ed89dea7436fd accepted streaming=false
+[2026-09-13T13:16:23Z] request chatcmpl-f680c33810504014b87ed89dea7436fd prepared prompt=154
+[2026-09-13T13:16:23Z] request chatcmpl-f680c33810504014b87ed89dea7436fd generating
+[2026-09-13T13:18:50Z] request chatcmpl-f680c33810504014b87ed89dea7436fd completed in 147.585s prompt=154 cached=0 completion=280 finish=stop
+[2026-09-13T13:18:50Z] request chatcmpl-7adf8a663ddd432eb1a539fa54b1d387 accepted streaming=false
+[2026-09-13T13:18:50Z] request chatcmpl-7adf8a663ddd432eb1a539fa54b1d387 prepared prompt=216
+[2026-09-13T13:18:50Z] request chatcmpl-7adf8a663ddd432eb1a539fa54b1d387 generating
+[2026-09-13T13:21:50Z] request chatcmpl-7adf8a663ddd432eb1a539fa54b1d387 completed in 179.382s prompt=216 cached=0 completion=330 finish=stop
+[2026-09-13T13:21:50Z] request chatcmpl-12458cb28847466fb0f716a78abcb226 accepted streaming=false
+[2026-09-13T13:21:50Z] request chatcmpl-12458cb28847466fb0f716a78abcb226 prepared prompt=173
+[2026-09-13T13:21:50Z] request chatcmpl-12458cb28847466fb0f716a78abcb226 generating
+[2026-09-13T13:23:42Z] request chatcmpl-12458cb28847466fb0f716a78abcb226 completed in 112.139s prompt=173 cached=0 completion=207 finish=stop
+[2026-09-13T13:23:42Z] request chatcmpl-e5fd7acac05440538a24b9de7842d8c7 accepted streaming=false
+[2026-09-13T13:23:42Z] request chatcmpl-e5fd7acac05440538a24b9de7842d8c7 prepared prompt=141
+[2026-09-13T13:23:42Z] request chatcmpl-e5fd7acac05440538a24b9de7842d8c7 generating
+[2026-09-13T13:24:53Z] request chatcmpl-e5fd7acac05440538a24b9de7842d8c7 completed in 71.721s prompt=141 cached=0 completion=119 finish=stop
+[2026-09-13T13:24:53Z] request chatcmpl-9b3573d517a2415c83e1999864f56b2c accepted streaming=false
+[2026-09-13T13:24:53Z] request chatcmpl-9b3573d517a2415c83e1999864f56b2c prepared prompt=91
+[2026-09-13T13:24:53Z] request chatcmpl-9b3573d517a2415c83e1999864f56b2c generating
+[2026-09-13T13:25:29Z] request chatcmpl-9b3573d517a2415c83e1999864f56b2c completed in 35.596s prompt=91 cached=0 completion=53 finish=stop
+[2026-09-13T13:25:29Z] request chatcmpl-085a48c1f3424b299b4b4e72b6080b93 accepted streaming=false
+[2026-09-13T13:25:29Z] request chatcmpl-085a48c1f3424b299b4b4e72b6080b93 prepared prompt=99
+[2026-09-13T13:25:29Z] request chatcmpl-085a48c1f3424b299b4b4e72b6080b93 generating
+[2026-09-13T13:26:38Z] request chatcmpl-085a48c1f3424b299b4b4e72b6080b93 completed in 69.016s prompt=99 cached=0 completion=130 finish=stop
+[2026-09-13T13:26:38Z] request chatcmpl-05cfb6945bd7405a906b08b28d1a1e28 accepted streaming=false
+[2026-09-13T13:26:38Z] request chatcmpl-05cfb6945bd7405a906b08b28d1a1e28 prepared prompt=181
+[2026-09-13T13:26:38Z] request chatcmpl-05cfb6945bd7405a906b08b28d1a1e28 generating
+[2026-09-13T13:28:35Z] request chatcmpl-05cfb6945bd7405a906b08b28d1a1e28 completed in 117.399s prompt=181 cached=0 completion=203 finish=stop
+[2026-09-13T13:28:35Z] request chatcmpl-27e7ed8df5a4492e9a4cc8e77c8bb41d accepted streaming=false
+[2026-09-13T13:28:35Z] request chatcmpl-27e7ed8df5a4492e9a4cc8e77c8bb41d prepared prompt=133
+[2026-09-13T13:28:35Z] request chatcmpl-27e7ed8df5a4492e9a4cc8e77c8bb41d generating
+[2026-09-13T13:29:58Z] request chatcmpl-27e7ed8df5a4492e9a4cc8e77c8bb41d completed in 82.554s prompt=133 cached=0 completion=147 finish=stop
+[2026-09-13T13:29:58Z] request chatcmpl-664eeb0eeebb44e19d30a5cb112c6f5a accepted streaming=false
+[2026-09-13T13:29:58Z] request chatcmpl-664eeb0eeebb44e19d30a5cb112c6f5a prepared prompt=95
+[2026-09-13T13:29:58Z] request chatcmpl-664eeb0eeebb44e19d30a5cb112c6f5a generating
+[2026-09-13T13:30:38Z] request chatcmpl-664eeb0eeebb44e19d30a5cb112c6f5a completed in 39.946s prompt=95 cached=0 completion=58 finish=stop
+[2026-09-13T13:30:38Z] request chatcmpl-85878bd3e85344e1a11cd44bf63be938 accepted streaming=false
+[2026-09-13T13:30:38Z] request chatcmpl-85878bd3e85344e1a11cd44bf63be938 prepared prompt=107
+[2026-09-13T13:30:38Z] request chatcmpl-85878bd3e85344e1a11cd44bf63be938 generating
+[2026-09-13T13:31:24Z] request chatcmpl-85878bd3e85344e1a11cd44bf63be938 completed in 45.687s prompt=107 cached=0 completion=70 finish=stop
+[2026-09-13T13:31:24Z] request chatcmpl-e09da474f4534f79956e21dff96e4a80 accepted streaming=false
+[2026-09-13T13:31:24Z] request chatcmpl-e09da474f4534f79956e21dff96e4a80 prepared prompt=137
+[2026-09-13T13:31:24Z] request chatcmpl-e09da474f4534f79956e21dff96e4a80 generating
+[2026-09-13T13:32:32Z] request chatcmpl-e09da474f4534f79956e21dff96e4a80 completed in 68.712s prompt=137 cached=0 completion=107 finish=stop
+[2026-09-13T13:32:32Z] request chatcmpl-6b4d35b05cea4581a432b5e55a8002cb accepted streaming=false
+[2026-09-13T13:32:32Z] request chatcmpl-6b4d35b05cea4581a432b5e55a8002cb prepared prompt=168
+[2026-09-13T13:32:32Z] request chatcmpl-6b4d35b05cea4581a432b5e55a8002cb generating
+[2026-09-13T13:34:08Z] request chatcmpl-6b4d35b05cea4581a432b5e55a8002cb completed in 96.015s prompt=168 cached=0 completion=139 finish=stop
+[2026-09-13T13:34:08Z] request chatcmpl-03c8a92f8f7249d5a1491e108ee21a15 accepted streaming=false
+[2026-09-13T13:34:08Z] request chatcmpl-03c8a92f8f7249d5a1491e108ee21a15 prepared prompt=159
+[2026-09-13T13:34:08Z] request chatcmpl-03c8a92f8f7249d5a1491e108ee21a15 generating
+[2026-09-13T13:36:08Z] request chatcmpl-03c8a92f8f7249d5a1491e108ee21a15 completed in 119.455s prompt=159 cached=0 completion=193 finish=stop
+[2026-09-13T13:36:08Z] request chatcmpl-e495076a41d746b487f68faa99fbd998 accepted streaming=false
+[2026-09-13T13:36:08Z] request chatcmpl-e495076a41d746b487f68faa99fbd998 prepared prompt=314
+[2026-09-13T13:36:08Z] request chatcmpl-e495076a41d746b487f68faa99fbd998 generating
+[2026-09-13T13:42:30Z] request chatcmpl-e495076a41d746b487f68faa99fbd998 completed in 382.213s prompt=314 cached=0 completion=768 finish=length
+[2026-09-13T13:42:30Z] request chatcmpl-0514b8f43d72418f98addaf0f05b4297 accepted streaming=false
+[2026-09-13T13:42:30Z] request chatcmpl-0514b8f43d72418f98addaf0f05b4297 prepared prompt=200
+[2026-09-13T13:42:30Z] request chatcmpl-0514b8f43d72418f98addaf0f05b4297 generating
+[2026-09-13T13:45:07Z] request chatcmpl-0514b8f43d72418f98addaf0f05b4297 completed in 157.035s prompt=200 cached=0 completion=296 finish=stop
+[2026-09-13T13:45:07Z] request chatcmpl-7b829c59ac644db8bddb6ee2c0f71201 accepted streaming=false
+[2026-09-13T13:45:07Z] request chatcmpl-7b829c59ac644db8bddb6ee2c0f71201 prepared prompt=124
+[2026-09-13T13:45:07Z] request chatcmpl-7b829c59ac644db8bddb6ee2c0f71201 generating
+[2026-09-13T13:46:04Z] request chatcmpl-7b829c59ac644db8bddb6ee2c0f71201 completed in 56.442s prompt=124 cached=0 completion=87 finish=stop
+[2026-09-13T13:46:04Z] request chatcmpl-22109e7c59324270ae82c7aee6b1f338 accepted streaming=false
+[2026-09-13T13:46:04Z] request chatcmpl-22109e7c59324270ae82c7aee6b1f338 prepared prompt=135
+[2026-09-13T13:46:04Z] request chatcmpl-22109e7c59324270ae82c7aee6b1f338 generating
+[2026-09-13T13:47:07Z] request chatcmpl-22109e7c59324270ae82c7aee6b1f338 completed in 63.349s prompt=135 cached=0 completion=97 finish=stop
+[2026-09-13T13:47:07Z] request chatcmpl-714586ad45814c5293daa31e35ee6576 accepted streaming=false
+[2026-09-13T13:47:07Z] request chatcmpl-714586ad45814c5293daa31e35ee6576 prepared prompt=133
+[2026-09-13T13:47:07Z] request chatcmpl-714586ad45814c5293daa31e35ee6576 generating
+[2026-09-13T13:48:27Z] request chatcmpl-714586ad45814c5293daa31e35ee6576 completed in 80.434s prompt=133 cached=0 completion=142 finish=stop
+[2026-09-13T13:48:27Z] request chatcmpl-e85d8de5b7884ee18ec3e6fb1ca913ab accepted streaming=false
+[2026-09-13T13:48:27Z] request chatcmpl-e85d8de5b7884ee18ec3e6fb1ca913ab prepared prompt=173
+[2026-09-13T13:48:27Z] request chatcmpl-e85d8de5b7884ee18ec3e6fb1ca913ab generating
+[2026-09-13T13:50:47Z] request chatcmpl-e85d8de5b7884ee18ec3e6fb1ca913ab completed in 139.140s prompt=173 cached=0 completion=256 finish=stop
+[2026-09-13T13:50:47Z] request chatcmpl-82fdf0ce3aa54a6c89804caccf6bd4a0 accepted streaming=false
+[2026-09-13T13:50:47Z] request chatcmpl-82fdf0ce3aa54a6c89804caccf6bd4a0 prepared prompt=214
+[2026-09-13T13:50:47Z] request chatcmpl-82fdf0ce3aa54a6c89804caccf6bd4a0 generating
+[2026-09-13T13:53:43Z] request chatcmpl-82fdf0ce3aa54a6c89804caccf6bd4a0 completed in 176.131s prompt=214 cached=0 completion=343 finish=stop
+[2026-09-13T13:53:43Z] request chatcmpl-c0cc112ac9f545f98b8b13d1196f66f4 accepted streaming=false
+[2026-09-13T13:53:43Z] request chatcmpl-c0cc112ac9f545f98b8b13d1196f66f4 prepared prompt=151
+[2026-09-13T13:53:43Z] request chatcmpl-c0cc112ac9f545f98b8b13d1196f66f4 generating
+[2026-09-13T13:55:52Z] request chatcmpl-c0cc112ac9f545f98b8b13d1196f66f4 completed in 128.863s prompt=151 cached=0 completion=251 finish=stop
+[2026-09-13T13:55:52Z] request chatcmpl-1292f38ae90f4f0c8933298723be81de accepted streaming=false
+[2026-09-13T13:55:52Z] request chatcmpl-1292f38ae90f4f0c8933298723be81de prepared prompt=212
+[2026-09-13T13:55:52Z] request chatcmpl-1292f38ae90f4f0c8933298723be81de generating
+[2026-09-13T13:58:48Z] request chatcmpl-1292f38ae90f4f0c8933298723be81de completed in 176.431s prompt=212 cached=0 completion=336 finish=stop
+[2026-09-13T13:58:48Z] request chatcmpl-c58d76e2055f4e1dac294ec83631872d accepted streaming=false
+[2026-09-13T13:58:48Z] request chatcmpl-c58d76e2055f4e1dac294ec83631872d prepared prompt=201
+[2026-09-13T13:58:48Z] request chatcmpl-c58d76e2055f4e1dac294ec83631872d generating
+[2026-09-13T14:00:58Z] request chatcmpl-c58d76e2055f4e1dac294ec83631872d completed in 129.493s prompt=201 cached=0 completion=220 finish=stop
+[2026-09-13T14:00:58Z] request chatcmpl-69bc99a074874e8f837824407e37f9de accepted streaming=false
+[2026-09-13T14:00:58Z] request chatcmpl-69bc99a074874e8f837824407e37f9de prepared prompt=163
+[2026-09-13T14:00:58Z] request chatcmpl-69bc99a074874e8f837824407e37f9de generating
+[2026-09-13T14:02:29Z] request chatcmpl-69bc99a074874e8f837824407e37f9de completed in 91.810s prompt=163 cached=0 completion=132 finish=stop
+[2026-09-13T14:02:29Z] request chatcmpl-2b111d31a70b4ed4898dfdcc08c439e7 accepted streaming=false
+[2026-09-13T14:02:29Z] request chatcmpl-2b111d31a70b4ed4898dfdcc08c439e7 prepared prompt=210
+[2026-09-13T14:02:29Z] request chatcmpl-2b111d31a70b4ed4898dfdcc08c439e7 generating
+[2026-09-13T14:04:37Z] request chatcmpl-2b111d31a70b4ed4898dfdcc08c439e7 completed in 127.784s prompt=210 cached=0 completion=201 finish=stop
+[2026-09-13T14:04:37Z] request chatcmpl-af0f585c37b748539357456bed2cf768 accepted streaming=false
+[2026-09-13T14:04:37Z] request chatcmpl-af0f585c37b748539357456bed2cf768 prepared prompt=151
+[2026-09-13T14:04:37Z] request chatcmpl-af0f585c37b748539357456bed2cf768 generating
+[2026-09-13T14:06:21Z] request chatcmpl-af0f585c37b748539357456bed2cf768 completed in 103.686s prompt=151 cached=0 completion=180 finish=stop
+[2026-09-13T14:06:21Z] request chatcmpl-c6987646308f456ba0142a5aced40ea9 accepted streaming=false
+[2026-09-13T14:06:21Z] request chatcmpl-c6987646308f456ba0142a5aced40ea9 prepared prompt=93
+[2026-09-13T14:06:21Z] request chatcmpl-c6987646308f456ba0142a5aced40ea9 generating
+[2026-09-13T14:07:02Z] request chatcmpl-c6987646308f456ba0142a5aced40ea9 completed in 41.390s prompt=93 cached=0 completion=60 finish=stop
+[2026-09-13T14:07:02Z] request chatcmpl-c8475bf0d7254e05a6706820377e837a accepted streaming=false
+[2026-09-13T14:07:02Z] request chatcmpl-c8475bf0d7254e05a6706820377e837a prepared prompt=223
+[2026-09-13T14:07:02Z] request chatcmpl-c8475bf0d7254e05a6706820377e837a generating
+[2026-09-13T14:10:28Z] request chatcmpl-c8475bf0d7254e05a6706820377e837a completed in 205.704s prompt=223 cached=0 completion=368 finish=stop
+[2026-09-13T14:10:28Z] request chatcmpl-ee0c93d967714cdfbfc8cc385ea9952e accepted streaming=false
+[2026-09-13T14:10:28Z] request chatcmpl-ee0c93d967714cdfbfc8cc385ea9952e prepared prompt=129
+[2026-09-13T14:10:28Z] request chatcmpl-ee0c93d967714cdfbfc8cc385ea9952e generating
+[2026-09-13T14:11:52Z] request chatcmpl-ee0c93d967714cdfbfc8cc385ea9952e completed in 83.929s prompt=129 cached=0 completion=153 finish=stop
+[2026-09-13T14:11:52Z] request chatcmpl-6a88a0c224aa475e813a92a57de6008c accepted streaming=false
+[2026-09-13T14:11:52Z] request chatcmpl-6a88a0c224aa475e813a92a57de6008c prepared prompt=122
+[2026-09-13T14:11:52Z] request chatcmpl-6a88a0c224aa475e813a92a57de6008c generating
+[2026-09-13T14:12:46Z] request chatcmpl-6a88a0c224aa475e813a92a57de6008c completed in 53.828s prompt=122 cached=0 completion=87 finish=stop
+[2026-09-13T14:12:46Z] request chatcmpl-28b869827f5947adad336eb082d1f8a6 accepted streaming=false
+[2026-09-13T14:12:46Z] request chatcmpl-28b869827f5947adad336eb082d1f8a6 prepared prompt=167
+[2026-09-13T14:12:46Z] request chatcmpl-28b869827f5947adad336eb082d1f8a6 generating
+[2026-09-13T14:14:16Z] request chatcmpl-28b869827f5947adad336eb082d1f8a6 completed in 89.887s prompt=167 cached=0 completion=134 finish=stop
+[2026-09-13T14:14:16Z] request chatcmpl-ec66b75574ab405a98e52ceef36566d4 accepted streaming=false
+[2026-09-13T14:14:16Z] request chatcmpl-ec66b75574ab405a98e52ceef36566d4 prepared prompt=143
+[2026-09-13T14:14:16Z] request chatcmpl-ec66b75574ab405a98e52ceef36566d4 generating
+[2026-09-13T14:15:35Z] request chatcmpl-ec66b75574ab405a98e52ceef36566d4 completed in 79.903s prompt=143 cached=0 completion=133 finish=stop
+[2026-09-13T14:15:35Z] request chatcmpl-4af82a3f7a4f459d9e3b3a9ba6d63eca accepted streaming=false
+[2026-09-13T14:15:35Z] request chatcmpl-4af82a3f7a4f459d9e3b3a9ba6d63eca prepared prompt=182
+[2026-09-13T14:15:35Z] request chatcmpl-4af82a3f7a4f459d9e3b3a9ba6d63eca generating
+[2026-09-13T14:17:15Z] request chatcmpl-4af82a3f7a4f459d9e3b3a9ba6d63eca completed in 99.503s prompt=182 cached=0 completion=166 finish=stop
+[2026-09-13T14:17:15Z] request chatcmpl-68e44d84050b4dc8bb45f27c2f51a136 accepted streaming=false
+[2026-09-13T14:17:15Z] request chatcmpl-68e44d84050b4dc8bb45f27c2f51a136 prepared prompt=132
+[2026-09-13T14:17:15Z] request chatcmpl-68e44d84050b4dc8bb45f27c2f51a136 generating
+[2026-09-13T14:18:21Z] request chatcmpl-68e44d84050b4dc8bb45f27c2f51a136 completed in 65.694s prompt=132 cached=0 completion=100 finish=stop
+[2026-09-13T14:18:21Z] request chatcmpl-2db29728c10d460db46e3168d363361b accepted streaming=false
+[2026-09-13T14:18:21Z] request chatcmpl-2db29728c10d460db46e3168d363361b prepared prompt=101
+[2026-09-13T14:18:21Z] request chatcmpl-2db29728c10d460db46e3168d363361b generating
+[2026-09-13T14:19:04Z] request chatcmpl-2db29728c10d460db46e3168d363361b completed in 43.314s prompt=101 cached=0 completion=63 finish=stop
+[2026-09-13T14:19:04Z] request chatcmpl-2fc8a8e21bd14b708d599f82140d92dd accepted streaming=false
+[2026-09-13T14:19:04Z] request chatcmpl-2fc8a8e21bd14b708d599f82140d92dd prepared prompt=193
+[2026-09-13T14:19:04Z] request chatcmpl-2fc8a8e21bd14b708d599f82140d92dd generating
+[2026-09-13T14:20:45Z] request chatcmpl-2fc8a8e21bd14b708d599f82140d92dd completed in 101.408s prompt=193 cached=0 completion=161 finish=stop
+[2026-09-13T14:20:45Z] request chatcmpl-abe0f78fef024254ba4502b48ac3f519 accepted streaming=false
+[2026-09-13T14:20:45Z] request chatcmpl-abe0f78fef024254ba4502b48ac3f519 prepared prompt=104
+[2026-09-13T14:20:45Z] request chatcmpl-abe0f78fef024254ba4502b48ac3f519 generating
+[2026-09-13T14:22:00Z] request chatcmpl-abe0f78fef024254ba4502b48ac3f519 completed in 74.983s prompt=104 cached=0 completion=130 finish=stop
+[2026-09-13T14:22:00Z] request chatcmpl-29b551c48d44488ab5e6eaafae8a79a9 accepted streaming=false
+[2026-09-13T14:22:00Z] request chatcmpl-29b551c48d44488ab5e6eaafae8a79a9 prepared prompt=143
+[2026-09-13T14:22:00Z] request chatcmpl-29b551c48d44488ab5e6eaafae8a79a9 generating
+[2026-09-13T14:23:30Z] request chatcmpl-29b551c48d44488ab5e6eaafae8a79a9 completed in 89.231s prompt=143 cached=0 completion=157 finish=stop
+[2026-09-13T14:23:30Z] request chatcmpl-de7d981b86ca422482d7de1cb21dcabf accepted streaming=false
+[2026-09-13T14:23:30Z] request chatcmpl-de7d981b86ca422482d7de1cb21dcabf prepared prompt=140
+[2026-09-13T14:23:30Z] request chatcmpl-de7d981b86ca422482d7de1cb21dcabf generating
+[2026-09-13T14:24:58Z] request chatcmpl-de7d981b86ca422482d7de1cb21dcabf completed in 88.173s prompt=140 cached=0 completion=163 finish=stop
+[2026-09-13T14:24:58Z] request chatcmpl-b1f537d236344639a89344cd919aaa28 accepted streaming=false
+[2026-09-13T14:24:58Z] request chatcmpl-b1f537d236344639a89344cd919aaa28 prepared prompt=173
+[2026-09-13T14:24:58Z] request chatcmpl-b1f537d236344639a89344cd919aaa28 generating
+[2026-09-13T14:26:34Z] request chatcmpl-b1f537d236344639a89344cd919aaa28 completed in 96.064s prompt=173 cached=0 completion=164 finish=stop
+[2026-09-13T14:26:34Z] request chatcmpl-8c2d29aca57943a49ac3a480fa277210 accepted streaming=false
+[2026-09-13T14:26:34Z] request chatcmpl-8c2d29aca57943a49ac3a480fa277210 prepared prompt=117
+[2026-09-13T14:26:34Z] request chatcmpl-8c2d29aca57943a49ac3a480fa277210 generating
+[2026-09-13T14:28:18Z] request chatcmpl-8c2d29aca57943a49ac3a480fa277210 completed in 103.716s prompt=117 cached=0 completion=202 finish=stop
+[2026-09-13T14:28:18Z] request chatcmpl-ef2fae6be6034a8a94e135d6b4bf4909 accepted streaming=false
+[2026-09-13T14:28:18Z] request chatcmpl-ef2fae6be6034a8a94e135d6b4bf4909 prepared prompt=155
+[2026-09-13T14:28:18Z] request chatcmpl-ef2fae6be6034a8a94e135d6b4bf4909 generating
+[2026-09-13T14:29:37Z] request chatcmpl-ef2fae6be6034a8a94e135d6b4bf4909 completed in 79.910s prompt=155 cached=0 completion=125 finish=stop
+[2026-09-13T14:29:37Z] request chatcmpl-fb168d1074fa435aa870b92f7f4a1c30 accepted streaming=false
+[2026-09-13T14:29:37Z] request chatcmpl-fb168d1074fa435aa870b92f7f4a1c30 prepared prompt=142
+[2026-09-13T14:29:37Z] request chatcmpl-fb168d1074fa435aa870b92f7f4a1c30 generating
+[2026-09-13T14:31:09Z] request chatcmpl-fb168d1074fa435aa870b92f7f4a1c30 completed in 91.689s prompt=142 cached=0 completion=156 finish=stop
+[2026-09-13T14:31:09Z] request chatcmpl-20cc4ea6325849bcabad615f86a08a05 accepted streaming=false
+[2026-09-13T14:31:09Z] request chatcmpl-20cc4ea6325849bcabad615f86a08a05 prepared prompt=161
+[2026-09-13T14:31:09Z] request chatcmpl-20cc4ea6325849bcabad615f86a08a05 generating
+[2026-09-13T14:32:47Z] request chatcmpl-20cc4ea6325849bcabad615f86a08a05 completed in 97.450s prompt=161 cached=0 completion=150 finish=stop
+[2026-09-13T14:32:47Z] request chatcmpl-6f4f480974cc496f8c718a90b821e6ec accepted streaming=false
+[2026-09-13T14:32:47Z] request chatcmpl-6f4f480974cc496f8c718a90b821e6ec prepared prompt=201
+[2026-09-13T14:32:47Z] request chatcmpl-6f4f480974cc496f8c718a90b821e6ec generating
+[2026-09-13T14:35:29Z] request chatcmpl-6f4f480974cc496f8c718a90b821e6ec completed in 162.212s prompt=201 cached=0 completion=279 finish=stop
+[2026-09-13T14:35:29Z] request chatcmpl-f2678df5d2d943f8b6d82888674d2cc1 accepted streaming=false
+[2026-09-13T14:35:29Z] request chatcmpl-f2678df5d2d943f8b6d82888674d2cc1 prepared prompt=179
+[2026-09-13T14:35:29Z] request chatcmpl-f2678df5d2d943f8b6d82888674d2cc1 generating
+[2026-09-13T14:42:16Z] request chatcmpl-f2678df5d2d943f8b6d82888674d2cc1 completed in 407.414s prompt=179 cached=0 completion=768 finish=length
+[2026-09-13T14:42:16Z] request chatcmpl-24695148719049f6829038ae605d958a accepted streaming=false
+[2026-09-13T14:42:16Z] request chatcmpl-24695148719049f6829038ae605d958a prepared prompt=137
+[2026-09-13T14:42:16Z] request chatcmpl-24695148719049f6829038ae605d958a generating
+[2026-09-13T14:44:02Z] request chatcmpl-24695148719049f6829038ae605d958a completed in 106.200s prompt=137 cached=0 completion=204 finish=stop
+[2026-09-13T14:44:02Z] request chatcmpl-777d0c031cb04e4dbe4844dbde35222a accepted streaming=false
+[2026-09-13T14:44:02Z] request chatcmpl-777d0c031cb04e4dbe4844dbde35222a prepared prompt=168
+[2026-09-13T14:44:02Z] request chatcmpl-777d0c031cb04e4dbe4844dbde35222a generating
+[2026-09-13T14:45:42Z] request chatcmpl-777d0c031cb04e4dbe4844dbde35222a completed in 99.877s prompt=168 cached=0 completion=155 finish=stop
+[2026-09-13T14:45:42Z] request chatcmpl-658f1171140042f9929c9153c87fbb28 accepted streaming=false
+[2026-09-13T14:45:42Z] request chatcmpl-658f1171140042f9929c9153c87fbb28 prepared prompt=274
+[2026-09-13T14:45:42Z] request chatcmpl-658f1171140042f9929c9153c87fbb28 generating
+[2026-09-13T14:48:35Z] request chatcmpl-658f1171140042f9929c9153c87fbb28 completed in 172.275s prompt=274 cached=0 completion=286 finish=stop
+[2026-09-13T14:48:35Z] request chatcmpl-e71dc0575c474665b782c049836d29ec accepted streaming=false
+[2026-09-13T14:48:35Z] request chatcmpl-e71dc0575c474665b782c049836d29ec prepared prompt=381
+[2026-09-13T14:48:35Z] request chatcmpl-e71dc0575c474665b782c049836d29ec generating
+[2026-09-13T14:53:05Z] request chatcmpl-e71dc0575c474665b782c049836d29ec completed in 269.941s prompt=381 cached=0 completion=461 finish=stop
+[2026-09-13T14:53:05Z] request chatcmpl-4124daa2e4e24bf896f6311a265ca9c9 accepted streaming=false
+[2026-09-13T14:53:05Z] request chatcmpl-4124daa2e4e24bf896f6311a265ca9c9 prepared prompt=214
+[2026-09-13T14:53:05Z] request chatcmpl-4124daa2e4e24bf896f6311a265ca9c9 generating
+[2026-09-13T14:55:19Z] request chatcmpl-4124daa2e4e24bf896f6311a265ca9c9 completed in 134.756s prompt=214 cached=0 completion=236 finish=stop
+[2026-09-13T14:55:19Z] request chatcmpl-a6bb58ede1554ebb87270f1a550bd9b0 accepted streaming=false
+[2026-09-13T14:55:19Z] request chatcmpl-a6bb58ede1554ebb87270f1a550bd9b0 prepared prompt=177
+[2026-09-13T14:55:19Z] request chatcmpl-a6bb58ede1554ebb87270f1a550bd9b0 generating
+[2026-09-13T14:57:24Z] request chatcmpl-a6bb58ede1554ebb87270f1a550bd9b0 completed in 125.073s prompt=177 cached=0 completion=237 finish=stop
+[2026-09-13T14:57:24Z] request chatcmpl-e6f5b4f4489448f89ed692db6debc43c accepted streaming=false
+[2026-09-13T14:57:24Z] request chatcmpl-e6f5b4f4489448f89ed692db6debc43c prepared prompt=171
+[2026-09-13T14:57:24Z] request chatcmpl-e6f5b4f4489448f89ed692db6debc43c generating
+[2026-09-13T14:59:35Z] request chatcmpl-e6f5b4f4489448f89ed692db6debc43c completed in 130.483s prompt=171 cached=0 completion=240 finish=stop
+[2026-09-13T14:59:35Z] request chatcmpl-8b9bfd07045549d7ae6c67132c9b9c5a accepted streaming=false
+[2026-09-13T14:59:35Z] request chatcmpl-8b9bfd07045549d7ae6c67132c9b9c5a prepared prompt=283
+[2026-09-13T14:59:35Z] request chatcmpl-8b9bfd07045549d7ae6c67132c9b9c5a generating
+[2026-09-13T15:02:50Z] request chatcmpl-8b9bfd07045549d7ae6c67132c9b9c5a completed in 194.883s prompt=283 cached=0 completion=321 finish=stop
+[2026-09-13T15:02:50Z] request chatcmpl-94239cb9892e4aa6bbf91d1312bfbd62 accepted streaming=false
+[2026-09-13T15:02:50Z] request chatcmpl-94239cb9892e4aa6bbf91d1312bfbd62 prepared prompt=205
+[2026-09-13T15:02:50Z] request chatcmpl-94239cb9892e4aa6bbf91d1312bfbd62 generating
+[2026-09-13T15:04:53Z] request chatcmpl-94239cb9892e4aa6bbf91d1312bfbd62 completed in 123.253s prompt=205 cached=0 completion=210 finish=stop
+[2026-09-13T15:04:53Z] request chatcmpl-3437ea9151cb4cefaab969d950c1fc5d accepted streaming=false
+[2026-09-13T15:04:53Z] request chatcmpl-3437ea9151cb4cefaab969d950c1fc5d prepared prompt=246
+[2026-09-13T15:04:53Z] request chatcmpl-3437ea9151cb4cefaab969d950c1fc5d generating
+[2026-09-13T15:07:33Z] request chatcmpl-3437ea9151cb4cefaab969d950c1fc5d completed in 160.031s prompt=246 cached=0 completion=266 finish=stop
+[2026-09-13T15:07:33Z] request chatcmpl-ac49c8141ddb4354a10e26a9cd54f605 accepted streaming=false
+[2026-09-13T15:07:33Z] request chatcmpl-ac49c8141ddb4354a10e26a9cd54f605 prepared prompt=130
+[2026-09-13T15:07:33Z] request chatcmpl-ac49c8141ddb4354a10e26a9cd54f605 generating
+[2026-09-13T15:10:18Z] request chatcmpl-ac49c8141ddb4354a10e26a9cd54f605 completed in 165.361s prompt=130 cached=0 completion=333 finish=stop
+[2026-09-13T15:10:18Z] request chatcmpl-25c34b9593e7455f92e7135f8347cd13 accepted streaming=false
+[2026-09-13T15:10:18Z] request chatcmpl-25c34b9593e7455f92e7135f8347cd13 prepared prompt=189
+[2026-09-13T15:10:18Z] request chatcmpl-25c34b9593e7455f92e7135f8347cd13 generating
+[2026-09-13T15:16:03Z] request chatcmpl-25c34b9593e7455f92e7135f8347cd13 completed in 344.968s prompt=189 cached=0 completion=768 finish=length
+[2026-09-13T15:16:03Z] request chatcmpl-6e9b9a9383774448aabd75c9f886193f accepted streaming=false
+[2026-09-13T15:16:03Z] request chatcmpl-6e9b9a9383774448aabd75c9f886193f prepared prompt=162
+[2026-09-13T15:16:03Z] request chatcmpl-6e9b9a9383774448aabd75c9f886193f generating
+[2026-09-13T15:18:30Z] request chatcmpl-6e9b9a9383774448aabd75c9f886193f completed in 146.347s prompt=162 cached=0 completion=282 finish=stop
+[2026-09-13T15:18:30Z] request chatcmpl-7cb91110ec8c487eaadcc3df01011184 accepted streaming=false
+[2026-09-13T15:18:30Z] request chatcmpl-7cb91110ec8c487eaadcc3df01011184 prepared prompt=371
+[2026-09-13T15:18:30Z] request chatcmpl-7cb91110ec8c487eaadcc3df01011184 generating
+[2026-09-13T15:22:12Z] request chatcmpl-7cb91110ec8c487eaadcc3df01011184 completed in 221.920s prompt=371 cached=0 completion=383 finish=stop
+[2026-09-13T15:22:12Z] request chatcmpl-1ab73fa1324b459a932f0062d3b30140 accepted streaming=false
+[2026-09-13T15:22:12Z] request chatcmpl-1ab73fa1324b459a932f0062d3b30140 prepared prompt=198
+[2026-09-13T15:22:12Z] request chatcmpl-1ab73fa1324b459a932f0062d3b30140 generating
+[2026-09-13T15:24:08Z] request chatcmpl-1ab73fa1324b459a932f0062d3b30140 completed in 115.972s prompt=198 cached=0 completion=189 finish=stop
+[2026-09-13T15:24:08Z] request chatcmpl-3102b9b7e05b47a19fc1f505bf226a84 accepted streaming=false
+[2026-09-13T15:24:08Z] request chatcmpl-3102b9b7e05b47a19fc1f505bf226a84 prepared prompt=169
+[2026-09-13T15:24:08Z] request chatcmpl-3102b9b7e05b47a19fc1f505bf226a84 generating
+[2026-09-13T15:26:02Z] request chatcmpl-3102b9b7e05b47a19fc1f505bf226a84 completed in 114.397s prompt=169 cached=0 completion=194 finish=stop
+[2026-09-13T15:26:02Z] request chatcmpl-e1ee499d68b641d682fd1c95f4c24a03 accepted streaming=false
+[2026-09-13T15:26:02Z] request chatcmpl-e1ee499d68b641d682fd1c95f4c24a03 prepared prompt=326
+[2026-09-13T15:26:02Z] request chatcmpl-e1ee499d68b641d682fd1c95f4c24a03 generating
+[2026-09-13T15:32:14Z] request chatcmpl-e1ee499d68b641d682fd1c95f4c24a03 completed in 371.701s prompt=326 cached=0 completion=591 finish=stop
+[2026-09-13T15:32:14Z] request chatcmpl-df165cabd0f24fdd873d013dee819888 accepted streaming=false
+[2026-09-13T15:32:14Z] request chatcmpl-df165cabd0f24fdd873d013dee819888 prepared prompt=126
+[2026-09-13T15:32:14Z] request chatcmpl-df165cabd0f24fdd873d013dee819888 generating
+[2026-09-13T15:33:46Z] request chatcmpl-df165cabd0f24fdd873d013dee819888 completed in 92.600s prompt=126 cached=0 completion=177 finish=stop
+[2026-09-13T15:33:46Z] request chatcmpl-911588830dc546c48b2d5c7b41f0b85e accepted streaming=false
+[2026-09-13T15:33:46Z] request chatcmpl-911588830dc546c48b2d5c7b41f0b85e prepared prompt=91
+[2026-09-13T15:33:46Z] request chatcmpl-911588830dc546c48b2d5c7b41f0b85e generating
+[2026-09-13T15:35:54Z] request chatcmpl-911588830dc546c48b2d5c7b41f0b85e completed in 127.378s prompt=91 cached=0 completion=286 finish=stop
+[2026-09-13T15:35:54Z] request chatcmpl-a3439412632c49919046293a5bb5fa06 accepted streaming=false
+[2026-09-13T15:35:54Z] request chatcmpl-a3439412632c49919046293a5bb5fa06 prepared prompt=199
+[2026-09-13T15:35:54Z] request chatcmpl-a3439412632c49919046293a5bb5fa06 generating
+[2026-09-13T15:37:57Z] request chatcmpl-a3439412632c49919046293a5bb5fa06 completed in 123.254s prompt=199 cached=0 completion=217 finish=stop
+[2026-09-13T15:37:57Z] request chatcmpl-57ad70e4d24946c9958e6e83bae5e9af accepted streaming=false
+[2026-09-13T15:37:57Z] request chatcmpl-57ad70e4d24946c9958e6e83bae5e9af prepared prompt=101
+[2026-09-13T15:37:57Z] request chatcmpl-57ad70e4d24946c9958e6e83bae5e9af generating
+[2026-09-13T15:39:03Z] request chatcmpl-57ad70e4d24946c9958e6e83bae5e9af completed in 66.402s prompt=101 cached=0 completion=117 finish=stop
+[2026-09-13T15:39:03Z] request chatcmpl-ee8d56e8141d418885205d451cd43936 accepted streaming=false
+[2026-09-13T15:39:03Z] request chatcmpl-ee8d56e8141d418885205d451cd43936 prepared prompt=183
+[2026-09-13T15:39:03Z] request chatcmpl-ee8d56e8141d418885205d451cd43936 generating
+[2026-09-13T15:41:09Z] request chatcmpl-ee8d56e8141d418885205d451cd43936 completed in 125.900s prompt=183 cached=0 completion=223 finish=stop
+[2026-09-13T15:41:09Z] request chatcmpl-36e438395ae44ef4a66c5592060acc6b accepted streaming=false
+[2026-09-13T15:41:09Z] request chatcmpl-36e438395ae44ef4a66c5592060acc6b prepared prompt=320
+[2026-09-13T15:41:09Z] request chatcmpl-36e438395ae44ef4a66c5592060acc6b generating
+[2026-09-13T15:44:37Z] request chatcmpl-36e438395ae44ef4a66c5592060acc6b completed in 207.466s prompt=320 cached=0 completion=357 finish=stop
+[2026-09-13T15:44:37Z] request chatcmpl-5ab5445f049f48f7bef2fa24050082f3 accepted streaming=false
+[2026-09-13T15:44:37Z] request chatcmpl-5ab5445f049f48f7bef2fa24050082f3 prepared prompt=259
+[2026-09-13T15:44:37Z] request chatcmpl-5ab5445f049f48f7bef2fa24050082f3 generating
+[2026-09-13T15:47:44Z] request chatcmpl-5ab5445f049f48f7bef2fa24050082f3 completed in 186.710s prompt=259 cached=0 completion=306 finish=stop
+[2026-09-13T15:47:44Z] request chatcmpl-6c842c66c2954a5db7e4250d405ef55b accepted streaming=false
+[2026-09-13T15:47:44Z] request chatcmpl-6c842c66c2954a5db7e4250d405ef55b prepared prompt=161
+[2026-09-13T15:47:44Z] request chatcmpl-6c842c66c2954a5db7e4250d405ef55b generating
+[2026-09-13T15:50:11Z] request chatcmpl-6c842c66c2954a5db7e4250d405ef55b completed in 147.130s prompt=161 cached=0 completion=238 finish=stop
+[2026-09-13T15:50:11Z] request chatcmpl-bb039c9815e74b8295a260a6800195e8 accepted streaming=false
+[2026-09-13T15:50:11Z] request chatcmpl-bb039c9815e74b8295a260a6800195e8 prepared prompt=173
+[2026-09-13T15:50:11Z] request chatcmpl-bb039c9815e74b8295a260a6800195e8 generating
+[2026-09-13T15:52:06Z] request chatcmpl-bb039c9815e74b8295a260a6800195e8 completed in 114.859s prompt=173 cached=0 completion=195 finish=stop
+[2026-09-13T15:52:06Z] request chatcmpl-76e35b692f0d4ee19df9ba201ac3e70e accepted streaming=false
+[2026-09-13T15:52:06Z] request chatcmpl-76e35b692f0d4ee19df9ba201ac3e70e prepared prompt=158
+[2026-09-13T15:52:06Z] request chatcmpl-76e35b692f0d4ee19df9ba201ac3e70e generating
+[2026-09-13T15:54:12Z] request chatcmpl-76e35b692f0d4ee19df9ba201ac3e70e completed in 126.890s prompt=158 cached=0 completion=235 finish=stop
+[2026-09-13T15:54:12Z] request chatcmpl-d6bdd3164e374a78b34e244b88ece543 accepted streaming=false
+[2026-09-13T15:54:12Z] request chatcmpl-d6bdd3164e374a78b34e244b88ece543 prepared prompt=184
+[2026-09-13T15:54:12Z] request chatcmpl-d6bdd3164e374a78b34e244b88ece543 generating
+[2026-09-13T15:56:17Z] request chatcmpl-d6bdd3164e374a78b34e244b88ece543 completed in 124.126s prompt=184 cached=0 completion=221 finish=stop
+[2026-09-13T15:56:17Z] request chatcmpl-c9787f914ae64bf382a01486e36fae8c accepted streaming=false
+[2026-09-13T15:56:17Z] request chatcmpl-c9787f914ae64bf382a01486e36fae8c prepared prompt=160
+[2026-09-13T15:56:17Z] request chatcmpl-c9787f914ae64bf382a01486e36fae8c generating
+[2026-09-13T15:59:15Z] request chatcmpl-c9787f914ae64bf382a01486e36fae8c completed in 178.656s prompt=160 cached=0 completion=339 finish=stop
+[2026-09-13T15:59:15Z] request chatcmpl-e480056ecbb84beda2e12f2160efe27d accepted streaming=false
+[2026-09-13T15:59:15Z] request chatcmpl-e480056ecbb84beda2e12f2160efe27d prepared prompt=375
+[2026-09-13T15:59:15Z] request chatcmpl-e480056ecbb84beda2e12f2160efe27d generating
+[2026-09-13T16:04:13Z] request chatcmpl-e480056ecbb84beda2e12f2160efe27d completed in 297.575s prompt=375 cached=0 completion=564 finish=stop
+[2026-09-13T16:04:13Z] request chatcmpl-9ca339a03ec14e4db6b98da31887b587 accepted streaming=false
+[2026-09-13T16:04:13Z] request chatcmpl-9ca339a03ec14e4db6b98da31887b587 prepared prompt=227
+[2026-09-13T16:04:13Z] request chatcmpl-9ca339a03ec14e4db6b98da31887b587 generating
+[2026-09-13T16:06:58Z] request chatcmpl-9ca339a03ec14e4db6b98da31887b587 completed in 165.009s prompt=227 cached=0 completion=287 finish=stop
+[2026-09-13T16:06:58Z] request chatcmpl-12cc63d0e9cf4d248a39ea168da5aa05 accepted streaming=false
+[2026-09-13T16:06:58Z] request chatcmpl-12cc63d0e9cf4d248a39ea168da5aa05 prepared prompt=208
+[2026-09-13T16:06:58Z] request chatcmpl-12cc63d0e9cf4d248a39ea168da5aa05 generating
+[2026-09-13T16:09:36Z] request chatcmpl-12cc63d0e9cf4d248a39ea168da5aa05 completed in 158.069s prompt=208 cached=0 completion=298 finish=stop
+[2026-09-13T16:09:36Z] request chatcmpl-1bef689a465a4603a47331f76cbab250 accepted streaming=false
+[2026-09-13T16:09:36Z] request chatcmpl-1bef689a465a4603a47331f76cbab250 prepared prompt=165
+[2026-09-13T16:09:36Z] request chatcmpl-1bef689a465a4603a47331f76cbab250 generating
+[2026-09-13T16:11:32Z] request chatcmpl-1bef689a465a4603a47331f76cbab250 completed in 115.751s prompt=165 cached=0 completion=208 finish=stop
+[2026-09-13T16:11:32Z] request chatcmpl-4bf51df5a3154a09a3b666a2625be031 accepted streaming=false
+[2026-09-13T16:11:32Z] request chatcmpl-4bf51df5a3154a09a3b666a2625be031 prepared prompt=120
+[2026-09-13T16:11:32Z] request chatcmpl-4bf51df5a3154a09a3b666a2625be031 generating
+[2026-09-13T16:12:38Z] request chatcmpl-4bf51df5a3154a09a3b666a2625be031 completed in 66.221s prompt=120 cached=0 completion=119 finish=stop
+[2026-09-13T16:12:38Z] request chatcmpl-394783bb0bb540c8b0938ab8ebf207d3 accepted streaming=false
+[2026-09-13T16:12:38Z] request chatcmpl-394783bb0bb540c8b0938ab8ebf207d3 prepared prompt=215
+[2026-09-13T16:12:38Z] request chatcmpl-394783bb0bb540c8b0938ab8ebf207d3 generating
+[2026-09-13T16:16:36Z] request chatcmpl-394783bb0bb540c8b0938ab8ebf207d3 completed in 237.936s prompt=215 cached=0 completion=467 finish=stop
+[2026-09-13T16:16:36Z] request chatcmpl-b21772b630b54875925a128cc8d10b8f accepted streaming=false
+[2026-09-13T16:16:36Z] request chatcmpl-b21772b630b54875925a128cc8d10b8f prepared prompt=187
+[2026-09-13T16:16:36Z] request chatcmpl-b21772b630b54875925a128cc8d10b8f generating
+[2026-09-13T16:18:45Z] request chatcmpl-b21772b630b54875925a128cc8d10b8f completed in 129.360s prompt=187 cached=0 completion=232 finish=stop
+[2026-09-13T16:18:45Z] request chatcmpl-433bf1301f3741e5bedb9e68f37e3634 accepted streaming=false
+[2026-09-13T16:18:45Z] request chatcmpl-433bf1301f3741e5bedb9e68f37e3634 prepared prompt=166
+[2026-09-13T16:18:45Z] request chatcmpl-433bf1301f3741e5bedb9e68f37e3634 generating
+[2026-09-13T16:20:23Z] request chatcmpl-433bf1301f3741e5bedb9e68f37e3634 completed in 97.338s prompt=166 cached=0 completion=154 finish=stop
+[2026-09-13T16:20:23Z] request chatcmpl-6d31d89dd9574ad4a4df526b612b8490 accepted streaming=false
+[2026-09-13T16:20:23Z] request chatcmpl-6d31d89dd9574ad4a4df526b612b8490 prepared prompt=146
+[2026-09-13T16:20:23Z] request chatcmpl-6d31d89dd9574ad4a4df526b612b8490 generating
+[2026-09-13T16:22:00Z] request chatcmpl-6d31d89dd9574ad4a4df526b612b8490 completed in 97.015s prompt=146 cached=0 completion=192 finish=stop
+[2026-09-13T16:22:00Z] request chatcmpl-48ba77caf9b443949e78ade3344a13e0 accepted streaming=false
+[2026-09-13T16:22:00Z] request chatcmpl-48ba77caf9b443949e78ade3344a13e0 prepared prompt=201
+[2026-09-13T16:22:00Z] request chatcmpl-48ba77caf9b443949e78ade3344a13e0 generating
+[2026-09-13T16:24:14Z] request chatcmpl-48ba77caf9b443949e78ade3344a13e0 completed in 134.868s prompt=201 cached=0 completion=251 finish=stop
+[2026-09-13T16:24:14Z] request chatcmpl-a0160ca9b7d347af99d397086fbafb09 accepted streaming=false
+[2026-09-13T16:24:14Z] request chatcmpl-a0160ca9b7d347af99d397086fbafb09 prepared prompt=167
+[2026-09-13T16:24:14Z] request chatcmpl-a0160ca9b7d347af99d397086fbafb09 generating
+[2026-09-13T16:26:02Z] request chatcmpl-a0160ca9b7d347af99d397086fbafb09 completed in 107.561s prompt=167 cached=0 completion=188 finish=stop
+[2026-09-13T16:26:02Z] request chatcmpl-69afbbb06b4c41509d83998f68a08c84 accepted streaming=false
+[2026-09-13T16:26:02Z] request chatcmpl-69afbbb06b4c41509d83998f68a08c84 prepared prompt=337
+[2026-09-13T16:26:02Z] request chatcmpl-69afbbb06b4c41509d83998f68a08c84 generating
+[2026-09-13T16:30:29Z] request chatcmpl-69afbbb06b4c41509d83998f68a08c84 completed in 267.123s prompt=337 cached=0 completion=482 finish=stop
+[2026-09-13T16:30:29Z] request chatcmpl-1687c10898524e3081ee588d14b326fc accepted streaming=false
+[2026-09-13T16:30:29Z] request chatcmpl-1687c10898524e3081ee588d14b326fc prepared prompt=177
+[2026-09-13T16:30:29Z] request chatcmpl-1687c10898524e3081ee588d14b326fc generating
+[2026-09-13T16:32:41Z] request chatcmpl-1687c10898524e3081ee588d14b326fc completed in 132.059s prompt=177 cached=0 completion=240 finish=stop
+[2026-09-13T16:32:41Z] request chatcmpl-610f4d6621ed47a4964d337547e7a6e2 accepted streaming=false
+[2026-09-13T16:32:41Z] request chatcmpl-610f4d6621ed47a4964d337547e7a6e2 prepared prompt=271
+[2026-09-13T16:32:41Z] request chatcmpl-610f4d6621ed47a4964d337547e7a6e2 generating
+[2026-09-13T16:35:50Z] request chatcmpl-610f4d6621ed47a4964d337547e7a6e2 completed in 188.339s prompt=271 cached=0 completion=327 finish=stop
+[2026-09-13T16:35:50Z] request chatcmpl-1b7c9a92a32044f4a655d2ec39fd3f5a accepted streaming=false
+[2026-09-13T16:35:50Z] request chatcmpl-1b7c9a92a32044f4a655d2ec39fd3f5a prepared prompt=177
+[2026-09-13T16:35:50Z] request chatcmpl-1b7c9a92a32044f4a655d2ec39fd3f5a generating
+[2026-09-13T16:38:31Z] request chatcmpl-1b7c9a92a32044f4a655d2ec39fd3f5a completed in 161.572s prompt=177 cached=0 completion=308 finish=stop
+[2026-09-13T16:38:31Z] request chatcmpl-7b232c2620ec489ab925029eafbbdd52 accepted streaming=false
+[2026-09-13T16:38:31Z] request chatcmpl-7b232c2620ec489ab925029eafbbdd52 prepared prompt=352
+[2026-09-13T16:38:31Z] request chatcmpl-7b232c2620ec489ab925029eafbbdd52 generating
+[2026-09-13T16:44:05Z] request chatcmpl-7b232c2620ec489ab925029eafbbdd52 completed in 333.992s prompt=352 cached=0 completion=670 finish=stop
+[2026-09-13T16:44:05Z] request chatcmpl-ffb890108ac04662a2680a089c02ee14 accepted streaming=false
+[2026-09-13T16:44:05Z] request chatcmpl-ffb890108ac04662a2680a089c02ee14 prepared prompt=251
+[2026-09-13T16:44:05Z] request chatcmpl-ffb890108ac04662a2680a089c02ee14 generating
+[2026-09-13T16:47:05Z] request chatcmpl-ffb890108ac04662a2680a089c02ee14 completed in 179.374s prompt=251 cached=0 completion=344 finish=stop
+[2026-09-13T16:47:05Z] request chatcmpl-53f2451ac7264433aa4bd9079b47daf2 accepted streaming=false
+[2026-09-13T16:47:05Z] request chatcmpl-53f2451ac7264433aa4bd9079b47daf2 prepared prompt=204
+[2026-09-13T16:47:05Z] request chatcmpl-53f2451ac7264433aa4bd9079b47daf2 generating
+[2026-09-13T16:49:45Z] request chatcmpl-53f2451ac7264433aa4bd9079b47daf2 completed in 160.191s prompt=204 cached=0 completion=320 finish=stop
+[2026-09-13T16:49:45Z] request chatcmpl-35b2b8f9db324f5da895667c451ba3b5 accepted streaming=false
+[2026-09-13T16:49:45Z] request chatcmpl-35b2b8f9db324f5da895667c451ba3b5 prepared prompt=213
+[2026-09-13T16:49:45Z] request chatcmpl-35b2b8f9db324f5da895667c451ba3b5 generating
+[2026-09-13T16:52:16Z] request chatcmpl-35b2b8f9db324f5da895667c451ba3b5 completed in 151.434s prompt=213 cached=0 completion=263 finish=stop
+[2026-09-13T16:52:16Z] request chatcmpl-b1c9f0bf5f36409aac2ef49599b51a9d accepted streaming=false
+[2026-09-13T16:52:16Z] request chatcmpl-b1c9f0bf5f36409aac2ef49599b51a9d prepared prompt=234
+[2026-09-13T16:52:16Z] request chatcmpl-b1c9f0bf5f36409aac2ef49599b51a9d generating
+[2026-09-13T16:54:59Z] request chatcmpl-b1c9f0bf5f36409aac2ef49599b51a9d completed in 163.340s prompt=234 cached=0 completion=298 finish=stop
+[2026-09-13T16:54:59Z] request chatcmpl-a6ac88470ba645b5a92612780acaf031 accepted streaming=false
+[2026-09-13T16:54:59Z] request chatcmpl-a6ac88470ba645b5a92612780acaf031 prepared prompt=135
+[2026-09-13T16:54:59Z] request chatcmpl-a6ac88470ba645b5a92612780acaf031 generating
+[2026-09-13T16:56:41Z] request chatcmpl-a6ac88470ba645b5a92612780acaf031 completed in 101.384s prompt=135 cached=0 completion=180 finish=stop
+[2026-09-13T16:56:41Z] request chatcmpl-1745eccc66164000b68e7feffa5a756b accepted streaming=false
+[2026-09-13T16:56:41Z] request chatcmpl-1745eccc66164000b68e7feffa5a756b prepared prompt=383
+[2026-09-13T16:56:41Z] request chatcmpl-1745eccc66164000b68e7feffa5a756b generating
+[2026-09-13T17:00:49Z] request chatcmpl-1745eccc66164000b68e7feffa5a756b completed in 248.514s prompt=383 cached=0 completion=411 finish=stop
+[2026-09-13T17:00:49Z] request chatcmpl-64665dd5dc8c41289c88feb86ce50c6d accepted streaming=false
+[2026-09-13T17:00:49Z] request chatcmpl-64665dd5dc8c41289c88feb86ce50c6d prepared prompt=222
+[2026-09-13T17:00:49Z] request chatcmpl-64665dd5dc8c41289c88feb86ce50c6d generating
+[2026-09-13T17:06:35Z] request chatcmpl-64665dd5dc8c41289c88feb86ce50c6d completed in 345.452s prompt=222 cached=0 completion=768 finish=length
+[2026-09-13T17:06:35Z] request chatcmpl-2877bdcbbe104c67b170c9904fae1a04 accepted streaming=false
+[2026-09-13T17:06:35Z] request chatcmpl-2877bdcbbe104c67b170c9904fae1a04 prepared prompt=235
+[2026-09-13T17:06:35Z] request chatcmpl-2877bdcbbe104c67b170c9904fae1a04 generating
+[2026-09-13T17:09:07Z] request chatcmpl-2877bdcbbe104c67b170c9904fae1a04 completed in 152.525s prompt=235 cached=0 completion=300 finish=stop
+[2026-09-13T17:09:07Z] request chatcmpl-b7d75e9ff0444469953c9ffc56db7ab1 accepted streaming=false
+[2026-09-13T17:09:07Z] request chatcmpl-b7d75e9ff0444469953c9ffc56db7ab1 prepared prompt=201
+[2026-09-13T17:09:07Z] request chatcmpl-b7d75e9ff0444469953c9ffc56db7ab1 generating
+[2026-09-13T17:12:08Z] request chatcmpl-b7d75e9ff0444469953c9ffc56db7ab1 completed in 180.998s prompt=201 cached=0 completion=358 finish=stop
+[2026-09-13T17:12:08Z] request chatcmpl-cb9d601c23cf455da5de8e0bfb0f8462 accepted streaming=false
+[2026-09-13T17:12:08Z] request chatcmpl-cb9d601c23cf455da5de8e0bfb0f8462 prepared prompt=221
+[2026-09-13T17:12:08Z] request chatcmpl-cb9d601c23cf455da5de8e0bfb0f8462 generating
+[2026-09-13T17:15:08Z] request chatcmpl-cb9d601c23cf455da5de8e0bfb0f8462 completed in 179.680s prompt=221 cached=0 completion=329 finish=stop
+[2026-09-13T17:15:08Z] request chatcmpl-d4ac3fa774054fd1a9752fe14fefb8db accepted streaming=false
+[2026-09-13T17:15:08Z] request chatcmpl-d4ac3fa774054fd1a9752fe14fefb8db prepared prompt=280
+[2026-09-13T17:15:08Z] request chatcmpl-d4ac3fa774054fd1a9752fe14fefb8db generating
+[2026-09-13T17:18:12Z] request chatcmpl-d4ac3fa774054fd1a9752fe14fefb8db completed in 183.875s prompt=280 cached=0 completion=305 finish=stop
+[2026-09-13T17:18:12Z] request chatcmpl-0d4ad7a14dae41858cb9efb20394b785 accepted streaming=false
+[2026-09-13T17:18:12Z] request chatcmpl-0d4ad7a14dae41858cb9efb20394b785 prepared prompt=149
+[2026-09-13T17:18:12Z] request chatcmpl-0d4ad7a14dae41858cb9efb20394b785 generating
+[2026-09-13T17:19:41Z] request chatcmpl-0d4ad7a14dae41858cb9efb20394b785 completed in 89.264s prompt=149 cached=0 completion=150 finish=stop
+[2026-09-13T17:19:41Z] request chatcmpl-e534bcdbe99847f886340e9396befb5c accepted streaming=false
+[2026-09-13T17:19:41Z] request chatcmpl-e534bcdbe99847f886340e9396befb5c prepared prompt=187
+[2026-09-13T17:19:41Z] request chatcmpl-e534bcdbe99847f886340e9396befb5c generating
+[2026-09-13T17:22:12Z] request chatcmpl-e534bcdbe99847f886340e9396befb5c completed in 151.239s prompt=187 cached=0 completion=285 finish=stop
+[2026-09-13T17:22:12Z] request chatcmpl-1e5b12856c464b7392f653cc679430b6 accepted streaming=false
+[2026-09-13T17:22:12Z] request chatcmpl-1e5b12856c464b7392f653cc679430b6 prepared prompt=284
+[2026-09-13T17:22:12Z] request chatcmpl-1e5b12856c464b7392f653cc679430b6 generating
+[2026-09-13T17:25:42Z] request chatcmpl-1e5b12856c464b7392f653cc679430b6 completed in 209.891s prompt=284 cached=0 completion=359 finish=stop
+[2026-09-13T17:25:42Z] request chatcmpl-fe9a9cc6d97c48a683c5d23e8edfa19f accepted streaming=false
+[2026-09-13T17:25:42Z] request chatcmpl-fe9a9cc6d97c48a683c5d23e8edfa19f prepared prompt=339
+[2026-09-13T17:25:42Z] request chatcmpl-fe9a9cc6d97c48a683c5d23e8edfa19f generating
+[2026-09-13T17:31:40Z] request chatcmpl-fe9a9cc6d97c48a683c5d23e8edfa19f completed in 357.881s prompt=339 cached=0 completion=744 finish=stop
+[2026-09-13T17:31:40Z] request chatcmpl-6781d8e2273743c68dc51e56a5706334 accepted streaming=false
+[2026-09-13T17:31:40Z] request chatcmpl-6781d8e2273743c68dc51e56a5706334 prepared prompt=189
+[2026-09-13T17:31:40Z] request chatcmpl-6781d8e2273743c68dc51e56a5706334 generating
+[2026-09-13T17:34:49Z] request chatcmpl-6781d8e2273743c68dc51e56a5706334 completed in 188.559s prompt=189 cached=0 completion=384 finish=stop
+[2026-09-13T17:34:49Z] request chatcmpl-4113d70f3e6244429baffb6f133ea5f7 accepted streaming=false
+[2026-09-13T17:34:49Z] request chatcmpl-4113d70f3e6244429baffb6f133ea5f7 prepared prompt=296
+[2026-09-13T17:34:49Z] request chatcmpl-4113d70f3e6244429baffb6f133ea5f7 generating
+[2026-09-13T17:37:58Z] request chatcmpl-4113d70f3e6244429baffb6f133ea5f7 completed in 189.242s prompt=296 cached=0 completion=344 finish=stop
+[2026-09-13T17:37:58Z] request chatcmpl-21b800ab239c4f8f9e6f6e1b13e5626e accepted streaming=false
+[2026-09-13T17:37:58Z] request chatcmpl-21b800ab239c4f8f9e6f6e1b13e5626e prepared prompt=313
+[2026-09-13T17:37:58Z] request chatcmpl-21b800ab239c4f8f9e6f6e1b13e5626e generating
+[2026-09-13T17:44:05Z] request chatcmpl-21b800ab239c4f8f9e6f6e1b13e5626e completed in 366.864s prompt=313 cached=0 completion=694 finish=stop
+[2026-09-13T17:44:05Z] request chatcmpl-3ea76904bb3542faae2afc123cd7f913 accepted streaming=false
+[2026-09-13T17:44:05Z] request chatcmpl-3ea76904bb3542faae2afc123cd7f913 prepared prompt=171
+[2026-09-13T17:44:05Z] request chatcmpl-3ea76904bb3542faae2afc123cd7f913 generating
+[2026-09-13T17:46:16Z] request chatcmpl-3ea76904bb3542faae2afc123cd7f913 completed in 130.960s prompt=171 cached=0 completion=247 finish=stop
+[2026-09-13T17:46:16Z] request chatcmpl-a635f911871647e59a7c04b80a67fea1 accepted streaming=false
+[2026-09-13T17:46:16Z] request chatcmpl-a635f911871647e59a7c04b80a67fea1 prepared prompt=455
+[2026-09-13T17:46:16Z] request chatcmpl-a635f911871647e59a7c04b80a67fea1 generating
+[2026-09-13T17:52:36Z] request chatcmpl-a635f911871647e59a7c04b80a67fea1 completed in 379.935s prompt=455 cached=0 completion=768 finish=length
+[2026-09-13T17:52:36Z] request chatcmpl-acc0b30eaebf4b589f1bc0bfc921bc71 accepted streaming=false
+[2026-09-13T17:52:36Z] request chatcmpl-acc0b30eaebf4b589f1bc0bfc921bc71 prepared prompt=289
+[2026-09-13T17:52:36Z] request chatcmpl-acc0b30eaebf4b589f1bc0bfc921bc71 generating
+[2026-09-13T17:58:53Z] request chatcmpl-acc0b30eaebf4b589f1bc0bfc921bc71 completed in 376.817s prompt=289 cached=0 completion=768 finish=length
+[2026-09-13T17:58:53Z] request chatcmpl-a4393c3aba8143bc86ab1d34cfb0266f accepted streaming=false
+[2026-09-13T17:58:53Z] request chatcmpl-a4393c3aba8143bc86ab1d34cfb0266f prepared prompt=122
+[2026-09-13T17:58:53Z] request chatcmpl-a4393c3aba8143bc86ab1d34cfb0266f generating
+[2026-09-13T18:00:12Z] request chatcmpl-a4393c3aba8143bc86ab1d34cfb0266f completed in 79.073s prompt=122 cached=0 completion=149 finish=stop
+[2026-09-13T18:00:12Z] request chatcmpl-689ffdf36dd24391ba4590b6c485ebf5 accepted streaming=false
+[2026-09-13T18:00:12Z] request chatcmpl-689ffdf36dd24391ba4590b6c485ebf5 prepared prompt=181
+[2026-09-13T18:00:12Z] request chatcmpl-689ffdf36dd24391ba4590b6c485ebf5 generating
+[2026-09-13T18:03:41Z] request chatcmpl-689ffdf36dd24391ba4590b6c485ebf5 completed in 209.134s prompt=181 cached=0 completion=469 finish=stop
+[2026-09-13T18:03:41Z] request chatcmpl-02fd099823ac41a5892a2d50d4ec6790 accepted streaming=false
+[2026-09-13T18:03:41Z] request chatcmpl-02fd099823ac41a5892a2d50d4ec6790 prepared prompt=210
+[2026-09-13T18:03:41Z] request chatcmpl-02fd099823ac41a5892a2d50d4ec6790 generating
+[2026-09-13T18:05:55Z] request chatcmpl-02fd099823ac41a5892a2d50d4ec6790 completed in 134.026s prompt=210 cached=0 completion=228 finish=stop
+[2026-09-13T18:05:55Z] request chatcmpl-0e6e256e9ea74e77baf92ee42ce2256a accepted streaming=false
+[2026-09-13T18:05:55Z] request chatcmpl-0e6e256e9ea74e77baf92ee42ce2256a prepared prompt=186
+[2026-09-13T18:05:55Z] request chatcmpl-0e6e256e9ea74e77baf92ee42ce2256a generating
+[2026-09-13T18:08:38Z] request chatcmpl-0e6e256e9ea74e77baf92ee42ce2256a completed in 162.912s prompt=186 cached=0 completion=341 finish=stop
+[2026-09-13T18:08:38Z] request chatcmpl-adc165c4e2b54d8e869c2aa5744f2da4 accepted streaming=false
+[2026-09-13T18:08:38Z] request chatcmpl-adc165c4e2b54d8e869c2aa5744f2da4 prepared prompt=150
+[2026-09-13T18:08:38Z] request chatcmpl-adc165c4e2b54d8e869c2aa5744f2da4 generating
+[2026-09-13T18:10:06Z] request chatcmpl-adc165c4e2b54d8e869c2aa5744f2da4 completed in 88.010s prompt=150 cached=0 completion=149 finish=stop
+[2026-09-13T18:10:06Z] request chatcmpl-2baaa4d5ab8a43ce84b2d7b0a83db40b accepted streaming=false
+[2026-09-13T18:10:06Z] request chatcmpl-2baaa4d5ab8a43ce84b2d7b0a83db40b prepared prompt=190
+[2026-09-13T18:10:06Z] request chatcmpl-2baaa4d5ab8a43ce84b2d7b0a83db40b generating
+[2026-09-13T18:12:08Z] request chatcmpl-2baaa4d5ab8a43ce84b2d7b0a83db40b completed in 122.142s prompt=190 cached=0 completion=218 finish=stop
+[2026-09-13T18:12:08Z] request chatcmpl-d072ee8ce07e4bd39210462656d7bd93 accepted streaming=false
+[2026-09-13T18:12:08Z] request chatcmpl-d072ee8ce07e4bd39210462656d7bd93 prepared prompt=192
+[2026-09-13T18:12:08Z] request chatcmpl-d072ee8ce07e4bd39210462656d7bd93 generating
+[2026-09-13T18:14:44Z] request chatcmpl-d072ee8ce07e4bd39210462656d7bd93 completed in 156.301s prompt=192 cached=0 completion=297 finish=stop
+[2026-09-13T18:14:44Z] request chatcmpl-8b0f261a29e64847822c229b421bad7c accepted streaming=false
+[2026-09-13T18:14:44Z] request chatcmpl-8b0f261a29e64847822c229b421bad7c prepared prompt=122
+[2026-09-13T18:14:44Z] request chatcmpl-8b0f261a29e64847822c229b421bad7c generating
+[2026-09-13T18:16:18Z] request chatcmpl-8b0f261a29e64847822c229b421bad7c completed in 93.493s prompt=122 cached=0 completion=182 finish=stop
+[2026-09-13T18:16:18Z] request chatcmpl-4d4d06e7a2ac46fc81bdaa9ffd96ec8f accepted streaming=false
+[2026-09-13T18:16:18Z] request chatcmpl-4d4d06e7a2ac46fc81bdaa9ffd96ec8f prepared prompt=147
+[2026-09-13T18:16:18Z] request chatcmpl-4d4d06e7a2ac46fc81bdaa9ffd96ec8f generating
+[2026-09-13T18:17:44Z] request chatcmpl-4d4d06e7a2ac46fc81bdaa9ffd96ec8f completed in 86.433s prompt=147 cached=0 completion=140 finish=stop
+[2026-09-13T18:17:44Z] request chatcmpl-fe61f34a8f5a437c86d8f91621dfefe7 accepted streaming=false
+[2026-09-13T18:17:44Z] request chatcmpl-fe61f34a8f5a437c86d8f91621dfefe7 prepared prompt=156
+[2026-09-13T18:17:44Z] request chatcmpl-fe61f34a8f5a437c86d8f91621dfefe7 generating
+[2026-09-13T18:20:38Z] request chatcmpl-fe61f34a8f5a437c86d8f91621dfefe7 completed in 174.114s prompt=156 cached=0 completion=297 finish=stop
+[2026-09-13T18:20:38Z] request chatcmpl-0ea2b9e31ed6451fbacf28f0335435ca accepted streaming=false
+[2026-09-13T18:20:38Z] request chatcmpl-0ea2b9e31ed6451fbacf28f0335435ca prepared prompt=267
+[2026-09-13T18:20:38Z] request chatcmpl-0ea2b9e31ed6451fbacf28f0335435ca generating
+[2026-09-13T18:24:26Z] request chatcmpl-0ea2b9e31ed6451fbacf28f0335435ca completed in 227.401s prompt=267 cached=0 completion=419 finish=stop
+[2026-09-13T18:24:26Z] request chatcmpl-4fd534287df94ffe8a75adc746bbfb59 accepted streaming=false
+[2026-09-13T18:24:26Z] request chatcmpl-4fd534287df94ffe8a75adc746bbfb59 prepared prompt=218
+[2026-09-13T18:24:26Z] request chatcmpl-4fd534287df94ffe8a75adc746bbfb59 generating
+[2026-09-13T18:26:35Z] request chatcmpl-4fd534287df94ffe8a75adc746bbfb59 completed in 129.049s prompt=218 cached=0 completion=240 finish=stop
+[2026-09-13T18:26:35Z] request chatcmpl-a9aba1d53c4b4b89a6cbc7abc08b2ce6 accepted streaming=false
+[2026-09-13T18:26:35Z] request chatcmpl-a9aba1d53c4b4b89a6cbc7abc08b2ce6 prepared prompt=207
+[2026-09-13T18:26:35Z] request chatcmpl-a9aba1d53c4b4b89a6cbc7abc08b2ce6 generating
+[2026-09-13T18:29:15Z] request chatcmpl-a9aba1d53c4b4b89a6cbc7abc08b2ce6 completed in 160.021s prompt=207 cached=0 completion=292 finish=stop
+[2026-09-13T18:29:15Z] request chatcmpl-8c67d25c0f114c6385d11462cfddc068 accepted streaming=false
+[2026-09-13T18:29:15Z] request chatcmpl-8c67d25c0f114c6385d11462cfddc068 prepared prompt=205
+[2026-09-13T18:29:15Z] request chatcmpl-8c67d25c0f114c6385d11462cfddc068 generating
+[2026-09-13T18:31:50Z] request chatcmpl-8c67d25c0f114c6385d11462cfddc068 completed in 155.570s prompt=205 cached=0 completion=283 finish=stop
+[2026-09-13T18:31:50Z] request chatcmpl-46a78a0d02ff48f58983cb6d52c7727f accepted streaming=false
+[2026-09-13T18:31:50Z] request chatcmpl-46a78a0d02ff48f58983cb6d52c7727f prepared prompt=173
+[2026-09-13T18:31:50Z] request chatcmpl-46a78a0d02ff48f58983cb6d52c7727f generating
+[2026-09-13T18:34:25Z] request chatcmpl-46a78a0d02ff48f58983cb6d52c7727f completed in 154.942s prompt=173 cached=0 completion=293 finish=stop
+[2026-09-13T18:34:25Z] request chatcmpl-41fd43a4b7a24395a148c5ad31fee1e6 accepted streaming=false
+[2026-09-13T18:34:25Z] request chatcmpl-41fd43a4b7a24395a148c5ad31fee1e6 prepared prompt=176
+[2026-09-13T18:34:25Z] request chatcmpl-41fd43a4b7a24395a148c5ad31fee1e6 generating
+[2026-09-13T18:37:06Z] request chatcmpl-41fd43a4b7a24395a148c5ad31fee1e6 completed in 160.751s prompt=176 cached=0 completion=266 finish=stop
+[2026-09-13T18:37:06Z] request chatcmpl-16e3caca98e146eaa68d6c18b4c54a07 accepted streaming=false
+[2026-09-13T18:37:06Z] request chatcmpl-16e3caca98e146eaa68d6c18b4c54a07 prepared prompt=220
+[2026-09-13T18:37:06Z] request chatcmpl-16e3caca98e146eaa68d6c18b4c54a07 generating
+[2026-09-13T18:44:09Z] request chatcmpl-16e3caca98e146eaa68d6c18b4c54a07 completed in 422.571s prompt=220 cached=0 completion=768 finish=length
+[2026-09-13T18:44:09Z] request chatcmpl-f0c7484e214545a8b9268388b208ad53 accepted streaming=false
+[2026-09-13T18:44:09Z] request chatcmpl-f0c7484e214545a8b9268388b208ad53 prepared prompt=261
+[2026-09-13T18:44:09Z] request chatcmpl-f0c7484e214545a8b9268388b208ad53 generating
+[2026-09-13T18:47:34Z] request chatcmpl-f0c7484e214545a8b9268388b208ad53 completed in 205.605s prompt=261 cached=0 completion=376 finish=stop
+[2026-09-13T18:47:34Z] request chatcmpl-a2a781c20cad4d20ba80893725782b0d accepted streaming=false
+[2026-09-13T18:47:34Z] request chatcmpl-a2a781c20cad4d20ba80893725782b0d prepared prompt=244
+[2026-09-13T18:47:34Z] request chatcmpl-a2a781c20cad4d20ba80893725782b0d generating
+[2026-09-13T18:50:01Z] request chatcmpl-a2a781c20cad4d20ba80893725782b0d completed in 146.764s prompt=244 cached=0 completion=274 finish=stop
+[2026-09-13T18:50:01Z] request chatcmpl-ab49140ce64b4bf88c5dd7477cd217bf accepted streaming=false
+[2026-09-13T18:50:01Z] request chatcmpl-ab49140ce64b4bf88c5dd7477cd217bf prepared prompt=137
+[2026-09-13T18:50:01Z] request chatcmpl-ab49140ce64b4bf88c5dd7477cd217bf generating
+[2026-09-13T18:51:55Z] request chatcmpl-ab49140ce64b4bf88c5dd7477cd217bf completed in 113.693s prompt=137 cached=0 completion=199 finish=stop
+[2026-09-13T18:51:55Z] request chatcmpl-003a22dadaeb41b9ab28a141ee11f5cc accepted streaming=false
+[2026-09-13T18:51:55Z] request chatcmpl-003a22dadaeb41b9ab28a141ee11f5cc prepared prompt=187
+[2026-09-13T18:51:55Z] request chatcmpl-003a22dadaeb41b9ab28a141ee11f5cc generating
+[2026-09-13T18:54:13Z] request chatcmpl-003a22dadaeb41b9ab28a141ee11f5cc completed in 137.961s prompt=187 cached=0 completion=240 finish=stop
+[2026-09-13T18:54:13Z] request chatcmpl-42e0c8751da94a7a98cd2e4a9df79c2c accepted streaming=false
+[2026-09-13T18:54:13Z] request chatcmpl-42e0c8751da94a7a98cd2e4a9df79c2c prepared prompt=282
+[2026-09-13T18:54:13Z] request chatcmpl-42e0c8751da94a7a98cd2e4a9df79c2c generating
+[2026-09-13T18:56:56Z] request chatcmpl-42e0c8751da94a7a98cd2e4a9df79c2c completed in 162.879s prompt=282 cached=0 completion=259 finish=stop
+[2026-09-13T18:56:56Z] request chatcmpl-1402dde8fb6c4c0291ef3f03b4c28347 accepted streaming=false
+[2026-09-13T18:56:56Z] request chatcmpl-1402dde8fb6c4c0291ef3f03b4c28347 prepared prompt=328
+[2026-09-13T18:56:56Z] request chatcmpl-1402dde8fb6c4c0291ef3f03b4c28347 generating
+[2026-09-13T19:00:38Z] request chatcmpl-1402dde8fb6c4c0291ef3f03b4c28347 completed in 221.835s prompt=328 cached=0 completion=388 finish=stop
+[2026-09-13T19:00:38Z] request chatcmpl-33c7057764aa42988dad396f1ceee6f1 accepted streaming=false
+[2026-09-13T19:00:38Z] request chatcmpl-33c7057764aa42988dad396f1ceee6f1 prepared prompt=174
+[2026-09-13T19:00:38Z] request chatcmpl-33c7057764aa42988dad396f1ceee6f1 generating
+[2026-09-13T19:02:50Z] request chatcmpl-33c7057764aa42988dad396f1ceee6f1 completed in 132.338s prompt=174 cached=0 completion=216 finish=stop
+[2026-09-13T19:02:50Z] request chatcmpl-904840d9bcfa4348af20d9b191f95a7d accepted streaming=false
+[2026-09-13T19:02:50Z] request chatcmpl-904840d9bcfa4348af20d9b191f95a7d prepared prompt=117
+[2026-09-13T19:02:50Z] request chatcmpl-904840d9bcfa4348af20d9b191f95a7d generating
+[2026-09-13T19:04:19Z] request chatcmpl-904840d9bcfa4348af20d9b191f95a7d completed in 88.844s prompt=117 cached=0 completion=173 finish=stop
+[2026-09-13T19:04:19Z] request chatcmpl-b38821794526468fa77822260c25221f accepted streaming=false
+[2026-09-13T19:04:19Z] request chatcmpl-b38821794526468fa77822260c25221f prepared prompt=160
+[2026-09-13T19:04:19Z] request chatcmpl-b38821794526468fa77822260c25221f generating
+[2026-09-13T19:07:03Z] request chatcmpl-b38821794526468fa77822260c25221f completed in 164.764s prompt=160 cached=0 completion=321 finish=stop
+[2026-09-13T19:07:03Z] request chatcmpl-b1750a5be60a44f99d22201ca51f2c3c accepted streaming=false
+[2026-09-13T19:07:03Z] request chatcmpl-b1750a5be60a44f99d22201ca51f2c3c prepared prompt=158
+[2026-09-13T19:07:03Z] request chatcmpl-b1750a5be60a44f99d22201ca51f2c3c generating
+[2026-09-13T19:08:46Z] request chatcmpl-b1750a5be60a44f99d22201ca51f2c3c completed in 102.973s prompt=158 cached=0 completion=173 finish=stop
+[2026-09-13T19:08:46Z] request chatcmpl-d32e3c20d48c440bb8bfbe41184f42e3 accepted streaming=false
+[2026-09-13T19:08:46Z] request chatcmpl-d32e3c20d48c440bb8bfbe41184f42e3 prepared prompt=168
+[2026-09-13T19:08:46Z] request chatcmpl-d32e3c20d48c440bb8bfbe41184f42e3 generating
+[2026-09-13T19:11:31Z] request chatcmpl-d32e3c20d48c440bb8bfbe41184f42e3 completed in 164.741s prompt=168 cached=0 completion=328 finish=stop
+[2026-09-13T19:11:31Z] request chatcmpl-767cc8843fe144308915aa82aa689fa2 accepted streaming=false
+[2026-09-13T19:11:31Z] request chatcmpl-767cc8843fe144308915aa82aa689fa2 prepared prompt=351
+[2026-09-13T19:11:31Z] request chatcmpl-767cc8843fe144308915aa82aa689fa2 generating
+[2026-09-13T19:15:43Z] request chatcmpl-767cc8843fe144308915aa82aa689fa2 completed in 251.714s prompt=351 cached=0 completion=413 finish=stop
+[2026-09-13T19:15:43Z] request chatcmpl-ec44a5c5d3c746c0b415e196c60cbe29 accepted streaming=false
+[2026-09-13T19:15:43Z] request chatcmpl-ec44a5c5d3c746c0b415e196c60cbe29 prepared prompt=262
+[2026-09-13T19:15:43Z] request chatcmpl-ec44a5c5d3c746c0b415e196c60cbe29 generating
+[2026-09-13T19:18:26Z] request chatcmpl-ec44a5c5d3c746c0b415e196c60cbe29 completed in 163.458s prompt=262 cached=0 completion=273 finish=stop
+[2026-09-13T19:18:26Z] request chatcmpl-22e21cd4b35942e9a3cd3598a58c8a71 accepted streaming=false
+[2026-09-13T19:18:26Z] request chatcmpl-22e21cd4b35942e9a3cd3598a58c8a71 prepared prompt=162
+[2026-09-13T19:18:26Z] request chatcmpl-22e21cd4b35942e9a3cd3598a58c8a71 generating
+[2026-09-13T19:20:49Z] request chatcmpl-22e21cd4b35942e9a3cd3598a58c8a71 completed in 142.586s prompt=162 cached=0 completion=250 finish=stop
+[2026-09-13T19:20:49Z] request chatcmpl-c30fd3510a4f4fc0ade6c2964b8d4c96 accepted streaming=false
+[2026-09-13T19:20:49Z] request chatcmpl-c30fd3510a4f4fc0ade6c2964b8d4c96 prepared prompt=135
+[2026-09-13T19:20:49Z] request chatcmpl-c30fd3510a4f4fc0ade6c2964b8d4c96 generating
+[2026-09-13T19:22:01Z] request chatcmpl-c30fd3510a4f4fc0ade6c2964b8d4c96 completed in 72.008s prompt=135 cached=0 completion=119 finish=stop
+[2026-09-13T19:22:01Z] request chatcmpl-5e3ade2df6734becb13aed80bf933d22 accepted streaming=false
+[2026-09-13T19:22:01Z] request chatcmpl-5e3ade2df6734becb13aed80bf933d22 prepared prompt=157
+[2026-09-13T19:22:01Z] request chatcmpl-5e3ade2df6734becb13aed80bf933d22 generating
+[2026-09-13T19:24:20Z] request chatcmpl-5e3ade2df6734becb13aed80bf933d22 completed in 139.091s prompt=157 cached=0 completion=224 finish=stop
+FinchMoEServer ready at http://127.0.0.1:8080 model=finchmoe-qwen38 context=4096 prompt_cache=single-prefix integrity=trusted-install (explicit)
