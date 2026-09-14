@@ -69,6 +69,24 @@ public enum AppModelVerification: String, CaseIterable, Codable, Sendable, Ident
     }
 }
 
+public enum AppKVCacheMode: String, CaseIterable, Codable, Sendable, Identifiable {
+    case fp16
+    case int8
+    case turbo4bit = "turbo-4bit"
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .fp16: return "FP16"
+        case .int8: return "8-bit"
+        case .turbo4bit: return "Turbo 4-bit"
+        }
+    }
+
+    public var isAvailable: Bool { self == .fp16 }
+}
+
 public struct AppRuntimeOptions: Equatable, Sendable {
     public static let allowedSlotCounts = RuntimeConfiguration.allowedExpertCacheSlots
     public static let allowedPrefillChunkTokens = RuntimeConfiguration.allowedPrefillChunkTokens

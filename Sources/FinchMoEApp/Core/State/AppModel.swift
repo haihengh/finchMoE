@@ -10,7 +10,27 @@ public final class AppModel {
         case running
     }
 
+    public enum LocalServerState: Equatable {
+        case stopped
+        case starting
+        case running(URL)
+        case failed(String)
+
+        public var isRunning: Bool {
+            if case .running = self { return true }
+            return false
+        }
+
+        public var isActive: Bool {
+            switch self {
+            case .starting, .running: return true
+            case .stopped, .failed: return false
+            }
+        }
+    }
+
     public var modelPathText: String
+    public private(set) var selectedModelChoice: AppModelChoice?
     public var promptText: String = ""
     public private(set) var outputPromptText: String = ""
     public var outputText: String = ""
@@ -28,6 +48,10 @@ public final class AppModel {
     public private(set) var sentPromptBehavior: AppSentPromptBehavior = .keep
     public var diagnostics: AppDiagnostics?
     public var error: AppInferenceError?
+    public var localServerPort: Int = 8080
+    public var localServerModelID: String = "finchmoe-local"
+    public private(set) var localServerState: LocalServerState = .stopped
+    public private(set) var localServerLog: String = ""
     public var installState: AppModelInstallState = .idle
     public private(set) var installETAPresentation: DownloadETAPresentation = .hidden
     public private(set) var installETAText: String?
@@ -45,10 +69,11 @@ public final class AppModel {
     public private(set) var isCancellationPending: Bool = false
 
     private let client: any AppInferenceClient
-    private let installer: any AppModelInstallerClient
+    private var installer: any AppModelInstallerClient
     private var runTask: Task<Void, Never>?
     private var loadTask: Task<Void, Never>?
     private var installTask: Task<Void, Never>?
+    private var localServerProcess: Process?
     private var unloadTask: Task<Void, Never>?
     private var loadGeneration: UInt64 = 0
     private var unloadGeneration: UInt64 = 0
@@ -78,6 +103,7 @@ public final class AppModel {
             ? MacAppSettingsFileStore.loadOrCreate(forModelDirectory: directory)
             : MacAppSettings()
         self.modelPathText = directory.path
+        self.selectedModelChoice = Self.modelChoice(for: directory, descriptor: descriptor)
         self.runtimeOptions = AppRuntimeOptions(persisted: settings)
         self.maxContextTokens = settings.contextTokens
         self.temperature = settings.temperature
@@ -131,6 +157,10 @@ public final class AppModel {
 
     public var installDescriptor: AppModelInstallDescriptor { installer.descriptor }
 
+    public var modelChoices: [AppModelChoice] { AppModelChoice.allCases }
+
+    public var packageRootURL: URL? { AppModelLocation.packageRootURL() }
+
     public var installRequirement: AppModelInstallRequirement? {
         installReadiness.requirement
     }
@@ -141,6 +171,7 @@ public final class AppModel {
         guard case .ready = installReadiness else { return false }
         return !isRunning && !loadState.isLoading && !isInstallingModel
             && requiresModelInstallation
+            && installDescriptor.supportsRemoteInstall
     }
 
     public var canCancelInstall: Bool { installState.canCancel }
@@ -211,6 +242,13 @@ public final class AppModel {
 
     public var canCancel: Bool { isRunning && !isCancellationPending }
 
+    public var canStartLocalServer: Bool {
+        isModelInstalled && !isRunning && !loadState.isLoading && !localServerState.isActive
+            && (1...65_535).contains(localServerPort)
+    }
+
+    public var canStopLocalServer: Bool { localServerState.isActive }
+
     public var hasOutputTranscript: Bool {
         !outputPromptText.isEmpty || !outputText.isEmpty
     }
@@ -276,12 +314,26 @@ public final class AppModel {
         temperature != 0
     }
 
+    public func setModelChoice(_ choice: AppModelChoice) {
+        guard let packageRootURL else { return }
+        setModelURL(choice.defaultURL(packageRoot: packageRootURL), descriptor: choice.descriptor)
+    }
+
     public func setModelURL(_ url: URL) {
+        setModelURL(url, descriptor: AppModelInstallationProbe.matchingDescriptor(at: url))
+    }
+
+    private func setModelURL(_ url: URL, descriptor: AppModelInstallDescriptor) {
         guard !isRunning else { return }
         let path = url.standardizedFileURL.path
-        guard path != modelPathText else { return }
+        let newChoice = Self.modelChoice(for: url, descriptor: descriptor)
+        guard path != modelPathText || descriptor != installer.descriptor else { return }
 
+        stopLocalServer()
         modelPathText = path
+        selectedModelChoice = newChoice
+        installer.cancel()
+        installer = RepackModelInstallerClient(descriptor: descriptor)
         applyPersistedSettings(
             forModelDirectory: URL(fileURLWithPath: path, isDirectory: true))
         loadGeneration &+= 1
@@ -289,7 +341,6 @@ public final class AppModel {
         loadTask = nil
         installGeneration &+= 1
         installTask?.cancel()
-        installer.cancel()
         installTask = nil
         resetInstallETA()
         installState = .idle
@@ -300,7 +351,8 @@ public final class AppModel {
         diagnostics = nil
         error = nil
         phase = .idle
-        installationStatus = AppModelInstallationProbe.status(at: URL(fileURLWithPath: path))
+        installationStatus = AppModelInstallationProbe.status(
+            at: URL(fileURLWithPath: path), descriptor: descriptor)
         refreshInstallReadiness()
 
         if let lifecycle = client as? AppModelLifecycleClient {
@@ -427,6 +479,73 @@ public final class AppModel {
             self.loadState = .notLoaded
             self.clearUnloadTask(generation: generation)
         }
+    }
+
+    public func startLocalServer() {
+        guard canStartLocalServer else { return }
+        stopLocalServer()
+        localServerState = .starting
+        localServerLog = "Starting server..."
+
+        guard let executable = Self.localServerExecutableURL() else {
+            localServerState = .failed("FinchMoEServer executable was not found. Build the FinchMoEServer product first.")
+            return
+        }
+
+        let process = Process()
+        let outputPipe = Pipe()
+        process.executableURL = executable
+        process.arguments = [
+            "--model", URL(fileURLWithPath: modelPathText).standardizedFileURL.path,
+            "--port", "\(localServerPort)",
+            "--model-id", localServerModelID.isEmpty ? installDescriptor.shortName : localServerModelID,
+            "--max-context", "\(maxContextTokens)",
+            "--verify", runtimeOptions.modelVerification.rawValue,
+        ]
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+        process.terminationHandler = { [weak self] process in
+            Task { @MainActor in
+                guard let self, self.localServerProcess === process else { return }
+                self.localServerProcess = nil
+                if process.terminationStatus == 0 {
+                    self.localServerState = .stopped
+                } else {
+                    self.localServerState = .failed("FinchMoEServer exited with status \(process.terminationStatus).")
+                }
+            }
+        }
+        outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            Task { @MainActor in
+                guard let self, self.localServerProcess === process else { return }
+                self.localServerLog.append(text)
+                if text.contains("FinchMoEServer ready") {
+                    self.localServerState = .running(
+                        URL(string: "http://127.0.0.1:\(self.localServerPort)")!)
+                }
+            }
+        }
+
+        do {
+            try process.run()
+            localServerProcess = process
+        } catch {
+            outputPipe.fileHandleForReading.readabilityHandler = nil
+            localServerState = .failed("Failed to start FinchMoEServer: \(error)")
+        }
+    }
+
+    public func stopLocalServer() {
+        guard let process = localServerProcess else {
+            localServerState = .stopped
+            localServerLog = ""
+            return
+        }
+        process.terminate()
+        localServerProcess = nil
+        localServerState = .stopped
     }
 
     public func installModel() {
@@ -874,5 +993,29 @@ public final class AppModel {
     private func clearUnloadTask(generation: UInt64) {
         guard generation == unloadGeneration else { return }
         unloadTask = nil
+    }
+
+    private static func modelChoice(for directory: URL,
+                                    descriptor: AppModelInstallDescriptor) -> AppModelChoice? {
+        guard let root = AppModelLocation.packageRootURL() else { return nil }
+        return AppModelChoice.allCases.first {
+            $0.descriptor == descriptor
+                && $0.defaultURL(packageRoot: root).standardizedFileURL == directory.standardizedFileURL
+        }
+    }
+
+    private static func localServerExecutableURL() -> URL? {
+        let fileManager = FileManager.default
+        let executableName = "FinchMoEServer"
+        var candidates: [URL] = []
+        if let executableURL = Bundle.main.executableURL {
+            candidates.append(executableURL.deletingLastPathComponent()
+                .appendingPathComponent(executableName, isDirectory: false))
+        }
+        if let root = AppModelLocation.packageRootURL() {
+            candidates.append(root.appendingPathComponent(".build/release/\(executableName)", isDirectory: false))
+            candidates.append(root.appendingPathComponent(".build/debug/\(executableName)", isDirectory: false))
+        }
+        return candidates.first { fileManager.isExecutableFile(atPath: $0.path) }
     }
 }

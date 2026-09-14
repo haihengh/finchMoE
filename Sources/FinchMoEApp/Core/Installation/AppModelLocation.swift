@@ -1,6 +1,19 @@
 import Foundation
 
 enum AppModelLocation {
+    static func packageRootURL() -> URL? {
+        let fileManager = FileManager.default
+        if let executableURL = Bundle.main.executableURL,
+           let root = packageRoot(startingAt: executableURL.deletingLastPathComponent(),
+                                  fileExists: fileManager.fileExists(atPath:)) {
+            return root
+        }
+        let currentDirectoryURL = URL(fileURLWithPath: fileManager.currentDirectoryPath,
+                                      isDirectory: true)
+        return packageRoot(startingAt: currentDirectoryURL,
+                           fileExists: fileManager.fileExists(atPath:))
+    }
+
     static func defaultURL() -> URL {
         let fileManager = FileManager.default
         let applicationSupport = (try? fileManager.url(

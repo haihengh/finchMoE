@@ -505,6 +505,23 @@ struct ServerArgumentTests {
         #expect(throws: ServerArgumentError.self) { _ = try parsed("sometimes") }
     }
 
+      @Test func maxContextAcceptsLargeAppOptions() throws {
+        #expect(try ServerArguments.parse([
+          "--model", "model.finch",
+          "--max-context", "131072",
+        ]).maxContext == 131_072)
+        #expect(try ServerArguments.parse([
+          "--model", "model.finch",
+          "--max-context", "262144",
+        ]).maxContext == 262_144)
+        #expect(throws: ServerArgumentError.self) {
+          try ServerArguments.parse([
+            "--model", "model.finch",
+            "--max-context", "12345",
+          ])
+        }
+      }
+
     @Test func parsesSinglePrefixModeAndRejectsUnknownMode() throws {
         let arguments = try ServerArguments.parse([
             "--model", "model.finch",

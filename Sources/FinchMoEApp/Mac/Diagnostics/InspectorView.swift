@@ -4,10 +4,12 @@ import SwiftUI
 
 struct InspectorView: View {
     @Bindable var model: AppModel
+    @State private var kvCacheMode: AppKVCacheMode = .fp16
 
     var body: some View {
         Form {
             modelSection
+            serverSection
             memorySection
             generationSection
             runtimeSection
@@ -39,6 +41,26 @@ struct InspectorView: View {
                     .help("Copy model path")
                 }
             }
+            LabeledContent("Preset") {
+                Picker("Preset", selection: modelChoiceBinding) {
+                    ForEach(model.modelChoices) { choice in
+                        Text(choice.label).tag(Optional(choice))
+                    }
+                    Text("Local directory").tag(Optional<AppModelChoice>.none)
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .fixedSize()
+            }
+            HStack {
+                Button {
+                    chooseLocalModelDirectory()
+                } label: {
+                    Label("Choose Local Directory", systemImage: "folder")
+                }
+                .disabled(model.isRunning || model.isInstallingModel)
+                Spacer()
+            }
             if model.canUnloadModel {
                 Button("Unload Model", action: model.unloadModel)
             }
@@ -65,9 +87,59 @@ struct InspectorView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                if !model.installDescriptor.supportsRemoteInstall {
+                    Text("This preset loads a completed local .finch directory. Use Choose Local Directory for an existing install, or repack/download it outside the app.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .disabled(model.isRunning || model.isInstallingModel)
+    }
+
+    private var serverSection: some View {
+        Section("Local server") {
+            LabeledContent("Port") {
+                Stepper(value: $model.localServerPort, in: 1...65_535, step: 1) {
+                    Text("\(model.localServerPort)").monospacedDigit()
+                }
+                .fixedSize()
+            }
+            LabeledContent("Model ID") {
+                TextField("Model ID", text: $model.localServerModelID)
+                    .textFieldStyle(.roundedBorder)
+            }
+            switch model.localServerState {
+            case .stopped:
+                Text("Stopped")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .starting:
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Starting")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            case .running(let url):
+                LabeledContent("URL") {
+                    Text(url.absoluteString)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+            case .failed(let message):
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            HStack {
+                Button("Start", action: model.startLocalServer)
+                    .disabled(!model.canStartLocalServer)
+                Button("Stop", action: model.stopLocalServer)
+                    .disabled(!model.canStopLocalServer)
+            }
+        }
+        .disabled(model.isRunning || model.loadState.isLoading)
     }
 
     private var memorySection: some View {
@@ -83,6 +155,22 @@ struct InspectorView: View {
                 .labelsHidden()
                 .fixedSize()
             }
+            LabeledContent("KV cache") {
+                Picker("KV cache", selection: $kvCacheMode) {
+                    ForEach(AppKVCacheMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .fixedSize()
+            }
+            .onChange(of: kvCacheMode) { _, newValue in
+                guard newValue.isAvailable else { kvCacheMode = .fp16; return }
+            }
+            Text("FP16 KV is the available runtime path in this build. 8-bit and Turbo 4-bit are shown for the planned quantized KV modes and remain disabled until the core backend lands.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             LabeledContent("Slots") {
                 Picker("Slots", selection: $model.runtimeOptions.expertCacheSlots) {
                     ForEach(AppRuntimeOptions.allowedSlotCounts, id: \.self) { slots in
@@ -176,6 +264,26 @@ struct InspectorView: View {
             }
         }
         .disabled(model.isRunning || model.loadState.isLoading)
+    }
+
+    private var modelChoiceBinding: Binding<AppModelChoice?> {
+        Binding {
+            model.selectedModelChoice
+        } set: { choice in
+            guard let choice else { return }
+            model.setModelChoice(choice)
+        }
+    }
+
+    private func chooseLocalModelDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        if panel.runModal() == .OK, let url = panel.url {
+            model.setModelURL(url)
+        }
     }
 
 }
