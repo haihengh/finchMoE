@@ -25,7 +25,6 @@
   <a href="docs/IMPLEMENTATION_REFERENCES.md">References</a>
 </p>
 
-![FinchMoE Mac app generating text](docs/assets/finchmoe-app.webp)
 
 ## What this is
 
