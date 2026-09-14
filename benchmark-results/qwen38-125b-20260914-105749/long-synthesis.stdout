@@ -1,0 +1,3 @@
+TurboFieldfare is a specialized inference runtime for the Gemma 4 26B-A4B model, engineered to operate within a strict ~2 GB memory footprint on Apple Silicon Macs. The central constraint is the inability to load the full 14.3 GB model into RAM. Instead, the system maintains only the shared expert weights and the KV cache in memory, while streaming routed expert weights from SSD storage on demand.
+
+The runtime architecture splits data residency based on access patterns. Shared experts and attention mechanisms remain resident in Metal-visible memory. Routed experts, which constitute the bulk of the model’s parameters, are

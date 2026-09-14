@@ -5,7 +5,7 @@
 <h1 align="center">FinchMoE</h1>
 
 <p align="center">
-  <strong>Out-of-core MoE inference on Apple Silicon — running Qwen 3.6 35B-A3B</strong><br>
+  <strong>Out-of-core MoE inference on Apple Silicon — running Qwen 3.6 35B-A3B and Qwen 3.8 Flash-Next 125B</strong><br>
   A custom Swift + Metal runtime that streams MoE experts from SSD, so large models run on Macs with 8 GB of RAM.
 </p>
 
@@ -18,6 +18,7 @@
 
 <p align="center">
   <a href="#try-it">Quick start</a> ·
+  <a href="#model-performance-comparison">Model performance</a> ·
   <a href="#qwen-36-35b-a3b-port">Qwen 3.6 port</a> ·
   <a href="docs/OPENAI_SERVER.md">Local server</a> ·
   <a href="docs/BENCHMARKS.md">Benchmarks</a> ·
@@ -25,7 +26,7 @@
   <a href="docs/IMPLEMENTATION_REFERENCES.md">References</a>
 </p>
 
-![FinchMoE Mac app generating text](docs/assets/finchmoe-app.webp)
+
 
 ## What this is
 
@@ -125,6 +126,37 @@ checkpoint.
 Prompt length, generated length, page-cache state, and hardware all affect
 throughput. See [benchmarks](docs/BENCHMARKS.md) for the upstream Gemma
 measurements the fork started from.
+
+## Model performance comparison
+
+Measured 2026-09-14 on a 24 GB Apple M4 Pro MacBook Pro (`Mac16,7`, macOS
+26.6.2, Swift 6.2.4), using the release `FinchMoECLI`, verified local
+`.finch` installs, app sampling defaults for the prompt-suite rows
+(`temperature 0.2`, Top-K 64, Top-P 0.95), and a 128-token generation cap.
+Decode rates exclude model load and prompt prefill. Prefill rates are reported
+separately because long prompts exercise a different path than token-by-token
+decode.
+
+| Model | Install | HumanEval base pass@1 | HumanEval+ pass@1 |
+| --- | ---: | ---: | ---: |
+| Qwen 3.6 35B-A3B | ~19 GB `.finch` | 90.9% (149/164) | 87.8% (144/164) |
+| Qwen 3.8 Flash-Next 125B | ~167 GB `.finch` | 94.5% (155/164) | 92.1% (151/164) |
+
+| Prompt-suite case | Model | Prompt tokens | Prefill | Prefill tok/s | Decode | Decode tok/s | Expert reads/token |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| short-explanation | Qwen 3.6 35B-A3B | 62 | 2.29s | 27.1 | 5.42s | 23.61 | 214.7 MB |
+| short-explanation | Qwen 3.8 Flash-Next 125B | 62 | 5.81s | 10.7 | 21.04s | 6.08 | 607.1 MB |
+| medium-review | Qwen 3.6 35B-A3B | 426 | 10.48s | 40.7 | 5.46s | 23.46 | 236.0 MB |
+| medium-review | Qwen 3.8 Flash-Next 125B | 426 | 25.81s | 16.5 | 23.21s | 5.52 | 695.1 MB |
+| long-synthesis | Qwen 3.6 35B-A3B | 2,940 | 81.44s | 36.1 | 6.64s | 19.28 | 243.5 MB |
+| long-synthesis | Qwen 3.8 Flash-Next 125B | 2,940 | 198.33s | 14.8 | 26.01s | 4.92 | 719.3 MB |
+
+In this apples-to-apples local run, Qwen 3.6 decodes about **3.9-4.3x faster**
+than Qwen 3.8 across the 128-token prompt suite, while Qwen 3.8 scores **+3.7
+points** on HumanEval base and **+4.3 points** on HumanEval+. The dominant
+runtime difference is routed-expert I/O: the 125B install reads roughly
+607-719 MB of expert data per generated token here, versus 215-244 MB/token for
+the 35B install.
 
 ## The Qwen 3.6 35B-A3B port
 
