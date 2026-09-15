@@ -227,11 +227,15 @@ final class PLEHost {
     }
 
     /// The head-major `[headCount · rowDim]` gathered rows for one token,
-    /// converted from the parts' raw BF16 to the engine's FP16 activations.
+    /// decoded from the part's on-disk row (raw BF16 or int4 affine) into the
+    /// engine's FP16 activations.
     ///
     /// `open` is the model's cached part opener. The rows are hash-random, so
     /// they land in unrelated parts and mostly unrelated rows; this is at most
-    /// `headCount` single-row preads of 320 bytes each.
+    /// `headCount` single-row preads. The decode is per-layout, decided by the
+    /// streamer (which `Model` set from the manifest's `pleNgram` slot), so the
+    /// output shape/type is identical for both and nothing downstream (the GPU
+    /// gate/conv/plane-add kernels in `ple.metal`) changes.
     func gather(atPosition position: Int,
                 open: (Int) throws -> PLEPartStreamer) throws -> [Float16] {
         let rows = rowIndices(atPosition: position)
@@ -245,10 +249,35 @@ final class PLEHost {
             let streamer = try open(part)
             let bytes = try streamer.readRows(rowInPart..<(rowInPart + 1))
             let base = h * rowDim
-            bytes.withUnsafeBytes { raw in
-                let bits = raw.bindMemory(to: UInt16.self)
-                for d in 0..<rowDim {
-                    out[base + d] = Float16(Quantization.bf16ToFloat(bits[d]))
+            switch streamer.layout {
+            case .rawBF16:
+                bytes.withUnsafeBytes { raw in
+                    let bits = raw.bindMemory(to: UInt16.self)
+                    for d in 0..<rowDim {
+                        out[base + d] = Float16(Quantization.bf16ToFloat(bits[d]))
+                    }
+                }
+            case .quantized(let groupSize):
+                // On-disk row (writer layout): [packed nibbles: rowDim/2]
+                // [scale BF16 × nGroups] [bias BF16 × nGroups], native-endian.
+                let nGroups = rowDim / groupSize
+                bytes.withUnsafeBytes { raw in
+                    let b = raw.bindMemory(to: UInt8.self)
+                    let packedLen = rowDim / 2
+                    let packed = Array(b.prefix(packedLen))
+                    func u16(_ i: Int) -> UInt16 { UInt16(b[i]) | (UInt16(b[i + 1]) << 8) }
+                    var scales = [UInt16](repeating: 0, count: nGroups)
+                    for g in 0..<nGroups { scales[g] = u16(packedLen + 2 * g) }
+                    let biasBase = packedLen + 2 * nGroups
+                    var biases = [UInt16](repeating: 0, count: nGroups)
+                    for g in 0..<nGroups { biases[g] = u16(biasBase + 2 * g) }
+                    let r = Quantization.Int4AffinePLERow(packed: packed,
+                                                          scales: scales,
+                                                          biases: biases)
+                    let values = Quantization.dequantizeInt4AffinePLE(r, n: rowDim)
+                    for d in 0..<rowDim {
+                        out[base + d] = Float16(values[d])
+                    }
                 }
             }
         }

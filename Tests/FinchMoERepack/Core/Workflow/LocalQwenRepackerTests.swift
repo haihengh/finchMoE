@@ -237,6 +237,34 @@ import FinchMoEFormat
         return try await LocalQwenRepacker(options: options).run()
     }
 
+    /// Re-quantize a PLE part's raw BF16 source bytes row by row with the
+    /// canonical Phase-2 codec, laying each row out as
+    /// [packed nibbles: cols/2][scale BF16 × nGroups][bias BF16 × nGroups]
+    /// — exactly the stride `QwenQuantizedWriter.writePLEPart` writes. A
+    /// byte-compare of this against the written part proves the repack is the
+    /// canonical transform, not a verbatim copy.
+    private static func quantizedPLEBytes(_ source: Data, cols: Int, groupSize: Int) -> Data {
+        let rows = source.count / (cols * 2)
+        let nGroups = cols / groupSize
+        let rowStride = cols / 2 + 2 * nGroups * 2
+        var out = [UInt8](repeating: 0, count: rows * rowStride)
+        for r in 0..<rows {
+            var floats = [Float](repeating: 0, count: cols)
+            for k in 0..<cols {
+                let b = UInt16(source[r * cols * 2 + 2 * k])
+                    | UInt16(source[r * cols * 2 + 2 * k + 1]) << 8
+                floats[k] = FinchQuantization.bf16ToFloat(b)
+            }
+            let q = FinchQuantization.quantizeInt4AffinePLE(floats, groupSize: groupSize)
+            var o = r * rowStride
+            out.replaceSubrange(o..<(o + q.packed.count), with: q.packed)
+            o += q.packed.count
+            q.scales.withUnsafeBytes { memcpy(&out[o], $0.baseAddress!, $0.count) }; o += q.scales.count * 2
+            q.biases.withUnsafeBytes { memcpy(&out[o], $0.baseAddress!, $0.count) }
+        }
+        return Data(out)
+    }
+
     /// Raw source bytes of one checkpoint tensor (from the snapshot load).
     private static func readSourceTensor(
         _ snapshot: QwenLocalSnapshot.Snapshot, name: String
@@ -274,7 +302,13 @@ import FinchMoEFormat
         for L in 0..<t.numLayers {
             #expect(fm.fileExists(atPath: out + String(format: "/packed_experts/layer_%02d.bin", L)))
         }
-        let partBytes = t.ngramPartRows * t.ngramRowDim * 2
+        // PLE parts are int4-affine quantized (Phase 3), not raw BF16:
+        // per-row [packed nibbles: cols/2][scale BF16 × nGroups][bias BF16 × nGroups].
+        let cols = t.ngramRowDim
+        let groupSize = FinchQuantization.pleGroupSize
+        let nGroups = cols / groupSize
+        let rowStride = cols / 2 + 2 * nGroups * 2
+        let partBytes = t.ngramPartRows * rowStride
         for i in 0..<t.ngramPartCount {
             let p = out + String(format: "/ple_shards/shard_%03d.bin", i)
             #expect(fm.fileExists(atPath: p))
@@ -282,7 +316,8 @@ import FinchMoEFormat
         }
         #expect(fm.fileExists(atPath: out + "/tokenizer/config.json"))
 
-        // Parts are verbatim raw-BF16 copies of their source tensors.
+        // Parts are int4-affine quantizations of their source BF16 rows —
+        // re-quantize the source with the canonical codec and byte-compare.
         let snapshot = try QwenLocalSnapshot.load(snapshotDir: dir)
         for i in [0, 3] {
             let source = try Self.readSourceTensor(
@@ -290,7 +325,7 @@ import FinchMoEFormat
                 name: "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_\(i).weight")
             let written = try Data(contentsOf: URL(fileURLWithPath:
                 out + String(format: "/ple_shards/shard_%03d.bin", i)))
-            #expect(source == written)
+            #expect(written == Self.quantizedPLEBytes(source, cols: cols, groupSize: groupSize))
         }
 
         // Manifest: qwen3_8 identity, census-corrected PLE geometry, parts in
@@ -315,6 +350,12 @@ import FinchMoEFormat
         }
         let quant = try #require(manifest.quant)
         #expect(quant.embedding.weightBits == 4 && quant.router.weightBits == 8)
+        // The new additive PLE n-gram slot is present for a qwen3_8 install,
+        // locked to int4 / the Phase-1 group size / affine.
+        let pleQuant = try #require(quant.pleNgram)
+        #expect(pleQuant.weightBits == 4)
+        #expect(pleQuant.groupSize == FinchQuantization.pleGroupSize)
+        #expect(pleQuant.scheme == "affine")
 
         // Resident index: family identity + the I64 PLE metadata rides raw.
         let weightsData = try Data(contentsOf: URL(fileURLWithPath: out + "/model_weights.bin"))

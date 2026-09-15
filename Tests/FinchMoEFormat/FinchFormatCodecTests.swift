@@ -116,6 +116,44 @@ private enum FormatFixture {
         #expect(root["bitWidthOverridesHonored"] as? Int == 120)
     }
 
+    @Test func pleNgramSlotIsOptionalAndRoundTrips() throws {
+        // Old raw-BF16 PLE installs carry no pleNgram slot: the default
+        // fixture is exactly that shape, and it must decode with the slot nil.
+        let legacy = FormatFixture.manifest()
+        #expect(legacy.quant?.pleNgram == nil)
+        let legacyEncoded = try FinchManifestCodec.encode(legacy)
+        let legacyDecoded = try FinchManifestCodec.decode(legacyEncoded)
+        #expect(legacyDecoded == legacy)
+        #expect(legacyDecoded.quant?.pleNgram == nil)
+
+        // A quantized PLE install carries the additive slot; it round-trips.
+        let pleSlot = FinchManifestQuantSlotV1(
+            weightBits: 4, scheme: "affine", scaleType: "BF16",
+            biasType: "BF16", groupSize: FinchQuantization.pleGroupSize)
+        let quant = FinchManifestQuantV1(
+            embedding: FormatFixture.quantSlot, attention: FormatFixture.quantSlot,
+            linearAttention: FormatFixture.quantSlot, router: FormatFixture.quantSlot,
+            sharedExpert: FormatFixture.quantSlot, routedExpert: FormatFixture.quantSlot,
+            pleNgram: pleSlot)
+        let manifest = FormatFixture.manifest(quant: quant)
+        let encoded = try FinchManifestCodec.encode(manifest)
+        let decoded = try FinchManifestCodec.decode(encoded)
+        #expect(decoded == manifest)
+        #expect(decoded.quant?.pleNgram?.weightBits == 4)
+        #expect(decoded.quant?.pleNgram?.groupSize == FinchQuantization.pleGroupSize)
+
+        // Strip the slot from the wire: a decoder must tolerate its absence
+        // even on an otherwise-valid qwen3_8-shaped quant block.
+        var root = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        if var q = root["quant"] as? [String: Any] {
+            q.removeValue(forKey: "pleNgram")
+            root["quant"] = q
+        }
+        let stripped = try JSONSerialization.data(withJSONObject: root)
+        let strippedDecoded = try FinchManifestCodec.decode(stripped)
+        #expect(strippedDecoded.quant?.pleNgram == nil)
+    }
+
     @Test func acceptsAdditiveMinorAndUnknownTopLevelKey() throws {
         let data = try FinchManifestCodec.encode(FormatFixture.manifest(minor: 9))
         var root = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])

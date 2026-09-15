@@ -24,6 +24,14 @@ enum FinchJSON {
         var routedExpert: Int
     }
 
+    /// The PLE n-gram quantization slot (nil on raw-BF16 PLE installs and on
+    /// every non-qwen3_8 family — see `FinchManifestQuantV1.pleNgram`).
+    struct PleNgramQuant {
+        let weightBits: Int
+        let scheme: String
+        let groupSize: Int
+    }
+
     static func encodeManifest(plan: RepackPlan,
                                       modelID: String,
                                       sourceSnapshotHash: String,
@@ -31,7 +39,8 @@ enum FinchJSON {
                                       expertsPerLayer: Int,
                                       numLayers: Int,
                                       expertStride: UInt64,
-                                      bitWidths: QuantBitWidths) throws -> Data {
+                                      bitWidths: QuantBitWidths,
+                                      pleNgram: PleNgramQuant? = nil) throws -> Data {
         try encodeManifest(arch: plan.arch,
                            baseMode: plan.baseMode,
                            baseGroupSize: plan.baseGroupSize,
@@ -42,7 +51,8 @@ enum FinchJSON {
                            expertsPerLayer: expertsPerLayer,
                            numLayers: numLayers,
                            expertStride: expertStride,
-                           bitWidths: bitWidths)
+                           bitWidths: bitWidths,
+                           pleNgram: pleNgram)
     }
 
     static func encodeManifest(arch: ArchInfo,
@@ -55,7 +65,8 @@ enum FinchJSON {
                                       expertsPerLayer: Int,
                                       numLayers: Int,
                                       expertStride: UInt64,
-                                      bitWidths: QuantBitWidths) throws -> Data {
+                                      bitWidths: QuantBitWidths,
+                                      pleNgram: PleNgramQuant? = nil) throws -> Data {
         let bitWidthsByQuantSlot = [
             "embedding": bitWidths.embedding,
             "attention": bitWidths.attention,
@@ -120,13 +131,22 @@ enum FinchJSON {
                 biasType: "BF16",
                 groupSize: baseGroupSize)
         }
+        let pleSlot: FinchManifestQuantSlotV1? = pleNgram.map {
+            FinchManifestQuantSlotV1(
+                weightBits: $0.weightBits,
+                scheme: $0.scheme,
+                scaleType: "BF16",
+                biasType: "BF16",
+                groupSize: $0.groupSize)
+        }
         let quant = FinchManifestQuantV1(
             embedding: try slot("embedding"),
             attention: try slot("attention"),
             linearAttention: try slot("linearAttention"),
             router: try slot("router"),
             sharedExpert: try slot("sharedExpert"),
-            routedExpert: try slot("routedExpert"))
+            routedExpert: try slot("routedExpert"),
+            pleNgram: pleSlot)
         var wireFiles: [String: FinchManifestFileV1] = [:]
         wireFiles.reserveCapacity(files.count)
         for file in files {

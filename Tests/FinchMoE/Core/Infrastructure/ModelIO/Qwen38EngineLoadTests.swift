@@ -497,24 +497,43 @@ import FinchMoEValidationSupport
         #expect(part.partIndex == 2)
         #expect(part.rows == Toy38.ngramPartRows)
         #expect(part.columns == Toy38.ngramRowDim)
-        #expect(part.byteStride == Toy38.ngramRowDim * 2)
-        #expect(part.sizeBytes == UInt64(Toy38.ngramPartRows * Toy38.ngramRowDim * 2))
+        // PLE parts are quantized (int4 / group 32 / affine), so the per-row
+        // stride is the fixed int4-affine layout, not raw BF16:
+        // [packed nibbles: cols/2][scale BF16 × nGroups][bias BF16 × nGroups].
+        let cols = Toy38.ngramRowDim
+        let groupSize = FinchQuantization.pleGroupSize
+        let perRow = (cols / 2) + 2 * (cols / groupSize) * 2
+        #expect(part.byteStride == perRow)
+        #expect(part.sizeBytes == UInt64(Toy38.ngramPartRows * perRow))
         #expect(model.plePartOpenCount() == 1)
 
         // Cached: a second open returns the same streamer (no re-open).
         #expect(try model.openPLEPart(2) === part)
         #expect(model.plePartOpenCount() == 1)
 
-        // Whole-part read is byte-exact against the checkpoint slice: the
-        // repack copies parts raw, and the streamer must reproduce them.
+        // Whole-part read is byte-exact against a canonical re-quantization of
+        // the checkpoint's source rows: the repack quantizes each row, and the
+        // streamer must reproduce those exact bytes.
         let all = try part.readRows(0..<Toy38.ngramPartRows)
         #expect(all.count == Toy38.ngramPartRows * part.byteStride)
+        let name = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_2.weight"
         let source = Toy38.bf16Bytes(
-            count: Toy38.ngramPartRows * Toy38.ngramRowDim,
-            seed: 0x51A9 &+ UInt64(
-                "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_2.weight"
-                    .count) &* 7919)
-        #expect(all == source)
+            count: Toy38.ngramPartRows * cols,
+            seed: 0x51A9 &+ UInt64(name.count) &* 7919)
+        var quantized = Data()
+        for r in 0..<Toy38.ngramPartRows {
+            var row = [Float](repeating: 0, count: cols)
+            for d in 0..<cols {
+                let bits = UInt16(source[r * cols * 2 + 2 * d])
+                    | UInt16(source[r * cols * 2 + 2 * d + 1]) << 8
+                row[d] = FinchQuantization.bf16ToFloat(bits)
+            }
+            let q = FinchQuantization.quantizeInt4AffinePLE(row, groupSize: groupSize)
+            q.packed.forEach { quantized.append($0) }
+            q.scales.forEach { quantized.append(UInt8(truncatingIfNeeded: $0 & 0xFF)); quantized.append(UInt8(truncatingIfNeeded: $0 >> 8)) }
+            q.biases.forEach { quantized.append(UInt8(truncatingIfNeeded: $0 & 0xFF)); quantized.append(UInt8(truncatingIfNeeded: $0 >> 8)) }
+        }
+        #expect(all == quantized)
 
         // Range reads are contiguous slices of the whole-part buffer.
         let head = try part.readRows(0..<17)
@@ -593,24 +612,31 @@ import FinchMoEValidationSupport
                                          headsPerNGram: Toy38.headsPerNgram)
         #expect(rows == wantRows, "rows \(rows) vs \(wantRows)")
 
-        // Every gathered value is the byte pair on disk at that row: the part
-        // split, the row offset and the BF16→FP16 widening, all at once.
+        // Every gathered value is dequantize(quantize(sourceRow)) for the row
+        // the hash named: the repack quantized the part, the streamer read the
+        // quantized bytes, and the gather dequantized them. Reconstruct the
+        // canonical codec result from the checkpoint's source row and compare.
         let gathered = try host.gather(atPosition: 0) { try model.openPLEPart($0) }
         #expect(gathered.count == Toy38.ngramWidth)
 
-        var expected = [Float16](repeating: 0, count: gathered.count)
         let rowDim = Toy38.ngramRowDim
+        let groupSize = FinchQuantization.pleGroupSize
+        var expected = [Float16](repeating: 0, count: gathered.count)
         for (h, row) in rows.enumerated() {
             let (part, rowInPart) = host.location(ofRow: row)
-            let path = directory + String(format: "/ple_shards/shard_%03d.bin", part)
-            let raw = try Data(contentsOf: URL(fileURLWithPath: path))
-            let base = rowInPart * rowDim * 2
+            let name = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_\(part).weight"
+            let source = Toy38.bf16Bytes(
+                count: Toy38.ngramPartRows * rowDim,
+                seed: 0x51A9 &+ UInt64(name.count) &* 7919)
+            var rowFloats = [Float](repeating: 0, count: rowDim)
             for d in 0..<rowDim {
-                let lo = UInt16(raw[base + 2 * d])
-                let hi = UInt16(raw[base + 2 * d + 1])
-                let value = Float16(Quantization.bf16ToFloat(lo | (hi << 8)))
-                expected[h * rowDim + d] = value
+                let bits = UInt16(source[rowInPart * rowDim * 2 + 2 * d])
+                    | UInt16(source[rowInPart * rowDim * 2 + 2 * d + 1]) << 8
+                rowFloats[d] = FinchQuantization.bf16ToFloat(bits)
             }
+            let q = FinchQuantization.quantizeInt4AffinePLE(rowFloats, groupSize: groupSize)
+            let dq = FinchQuantization.dequantizeInt4AffinePLE(q, n: rowDim)
+            for d in 0..<rowDim { expected[h * rowDim + d] = Float16(dq[d]) }
         }
 
         var mismatch = -1

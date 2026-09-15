@@ -69,6 +69,10 @@ public struct ManifestQuant: Decodable, Equatable, Sendable {
     public let router: ManifestQuantSlot
     public let sharedExpert: ManifestQuantSlot
     public let routedExpert: ManifestQuantSlot
+    /// PLE n-gram table quantization slot. `nil` on raw-BF16 PLE installs (which
+    /// keep the legacy byte path) and on non-qwen3_8 families; present with
+    /// int4 / group 32 / "affine" when the PLE table was quantized.
+    public let pleNgram: ManifestQuantSlot?
 }
 
 public struct Manifest: Decodable, Equatable, Sendable {
@@ -211,6 +215,19 @@ public enum ManifestReader {
                   slot.biasType.lowercased() == "bf16",
                   slot.groupSize == Quantization.groupSize else {
                 throw ModelError.indexCorrupt(detail: "unsupported quantization for \(name)")
+            }
+        }
+        // PLE n-gram slot: optional (raw-BF16 installs omit it). When present it
+        // must be the exact int4 / group-32 / affine layout the writer produces;
+        // anything else means a different on-disk stride we cannot decode, so
+        // reject the load rather than misread bytes (Phase 4 backward-compat).
+        if let ple = quant.pleNgram {
+            guard ple.weightBits == 4,
+                  ple.scheme.lowercased() == "affine",
+                  ple.scaleType.lowercased() == "bf16",
+                  ple.biasType.lowercased() == "bf16",
+                  ple.groupSize == Quantization.pleGroupSize else {
+                throw ModelError.indexCorrupt(detail: "unsupported quantization for pleNgram")
             }
         }
     }
@@ -407,7 +424,8 @@ private extension ManifestQuant {
                   linearAttention: ManifestQuantSlot(wire: wire.linearAttention),
                   router: ManifestQuantSlot(wire: wire.router),
                   sharedExpert: ManifestQuantSlot(wire: wire.sharedExpert),
-                  routedExpert: ManifestQuantSlot(wire: wire.routedExpert))
+                  routedExpert: ManifestQuantSlot(wire: wire.routedExpert),
+                  pleNgram: wire.pleNgram.map(ManifestQuantSlot.init(wire:)))
     }
 }
 

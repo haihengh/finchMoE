@@ -1085,19 +1085,46 @@ private enum T38 {
             let rows = PLERef.rowIndices(context: ctx, multipliers: multipliers,
                                          vocabSizes: vocabSizes, offsets: offsets,
                                          headsPerNGram: Toy.headsPerNgram)
-            // The gather reads BF16 rows out of the part files and stores them
-            // as half (`PLEHost.gather`).
+            // The gather reads rows out of the part files and stores them as
+            // half (`PLEHost.gather`); the row is raw BF16 or int4 affine per
+            // the streamer's layout. This mirrors that decode so the reference
+            // runs on exactly the engine's gathered vector (half-rounded).
             var gathered = [Float](repeating: 0, count: ngramWidth)
             for (h, row) in rows.enumerated() {
                 let part = row / Toy.ngramPartRows
                 let rowInPart = row % Toy.ngramPartRows
                 let streamer = try model.openPLEPart(part)
                 let bytes = try streamer.readRows(rowInPart..<(rowInPart + 1))
-                bytes.withUnsafeBytes { raw in
-                    let bits = raw.bindMemory(to: UInt16.self)
-                    for d in 0..<ngramRowDim {
-                        gathered[h * ngramRowDim + d] =
-                            Float(Float16(FinchQuantization.bf16ToFloat(bits[d])))
+                switch streamer.layout {
+                case .rawBF16:
+                    bytes.withUnsafeBytes { raw in
+                        let bits = raw.bindMemory(to: UInt16.self)
+                        for d in 0..<ngramRowDim {
+                            gathered[h * ngramRowDim + d] =
+                                Float(Float16(FinchQuantization.bf16ToFloat(bits[d])))
+                        }
+                    }
+                case .quantized(let groupSize):
+                    // On-disk row (writer layout): [packed nibbles: rowDim/2]
+                    // [scale BF16 × nGroups] [bias BF16 × nGroups], native-endian.
+                    let nGroups = ngramRowDim / groupSize
+                    bytes.withUnsafeBytes { raw in
+                        let b = raw.bindMemory(to: UInt8.self)
+                        let packedLen = ngramRowDim / 2
+                        let packed = Array(b.prefix(packedLen))
+                        func u16(_ i: Int) -> UInt16 { UInt16(b[i]) | (UInt16(b[i + 1]) << 8) }
+                        var scales = [UInt16](repeating: 0, count: nGroups)
+                        for g in 0..<nGroups { scales[g] = u16(packedLen + 2 * g) }
+                        let biasBase = packedLen + 2 * nGroups
+                        var biases = [UInt16](repeating: 0, count: nGroups)
+                        for g in 0..<nGroups { biases[g] = u16(biasBase + 2 * g) }
+                        let r = FinchQuantization.Int4AffinePLERow(packed: packed,
+                                                                   scales: scales,
+                                                                   biases: biases)
+                        let values = FinchQuantization.dequantizeInt4AffinePLE(r, n: ngramRowDim)
+                        for d in 0..<ngramRowDim {
+                            gathered[h * ngramRowDim + d] = Float(Float16(values[d]))
+                        }
                     }
                 }
             }
@@ -1360,7 +1387,7 @@ private enum T38 {
     /// `tolerance`; it holds them at these numbers and asserts that no *other*
     /// stage joins them.
     ///
-    /// Six of the seven are the last row's layer-3 chain — five stages of it and
+    /// Seven of the eight are the last row's layer-3 chain — six stages of it and
     /// the `logits` it produces. That chain's inputs are not the row's own
     /// arithmetic but eleven rows of the full layer's KV timeline, which the
     /// replay builds from its own planes. Row 11 is the first row past the
@@ -1368,17 +1395,17 @@ private enum T38 {
     /// rather than `encodeFull`, and that selection is what makes the output
     /// discontinuous in its inputs: the row's *attention input* is bit-identical
     /// between the two paths (`3|attnBlockIn` = 0.0), yet its output leaves at
-    /// 7.4e-2 — so what the selection amplifies is the KV residue, not anything
+    /// 1.4e-1 — so what the selection amplifies is the KV residue, not anything
     /// about the row's own input.
     ///
-    /// The seventh, `2|recState`, is the same shape one layer down: the GDN
+    /// The eighth, `2|recState`, is the same shape one layer down: the GDN
     /// state a chunk carries is unanchored exactly as the KV timeline is
     /// (`Replay.planeSeeds` re-seeds planes and never the recurrence), and its
-    /// residue compounds with layer index — 1.0e-6 at layer 0, 3.7e-3 at layer
-    /// 1, 1.3e-2 at layer 2 — while the readout damps it back under `tolerance`
-    /// downstream (`2|recurrentOut` 5.5e-3). It is the only layer 0–2 stage past
-    /// the line, and it is past it barely; layer 0 holds at ≤ 7.1e-4 and layer
-    /// 1 at ≤ 3.7e-3.
+    /// residue compounds with layer index — 1.0e-6 at layer 0, 2.0e-3 at layer
+    /// 1, 2.2e-2 at layer 2 — while the readout damps it back under `tolerance`
+    /// downstream (`2|recurrentOut` 8.3e-3). It is the only layer 0–2 stage past
+    /// the line, and it is past it barely; layer 0 holds at ≤ 7.2e-4 and layer
+    /// 1 at ≤ 5.5e-3.
     ///
     /// That this is carried-in residue and not a defect in the chunk's
     /// recurrence is already settled elsewhere: `prefillChunkMatchesDecodeSteps`
@@ -1390,8 +1417,8 @@ private enum T38 {
     /// That number is not a replay artifact, and the control is the engine
     /// itself: run the same twelve tokens through `produce` twelve times and
     /// through one `prefillChunked` chunk, and the engine's *own* two paths
-    /// differ at `3|attnBlockOut` by 0.09765625 — the same stage this replay
-    /// sits at (0.07423675), and in fact a *shorter* distance than the engine's
+    /// differ at `3|attnBlockOut` by 0.142604 — the same stage this replay
+    /// sits at (0.14233708), and in fact a *shorter* distance than the engine's
     /// two paths are from each other. The chunk path seeds that difference at
     /// layer 0, where `MoeTailRef`'s chunked reduce takes fp16 `routePartials`
     /// while decode's fused `moe_phase2_down_reduce_k8` keeps the per-slot
@@ -1417,20 +1444,48 @@ private enum T38 {
     /// measured in a wrong-gate regime. Under it the same run measured
     /// 0.49819666 / 0.3041551 / 0.22048835 / 0.20131938 / 0.1734365 /
     /// 0.062440872 and the control above was 0.50025904. The corrected gate is
-    /// better conditioned as well as right: the layer-3 set shrank ~6-9x,
-    /// `3|hc.mid` dropped out of it entirely (0.05141066 → 4.9e-3, so it is now
-    /// held at `tolerance` instead — a tighter bound than the 0.06 it had), and
-    /// only `2|recState` moved the other way (0.009862052 → 0.013246425).
+    /// better conditioned as well as right: the layer-3 set shrank ~6-9x, and
+    /// only `2|recState` moved the other way (0.009862052 → 0.013246425). The
+    /// correction also dropped `3|hc.mid` out of the set entirely (0.05141066 →
+    /// 4.9e-3); the PLE re-measurement below put it back.
+    ///
+    /// The set was re-measured a second time when the repack learned to quantize
+    /// the PLE n-gram table (int4 affine, group 32 — `PLE_QUANTIZATION_PLAN.md`
+    /// phases 3-4). That is a *data* change, not an arithmetic one: the toy's PLE
+    /// rows are uniform in [−2, 2) and now land on the int4 grid, so the engine's
+    /// residual plane is no longer the zero-PLE-error install this table was
+    /// first measured against, and layer 3's sparse selection re-lands on its
+    /// discontinuities. The movement is quantization error and nothing else —
+    /// the layout is decided once, from the manifest slot (`Model.plePartLayout`),
+    /// and the gather is cross-checked byte-for-byte elsewhere
+    /// (`plePartsStreamVerifiedRows`, `pleHashMetadataAndGatherMatchTheCheckpoint`,
+    /// `PLEHostTests`). Sweeping the group size moves every ceiling with it,
+    /// monotonically in the error, while layer 1 — the PLE layer itself — never
+    /// leaves `tolerance` (≤ 5.5e-3 at every group size):
+    ///
+    ///     stage              group 8    group 32   group 160
+    ///     3|attnBlockOut      0.0298     0.1423     0.5267
+    ///     logits              0.0081     0.1387     0.1801
+    ///     3|hc.mid            0.0022     0.0128     0.0502
+    ///     3|hc.post           0.0042     0.0594     0.0627
+    ///
+    /// Group 8 is a 4x finer group and group 160 a 5x coarser one than the
+    /// shipping group 32, which is what every number below is measured at. Note
+    /// the toy is a far noisier regime than a real install: its PLE rows are
+    /// ~100x the real table's `mean|w| = 6.1e-3` (Phase 1) at the same ~5.6%
+    /// relative int4 error, so these ceilings are calibrated to the toy's own
+    /// amplification and are not a statement about the shipped model's quality.
     static let prefillAmplified: [String: Float] = [
         // measured; each ceiling is its measurement rounded up to two decimals
         // (the values are deterministic run to run)
-        "3|attnBlockOut": 0.08,   // 0.07423675
-        "3|mlpBlockIn": 0.07,     // 0.06697009
-        "3|sharedOut": 0.06,      // 0.05645851
-        "3|ffnBlockIn": 0.06,     // 0.05053381
-        "logits": 0.03,           // 0.022107244  (keyed without the "prefill " prefix)
-        "3|hc.post": 0.02,        // 0.015037594
-        "2|recState": 0.02,       // 0.013246425
+        "3|mlpBlockIn": 0.17,     // 0.1616603
+        "3|attnBlockOut": 0.15,   // 0.14233708
+        "logits": 0.14,           // 0.13869382  (keyed without the "prefill " prefix)
+        "3|sharedOut": 0.09,      // 0.08038404
+        "3|ffnBlockIn": 0.07,     // 0.06477558
+        "3|hc.post": 0.06,        // 0.05942275
+        "2|recState": 0.03,       // 0.022003034
+        "3|hc.mid": 0.02,         // 0.012769934
     ]
 }
 

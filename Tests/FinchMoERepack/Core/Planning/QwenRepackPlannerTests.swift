@@ -219,13 +219,21 @@ import FinchMoEFormat
         // Every layer carries the routed-expert bundle (real checkpoint shape).
         #expect(plan.layers.allSatisfy { $0.expertsPerLayer == t.experts })
 
-        // PLE parts: 4 × [32, 160] raw BF16, contiguous naming, in-plan rows.
-        #expect(plan.pleParts.count == t.ngramPartCount)
+        // PLE parts: 4 × [32, 160], int4-affine quantized (Phase 3),
+        // contiguous naming, in-plan rows.
+        let groupSize = FinchQuantization.pleGroupSize
         for (i, part) in plan.pleParts.enumerated() {
             #expect(part.partIndex == i)
             #expect(part.relativePath == String(format: "ple_shards/shard_%03d.bin", i))
             #expect(part.path.hasSuffix("/ple_shards/shard_\(String(format: "%03d", i)).bin"))
             #expect(part.rows == t.ngramPartRows && part.cols == t.ngramRowDim)
+            // The transform metadata the writer + size accounting derive from:
+            // the Phase-1 group size, and the fixed per-row stride / total size
+            // for the [packed][scale][bias] layout.
+            #expect(part.groupSize == groupSize)
+            let nGroups = t.ngramRowDim / groupSize
+            #expect(part.rowByteStride == t.ngramRowDim / 2 + 2 * nGroups * 2)
+            #expect(part.quantizedByteCount == UInt64(t.ngramPartRows) * UInt64(part.rowByteStride))
         }
         // Census correction: manifest arch reflects the live part geometry.
         #expect(plan.arch.ngramPartCount == t.ngramPartCount)
