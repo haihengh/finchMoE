@@ -3786,6 +3786,11 @@ extension QwenLayer0DebugTests {
             into: logits, onProgress: { _ in })
 
         // Engine greedy first token from the prefill logits (row T-1).
+        //
+        // `prefillChunked` returns with its last chunk still in flight — that
+        // is the production contract, and `produce` is the one that guarantees
+        // completion — so reading the buffer here needs the drain first.
+        runner.drainGPU()
         let lp = logits.contents().assumingMemoryBound(to: Float16.self)
         var top8: [(Float, Int)] = []
         for v in 0..<model.config.vocabSize {

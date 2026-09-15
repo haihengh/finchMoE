@@ -1670,6 +1670,10 @@ private enum T38 {
                     tolerance: T38.tolerance, gFloatOnly: true,
                     skip: T38.seededPlanes,
                     into: &failures, worst: &worst)
+        // The prefill loop above leaves its last chunk in flight —
+        // `prefillChunked` does not wait, `produce` is the one that guarantees
+        // completion — so the host read of the logits buffer needs the drain.
+        runner.drainGPU()
         let have = T38.readLogits(logits)
         let e = T38.relError(have, replayLogits)
         worst["logits"] = e
