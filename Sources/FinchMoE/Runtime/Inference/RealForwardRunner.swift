@@ -647,7 +647,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // timelines. Only the raw and pooled keys persist across steps —
             // they are the indexer's own cache — so this is the one Qwen 3.8
             // structure `reset()` has to clear.
-            if let state = try QSAIndexerState(device: device, config: cfg,
+            // `FQ_QSA_OFF=1` builds the runner without the sparse-block
+            // selector. That is a configuration the engine already supports —
+            // a Qwen 3.8 repack built without the indexer tensors loads
+            // exactly this way and keeps the dense attention path — and it is
+            // what isolates the ranking dispatches from plain context length
+            // when a long run turns out not to be bit-reproducible.
+            let qsaDisabled = ProcessInfo.processInfo.environment["FQ_QSA_OFF"] == "1"
+            if !qsaDisabled,
+               let state = try QSAIndexerState(device: device, config: cfg,
                                                maxContext: maxContext) {
                 self.qsaIndexer = try QSAIndexer(context: ctx)
                 self.qsaState = state
@@ -3956,7 +3964,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let qsaLayer = qsaState.flatMap { st in
                 st.index(ofLayer: L).map { (state: st, index: $0) }
             }
-            let idxCapacity = qsaLayer?.state.capacity ?? 0
+            // No indexer means no selection: `Int.max` says "every position is
+            // inside the selection width", so the dense path is taken
+            // everywhere. The decode path already spells it this way
+            // (`idxDense`); here a `?? 0` said the opposite — the width was 0,
+            // so every position was outside it, and the prefill dispatched the
+            // cells path with `nCells: 0`, which traps on
+            // `precondition(nCells > 0)`. That made any Qwen 3.8 install
+            // without indexer tensors — a configuration this file documents as
+            // supported — crash in chunked prefill.
+            let idxCapacity = qsaLayer?.state.capacity ?? Int.max
             // The position one past the chunk — both the KV length the
             // per-row attention sees and the end of the poolable block range.
             let endPosition = startPosition + t
@@ -5857,6 +5874,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         if let err = cb.error {
             print("CB error: \(err)")
         }
+    }
+
+    /// Drain the queue: an empty command buffer committed after everything
+    /// else completes only once all of it has, because a `MTLCommandQueue`
+    /// starts its buffers in submission order. Cheaper and more local than
+    /// threading a command buffer out of `prefillChunked` for the caller to
+    /// wait on, and it cannot be skipped by a caller that forgets.
+    public func drainGPU() {
+        guard let cb = ctx.queue.makeCommandBuffer() else { return }
+        commitCounting(cb)
+        waitForCompletion(cb)
     }
 
 }

@@ -125,6 +125,12 @@ public func run(args: Args,
                 + "and decoded in memory after the read; the installed table is "
                 + "unchanged\n").utf8))
         }
+        // Same reason: a run with the sparse-block selector disabled computes
+        // different logits from one with it, so the log has to say which it is.
+        if environment["FQ_QSA_OFF"] == "1" {
+            stderr.write(Data(("qsa_off: built without the QSA indexer; attention "
+                + "takes the dense path for every layer\n").utf8))
+        }
         let runner = try RealForwardRunner(
             model: model,
             context: context,

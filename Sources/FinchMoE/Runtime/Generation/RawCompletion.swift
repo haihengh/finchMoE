@@ -240,6 +240,17 @@ public func runRawCompletion(producer: any LogitProducer,
             throw PrefillError.unsupportedPrefillSeed(
                 "a prefill logits dump needs the logits head, but this producer is fused-greedy")
         }
+        // Reading the buffer on the host needs the GPU to be done with it:
+        // `prefillChunked` returns with its last chunk still in flight (unlike
+        // `produce`, which guarantees completion), so without this the dump
+        // reads a buffer that may still be being written.
+        //
+        // This is a latent-race fix, not the explanation for everything: it was
+        // added while chasing a run-to-run difference in long-prompt dumps, and
+        // that difference survived it — it tracks the QSA indexer's ranking
+        // path instead (see `idxDense` in RealForwardRunner, engaged past 2051
+        // tokens on this model), not the host read.
+        producer.drainGPU()
         try scratch.writeLogits(to: prefillLogitsDumpPath)
     }
 

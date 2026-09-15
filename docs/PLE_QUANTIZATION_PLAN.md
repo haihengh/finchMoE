@@ -506,6 +506,14 @@ final-prefill row (`FQ_DUMP_PREFILL_LOGITS`), scored by rank band:
 | medium-review (426) | MATCH | 0.999940 (10/10) | 0.999880 | 0.997876 | 0.47 / 0.219 | diverges ~token 25 |
 | long-synthesis (2940) | MATCH | 0.999897 (10/10) | 0.999806 | 0.996318 | 1.11 / 0.031 | diverges ~token 20 |
 
+> **The `long-synthesis` row is not trustworthy at the precision it is printed.**
+> That prompt is the only one of the three past the QSA indexer's selection
+> width (`indexerBudget + r − 1` = 2051 on this model), and a dump taken past
+> that point is reproducible only to ~0.04 median / ~0.37 max nats run to run —
+> the engine's own variation, not the PLE effect (see Phase 5.2 result below).
+> The PLE perturbation there was ~1.15 max, so the reading holds and the effect
+> still dominates; the digits do not. The two short rows are bit-reproducible.
+
 **Reading.** Argmax holds on all three, top-10 overlap is 9-10/10, and the
 top-band cosine is 0.9998-0.99995. For scale — not as an apples-to-apples
 comparison, since those runs differ in both weights and engine — the
@@ -533,6 +541,117 @@ something this phase can clear on its own.
 **Exit gate: MET** for the numeric-diff criterion. 5.2 and 5.3 remain, and
 5.3 is now the load-bearing one: the flips above are the reason to run it
 rather than assume.
+
+#### Phase 5.2 result (measured 2026-09-15) — PASS, and it validates 5.1
+
+The repack (Phase 3) ran against the real 352 GB snapshot into a new install,
+`models/Qwen3.8-Flash-Next-125B-ple4bit.finch/`, leaving the 162 GiB one in
+place. 103,925,807,384 B written (97 GiB against 162 GiB), 16 minutes under
+`tools/memguard.sh` at a 2.4 GB peak, every part exactly 250,001,200 B — the
+int4 stride, 68.8% under the raw layout — and the manifest carries
+`quant.pleNgram` = int4 / affine / group 32 / BF16 scales and biases, with the
+receipt written. Part files and per-file SHA-256 are recorded in the repack
+journal, so the run is resumable as designed.
+
+Same engine, same flags, same three prompts; the only variable is which install
+the weights came from:
+
+| prompt | new vs current 162 GiB install | new vs 5.1's `FQ_PLE_QUANT_SIM` prediction |
+| --- | --- | --- |
+| short-explanation | argmax MATCH, top-10 0.999953 (9/10) | **bit-identical** (md5-equal) |
+| medium-review | argmax MATCH, top-10 0.999940 (10/10) | **bit-identical** |
+| long-synthesis | argmax MATCH, top-10 0.999894 (10/10) | 0.999985 / max 0.156 — see the caveat |
+
+The first two rows are the strong result: the repacked install reproduces the
+simulation *exactly*, byte for byte, over all 248,320 logits. That is what
+makes 5.1's numbers a statement about the artifact being shipped rather than
+about a stand-in — the writer's on-disk transform and the runtime's quantized
+decode path both agree with the simulation to the byte. The long row does not
+reach that bar, and the reason is not the PLE (below).
+
+**Corroboration on the table itself**, independent of the engine: 4,000
+randomly sampled rows across all 128 parts have `|new − old| / scale` with
+median 0.4970, p99 0.5000 and **max exactly 0.5000** — zero rows above the
+half-step bound, which is the signature of round-to-nearest and nothing else.
+And the old install's raw table is a **verbatim copy of the source snapshot**
+(3,200 rows across 16 ngram shards, byte-identical), so the writer quantized
+exactly the rows the simulation quantized.
+
+##### Found on the way: the engine is not bit-reproducible past 2051 tokens
+
+Two runs of the *same install*, same binary, same flags, same prompt disagree
+in **99.4% of the final-prefill logits** (median 0.038 nats, max 0.375), while
+**the 32 generated tokens are identical** — and across four runs of
+`long-synthesis` two of them matched bit-exactly, including across a binary
+rebuild. So the computation is *sometimes* reproducible, which is a race rather
+than deterministic-but-different.
+
+It tracks the context length, and specifically the QSA indexer's ranking path.
+Probes built by truncating `long-synthesis` to a target length, each run twice
+on the same install, show the effect appearing *in proportion to the number of
+positions past the boundary* rather than switching on at it:
+
+| probe | prefill tokens | positions past 2051 | run-to-run |
+| --- | --- | --- | --- |
+| short-explanation | 62 | 0 (dense) | bit-identical |
+| medium-review | 426 | 0 (dense) | bit-identical |
+| probe_2000 | 1994 | 0 (dense) | bit-identical |
+| probe_2150 | 2065 | 14 | bit-identical |
+| probe_2500 | 2511 | 460 | differs — 99.5%, median 0.045, max 0.592 |
+| long-synthesis | 2940 | 889 | differs — 99.4%, median 0.038, max 0.375 |
+
+`idxDense = capacity >= position + 1` with `capacity = min(maxContext,
+indexerBudget + r − 1)` = 2051 here, so the ranking dispatches — the same QSA
+radix-select that already produced one UB bug
+(`docs/` note in the Metal debugging memory: a barrier inside
+`if (simd_group == 0)`) — only run past that point. Below it, runs agree
+*across installs and across binaries*; well past it, they do not, and 14
+positions is too few draws for a small per-position probability to show. The
+generated tokens stayed identical in every pair.
+
+**Scope.** This is not a PLE defect and not caused by the repack; it is a
+pre-existing engine property of long-context prefill. EvalPlus prompts are far
+under 2051 tokens, so 5.3 is not affected by it. But it does bound what any
+long-prompt logit measurement in this project can claim, including the row
+above, and it is worth its own investigation.
+
+**Isolated to the indexer's ranking path.** `FQ_QSA_OFF=1` builds the runner
+without the sparse-block selector — a configuration the engine already
+supports, since a 3.8 repack built without indexer tensors loads that way — so
+the same prompt can be run with and without it. Same install, same binary,
+same flags, same 2511 tokens:
+
+| configuration | run-to-run |
+| --- | --- |
+| indexer on | differs — 247,205 / 248,320 elements (99.5%) |
+| indexer off | **bit-identical** — 0 / 248,320 |
+
+The prompt is identical in both runs, so this is not a length effect: the
+extra machinery the indexer adds is where the variation lives. Together with
+the boundary table above — reproducible when the ranking does not dispatch,
+not reproducible when it does, reproducible again when the selector is absent
+entirely — the ranking dispatches (pool → score → radix select → cells write)
+are the thing to read, which is the same subsystem that produced the divergent
+threadgroup barrier.
+
+**A latent crash fixed on the way.** Wiring `FQ_QSA_OFF` trapped immediately in
+`Attention.encodeFullCells`' `precondition(nCells > 0)`. Cause: the prefill
+path computed `idxCapacity = qsaLayer?.state.capacity ?? 0` while the decode
+path computes `qsaLayer?.state.capacity ?? Int.max`. With no indexer, "0" means
+every position is *outside* the selection width, so prefill dispatched the
+cells path with `nCells: 0` and trapped — i.e. **any Qwen 3.8 install without
+indexer tensors crashed in chunked prefill**, a configuration this engine
+documents as supported. The prefill path now matches decode. No test covered
+it: no indexer-less fixture exists anywhere in `Tests/` (every 3.8 toy sets
+`indexerNumHeads = 2`), so adding one is the follow-up — it means
+parameterizing the shared toy fixture rather than a new file.
+
+A latent, separate hazard was also fixed while chasing this: the prefill
+logits dump read the logits buffer on the host without waiting for the GPU,
+whereas `produce` guarantees completion and `prefillChunked` deliberately does
+not. That read is now preceded by `drainGPU()`. It is **not** the cause of the
+variation above — the variation survived the fix — but a host read of a buffer
+the GPU may still be writing is unsafe on its own terms.
 
 ### Phase 6 — Full repack on the real machine, sizing, and rollout
 
