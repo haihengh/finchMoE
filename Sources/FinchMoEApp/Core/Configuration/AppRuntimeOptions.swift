@@ -78,9 +78,9 @@ public enum AppKVCacheMode: String, CaseIterable, Codable, Sendable, Identifiabl
 
     public var label: String {
         switch self {
-        case .fp16: return "FP16"
-        case .int8: return "8-bit"
-        case .turbo4bit: return "Turbo 4-bit"
+        case .fp16: return "FP16 (16-bit)"
+        case .int8: return "8-bit (Planned)"
+        case .turbo4bit: return "Turbo 4-bit (Planned)"
         }
     }
 

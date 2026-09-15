@@ -50,7 +50,6 @@ struct InspectorView: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .fixedSize()
             }
             HStack {
                 Button {
@@ -153,17 +152,17 @@ struct InspectorView: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .fixedSize()
             }
             LabeledContent("KV cache") {
                 Picker("KV cache", selection: $kvCacheMode) {
                     ForEach(AppKVCacheMode.allCases) { mode in
-                        Text(mode.label).tag(mode)
+                        Text(mode.label)
+                            .tag(mode)
+                            .disabled(!mode.isAvailable)
                     }
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .fixedSize()
             }
             .onChange(of: kvCacheMode) { _, newValue in
                 guard newValue.isAvailable else { kvCacheMode = .fp16; return }
@@ -179,7 +178,6 @@ struct InspectorView: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .fixedSize()
             }
             Text("More slots can improve decode speed by keeping more experts in memory, but they also use more RAM. Changes are compared with 4K context and 16 slots and apply after reloading the model.")
                 .font(.caption)
@@ -208,7 +206,6 @@ struct InspectorView: View {
                     Stepper(value: $model.topK, in: 1...256, step: 1) {
                         Text("\(model.topK)").monospacedDigit()
                     }
-                    .fixedSize()
                 }
             }
             Toggle("Top-P", isOn: $model.topPEnabled)
@@ -231,32 +228,30 @@ struct InspectorView: View {
     private var runtimeSection: some View {
         Section("Runtime") {
             Toggle("Prefill", isOn: $model.runtimeOptions.prefillEnabled)
-            VStack(alignment: .leading, spacing: 8) {
-                Text("RDADVISE")
+            LabeledContent("RDADVISE") {
                 Picker("RDADVISE", selection: $model.runtimeOptions.rdadvisePolicy) {
                     ForEach(AppRDAdvicePolicy.allCases) { policy in
                         Text(policy.label).tag(policy)
                     }
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
                 .labelsHidden()
             }
             Text("RDADVISE is experimental. It may speed up short decodes but slow down long decodes.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Model verification")
+            LabeledContent("Verification") {
                 Picker("Model verification", selection: $model.runtimeOptions.modelVerification) {
                     ForEach(AppModelVerification.allCases) { mode in
                         Text(mode.label).tag(mode)
                     }
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
                 .labelsHidden()
-                Text(model.runtimeOptions.modelVerification.detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
+            Text(model.runtimeOptions.modelVerification.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
             if model.hasStaleLoadedRuntime {
                 Text("Reload required")
                     .font(.caption)

@@ -170,6 +170,7 @@ import Testing
     @Test func runSnapshotsPromptIntoOutputTranscript() async throws {
         let client = MockInferenceClient(response: "answer", tokenDelayNanos: 1)
         let model = readyModel(client: client)
+        model.setSentPromptBehavior(.keep)
         model.promptText = "original prompt"
         model.maxNewTokensOverride = 1
         model.run()

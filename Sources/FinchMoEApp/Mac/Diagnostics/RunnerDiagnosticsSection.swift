@@ -42,7 +42,7 @@ struct RunnerDiagnosticsSection: View {
                     DisclosureGroup("Prefill details") {
                         VStack(spacing: 8) {
                             DiagnosticRow("Mode", "\(prefill.requestedMode.rawValue) -> \(prefill.executedMode.rawValue)")
-                            DiagnosticRow("KV storage", prefill.kvStorageMode?.rawValue ?? "unknown")
+                            DiagnosticRow("KV storage", prefill.kvStorageMode.map { $0 == .fp16 ? "FP16 (16-bit)" : $0.rawValue } ?? "unknown")
                             DiagnosticRow("Completeness", prefill.chunkCompleteness.rawValue)
                             if let reason = prefill.unsupportedReason, !reason.isEmpty {
                                 DiagnosticRow("Unsupported reason", reason, multiline: true)
@@ -155,7 +155,6 @@ private struct DiagnosticRow: View {
                 .textSelection(.enabled)
                 .multilineTextAlignment(.trailing)
                 .lineLimit(multiline ? nil : 2)
-                .fixedSize(horizontal: false, vertical: true)
         } label: {
             HStack(spacing: 4) {
                 Text(label)
