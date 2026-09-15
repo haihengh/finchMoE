@@ -89,6 +89,7 @@ public func run(args: Args,
         let prefillLogitsDumpPath = environment["FQ_DUMP_PREFILL_LOGITS"]
         let runtime = RuntimeConfiguration(
             expertCacheSlots: args.expertCacheSlots ?? RuntimeConfiguration.production.expertCacheSlots,
+            prefillChunkTokens: args.prefillChunkTokens,
             forceLogitsHead: !config.isPureGreedy || prefillLogitsDumpPath != nil)
 
         guard MTLCreateSystemDefaultDevice() != nil else {
@@ -184,6 +185,26 @@ public func run(args: Args,
                 expertStride: model.routedExpertStrideBytes(),
                 slots: runtime.expertCacheSlots,
                 scope: countersAtDecodeStart == nil ? "whole-run" : "decode")
+            stderr.write(Data((line + "\n").utf8))
+        }
+        // Prefill-side I/O, on its own opt-in gate rather than appended to the
+        // documented `--counters` schema: the chunk-size question is "does the
+        // expert read volume fall as the chunk grows", and that is a different
+        // measurement from the decode breakdown.
+        if environment["FQ_PREFILL_COUNTERS"] != nil {
+            let stride = UInt64(model.routedExpertStrideBytes())
+            let bytes = runner.totalPrefillExpertMisses &* stride
+            let chunks = runner.totalPrefillChunks
+            let perChunkMB = chunks > 0
+                ? Double(bytes) / Double(chunks) / 1_048_576.0
+                : 0
+            let line = String(
+                format: "prefill_counters chunks=%llu tiles=%llu expert_misses=%llu bytes=%.2fGB MB_per_chunk=%.1f",
+                chunks,
+                runner.totalPrefillTiles,
+                runner.totalPrefillExpertMisses,
+                Double(bytes) / 1_073_741_824.0,
+                perChunkMB)
             stderr.write(Data((line + "\n").utf8))
         }
         // The engine's own pread sequence, for the offline replay. Written on

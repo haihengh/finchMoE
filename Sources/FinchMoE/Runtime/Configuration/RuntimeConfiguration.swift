@@ -21,7 +21,14 @@ public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
 
 public struct RuntimeConfiguration: Sendable, Equatable {
     public static let allowedExpertCacheSlots = [8, 16, 24, 32]
-    public static let allowedPrefillChunkTokens = [32, 64, 128]
+    // Prefill cost is dominated by re-reading a layer's routed-expert pool once
+    // per chunk (the LFU cache holds singles of experts, not the pool), so the
+    // chunk size is the prefill I/O divisor. The ceiling was 128 — the upstream
+    // Gemma install's tuning point — and was never swept on Qwen, whose 256
+    // experts make the union saturate far earlier. Prefill scratch is ~154 KiB
+    // per chunk token for Qwen 3.6, so 512 costs ~79 MiB and 1024 ~158 MiB
+    // against a ~1.1 GiB resident budget.
+    public static let allowedPrefillChunkTokens = [32, 64, 128, 256, 512, 1024]
 
     public let expertCacheSlots: Int
     public let expertCachePolicy: RuntimeExpertCachePolicy

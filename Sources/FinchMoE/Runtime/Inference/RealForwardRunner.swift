@@ -855,6 +855,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     // measure, so the multiplication happens once at print time instead.
     public private(set) var totalExpertHits: UInt64 = 0
     public private(set) var totalExpertMisses: UInt64 = 0
+    // Prefill-side routed-expert I/O, kept separate from the decode pair above.
+    // The chunked prefill loops stream tiles through their own `fetch` bindings
+    // and never call `encodeRoutedTail`, so `totalExpertMisses` is structurally
+    // decode-only on the chunked path. These make the prefill read volume
+    // observable, which is the number the chunk-size question turns on:
+    // prefill reads `misses * expertStride` bytes, and a layer's pool is
+    // re-read once per chunk.
+    public private(set) var totalPrefillExpertMisses: UInt64 = 0
+    public private(set) var totalPrefillTiles: UInt64 = 0
+    public private(set) var totalPrefillChunks: UInt64 = 0
     // Full-attention layers whose QSA indexer ran the ranked path rather than
     // the dense one. The indexer budget is a position threshold (~2048 on the
     // real 3.8 install), so a soak long enough to cross it shows a step in the
@@ -1247,6 +1257,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
         }
 
+        totalPrefillChunks &+= 1
         prefillChunkState.markDirty(startPosition: startPosition, tokenCount: tokens.count)
 
         guard var cb = ctx.queue.makeCommandBuffer() else {
@@ -1630,6 +1641,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         try fetch.binding.validateCoversPairs(routes.sortedPairs,
                                                               pairStart: Int(tile.pairStart),
                                                               pairCount: Int(tile.pairCount))
+                        totalPrefillExpertMisses &+= UInt64(fetch.plannedMissSlots.count)
+                        totalPrefillTiles &+= 1
                         if !fetch.plannedMissSlots.isEmpty {
                             try tileLifetime.begin(tileIndex: tileIndex,
                                                    plannedSlots: fetch.plannedMissSlots)
@@ -2627,6 +2640,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             try fetch.binding.validateCoversPairs(routes.sortedPairs,
                                                   pairStart: Int(tile.pairStart),
                                                   pairCount: Int(tile.pairCount))
+            totalPrefillExpertMisses &+= UInt64(fetch.plannedMissSlots.count)
+            totalPrefillTiles &+= 1
             if !fetch.plannedMissSlots.isEmpty {
                 try tileLifetime.begin(tileIndex: tileIndex,
                                        plannedSlots: fetch.plannedMissSlots)
@@ -4521,6 +4536,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             try fetch.binding.validateCoversPairs(routes.sortedPairs,
                                                   pairStart: Int(tile.pairStart),
                                                   pairCount: Int(tile.pairCount))
+            totalPrefillExpertMisses &+= UInt64(fetch.plannedMissSlots.count)
+            totalPrefillTiles &+= 1
             if !fetch.plannedMissSlots.isEmpty {
                 try tileLifetime.begin(tileIndex: tileIndex,
                                        plannedSlots: fetch.plannedMissSlots)

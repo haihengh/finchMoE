@@ -87,7 +87,7 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
                 chunkTokens: Int,
                 routedPairMicrobatchRows: Int = 32,
                 maxContext: Int = Int.max) {
-        self.chunkTokens = max(1, min(chunkTokens, 128))
+        self.chunkTokens = max(1, min(chunkTokens, PrefillRuntimeConfig.maxChunkTokens))
         self.hiddenSize = config.hiddenSize
         // Doubled q_proj (per-head q|gate pairs) + GDN recurrent scratch are
         // shared by both Qwen hybrid families; Gemma leaves them empty.
