@@ -8,6 +8,22 @@ public protocol LogitProducer: AnyObject, Sendable {
     func reset()
     /// Run one token at `position`, leaving FP16 logits in `logits`.
     func produce(token: Int32, position: Int, into logits: MTLBuffer) async throws
+
+    /// Block until every command buffer submitted so far has completed, so a
+    /// host read of a GPU-written buffer sees the finished bytes.
+    ///
+    /// The engine does not wait per command buffer — same-queue submission
+    /// order is enough for GPU work to be correctly ordered, and the waits cost
+    /// more than they buy. `produce` is the exception and guarantees completion
+    /// on return (that is what `sampleOnce` and `qsaSelection` rely on);
+    /// `prefillChunked` deliberately does not, so anything reading a prefill
+    /// result on the CPU — such as the logits dump — must drain first.
+    func drainGPU()
+}
+
+extension LogitProducer {
+    /// Producers with no GPU (the scripted test doubles) have nothing to drain.
+    public func drainGPU() {}
 }
 
 public protocol ContinuableLogitProducer: LogitProducer {
