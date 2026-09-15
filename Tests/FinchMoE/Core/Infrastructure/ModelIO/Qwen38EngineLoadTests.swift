@@ -1065,6 +1065,10 @@ import FinchMoEValidationSupport
                 options: .storageModeShared))
             let newPosition = try await body(runner, logits)
             runner.qwenLayerDebugHook = nil
+            // `body` may have used `prefillChunked`, which leaves its last
+            // chunk in flight; the read below is a host read of the logits
+            // buffer, so it needs the drain first.
+            runner.drainGPU()
             return (runner, stages, read(logits), newPosition)
         }
 
