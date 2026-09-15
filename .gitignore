@@ -2,12 +2,14 @@
 # link itself — everything under it is already untracked in the home checkout.
 # (No trailing slash: a symlink to a directory is matched as a file.)
 /models
+.claude/*
 .abacusai/
 /reference/
 scratch/
-.build/*
+.build*/*
 .claude/*
 .vscode/*
+.swiftpm*/*
 .DS_Store
 *.xcodeproj
 *.xcworkspace
