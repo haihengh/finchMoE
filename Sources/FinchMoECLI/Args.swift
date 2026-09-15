@@ -15,6 +15,7 @@ public struct Args: Equatable, Sendable {
     public var quiet: Bool
     public var counters: Bool
     public var expertCacheSlots: Int?
+    public var prefillChunkTokens: Int
     public var verify: ModelIntegrityPreference
 
     public init(model: String,
@@ -31,6 +32,7 @@ public struct Args: Equatable, Sendable {
                 quiet: Bool = false,
                 counters: Bool = false,
                 expertCacheSlots: Int? = nil,
+                prefillChunkTokens: Int = 128,
                 verify: ModelIntegrityPreference = .automatic) {
         self.model = model
         self.prompt = prompt
@@ -46,6 +48,7 @@ public struct Args: Equatable, Sendable {
         self.quiet = quiet
         self.counters = counters
         self.expertCacheSlots = expertCacheSlots
+        self.prefillChunkTokens = prefillChunkTokens
         self.verify = verify
     }
 }
@@ -81,6 +84,12 @@ extension Args {
             .joined(separator: ", ")
     }
 
+    private static var prefillChunkList: String {
+        RuntimeConfiguration.allowedPrefillChunkTokens
+            .map(String.init)
+            .joined(separator: ", ")
+    }
+
     public static let usage = """
     FinchMoECLI — local text generation (instruction chat and raw completion)
 
@@ -112,6 +121,14 @@ extension Args {
                                 (default 16). Same knob the app and the server
                                 expose. A count below the model's top-k is
                                 rejected rather than left to trap.
+      --prefill-chunk-tokens <n>
+                                Prompt-prefill chunk size, one of
+                                \(prefillChunkList) (default 128). Chunked
+                                prefill re-reads a layer's routed-expert pool
+                                once per chunk, so this is the prefill I/O
+                                divisor: a larger chunk cuts expert bytes read
+                                roughly in proportion. Prefill scratch grows
+                                ~154 KiB per token on Qwen 3.6.
       --verify <mode>           Integrity policy. auto (default) uses
                                 verified-install.json when one is present and
                                 valid and falls back to hashing otherwise;
@@ -143,6 +160,7 @@ extension Args {
         var quiet = false
         var counters = false
         var expertCacheSlots: Int?
+        var prefillChunkTokens = 128
         var verify = ModelIntegrityPreference.automatic
 
         var index = 0
@@ -169,6 +187,14 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 expertCacheSlots = parsed
+            case "--prefill-chunk-tokens":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = Int(value),
+                      RuntimeConfiguration.allowedPrefillChunkTokens.contains(parsed)
+                else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                prefillChunkTokens = parsed
             case "--model":
                 model = try takeValue(argv, &index, flag: flag)
             case "--prompt":
@@ -260,6 +286,7 @@ extension Args {
                     quiet: quiet,
                     counters: counters,
                     expertCacheSlots: expertCacheSlots,
+                    prefillChunkTokens: prefillChunkTokens,
                     verify: verify)
     }
 
