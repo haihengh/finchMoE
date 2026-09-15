@@ -80,12 +80,14 @@ import FinchMoEValidationSupport
          vocabs: Array(repeating: UInt64(8), count: heads))
     }
 
-    private static func makeHost(config: ArchConfig? = nil) -> PLEHost {
+    private static func makeHost(config: ArchConfig? = nil,
+                                 quantizationSimulation: Int? = nil) -> PLEHost {
         let c = toyConstants()
         guard let host = PLEHost(config: config ?? toyConfig(),
                                  multipliers: c.multipliers,
                                  headOffsets: c.offsets,
-                                 headVocabSizes: c.vocabs) else {
+                                 headVocabSizes: c.vocabs,
+                                 quantizationSimulation: quantizationSimulation) else {
             preconditionFailure("toy config must build a PLE host")
         }
         return host
@@ -172,16 +174,18 @@ import FinchMoEValidationSupport
 
     // MARK: - Gather
 
-    /// Writes a table whose every row is `[row, row+1, row+2, row+3]` as BF16,
-    /// so a gathered vector says exactly which rows it read and in what order.
+    /// Writes a table row by row as BF16, defaulting to `[row, row+1, row+2,
+    /// row+3]` so a gathered vector says exactly which rows it read and in what
+    /// order. `values` overrides that where a test needs data off the int4 grid.
     private static func writeToyTable(rowDim: Int, partCount: Int, partRows: Int,
+                                      values: (Int, Int) -> Float = { Float($0 + $1) },
                                       in directory: URL) throws {
         for part in 0..<partCount {
             var bytes = Data()
             for r in 0..<partRows {
                 let row = part * partRows + r
                 for d in 0..<rowDim {
-                    let bits = Quantization.bf16Bits(Float(row + d))
+                    let bits = Quantization.bf16Bits(values(row, d))
                     bytes.append(UInt8(bits & 0xFF))
                     bytes.append(UInt8(bits >> 8))
                 }
@@ -286,6 +290,57 @@ import FinchMoEValidationSupport
                         "head \(h) (row \(row), part \(row / partRows)) dim \(d): \(gathered[h * rowDim + d]) vs \(want16)")
             }
         }
+    }
+
+    /// The Phase 5.1 isolation knob (`FQ_PLE_QUANT_SIM`): with a simulation
+    /// group set, a **raw-BF16** part must decode to exactly what the
+    /// quantized install would supply for the same row —
+    /// `dequantize(quantize(row))` — so an A/B between two runs differs only
+    /// in PLE row precision. The fixture's values are deliberately off the
+    /// int4 grid, and the test fails if nothing moved: a simulation that
+    /// silently did nothing would otherwise pass by comparing a row to itself.
+    @Test("the simulation reproduces the quantized install from a raw-BF16 part")
+    func gatherSimulatesQuantization() throws {
+        let rowDim = 4, partCount = 2, partRows = 8, groupSize = 2
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("plehost-sim-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let value: (Int, Int) -> Float = { row, d in Float(row) * 0.1 + Float(d) * 0.37 }
+        try Self.writeToyTable(rowDim: rowDim, partCount: partCount, partRows: partRows,
+                               values: value, in: dir)
+
+        let config = Self.toyConfig(rowDim: rowDim, partCount: partCount, partRows: partRows)
+        let host = Self.makeHost(config: config, quantizationSimulation: groupSize)
+        host.record(position: 0, token: 3)
+        let rows = host.rowIndices(atPosition: 0)
+
+        let gathered = try host.gather(atPosition: 0) { part in
+            let fd = Darwin.open(dir.appendingPathComponent(
+                String(format: "shard_%03d.bin", part)).path, O_RDONLY)
+            guard fd >= 0 else { throw CocoaError(.fileNoSuchFile) }
+            defer { close(fd) }
+            return try PLEPartStreamer(partIndex: part, rows: partRows,
+                                       columns: rowDim, fileDescriptor: fd)
+        }
+
+        var moved = false
+        for (h, row) in rows.enumerated() {
+            // The table stores BF16, so the row the engine quantizes is the
+            // BF16-rounded one, not the generator's exact value.
+            let source = (0..<rowDim).map {
+                Quantization.bf16ToFloat(Quantization.bf16Bits(value(row, $0)))
+            }
+            let q = Quantization.quantizeInt4AffinePLE(source, groupSize: groupSize)
+            let want = Quantization.dequantizeInt4AffinePLE(q, n: rowDim)
+            for d in 0..<rowDim {
+                let want16 = Float16(want[d])
+                #expect(gathered[h * rowDim + d] == want16,
+                        "head \(h) (row \(row)) dim \(d): \(gathered[h * rowDim + d]) vs \(want16)")
+                if want16 != Float16(source[d]) { moved = true }
+            }
+        }
+        #expect(moved, "no element moved — the fixture is on the int4 grid, so this proves nothing")
     }
 
     @Test("the raw-BF16 default layout rejects a quantized part file's size")

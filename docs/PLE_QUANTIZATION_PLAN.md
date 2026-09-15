@@ -471,6 +471,69 @@ already used, scoped to isolate the PLE change:
    regression. Any failure here means back to Phase 1 (coarser or finer
    group size), not shipping anyway.
 
+#### Phase 5.1 result (measured 2026-09-15) — PASS, on the real install
+
+**Venue changed, deliberately, from the step-1 sketch.** The sketch proposed a
+synthetic/sliced checkpoint "with a real-shaped PLE table". The two fixtures
+available were both wrong for the question: the toy's PLE rows are uniform in
+`[-2, 2)` against the real table's `mean|w| = 6.1e-3` — ~100× the magnitude at
+the same ~5.6% relative int4 error, a far noisier regime (see the Phase 4
+collateral below, where that toy's own amplification doubles every ceiling) —
+and a sliced real checkpoint is a purpose-built fixture that would still only
+approximate the real one. Instead the isolation is done **in memory, on the
+real install**:
+
+- `FQ_PLE_QUANT_SIM=<groupSize>` (`RealForwardRunner` → `PLEHost`) decodes
+  every **raw-BF16** PLE row as `dequantize(quantize(row))` before it reaches
+  the GPU. The installed table is not touched, every other weight is
+  bit-identical between the two runs, and the transform is the writer's own
+  canonical one — so the A/B differs in exactly one thing: PLE row precision.
+- No repack, no new install, no sliced fixture: the Phase 6 multi-hour job is
+  not on the critical path of this measurement, and 5.2/5.3 still get to run
+  against the real thing.
+- `PLEHostTests.gatherSimulatesQuantization` pins the knob itself: the
+  simulated decode must equal `dequantize(quantize(row))` of the same on-disk
+  row, and the test fails if no element moved (so a silent no-op cannot pass).
+
+Three prompts from `docs/benchmark-prompts/real-generation-v1/`, greedy T=0,
+32 generated tokens, `--max-context` 2048 (4096 for the 2940-token prompt),
+each pair run under `tools/memguard.sh` one at a time. Logits are the
+final-prefill row (`FQ_DUMP_PREFILL_LOGITS`), scored by rank band:
+
+| prompt (prefill tokens) | argmax | top-10 cos (overlap) | top-100 cos | whole-vocab cos | top-1 margin / perturbation | greedy text |
+| --- | --- | --- | --- | --- | --- | --- |
+| short-explanation (62) | MATCH | 0.999953 (9/10) | 0.999865 | 0.996408 | 5.56 / 0.047 | identical, 32 tokens |
+| medium-review (426) | MATCH | 0.999940 (10/10) | 0.999880 | 0.997876 | 0.47 / 0.219 | diverges ~token 25 |
+| long-synthesis (2940) | MATCH | 0.999897 (10/10) | 0.999806 | 0.996318 | 1.11 / 0.031 | diverges ~token 20 |
+
+**Reading.** Argmax holds on all three, top-10 overlap is 9-10/10, and the
+top-band cosine is 0.9998-0.99995. For scale — not as an apples-to-apples
+comparison, since those runs differ in both weights and engine — the
+cross-quantization oracle comparison already accepted in
+`docs/QWEN38_PORT.md` sits at top-10 cos 0.995 with whole-vocab 0.880, so the
+PLE term is roughly an order of magnitude below the error the port already
+carries in the bands that decide behaviour. Whole-vocab (0.9963-0.9979) is
+*not* the number to read here: 98% of the reference vector's squared magnitude
+lives in the near-uniform tail, exactly the trap `docs/QWEN38_PORT.md`
+documents.
+
+**The honest caveat, and it is the one that matters downstream.** The
+perturbation is a *fraction of the top-1 margin* (0.031 of 1.11, 0.047 of
+5.56) — but on the one prompt with a thin margin (0.47 nats) it is ~half of
+it, and there the greedy trajectory diverges after ~25 tokens, as it does
+after ~20 on the third. Both continuations stay fluent English; this is not a
+quality collapse, it is a low-margin argmax flip, and it is precisely the
+mechanism by which a downstream pass@1 could move. Phase 5.1's own gate is
+about the numeric diff and it is met — the diff is inside the Phase 1 band
+(RMS 5.95e-4 per element, rel p99 5.63%, amplified to a ~0.03-0.22 nat
+logit perturbation) — but a greedy-trajectory flip on thin margins is a real
+behavioural difference that **5.3 must bound on the scored benchmark**, not
+something this phase can clear on its own.
+
+**Exit gate: MET** for the numeric-diff criterion. 5.2 and 5.3 remain, and
+5.3 is now the load-bearing one: the flips above are the reason to run it
+rather than assume.
+
 ### Phase 6 — Full repack on the real machine, sizing, and rollout
 
 1. Run the real 352 GB→quantized-PLE repack under

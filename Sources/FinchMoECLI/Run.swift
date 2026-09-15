@@ -117,6 +117,14 @@ public func run(args: Args,
                                                     topKExperts: model.config.topKExperts) {
             return errored(stderr, message, 2)
         }
+        // The Phase 5.1 isolation knob changes what the model reads without
+        // changing what is on disk, so a run has to say it was on: a dump whose
+        // log does not name the mode cannot be compared against another.
+        if let sim = environment["FQ_PLE_QUANT_SIM"], !sim.isEmpty {
+            stderr.write(Data(("ple_quant_sim group=\(sim): PLE rows are quantized "
+                + "and decoded in memory after the read; the installed table is "
+                + "unchanged\n").utf8))
+        }
         let runner = try RealForwardRunner(
             model: model,
             context: context,

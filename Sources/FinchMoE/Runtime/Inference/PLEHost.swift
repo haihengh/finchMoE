@@ -65,6 +65,17 @@ final class PLEHost {
     let headOffsets: [UInt64]
     let headVocabSizes: [UInt64]
 
+    /// When set, every row decoded from a **raw-BF16** part is quantized and
+    /// decoded back before it reaches the GPU, so the engine sees exactly what
+    /// the int4 PLE install would hand it while the table on disk stays
+    /// untouched. `FQ_PLE_QUANT_SIM=<groupSize>` is the only thing that sets
+    /// it; it exists to isolate PLE quantization error from every other source
+    /// of error (`docs/PLE_QUANTIZATION_PLAN.md` Phase 5.1), not as a
+    /// production path. A part that is *already* quantized is left alone —
+    /// re-encoding it would be the identity, since its values are on the grid
+    /// by construction.
+    private let quantizationSimulation: Int?
+
     /// The last `ngramSize` tokens with their absolute positions, oldest
     /// first: the token being routed plus the `ngramSize − 1` predecessors its
     /// window reaches. Never longer.
@@ -78,7 +89,8 @@ final class PLEHost {
     init?(config: ArchConfig,
           multipliers: [UInt64],
           headOffsets: [UInt64],
-          headVocabSizes: [UInt64]) {
+          headVocabSizes: [UInt64],
+          quantizationSimulation: Int? = nil) {
         guard config.isQwen3_8, config.pleLayerIndexes.isEmpty == false,
               config.ngramSize > 1, config.headsPerNgram > 0,
               config.ngramRowDim > 0, config.ngramPartCount > 0,
@@ -118,6 +130,16 @@ final class PLEHost {
         self.multipliers = Array(multipliers.prefix(geometry.ngramSize))
         self.headOffsets = headOffsets
         self.headVocabSizes = headVocabSizes
+        // A group size that does not divide the row width would quantize a
+        // ragged final group — a layout no install can have, since the writer
+        // rejects it at plan time. Refuse it here too rather than let a
+        // measurement report on a shape that cannot ship.
+        if let groupSize = quantizationSimulation {
+            precondition(groupSize > 0 && geometry.rowDim % groupSize == 0,
+                         "PLE simulation group \(groupSize) does not divide the row "
+                         + "width \(geometry.rowDim)")
+        }
+        self.quantizationSimulation = quantizationSimulation
     }
 
     // MARK: - Sequence state
@@ -253,9 +275,22 @@ final class PLEHost {
             case .rawBF16:
                 bytes.withUnsafeBytes { raw in
                     let bits = raw.bindMemory(to: UInt16.self)
-                    for d in 0..<rowDim {
-                        out[base + d] = Float16(Quantization.bf16ToFloat(bits[d]))
+                    guard let groupSize = quantizationSimulation else {
+                        for d in 0..<rowDim {
+                            out[base + d] = Float16(Quantization.bf16ToFloat(bits[d]))
+                        }
+                        return
                     }
+                    // Phase 5.1: quantize the row as a whole — the writer's
+                    // unit — and decode it back, so this run's activation is
+                    // exactly what the int4 install would supply for the same
+                    // row. Everything else in the model is untouched, which is
+                    // what makes the A/B attributable to the PLE table alone.
+                    var values = [Float](repeating: 0, count: rowDim)
+                    for d in 0..<rowDim { values[d] = Quantization.bf16ToFloat(bits[d]) }
+                    let quantized = Quantization.quantizeInt4AffinePLE(values, groupSize: groupSize)
+                    let decoded = Quantization.dequantizeInt4AffinePLE(quantized, n: rowDim)
+                    for d in 0..<rowDim { out[base + d] = Float16(decoded[d]) }
                 }
             case .quantized(let groupSize):
                 // On-disk row (writer layout): [packed nibbles: rowDim/2]

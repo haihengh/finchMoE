@@ -40,6 +40,11 @@ public enum Quantization {
 
     // MARK: - INT4 affine (PLE table)
 
+    public static func quantizeInt4AffinePLE(_ row: [Float],
+                                             groupSize: Int = pleGroupSize) -> Int4AffinePLERow {
+        FinchQuantization.quantizeInt4AffinePLE(row, groupSize: groupSize)
+    }
+
     public static func dequantizeInt4AffinePLE(_ r: Int4AffinePLERow, n: Int) -> [Float] {
         FinchQuantization.dequantizeInt4AffinePLE(r, n: n)
     }
