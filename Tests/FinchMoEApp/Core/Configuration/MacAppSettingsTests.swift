@@ -83,7 +83,7 @@ import Testing
         #expect(settings.modelVerification == .automatic)
         #expect(settings.newlineShortcut == .return)
         #expect(settings.showPromptExamples)
-        #expect(settings.sentPromptBehavior == .keep)
+        #expect(settings.sentPromptBehavior == .clear)
     }
 
     @Test(arguments: AppNewlineShortcut.allCases)

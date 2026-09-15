@@ -16,7 +16,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var modelVerification: AppModelVerification = .automatic
     var newlineShortcut: AppNewlineShortcut = .return
     var showPromptExamples: Bool = true
-    var sentPromptBehavior: AppSentPromptBehavior = .keep
+    var sentPromptBehavior: AppSentPromptBehavior = .clear
 
     private enum CodingKeys: String, CodingKey {
         case version
@@ -46,7 +46,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          modelVerification: AppModelVerification = .automatic,
          newlineShortcut: AppNewlineShortcut = .return,
          showPromptExamples: Bool = true,
-         sentPromptBehavior: AppSentPromptBehavior = .keep) {
+         sentPromptBehavior: AppSentPromptBehavior = .clear) {
         self.version = version
         self.contextTokens = contextTokens
         self.expertCacheSlots = expertCacheSlots
@@ -91,7 +91,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             forKey: .showPromptExamples) ?? true
         sentPromptBehavior = try container.decodeIfPresent(
             AppSentPromptBehavior.self,
-            forKey: .sentPromptBehavior) ?? .keep
+            forKey: .sentPromptBehavior) ?? .clear
     }
 
     func isValid() -> Bool {

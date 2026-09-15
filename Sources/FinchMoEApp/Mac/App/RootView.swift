@@ -9,12 +9,12 @@ struct RootView: View {
     var body: some View {
         HStack(spacing: 0) {
             primaryContent
-                .frame(minWidth: 720, maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: 700, maxWidth: .infinity, maxHeight: .infinity)
 
             Divider()
 
             InspectorView(model: model)
-                .frame(width: 320)
+                .frame(width: 340)
                 .frame(maxHeight: .infinity)
                 .background(Color(nsColor: .windowBackgroundColor))
         }

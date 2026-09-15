@@ -45,7 +45,7 @@ public final class AppModel {
     public var topP: Double = 0.95
     public private(set) var newlineShortcut: AppNewlineShortcut = .return
     public private(set) var showPromptExamples: Bool = true
-    public private(set) var sentPromptBehavior: AppSentPromptBehavior = .keep
+    public private(set) var sentPromptBehavior: AppSentPromptBehavior = .clear
     public var diagnostics: AppDiagnostics?
     public var error: AppInferenceError?
     public var localServerPort: Int = 8080
