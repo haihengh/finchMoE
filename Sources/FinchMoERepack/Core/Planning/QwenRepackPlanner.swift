@@ -98,11 +98,14 @@ struct QwenResidentFilePlan: Sendable {
     var relativePath: String { (path as NSString).lastPathComponent }
 }
 
-/// One PLE n-gram table part: the part's source tensor copied verbatim
-/// (raw BF16, row-major) to its own file. The real model writes 128 parts of
-/// 2,500,012 × 160 rows (~800 MB each, 102.4 GB total); synthetic snapshots
-/// write fewer, smaller parts and the planner census-corrects
-/// `arch.ngramPartCount/ngramPartRows` to match.
+/// One PLE n-gram table part. Under the PLE quantization plan (Phase 2/3)
+/// each part's rows are quantized to int4 affine (group `pleGroupSize`) and
+/// laid out per-row as `[packed nibbles: cols/2][scale BF16 × nGroups]`
+/// `[bias BF16 × nGroups]` — a fixed stride, no per-row variable metadata.
+/// The real model writes 128 parts of 2,500,012 × 160 rows (~100 B/row →
+/// ~250 MB each, ~32 GB total); synthetic snapshots write fewer, smaller
+/// parts and the planner census-corrects `arch.ngramPartCount/ngramPartRows`
+/// to match.
 struct QwenPLEPartFilePlan: Sendable {
     let partIndex: Int
     /// Absolute write target under the install's `ple_shards/` directory.
@@ -111,7 +114,22 @@ struct QwenPLEPartFilePlan: Sendable {
     let relativePath: String
     let rows: Int
     let cols: Int
+    /// PLE int4 affine group size (Phase 1 chose 32). The row is self-
+    /// describing on decode, but the writer and the size accounting both
+    /// derive their stride from this, so it is carried explicitly.
+    let groupSize: Int
     let source: SourceTensor
+
+    /// Per-row on-disk stride: `cols/2` packed nibbles + `2 * nGroups` BF16
+    /// scale/bias bytes. For 160 cols / group 32 that is 80 + 20 = 100 bytes.
+    var rowByteStride: Int {
+        let nGroups = cols / groupSize
+        return cols / 2 + 2 * nGroups * MemoryLayout<UInt16>.size
+    }
+    /// Total quantized part file size.
+    var quantizedByteCount: UInt64 {
+        UInt64(rows) * UInt64(rowByteStride)
+    }
 }
 
 struct QwenRepackPlan: Sendable {
@@ -251,6 +269,15 @@ enum QwenRepackPlanner {
                     detail: "config split_ngram_parts \(configured) != live part count \(count)")
             }
             let cols = arch.ngramRowDim ?? 160
+            let groupSize = FinchQuantization.pleGroupSize
+            // The int4 affine codec needs a whole number of groups per row;
+            // 160 / 32 = 5. A row width that is not a multiple would crash the
+            // quantizer's precondition, so reject it at plan time instead.
+            guard cols % groupSize == 0 else {
+                throw RepackError.configurationInvalid(
+                    detail: "PLE n-gram row width \(cols) is not a multiple of "
+                        + "the quantization group size \(groupSize)")
+            }
             var rows: Int?
             for i in 0..<count {
                 guard let tensor = registry[plePartsByIndex[i]!] else {
@@ -286,7 +313,7 @@ enum QwenRepackPlanner {
                     path: (pleDir as NSString).appendingPathComponent(
                         String(format: "shard_%03d.bin", i)),
                     relativePath: rel,
-                    rows: uniformRows, cols: cols, source: source))
+                    rows: uniformRows, cols: cols, groupSize: groupSize, source: source))
             }
         } else if !plePartsByIndex.isEmpty {
             throw RepackError.configurationInvalid(

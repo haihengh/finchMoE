@@ -395,35 +395,76 @@ enum QwenQuantizedWriter {
 
     // MARK: - PLE n-gram part files
 
-    /// One PLE n-gram table part: verbatim raw-BF16 copy of the source part
-    /// tensor to `ple_shards/shard_NNN.bin`. Real parts are ~800 MB each
-    /// (2,500,012 × 160 × 2 B); the stream is copied straight from the mapped
-    /// source in bounded chunks with per-chunk eviction, so the 102.4 GB
-    /// table never materializes in memory or page cache at once.
+    /// One PLE n-gram table part. Each 160-wide BF16 source row is quantized
+    /// to int4 affine (group `plan.groupSize`, 32) and written per-row as
+    /// `[packed nibbles: cols/2][scale BF16 × nGroups][bias BF16 × nGroups]`
+    /// — a fixed `rowByteStride` (100 bytes for 160 / group 32). Rows are
+    /// independent (one row decoded from its own bytes), processed in bounded
+    /// batches with the same mmap-slice → transform → pwrite discipline the
+    /// resident/expert writers use, and evicted from page cache as we go.
+    /// Real parts are ~800 MB of BF16 → ~250 MB quantized.
     static func writePLEPart(plan: QwenPLEPartFilePlan,
                              audit: RepackAudit,
                              cancellationCheck: () throws -> Void = {}) throws -> RepackAudit.OutputFile {
         try Posix.mkdirP(((plan.path as NSString).deletingLastPathComponent))
         let fd = try Posix.openCreateRW(plan.path)
         defer { close(fd) }
-        let totalBytes = UInt64(plan.rows) * UInt64(plan.cols) * 2
+
+        let cols = plan.cols
+        let groupSize = plan.groupSize
+        let nGroups = cols / groupSize
+        let packedRowBytes = cols / 2
+        let auxBytes = nGroups * 2
+        let rowStride = plan.rowByteStride
+        let totalRows = plan.rows
+        let totalBytes = UInt64(totalRows) * UInt64(rowStride)
         try Posix.ftruncate(fd, path: plan.path, size: totalBytes)
 
         let shard = try MmapHandle(path: plan.source.shardPath)
         let srcBase = plan.source.absoluteOffset
-        let chunkBytes = 8 << 20
-        var done: UInt64 = 0
-        while done < totalBytes {
+
+        let batchRows = 1024
+        let srcBatchBytes = batchRows * cols * 2
+        let outBatchBytes = batchRows * rowStride
+        let scratchBytes = outBatchBytes + cols * MemoryLayout<Float>.size
+        if scratchBytes > audit.largestScratchBytes {
+            audit.largestScratchBytes = scratchBytes
+        }
+        var floats = [Float](repeating: 0, count: cols)
+        var out = [UInt8](repeating: 0, count: batchRows * rowStride)
+
+        var row = 0
+        while row < totalRows {
             try cancellationCheck()
-            let chunk = Int(min(UInt64(chunkBytes), totalBytes - done))
-            let src = shard.slice(at: srcBase + done, count: chunk)
-            try Posix.pwriteAll(fd: fd, path: plan.path,
-                                buf: src.baseAddress!, count: chunk,
-                                offset: done)
-            audit.recordRead(bytes: chunk)
-            audit.recordWrite(bytes: chunk)
-            shard.adviseDontNeed(offset: srcBase + done, count: chunk)
-            done += UInt64(chunk)
+            let batch = min(batchRows, totalRows - row)
+            let srcOff = srcBase + UInt64(row * cols * 2)
+            let src = shard.slice(at: srcOff, count: batch * cols * 2)
+            audit.recordRead(bytes: batch * cols * 2)
+
+            for i in 0..<batch {
+                let rowBase = i * cols * 2
+                for k in 0..<cols {
+                    let bits = UInt16(src[rowBase + 2 * k])
+                        | UInt16(src[rowBase + 2 * k + 1]) << 8
+                    floats[k] = FinchQuantization.bf16ToFloat(bits)
+                }
+                let q = floats.withUnsafeBufferPointer {
+                    FinchQuantization.quantizeInt4AffinePLE($0, count: cols, groupSize: groupSize)
+                }
+                let dst = i * rowStride
+                q.packed.withUnsafeBytes { memcpy(&out[dst], $0.baseAddress!, $0.count) }
+                q.scales.withUnsafeBytes { memcpy(&out[dst + packedRowBytes], $0.baseAddress!, $0.count) }
+                q.biases.withUnsafeBytes { memcpy(&out[dst + packedRowBytes + auxBytes], $0.baseAddress!, $0.count) }
+            }
+
+            try out.withUnsafeBytes { raw in
+                try Posix.pwriteAll(fd: fd, path: plan.path,
+                                    buf: raw.baseAddress!, count: batch * rowStride,
+                                    offset: UInt64(row) * UInt64(rowStride))
+            }
+            audit.recordWrite(bytes: batch * rowStride)
+            shard.adviseDontNeed(offset: srcOff, count: batch * cols * 2)
+            row += batch
         }
 
         try Posix.fsync(fd, path: plan.path)

@@ -471,11 +471,23 @@ public struct Model {
 
     // MARK: - Qwen3.8-Flash-Next: PLE n-gram part files (lazy)
 
+    /// The on-disk layout of this install's PLE part files, read from the
+    /// manifest's optional `pleNgram` slot: present and valid means the int4
+    /// affine layout (group 32), absent means the legacy raw-BF16 path. This is
+    /// the single place the layout is decided, so `openPLEPartLocked` and the
+    /// size check below cannot disagree. `ManifestQuant`'s `pleNgram` is only
+    /// ever set to a group-32 slot or `nil` (rejected otherwise at decode), so
+    /// the group size here is a constant.
+    static func plePartLayout(quant: ManifestQuant?) -> PLEPartStreamer.Layout {
+        guard let ple = quant?.pleNgram else { return .rawBF16 }
+        return .quantized(groupSize: ple.groupSize)
+    }
+
     /// First touch of part file `part` opens it + verifies SHA-256; the
     /// returned streamer is cached for the model lifetime (mirrors the
-    /// per-layer routed-expert streamers). Parts are raw BF16 row-major
-    /// `[ngramPartRows, ngramRowDim]`; row addressing/hash layout is the M3.3
-    /// PLE gather's job.
+    /// per-layer routed-expert streamers). Parts are either raw BF16 row-major
+    /// `[ngramPartRows, ngramRowDim]` or the int4 affine layout, decided by
+    /// `plePartLayout`; row addressing/hash layout is the M3.3 PLE gather's job.
     public func openPLEPart(_ part: Int) throws -> PLEPartStreamer {
         try plePartsQueue.sync {
             try openPLEPartLocked(part)
@@ -529,6 +541,7 @@ public struct Model {
             partIndex: part,
             rows: config.ngramPartRows,
             columns: config.ngramRowDim,
+            layout: Self.plePartLayout(quant: manifest.quant),
             fileDescriptor: partFD)
         plePartsBox.streamers[part] = streamer
         plePartsBox.verified[part] = true
@@ -1156,9 +1169,20 @@ extension Model {
                 throw ModelError.indexCorrupt(
                     detail: "qwen3_8 preset must set the n-gram part geometry")
             }
+            // Per-row byte stride from the manifest's layout: raw BF16 is
+            // `columns × 2`; the int4 affine layout is
+            // `columns/2 + 2 · nGroups · 2`. Must match PLEPartStreamer.
+            let perRow: Int
+            switch Self.plePartLayout(quant: quant) {
+            case .rawBF16:
+                perRow = partColumns * MemoryLayout<UInt16>.size
+            case .quantized(let groupSize):
+                perRow = (partColumns >> 1)
+                    + (partColumns / groupSize) * MemoryLayout<UInt16>.size * 2
+            }
             let expectedPartBytes = try checkedMultiply(
                 UInt64(partRows),
-                UInt64(partColumns * MemoryLayout<UInt16>.size),
+                UInt64(perRow),
                 field: "PLE part file")
             for part in 0..<config.ngramPartCount {
                 let name = String(format: "ple_shards/shard_%03d.bin", part)

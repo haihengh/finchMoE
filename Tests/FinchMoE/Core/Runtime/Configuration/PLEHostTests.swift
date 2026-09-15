@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 @testable import FinchMoE
+import FinchMoEFormat
 import FinchMoEValidationSupport
 
 /// Cross-validates `PLEHost` — the host-side PLE n-gram routing — against
@@ -223,5 +224,92 @@ import FinchMoEValidationSupport
                         "head \(h) (row \(row), part \(row / partRows)) dim \(d): \(got) vs \(want)")
             }
         }
+    }
+
+    /// Write each part as the int4 affine layout the PLE-quant writer produces:
+    /// per row `[packed nibbles: rowDim/2][scale BF16 × nGroups][bias BF16 × nGroups]`,
+    /// with each row quantized from a known source value (`row*2 + d`). Group
+    /// size 2 here so the 4-wide toy rows exercise the multi-group path while
+    /// staying hand-checkable.
+    private static func writeQuantizedToyTable(rowDim: Int, partCount: Int, partRows: Int,
+                                               in directory: URL) throws {
+        let groupSize = 2
+        for part in 0..<partCount {
+            var bytes = Data()
+            for r in 0..<partRows {
+                let row = part * partRows + r
+                let values = (0..<rowDim).map { Float(row * 2 + $0) }
+                let q = FinchQuantization.quantizeInt4AffinePLE(values, groupSize: groupSize)
+                q.packed.forEach { bytes.append($0) }
+                q.scales.forEach { bytes.append(UInt8($0 & 0xFF)); bytes.append(UInt8($0 >> 8)) }
+                q.biases.forEach { bytes.append(UInt8($0 & 0xFF)); bytes.append(UInt8($0 >> 8)) }
+            }
+            let name = String(format: "shard_%03d.bin", part)
+            try bytes.write(to: directory.appendingPathComponent(name))
+        }
+    }
+
+    @Test("the gather decodes int4-affine PLE rows (quantized part layout)")
+    func gatherDecodesQuantizedRows() throws {
+        let rowDim = 4, partCount = 2, partRows = 8, groupSize = 2
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("plehost-quant-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Self.writeQuantizedToyTable(rowDim: rowDim, partCount: partCount,
+                                        partRows: partRows, in: dir)
+
+        let config = Self.toyConfig(rowDim: rowDim, partCount: partCount, partRows: partRows)
+        let host = Self.makeHost(config: config)
+        host.record(position: 0, token: 3)
+        let rows = host.rowIndices(atPosition: 0)
+
+        let gathered = try host.gather(atPosition: 0) { part in
+            let fd = Darwin.open(dir.appendingPathComponent(
+                String(format: "shard_%03d.bin", part)).path, O_RDONLY)
+            guard fd >= 0 else { throw CocoaError(.fileNoSuchFile) }
+            defer { close(fd) }
+            return try PLEPartStreamer(partIndex: part, rows: partRows,
+                                       columns: rowDim,
+                                       layout: .quantized(groupSize: groupSize),
+                                       fileDescriptor: fd)
+        }
+
+        #expect(gathered.count == rows.count * rowDim)
+        for (h, row) in rows.enumerated() {
+            let values = (0..<rowDim).map { Float(row * 2 + $0) }
+            let q = FinchQuantization.quantizeInt4AffinePLE(values, groupSize: groupSize)
+            let want = FinchQuantization.dequantizeInt4AffinePLE(q, n: rowDim)
+            for d in 0..<rowDim {
+                let want16 = Float16(want[d])
+                #expect(gathered[h * rowDim + d] == want16,
+                        "head \(h) (row \(row), part \(row / partRows)) dim \(d): \(gathered[h * rowDim + d]) vs \(want16)")
+            }
+        }
+    }
+
+    @Test("the raw-BF16 default layout rejects a quantized part file's size")
+    func rawLayoutRejectsQuantizedFileSize() throws {
+        let rowDim = 4, partRows = 8, groupSize = 2
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("plehost-mismatch-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Self.writeQuantizedToyTable(rowDim: rowDim, partCount: 1,
+                                        partRows: partRows, in: dir)
+        let path = dir.appendingPathComponent("shard_000.bin")
+        let fd = Darwin.open(path.path, O_RDONLY)
+        guard fd >= 0 else { throw CocoaError(.fileNoSuchFile) }
+        defer { close(fd) }
+        // Opened as raw BF16, the quantized file's size disagrees with rows × cols × 2.
+        #expect(throws: StreamerError.self) {
+            try PLEPartStreamer(partIndex: 0, rows: partRows, columns: rowDim,
+                                fileDescriptor: fd)
+        }
+        // And opened with the correct layout it matches exactly.
+        let ok = try PLEPartStreamer(partIndex: 0, rows: partRows, columns: rowDim,
+                                     layout: .quantized(groupSize: groupSize),
+                                     fileDescriptor: fd)
+        #expect(ok.sizeBytes == UInt64(partRows * (rowDim / 2 + 2 * (rowDim / groupSize) * 2)))
     }
 }

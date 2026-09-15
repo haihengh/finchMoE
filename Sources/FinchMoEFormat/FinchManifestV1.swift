@@ -216,19 +216,26 @@ package struct FinchManifestQuantV1: Codable, Equatable, Sendable {
     package let router: FinchManifestQuantSlotV1
     package let sharedExpert: FinchManifestQuantSlotV1
     package let routedExpert: FinchManifestQuantSlotV1
+    /// PLE n-gram table quantization slot. Additive and optional: `nil` on the
+    /// current raw-BF16 PLE installs (which must keep loading) and on every
+    /// non-qwen3_8 family; present with weightBits 4 / group 32 / scheme
+    /// "affine" when the PLE table was quantized (PLE_QUANTIZATION_PLAN Phase 3).
+    package let pleNgram: FinchManifestQuantSlotV1?
 
     package init(embedding: FinchManifestQuantSlotV1,
                  attention: FinchManifestQuantSlotV1,
                  linearAttention: FinchManifestQuantSlotV1,
                  router: FinchManifestQuantSlotV1,
                  sharedExpert: FinchManifestQuantSlotV1,
-                 routedExpert: FinchManifestQuantSlotV1) {
+                 routedExpert: FinchManifestQuantSlotV1,
+                 pleNgram: FinchManifestQuantSlotV1? = nil) {
         self.embedding = embedding
         self.attention = attention
         self.linearAttention = linearAttention
         self.router = router
         self.sharedExpert = sharedExpert
         self.routedExpert = routedExpert
+        self.pleNgram = pleNgram
     }
 }
 
@@ -353,6 +360,17 @@ package enum FinchManifestCodec {
                       !slot.biasType.isEmpty else {
                     throw FinchFormatError.invalid(
                         field: "manifest.quant.\(name)", reason: "invalid quantization values")
+                }
+            }
+            // PLE n-gram slot is optional (absent on raw-BF16 installs);
+            // when present it carries the same invariants as the others.
+            if let ple = quant.pleNgram {
+                guard ple.weightBits > 0, ple.weightBits <= 32,
+                      ple.groupSize > 0,
+                      !ple.scheme.isEmpty, !ple.scaleType.isEmpty,
+                      !ple.biasType.isEmpty else {
+                    throw FinchFormatError.invalid(
+                        field: "manifest.quant.pleNgram", reason: "invalid quantization values")
                 }
             }
         }

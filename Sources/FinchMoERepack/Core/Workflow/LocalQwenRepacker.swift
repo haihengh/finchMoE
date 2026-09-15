@@ -142,7 +142,7 @@ public final class LocalQwenRepacker {
                                               shardHeaders: snapshot.shardHeaders,
                                               outputDir: paths.partialDirectory)
         let pleBytes = plan.pleParts.reduce(UInt64(0)) {
-            $0 + UInt64($1.rows) * UInt64($1.cols) * 2
+            $0 + $1.quantizedByteCount
         }
         let outputBytes = plan.resident.totalSize
             + plan.layers.reduce(UInt64(0)) { $0 + $1.fileSize }
@@ -429,6 +429,14 @@ public final class LocalQwenRepacker {
         let modelID = plan.arch.modelFamily == ArchInfo.qwen38Family
             ? "local/Qwen3.8-Flash-Next-125B"
             : "local/Qwen3.6-35B-A3B"
+        // PLE n-gram quantization slot: present (int4, the plan's group size)
+        // for a qwen3_8 install that has PLE parts, absent otherwise — this
+        // is the additive manifest slot Phase 3 defines, and its absence is
+        // how old raw-BF16 installs stay loadable (Phase 4 backward-compat).
+        let pleNgram: FinchJSON.PleNgramQuant? = plan.pleParts.first.map {
+            FinchJSON.PleNgramQuant(weightBits: 4, scheme: "affine",
+                                    groupSize: $0.groupSize)
+        }
         let data = try FinchJSON.encodeManifest(
             arch: plan.arch,
             baseMode: "affine",
@@ -440,7 +448,8 @@ public final class LocalQwenRepacker {
             expertsPerLayer: plan.layers.first(where: { $0.expertsPerLayer > 0 })?.expertsPerLayer ?? 0,
             numLayers: plan.arch.numLayers,
             expertStride: expertStride,
-            bitWidths: bits)
+            bitWidths: bits,
+            pleNgram: pleNgram)
         let tmp = (partialDir as NSString).appendingPathComponent("manifest.json.tmp")
         let final = (partialDir as NSString).appendingPathComponent("manifest.json")
         try writeSmall(path: tmp, data: data)
