@@ -666,11 +666,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             var pleConstants: (multipliers: [UInt64], headOffsets: [UInt64],
                                headVocabSizes: [UInt64])? = nil
             if cfg.isQwen3_8 { pleConstants = try model.pleHashConstants() }
+            // `FQ_PLE_QUANT_SIM=<groupSize>`: decode every raw-BF16 PLE row as
+            // if the table had been quantized to that group size, with the
+            // install left alone. Phase 5.1's isolation knob — one variable
+            // between two otherwise identical runs.
+            let pleQuantSimulation = ProcessInfo.processInfo
+                .environment["FQ_PLE_QUANT_SIM"].flatMap(Int.init)
             if let c = pleConstants,
                let host = try PLEHost(config: cfg,
                                       multipliers: c.multipliers,
                                       headOffsets: c.headOffsets,
-                                      headVocabSizes: c.headVocabSizes) {
+                                      headVocabSizes: c.headVocabSizes,
+                                      quantizationSimulation: pleQuantSimulation) {
                 self.pleHost = host
                 self.ple = try PLE(context: ctx)
                 let hcDim = cfg.hyperConnectionDim
