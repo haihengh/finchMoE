@@ -28,7 +28,8 @@ Grounded in: `docs/SYSTEM_DESIGN.md`, `docs/OPTIMIZATION_JOURNEY.md`, `docs/QWEN
 #### 1.1 result (measured 2026-09-15) — the ceiling is raised, and it pays far more than predicted
 
 `5a82ecb` raised the ceiling 128 → 1024 and exposed
-`--prefill-chunk-tokens 32/64/128/256/512/1024` (default still 128) plus
+`--prefill-chunk-tokens 32/64/128/256/512/1024` (default 512 since this
+sweep) plus
 `FQ_PREFILL_COUNTERS`, which prices the mechanism directly: expert bytes read.
 Swept on the quantized-PLE 125B install, greedy T=0, 32 generated tokens,
 `--max-context` 2048/4096, one run per cell:
@@ -59,8 +60,10 @@ tokens rather than the chunk size: 256/512/1024 agree *exactly* with each other,
 the same size repeated gives identical tokens, and a genuine boundary-dependent
 math difference would have shown up in the 4-chunks-to-1 case above.
 
-Open follow-up: the default is still 128, so nothing here is realised until it
-moves. 512 captures most of the win at half the scratch of 1024.
+**Rolled out:** the default is now 512 (`PrefillRuntimeConfig.defaultChunked`,
+the CLI, the app and the decode protocol), which captures most of the win at
+half the scratch of 1024. Verified on this box before the change: token output
+is unaffected, and the cost is ~0.3 GB more peak on a 2900-token prompt.
 
 ### 1.2 [DONE 2026-09-11] Default the trusted-install receipt in the CLI, the server and the Mac app
 - **Original evidence**: `QWEN36_PORT.md` items 5 and 7 flagged this as an **open gap** — the CLI exposed `--verify trusted-install` (cuts fixed per-run cost from ~8s to <1s per README), but the Mac app's "verification default stays `full-sha256` (no UI setting)" and the server had no `--verify` flag at all, so every server process ate the full layer-SHA256 pass on first expert touch ("8.79s wall, of which ~8s is the first-use layer-SHA pass").

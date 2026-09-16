@@ -32,7 +32,7 @@ public struct Args: Equatable, Sendable {
                 quiet: Bool = false,
                 counters: Bool = false,
                 expertCacheSlots: Int? = nil,
-                prefillChunkTokens: Int = 128,
+                prefillChunkTokens: Int = 512,
                 verify: ModelIntegrityPreference = .automatic) {
         self.model = model
         self.prompt = prompt
@@ -123,7 +123,7 @@ extension Args {
                                 rejected rather than left to trap.
       --prefill-chunk-tokens <n>
                                 Prompt-prefill chunk size, one of
-                                \(prefillChunkList) (default 128). Chunked
+                                \(prefillChunkList) (default 512). Chunked
                                 prefill re-reads a layer's routed-expert pool
                                 once per chunk, so this is the prefill I/O
                                 divisor: a larger chunk cuts expert bytes read
@@ -160,7 +160,7 @@ extension Args {
         var quiet = false
         var counters = false
         var expertCacheSlots: Int?
-        var prefillChunkTokens = 128
+        var prefillChunkTokens = 512
         var verify = ModelIntegrityPreference.automatic
 
         var index = 0
