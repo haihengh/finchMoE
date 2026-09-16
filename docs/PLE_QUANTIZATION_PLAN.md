@@ -689,6 +689,34 @@ blocks 20/20, `<think>` leakage 0/20, sanitizer-empty 0/20, import-only 0/20,
 repetition loops 0/20 — i.e. the failure modes that made the older homegrown
 harness's numbers unreadable are all absent here.
 
+#### Phase 6 result (2026-09-15) — repack done, size recorded, decode I/O measured
+
+| 6.x | | |
+| --- | --- | --- |
+| 6.1 repack the real 352 GB snapshot | **done** — 16 min under memguard, 2.4 GB peak, every part exactly 250,001,200 B | |
+| 6.2 record the install size, receipt promotes | **done** — 103,925,807,384 B written (97 GiB against 162); `verified-install.json` written with 185 files and hashed at load | |
+| 6.3 measure decode-time I/O | **done** — see below | |
+| 6.4 mark PLE quant off `QWEN38_PORT.md`'s Deferred list | **done** | |
+| 6.5 cut the app default over to the new install | **done** — `AppModelLocation` now prefers `Qwen3.8-Flash-Next-125B-ple4bit.finch` and keeps the 162 GiB tree directly behind it as the fallback | |
+
+**6.3, measured rather than assumed.** `--counters` now carries the PLE path's
+byte traffic (`ple_bytes`, `ple_bytes/token`, both decode-scoped beside
+`pleGathers`), read off the streamer's own row stride so it follows whatever
+layout the install declares. A 24-token greedy decode on the same prompt, same
+flags, on each install:
+
+| install | PLE bytes/token | PLE wall/step |
+| --- | --- | --- |
+| this one (int4, group 32) | **1600 B** | 3.39 ms |
+| the 162 GiB one (raw BF16) | **5120 B** | 4.16 ms |
+
+16 rows × 100 B against 16 rows × 320 B — the 3.2x the layout predicts, now
+measured. It is also the honest scale of this change: the same run reports
+`io_mb/step=645` for routed experts, so the PLE path is ~1.8% of a decode step's
+I/O and ~1.8% of its wall clock. The repack's prize is the 65 GiB of install and
+the per-token traffic, not throughput — decode here is drive-bound at ~3.4 GB/s
+regardless.
+
 ### Phase 6 — Full repack on the real machine, sizing, and rollout
 
 1. Run the real 352 GB→quantized-PLE repack under

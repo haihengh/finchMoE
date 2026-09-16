@@ -58,15 +58,22 @@ enum AppModelLocation {
     /// is installed yet). Outside a checkout the Application Support Gemma
     /// target above remains the fallback.
     ///
-    /// Order matters, and 3.6 stays first: 3.8 is a 174 GB, 512-expert model
+    /// Order matters, and 3.6 stays first: 3.8 is a 125B, 512-expert model
     /// that needs far more memory than 3.6 to run, so a checkout holding both
     /// must keep starting on 3.6. 3.8 is the entry for a checkout that holds
     /// only it.
+    ///
+    /// Within the 3.8 pair the quantized-PLE install comes first and the
+    /// original is kept directly behind it as the fallback: they are the same
+    /// weights with the n-gram table at int4 instead of BF16 (97 GiB against
+    /// 162), and a checkout that still holds only the older tree must keep
+    /// working rather than fall through to Gemma.
     private static func preferredInstallURL(inPackageRoot root: URL,
                                             fileExists: (String) -> Bool) -> URL {
         let installed = [
             "models/Qwen3.6-35B-A3B-4bit.finch",
-            "models/Qwen3.8-Flash-Next-125B.finch",
+            "models/Qwen3.8-Flash-Next-125B-ple4bit.finch",   // 97 GiB, int4 PLE
+            "models/Qwen3.8-Flash-Next-125B.finch",           // 162 GiB, raw BF16 PLE (fallback)
         ]
         for relative in installed {
             let candidate = root.appendingPathComponent(relative, isDirectory: true)

@@ -966,6 +966,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalPleGatherNanos: UInt64 = 0
     public private(set) var totalPleGathers: UInt64 = 0
     public private(set) var totalPlePartOpens: UInt64 = 0
+    /// Bytes the PLE gather has requested, taken from the host after each call
+    /// rather than recomputed here, so it follows the install's actual row
+    /// stride — the number that prices the table's quantization.
+    public private(set) var totalPleRowBytes: UInt64 = 0
     public private(set) var totalCb2Nanos: UInt64 = 0
     public private(set) var totalHeadNanos: UInt64 = 0
     public private(set) var totalHeadFusedNanos: UInt64 = 0
@@ -5541,10 +5545,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // shard also hashes 800 MB *here*, inside a decode step, so a cold
             // run and a warm one do not measure the same thing.
             let tPle = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            // The host's byte total is cumulative over prefill *and* decode, so
+            // take the delta rather than assigning it: this counter is reported
+            // beside `pleGathers`, which is decode-only, and a per-token figure
+            // built from a whole-run numerator and a decode denominator is
+            // meaningless (it was 3.7x too high before this).
+            let pleBytesBefore = pleHost.totalRowBytesRead
             let gathered = try pleHost.gather(atPosition: position) { part in
                 totalPlePartOpens &+= 1
                 return try model.openPLEPart(part)
             }
+            totalPleRowBytes &+= pleHost.totalRowBytesRead &- pleBytesBefore
             totalPleGatherNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- tPle
             totalPleGathers &+= 1
             gathered.withUnsafeBytes { src in
