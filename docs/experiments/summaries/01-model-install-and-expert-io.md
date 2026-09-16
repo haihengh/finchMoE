@@ -1046,6 +1046,53 @@ GPU-contention elimination above is withdrawn.
   third that keeps the allocation and removes only the work. The first null would have left
   "Metal allocation" standing; only the pair separates them.
 
+### IO-22: The drive's contention penalty is generic, not GPU-specific, and a third of it is thread pressure
+
+- **Hypothesis:** IO-21 left the *specificity* question open. It had shown that adding a
+  dose-matched GPU to the replay costs the drive 12%, but its CPU half could not answer whether
+  that price is the GPU's or any heavy concurrent activity's: `mem_load` burned four CPU cores
+  where `gpu_load` runs at ~1.1%, and the two halves were measured in different sessions whose
+  alone arms differed by more than the effect (184-194 ms/step against 167-173).
+- **The control, matched on both axes.** `tools/read-sweep/contention-control.sh` runs every arm
+  **interleaved in one session with a rotating start**, so no arm is always measured against the
+  same drive state, and no session state is unique to an arm. The CPU arm is dose-matched by
+  construction — `--burst-mb` and `--period-ms` are the same flags the GPU arm uses, and only the
+  rate flag differs, because `mem_load`'s rate is what the CPUs deliver rather than a throttle.
+  Two thread counts separate "how many threads" from "how many bytes", and a fourth arm burns
+  four cores with **no memory traffic at all** (`yes`) to separate traffic from the scheduler.
+  Statistic is `thread_mean`, not p50: IO-21 found the per-read median hops a whole bucket on a
+  few points of mixture.
+- **Evidence.** Eight rounds of five arms, alone on the box, this install:
+
+  | arm | span mean | vs alone | thread_mean | vs alone |
+  |---|---|---|---|---|
+  | alone | 145.67 | — | 1.94 | — |
+  | gpu (648.8 MiB / 147 ms / 16.7 GB/s) | 164.10 | **+18.43** | 2.26 | **+0.31** |
+  | cpu4 (same dose, 4 threads) | 159.45 | **+13.78** | 2.18 | +0.24 |
+  | cpu1 (same dose, 1 thread) | 157.57 | +11.90 | 2.13 | +0.19 |
+  | burn (4 cores, no traffic) | 151.53 | **+5.86** | 2.09 | +0.14 |
+
+  The alone arm's span spread is 143.7-148.7, so within one session the drift that wrecked the
+  cross-session comparison is 3.5% — smaller than every effect measured.
+- **What it says.** The penalty is **not GPU-specific**: CPU memory traffic at the same dose
+  costs **75%** of the GPU's price, and thread count is not the driver (cpu4 minus cpu1 is
+  1.9 ms). A third of the CPU arm's cost survives with **no traffic at all**, so it is CPU and
+  scheduler pressure rather than bytes moved, and only ~4.6 ms separates the GPU from the
+  matched CPU arm. That also explains IO-21's flat 16x ladder: the price follows the *presence*
+  of concurrent activity, not its volume.
+- **Disposition.** Specificity is closed in the direction of generic contention. In the units
+  IO-21 used (per-read thread time: replay alone 1.97 -> replay+GPU 2.27 -> engine 4.13, a
+  2.16 ms gap), the GPU cell is 0.30 ms and the CPU-traffic cell 0.24, with 0.14 of that
+  reachable by thread pressure alone — so the contention family is worth **up to a quarter to a
+  third** of the engine's gap, and whether those cells *stack* in the engine is untested (they
+  are alternatives here, not additive). The majority remains unexplained, but the reframing
+  matters: the drive is slower when the box is **busy**, not when the GPU specifically reads.
+- **Lesson:** an unmatched control is not a weak measurement, it is no measurement — and the
+  mismatch hid in two places at once (a flag set that killed one arm outright, and a session
+  whose drive state differed from its comparison's). Rotating arms *within* a session is what
+  makes the comparison causal; IO-21 did that between loaded and unloaded and still lost the
+  specificity question to the session boundary.
+
 [Experiment inventory](../EXPERIMENT_INVENTORY.md) |
 [Optimization journey](../../OPTIMIZATION_JOURNEY.md) |
 [Next: Decode, MoE, INT4, and router](02-decode-moe-int4-and-router.md)

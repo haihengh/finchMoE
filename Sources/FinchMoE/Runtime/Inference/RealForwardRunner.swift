@@ -278,6 +278,51 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// production — the copies only run when a hook is installed.
     internal var qwenLayerDebugHook: ((Int, String, [Float16]) -> Void)? = nil
 
+    /// `FQ_QSA_DUMP=<path>`: append one line per step and full-attention layer
+    /// describing what the QSA ranking selected — the cell count, the pooled
+    /// block count, and a hash of the selected cell indices.
+    ///
+    /// This exists because the ranking path is where the engine stops being
+    /// bit-reproducible (past `indexerBudget + r − 1` = 2051 tokens on this
+    /// model), and the aggregate is the wrong instrument for finding it: two
+    /// runs differ in ~99% of their logits, which says the divergence happened
+    /// *somewhere earlier*. A fingerprint per step and layer turns that into
+    /// the first step and layer that actually moved, which is what a kernel
+    /// investigation needs. Dumped at the end of `produceToken`, after its
+    /// wait, because `qsaSelection` is only valid then — and the prefill path
+    /// has no equivalent point, since `prefillChunked` leaves work in flight.
+    private var qsaDumpPath: String? = nil
+    /// Best-effort; a diagnostic must never break the run it is diagnosing.
+    private func dumpQSASelection(position: Int) {
+        guard let path = qsaDumpPath, let st = qsaState else { return }
+        var lines = ""
+        for L in 0..<cfg.numLayers {
+            guard let li = st.index(ofLayer: L) else { continue }
+            let lay = st.layers[li]
+            let written = Int(lay.cellCount.contents()
+                .bindMemory(to: UInt32.self, capacity: 1).pointee)
+            let count = min(written, st.capacity)
+            let ptr = lay.cells.contents()
+                .bindMemory(to: UInt32.self, capacity: max(st.capacity, 1))
+            // FNV-1a over the selected indices: order-sensitive, and the list
+            // is ascending by construction, so a single swapped cell shows.
+            var h: UInt64 = 0xcbf2_9ce4_8422_2325
+            for i in 0..<count {
+                h = (h ^ UInt64(ptr[i])) &* 0x0000_0100_0000_01b3
+            }
+            lines += "step=\(position) layer=\(L) cells=\(count)"
+                + " pooled=\(lay.pooledBlocks) hash=\(String(h, radix: 16))\n"
+        }
+        guard !lines.isEmpty, let data = lines.data(using: .utf8) else { return }
+        if let fh = FileHandle(forWritingAtPath: path) {
+            fh.seekToEndOfFile()
+            fh.write(data)
+            try? fh.close()
+        } else {
+            try? data.write(to: URL(fileURLWithPath: path))
+        }
+    }
+
     /// Test/debug: the QSA cells a full layer's attention read on the last
     /// decode step, and how many blocks of its indexer timeline are pooled.
     /// Nil when the layer carries no indexer. Valid once the step's command
@@ -653,6 +698,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // exactly this way and keeps the dense attention path — and it is
             // what isolates the ranking dispatches from plain context length
             // when a long run turns out not to be bit-reproducible.
+            self.qsaDumpPath = ProcessInfo.processInfo
+                .environment["FQ_QSA_DUMP"]
             let qsaDisabled = ProcessInfo.processInfo.environment["FQ_QSA_OFF"] == "1"
             if !qsaDisabled,
                let state = try QSAIndexerState(device: device, config: cfg,
@@ -5865,6 +5912,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
         }
 
+        dumpQSASelection(position: position)
         kv?.advance()
     }
 
