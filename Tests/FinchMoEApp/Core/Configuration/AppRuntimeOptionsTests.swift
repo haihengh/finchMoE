@@ -9,14 +9,14 @@ import FinchMoE
         #expect(options.expertCacheSlots == 16)
         #expect(options.expertCachePolicy == .lfu)
         #expect(options.prefillEnabled)
-        #expect(options.prefillChunkTokens == 128)
+        #expect(options.prefillChunkTokens == 512)
         #expect(options.rdadvisePolicy == .off)
         #expect(options.modelVerification == .automatic)
 
         let runtime = try options.resolvedRuntimeConfiguration(forceLogitsHead: false)
         #expect(runtime == .production)
         #expect(options.resultSummary ==
-            "Cache 16 LFU, prefill 128, FP16 KV, RDADVISE off, auto verification")
+            "Cache 16 LFU, prefill 512, FP16 KV, RDADVISE off, auto verification")
     }
 
     @Test func verificationModesAreDistinctlyLabelled() {

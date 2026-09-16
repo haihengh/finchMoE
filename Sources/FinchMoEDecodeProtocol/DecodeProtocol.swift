@@ -11,7 +11,7 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
     public init(expertCacheSlots: Int = 16,
                 expertCachePolicy: String = "lfu",
                 prefillEnabled: Bool = true,
-                prefillChunkTokens: Int = 128,
+                prefillChunkTokens: Int = 512,
                 rdadvisePolicy: String = "off",
                 modelVerification: String = "full-sha256") {
         self.expertCacheSlots = expertCacheSlots

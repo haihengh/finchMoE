@@ -186,8 +186,17 @@ public struct PrefillRuntimeConfig: Sendable, Equatable {
         PrefillRuntimeConfig(mode: .off, chunkTokens: 128)
     }
 
+    /// Prefill is chunked by default, at 512 tokens per chunk.
+    ///
+    /// The chunk size is the prefill I/O divisor — a layer's routed-expert pool
+    /// is re-read once per chunk — and the measured curve is steep: on the
+    /// 125B, a 2900-token prompt prefills in 215 s at 512 against 344 s at 128,
+    /// with expert bytes read falling 645 GB → 251 GB, and 1024 adds only a
+    /// little more (182 s) for twice the scratch. 512 is the knee. Scratch
+    /// grows ~154 KiB per chunk token, so this costs ~0.3 GB of peak over the
+    /// old 128 on a 2900-token prompt. See `docs/OPTIMIZATION_PLAN.md` 1.1.
     public static var defaultChunked: PrefillRuntimeConfig {
-        production(chunkTokens: 128)
+        production(chunkTokens: 512)
     }
 
     public static func production(chunkTokens: Int) -> PrefillRuntimeConfig {

@@ -10,11 +10,17 @@ import FinchMoE
 
     /// Gemma has a sliding window, so only its full-attention layers grow with
     /// context; the sliding layers are capped at window + chunk.
+    ///
+    /// These numbers moved +75 MiB each when the prefill chunk default went
+    /// 128 → 512 (`docs/OPTIMIZATION_PLAN.md` 1.1): the sliding layers must hold
+    /// one chunk's rows beyond the window, so 384 more tokens per sliding layer
+    /// is 384 × 10 layers × 2 heads × 256 dim × 2 (K+V) × 2 B. Qwen is
+    /// unaffected — its `slidingWindow` is 0, so it has no sliding layers.
     @Test func gemmaFP16KVAllocationMatchesProduction() {
         let mebibytes = AppContextLengthOption.allCases.map {
             $0.fp16KVBytes(architecture: .gemma4_26B_A4B) / 1_048_576
         }
-        #expect(mebibytes == [305, 385, 545, 865, 1_505, 2_785, 5_345])
+        #expect(mebibytes == [380, 460, 620, 940, 1_580, 2_860, 5_420])
     }
 
     /// Qwen 3.6 has no sliding-window layers: 10 full-attention layers ×
