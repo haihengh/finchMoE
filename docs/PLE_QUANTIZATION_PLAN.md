@@ -653,6 +653,42 @@ not. That read is now preceded by `drainGPU()`. It is **not** the cause of the
 variation above — the variation survived the fix — but a host read of a buffer
 the GPU may still be writing is unsafe on its own terms.
 
+#### Phase 5.3 result (measured 2026-09-15) — PASS, at the cost of two problems
+
+EvalPlus 0.3.1 HumanEval, greedy, the same harness and protocol as the
+reference run (`archive/humaneval_evalplus/run_server_cell.sh`, scored by
+`evalplus.evaluate` with `--i-just-wanna-run`), on the new install, model-id
+`finchmoe-qwen38-ple4bit`:
+
+| | current 162 GiB install | quantized-PLE install |
+| --- | --- | --- |
+| base pass@1 | 0.945 (155/164) | **0.945 (155/164)** |
+| HumanEval+ pass@1 | 0.921 (151/164) | **0.909 (149/164)** |
+
+Only three of 164 problems moved, and on base they moved in *both* directions:
+`HumanEval/124` plus pass→fail, `HumanEval/140` base and plus pass→fail,
+`HumanEval/163` base fail→pass. Base is unchanged in count; the stricter suite
+loses two.
+
+**These flips are attributable, not noise.** HumanEval prompts on this model run
+137-172 tokens, and even a completion at the 768-token cap leaves the sequence
+under 2051 tokens — the context length past which the engine stops being
+bit-reproducible (the QSA ranking path; see Phase 5.2). Every cell therefore
+sits in the regime where the engine repeats exactly, so the PLE quantization is
+the only variable between the two runs. This is the behaviour Phase 5.1
+forecast: the quantization perturbs the top-1 logit by a fraction of its margin,
+and on borderline problems that tips a token.
+
+Against the plan's criterion — "within noise of the existing 0.945/0.921 (a
+handful of flips on borderline problems is expected register noise; a broad drop
+is not)" — 3 of 164 problems is a handful, and there is no broad drop. **Exit
+gate: MET.**
+
+The protocol gate was checked before committing to the sweep: fenced code
+blocks 20/20, `<think>` leakage 0/20, sanitizer-empty 0/20, import-only 0/20,
+repetition loops 0/20 — i.e. the failure modes that made the older homegrown
+harness's numbers unreadable are all absent here.
+
 ### Phase 6 — Full repack on the real machine, sizing, and rollout
 
 1. Run the real 352 GB→quantized-PLE repack under
