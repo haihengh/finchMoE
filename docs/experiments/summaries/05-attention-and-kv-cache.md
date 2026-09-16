@@ -254,6 +254,43 @@ failed the quality gate. It was rejected and removed.
   reader-to-next-writer edge. The surrounding compute path is covered in the
   [prefill summary](06-prefill.md).
 
+### KV-15: Prefill reproducibility is a function of the chunk size, and the ranking's selections are not where it starts
+
+- **Hypothesis:** the engine stops being bit-reproducible past 2051 tokens, and the QSA ranking path
+  (which only dispatches there) is where it happens — established by `FQ_QSA_OFF=1`, which removes the
+  sparse-block selector entirely and makes a diverging pair bit-identical.
+- **Instrument.** `FQ_QSA_DUMP=<path>` (docs/RUNTIME_CONTROLS.md) appends one line per full-attention
+  layer with the selected cell count, the pooled-block count, and an FNV-1a hash of the selected
+  indices — from the end of `produceToken` after its wait (`decode` records), and from the chunk loop
+  in `prefillChunked` after a drain (`prefill` records, which describe each chunk's *last* row). The
+  aggregate is the wrong instrument: two runs differ in ~99% of their logits, which says a divergence
+  happened somewhere earlier and nothing about where.
+- **Evidence, chunk size.** Four runs of the same 2940-token prompt at prefill chunk 128 produced
+  **four distinct outcomes** (all six pairs differ, 244,893-247,551 of 248,320 logits, max |d|
+  0.27-0.73); four runs at **512** produced **one** (all four md5-identical). The ranking dispatches in
+  both cases — positions are >= 2051 either way — so the chunking, not the context length, is the
+  variable. Every diverging pair measured before this ran at 128 and the first pair ever run at 512
+  was identical, which is what prompted the repetition.
+- **Where it is *not*.** A diverging pair at chunk 128, fingerprinted on both sides: **0 of 276
+  prefill records differ** — the selection at every chunk boundary, every layer, is the same in both
+  runs — while 276 of 372 decode records differ, first at the *first* decode step. That kills the
+  reading that the ranking's own output diverges: if it did at a chunk boundary, these would show it.
+  The logits dumped at the prefill/decode boundary *do* differ (246,623 elements), so the divergence
+  is in the prefill's output but not at its sampled selection points — either between them (a row the
+  sampling does not cover) or in other prefill math with the ranking merely enabling it.
+- **Consistent detail.** In all 276 differing decode records the cell count and pooled count are
+  identical (`cells=2051`, one `pooled` per position); only the chosen cells differ. So whatever
+  moved did not change *how many* cells the ranking keeps.
+- **Not settled, and the confound to name:** the 128 runs also take 60% longer (345 s against 215 s
+  prefill), so "128 is worse" and "longer runs are worse" are not yet separated. A chunk ladder
+  ({128, 256, 512} x 3 runs) is the discriminating experiment.
+- **Prior art of the same shape:** [KV-14](#kv-14) — a prefill tiled-attention race whose exposure
+  depended on the tiling, fixed with a two-bank layout. Chunk-size-dependent nondeterminism *is*
+  tiling-dependent nondeterminism, which is why a shared-memory reuse hazard in a prefill kernel is
+  the leading hypothesis rather than the radix select alone.
+- **Final disposition:** open. The instrument, the chunk-size result, and the negative on the
+  ranking's sampled selections are the usable parts.
+
 [Previous: RDADVISE](04-rdadvise.md) |
 [Experiment inventory](../EXPERIMENT_INVENTORY.md) |
 [Optimization journey](../../OPTIMIZATION_JOURNEY.md) |
