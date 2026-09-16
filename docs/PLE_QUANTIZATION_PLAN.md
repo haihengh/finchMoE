@@ -586,7 +586,9 @@ in **99.4% of the final-prefill logits** (median 0.038 nats, max 0.375), while
 rebuild. So the computation is *sometimes* reproducible, which is a race rather
 than deterministic-but-different.
 
-It tracks the context length, and specifically the QSA indexer's ranking path.
+It tracks the context length past the boundary — **or so this section first read
+it; see the correction below**, which separates length from how long the prefill
+runs and finds duration to be the surviving variable.
 Probes built by truncating `long-synthesis` to a target length, each run twice
 on the same install, show the effect appearing *in proportion to the number of
 positions past the boundary* rather than switching on at it:
@@ -632,19 +634,51 @@ the boundary table above — reproducible when the ranking does not dispatch,
 not reproducible when it does, reproducible again when the selector is absent
 entirely — the ranking dispatches (pool → score → radix select → cells write)
 are the thing to read, which is the same subsystem that produced the divergent
-threadgroup barrier.
+threadgroup barrier. **(Read the next paragraph before relying on this: the
+selector-absent row is a below-threshold null and has been refuted.)**
+
+**Correction (2026-09-16): the third column above is length, and length is not
+the variable.** A chunk ladder then a matched-duration control (KV-15) showed the
+2940-token row diverging at prefill chunk 128 (344 s) and not at chunk 512
+(215 s) — *same prompt, same number of ranked positions* — while chunk 512 on a
+4606-token prompt (348 s, matched duration) diverged 3 of 3. Chunk size is out
+and length is out; chunk count is disfavored; **elapsed prefill time** survives
+every comparison (215 s never diverged in 7 runs, 270 s in 2 of 3, 344-348 s in
+every pair tried). Nothing about wall time changes arithmetic; what accumulates
+is exposure to timing perturbation, and naming that state variable is the open
+work.
+
+**Second correction (2026-09-16): the `FQ_QSA_OFF` isolation above does not
+hold.** The selector-less pair that came back bit-identical was at 2511 tokens,
+~295 s — inside the regime where the duration curve is still often reproducible.
+Re-run at 4606 tokens (354-360 s of prefill), two selector-less runs differ in
+**246,482 of 248,320 logits**. So the ranking path is not *necessary* for the
+divergence, and "the ranking dispatches are the thing to read" — the conclusion
+the paragraph below draws — was a below-threshold null. Both of this section's
+attributions (the 2051 boundary and the ranking path) were proxies for how long
+the prefill runs. What the refutation does **not** establish: that the ranking's
+kernels are race-free — the selector changing no outcome is not the same as it
+being clean. The prefill path as a whole is back in scope.
 
 **A latent crash fixed on the way.** Wiring `FQ_QSA_OFF` trapped immediately in
 `Attention.encodeFullCells`' `precondition(nCells > 0)`. Cause: the prefill
 path computed `idxCapacity = qsaLayer?.state.capacity ?? 0` while the decode
 path computes `qsaLayer?.state.capacity ?? Int.max`. With no indexer, "0" means
 every position is *outside* the selection width, so prefill dispatched the
-cells path with `nCells: 0` and trapped — i.e. **any Qwen 3.8 install without
-indexer tensors crashed in chunked prefill**, a configuration this engine
-documents as supported. The prefill path now matches decode. No test covered
+cells path with `nCells: 0` and trapped. The reachable trigger is the
+`FQ_QSA_OFF=1` control above — **not** an install built without indexer tensors,
+which is what this section first claimed. That install cannot even load:
+`validateQwen38Layers` `requireAffine`s `index_qk_proj`/`q_layernorm`/
+`k_layernorm` on *every* full layer, with no `indexerNumHeads > 0` gate (the only
+such gate in the codebase is `QSAIndexerState.init`'s), so a 3.8 snapshot without
+them throws `tensorNotFound` before a runner exists. So the crash was a real
+hazard for a documented runtime control, and a non-hazard for installs. The
+prefill path now matches decode. No test covered
 it: no indexer-less fixture exists anywhere in `Tests/` (every 3.8 toy sets
-`indexerNumHeads = 2`), so adding one is the follow-up — it means
-parameterizing the shared toy fixture rather than a new file.
+`indexerNumHeads = 2`) — and none *can* exist while validation requires the
+tensors, so the regression test has to drive the control itself (the disable is
+now a construction parameter, defaulting to the environment variable) rather
+than a second fixture.
 
 A latent, separate hazard was also fixed while chasing this: the prefill
 logits dump read the logits buffer on the host without waiting for the GPU,

@@ -245,11 +245,13 @@ public func runRawCompletion(producer: any LogitProducer,
         // `produce`, which guarantees completion), so without this the dump
         // reads a buffer that may still be being written.
         //
-        // This is a latent-race fix, not the explanation for everything: it was
-        // added while chasing a run-to-run difference in long-prompt dumps, and
-        // that difference survived it — it tracks the QSA indexer's ranking
-        // path instead (see `idxDense` in RealForwardRunner, engaged past 2051
-        // tokens on this model), not the host read.
+        // This is a latent-race fix, not the explanation for the run-to-run
+        // difference in long-prompt dumps: that difference survived this fix,
+        // survived the removal of the QSA selector entirely (`FQ_QSA_OFF`, a
+        // pair at 354-360 s of prefill differing in 246,482 of 248,320 logits),
+        // and survived every chunk size tried. It tracks elapsed prefill time
+        // and nothing else tried so far — see KV-15 in
+        // docs/experiments/summaries/05-attention-and-kv-cache.md.
         producer.drainGPU()
         try scratch.writeLogits(to: prefillLogitsDumpPath)
     }

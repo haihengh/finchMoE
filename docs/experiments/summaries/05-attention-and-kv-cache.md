@@ -254,42 +254,82 @@ failed the quality gate. It was rejected and removed.
   reader-to-next-writer edge. The surrounding compute path is covered in the
   [prefill summary](06-prefill.md).
 
-### KV-15: Prefill reproducibility is a function of the chunk size, and the ranking's selections are not where it starts
+### KV-15: Prefill reproducibility tracks how long the prefill *runs*, not how it is chunked
 
-- **Hypothesis:** the engine stops being bit-reproducible past 2051 tokens, and the QSA ranking path
-  (which only dispatches there) is where it happens — established by `FQ_QSA_OFF=1`, which removes the
-  sparse-block selector entirely and makes a diverging pair bit-identical.
+- **Hypothesis, since refuted (see the last two cells):** the engine stops being bit-reproducible
+  past 2051 tokens, and the QSA ranking path (which only dispatches there) is where it happens — the
+  reading `FQ_QSA_OFF=1` supported, since it removed the sparse-block selector entirely and made a
+  diverging pair at 2511 tokens bit-identical.
 - **Instrument.** `FQ_QSA_DUMP=<path>` (docs/RUNTIME_CONTROLS.md) appends one line per full-attention
   layer with the selected cell count, the pooled-block count, and an FNV-1a hash of the selected
   indices — from the end of `produceToken` after its wait (`decode` records), and from the chunk loop
   in `prefillChunked` after a drain (`prefill` records, which describe each chunk's *last* row). The
   aggregate is the wrong instrument: two runs differ in ~99% of their logits, which says a divergence
   happened somewhere earlier and nothing about where.
-- **Evidence, chunk size.** Four runs of the same 2940-token prompt at prefill chunk 128 produced
-  **four distinct outcomes** (all six pairs differ, 244,893-247,551 of 248,320 logits, max |d|
-  0.27-0.73); four runs at **512** produced **one** (all four md5-identical). The ranking dispatches in
-  both cases — positions are >= 2051 either way — so the chunking, not the context length, is the
-  variable. Every diverging pair measured before this ran at 128 and the first pair ever run at 512
-  was identical, which is what prompted the repetition.
+- **First reading, since withdrawn.** Four runs of one 2940-token prompt at prefill chunk 128 gave
+  **four distinct outcomes**; four at **512** gave **one**. The ranking dispatches at both sizes, so
+  this looked like chunking — a tiling hazard, KV-14's shape — rather than context length.
+- **The ladder.** {128, 256, 512} x 3 runs, same prompt, same binary, back to back. The dose-response
+  reproduced, and so did the confound: prefill time is 343.9 / 269.9 / 215.0 s, so chunk size and run
+  duration move together by construction and this design cannot separate them.
+  `chunk 128 -> 3 distinct; 256 -> 2 distinct; 512 -> 1 distinct`.
+- **The duration control, which refutes the first reading.** Chunk **512** on a longer prompt (4606
+  tokens) so the prefill takes **347.6 / 341.2 / 351.1 s** — matched to the 128 case. Three runs,
+  **three distinct outcomes** (all pairs differ, ~247k of 248,320). Chunk 512 is not the safe setting;
+  it was the *short* setting.
+- **What the four cells together settle.** Length alone cannot be the variable: the same 2940-token
+  prompt diverges at 344 s and does not at 215 s. Chunk size alone cannot be it either: 512 diverges
+  at 348 s and does not at 215 s. Chunk *count* is disfavored: at chunk 256 (12 chunks, 270 s) two of
+  three runs matched each other, while 9 chunks at 348 s gave three distinct outcomes. What survives
+  every comparison is **elapsed prefill time**: 215 s has never diverged in 7 runs, 270 s diverged in
+  2 of 3, and 344-348 s diverged in every pair tried (6 runs: the ladder's 128 arm and the control).
+- **It is a rising probability, not a threshold.** An earlier, uncontrolled set of four 2940-token
+  runs had two match bit-exactly — including across a binary rebuild. That set's chunk size was not
+  recorded (the default at the time was 128, so it was most likely 344 s duration, where the ladder
+  and control above diverged 4 of 4). Either way it is the reason to write this as a probability that
+  rises with duration rather than a switch that flips at ~345 s. It is also independent evidence that
+  the computation *can* reproduce, which is what makes this a race and not a second arithmetic path.
+- **Named honestly: that is a correlate, not a mechanism.** Nothing about wall time changes
+  arithmetic. What accumulates over a long run is exposure to *timing perturbation* — the drive's own
+  read-latency regime, memory pressure and paging, thermal/power state, background activity — and any
+  of those could be what actually opens a race window. This experiment set separates duration from
+  length and tiling; it does not name the state variable, and the next step is to perturb timing
+  directly (see disposition) rather than to keep lengthening prompts.
+- **The second refutation: the selector is not necessary.** `FQ_QSA_OFF=1` removes the ranking
+  dispatches outright — dense attention at every position, `encodeFull` never `encodeFullCells`, and
+  the `Int.max` selection width takes the dense branch in prefill, not a degenerate cells call. Two
+  such runs on the same 4606-token prompt, at **359.6 and 353.7 s** of prefill, differ in **246,482 of
+  248,320 logits**. The earlier 2511-token `FQ_QSA_OFF` pair that came back bit-identical was ~295 s —
+  inside the regime where the duration curve above is still often reproducible. Both attributions this
+  entry was built on (the 2051 boundary, the ranking path) were proxies for how long the run takes.
 - **Where it is *not*.** A diverging pair at chunk 128, fingerprinted on both sides: **0 of 276
   prefill records differ** — the selection at every chunk boundary, every layer, is the same in both
   runs — while 276 of 372 decode records differ, first at the *first* decode step. That kills the
   reading that the ranking's own output diverges: if it did at a chunk boundary, these would show it.
   The logits dumped at the prefill/decode boundary *do* differ (246,623 elements), so the divergence
-  is in the prefill's output but not at its sampled selection points — either between them (a row the
-  sampling does not cover) or in other prefill math with the ranking merely enabling it.
+  is in the prefill's output but not at its sampled selection points — between them, in a row the
+  sampling does not cover, which is now the leading reading rather than a fallback.
 - **Consistent detail.** In all 276 differing decode records the cell count and pooled count are
   identical (`cells=2051`, one `pooled` per position); only the chosen cells differ. So whatever
   moved did not change *how many* cells the ranking keeps.
-- **Not settled, and the confound to name:** the 128 runs also take 60% longer (345 s against 215 s
-  prefill), so "128 is worse" and "longer runs are worse" are not yet separated. A chunk ladder
-  ({128, 256, 512} x 3 runs) is the discriminating experiment.
-- **Prior art of the same shape:** [KV-14](#kv-14) — a prefill tiled-attention race whose exposure
-  depended on the tiling, fixed with a two-bank layout. Chunk-size-dependent nondeterminism *is*
-  tiling-dependent nondeterminism, which is why a shared-memory reuse hazard in a prefill kernel is
-  the leading hypothesis rather than the radix select alone.
-- **Final disposition:** open. The instrument, the chunk-size result, and the negative on the
-  ranking's sampled selections are the usable parts.
+- **Prior art, now a weaker analogy:** [KV-14](#kv-14) was a prefill tiled-attention race whose
+  exposure depended on the tiling. That is what the withdrawn reading looked like. The duration
+  result moves this away from "a shared-memory reuse hazard in a specific kernel" and toward a race
+  whose *window* opens under timing perturbation the run accumulates.
+- **Final disposition:** open, with **both earlier attributions withdrawn** — the chunk-size reading
+  and the ranking-path isolation were each refuted by a control of their own. What is left: the
+  instrument, the negative on the ranking's *sampled selections*, the two refutations, and duration as
+  the surviving correlate. Note what the refutations do *not* do — they do not clear the ranking's
+  kernels (the selector changed no *outcome* here, which is not the same as being race-free), and they
+  do not identify a replacement suspect. The prefill path as a whole is back in scope, together with
+  the possibility that this is environmental rather than a kernel defect at all.
+- **The next experiment has to decouple work from wall time.** In every cell above, elapsed time and
+  the amount of work are confounded — at a fixed chunk size duration is proportional to token count,
+  and the ladder varied them together by construction. Work can be held fixed while wall time moves by
+  slowing the *I/O* (the contention load priced in [IO-22](01-model-install-and-expert-io.md#io-22),
+  or `FINCHMOE_IO_NOCACHE=1`) or by inserting delay between chunks. If a stretched short run diverges
+  while its unstretched twin does not, wall time is causal; if it does not, the remaining variable is
+  the number of dispatches, and the search belongs in the prefill kernels after all.
 
 [Previous: RDADVISE](04-rdadvise.md) |
 [Experiment inventory](../EXPERIMENT_INVENTORY.md) |

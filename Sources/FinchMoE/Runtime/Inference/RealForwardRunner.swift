@@ -699,15 +699,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // timelines. Only the raw and pooled keys persist across steps —
             // they are the indexer's own cache — so this is the one Qwen 3.8
             // structure `reset()` has to clear.
+            //
             // `FQ_QSA_OFF=1` builds the runner without the sparse-block
-            // selector. That is a configuration the engine already supports —
-            // a Qwen 3.8 repack built without the indexer tensors loads
-            // exactly this way and keeps the dense attention path — and it is
-            // what isolates the ranking dispatches from plain context length
-            // when a long run turns out not to be bit-reproducible.
+            // selector, keeping the dense attention path. It is the mechanism
+            // that isolates the ranking dispatches from plain context length
+            // when a long run turns out not to be bit-reproducible — and, since
+            // `validateQwen38Layers` requires the indexer tensors on every full
+            // layer unconditionally, it is the *only* way to reach a runner
+            // that has full layers but no indexer state. (An earlier comment
+            // here claimed a 3.8 repack without indexer tensors loads this way.
+            // It does not: that install fails validation with `tensorNotFound`
+            // before any runner exists.)
             self.qsaDumpPath = ProcessInfo.processInfo
                 .environment["FQ_QSA_DUMP"]
-            let qsaDisabled = ProcessInfo.processInfo.environment["FQ_QSA_OFF"] == "1"
+            // Two ways in, one state: the documented `FQ_QSA_OFF=1` control,
+            // and the injectable `qsaIndexerEnabled: false` a test uses (see
+            // its doc comment — no install can express this).
+            let qsaDisabled = !runtimeConfiguration.qsaIndexerEnabled
+                || ProcessInfo.processInfo.environment["FQ_QSA_OFF"] == "1"
             if !qsaDisabled,
                let state = try QSAIndexerState(device: device, config: cfg,
                                                maxContext: maxContext) {
