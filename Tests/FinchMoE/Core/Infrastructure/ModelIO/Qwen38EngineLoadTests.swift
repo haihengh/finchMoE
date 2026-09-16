@@ -823,10 +823,14 @@ import FinchMoEValidationSupport
 
     private static let hc = 4
 
-    static func makeRunner(_ model: Model) throws -> RealForwardRunner {
+    static func makeRunner(
+        _ model: Model,
+        configuration: RuntimeConfiguration = .production
+    ) throws -> RealForwardRunner {
         let context = try MetalContext()
         return try RealForwardRunner(model: model, context: context,
-                                     maxContext: 256)
+                                     maxContext: 256,
+                                     runtimeConfiguration: configuration)
     }
 
     @Test func decodeStepWiring() async throws {
@@ -1255,6 +1259,59 @@ import FinchMoEValidationSupport
                 "chunk pooled \(chunkSel.pooledBlocks) blocks, expected \(chunk / r)")
         #expect(chunkSel.pooledBlocks == decodeSel.pooledBlocks,
                 "chunk pooled \(chunkSel.pooledBlocks) blocks, decode pooled \(decodeSel.pooledBlocks)")
+    }
+
+    // MARK: - Selector-less prefill
+
+    /// Regression: chunked prefill must not trap when there is no QSA selector.
+    ///
+    /// A full-attention layer with no indexer state means "keep every
+    /// causally-visible cell", not "keep none". Decode computed its selection
+    /// width as `qsaState?.capacity ?? Int.max`; prefill computed `?? 0`. Zero
+    /// puts every position *outside* the selection width, so the cells path
+    /// dispatched with `nCells: 0` and trapped in `Attention.encodeFullCells`'
+    /// precondition. Prefill now matches decode.
+    ///
+    /// The state is *injected*, not loaded, because no install can express it:
+    /// `validateQwen38Layers` requires `index_qk_proj` plus both indexer
+    /// layernorms on every full layer, with no `indexerNumHeads > 0` gate, so a
+    /// snapshot without them throws `tensorNotFound` before a runner exists.
+    /// The two accessor assertions are load-bearing — without them the prefill
+    /// below would also pass on a runner whose selector was silently still
+    /// built, which covers nothing.
+    @Test func prefillWithoutIndexerSelectorUsesTheDensePath() async throws {
+        let model = try await Qwen38EngineLoadTests.loadToy38()
+        let vocab = Qwen38EngineLoadTests.Toy38.vocab
+        let fullLayer = 3
+        let capacity = min(256, Qwen38EngineLoadTests.Toy38.indexerBudget
+            + Qwen38EngineLoadTests.Toy38.indexerCompressRatio - 1)
+
+        let dense = try Self.makeRunner(
+            model, configuration: RuntimeConfiguration(qsaIndexerEnabled: false))
+        #expect(dense.qsaSelection(layer: fullLayer) == nil,
+                "the injected configuration must leave the full layer without an indexer")
+        let ranked = try Self.makeRunner(model)
+        #expect(ranked.qsaSelection(layer: fullLayer) != nil,
+                "the toy's full layer carries an indexer unless it is disabled")
+
+        // Two chunks, and past the selection width so the ranked path would
+        // have engaged had the selector been there.
+        let tokens = (0..<(capacity + 5)).map { Int32(3 + $0) }
+        let split = capacity + 1
+        let logits = try #require(model.device.makeBuffer(
+            length: vocab * MemoryLayout<Float16>.size, options: .storageModeShared))
+        var position = 0
+        for span in [Array(tokens[..<split]), Array(tokens[split...])] {
+            let result = try await dense.prefillChunked(
+                tokens: span[...], startPosition: position,
+                outputMode: .logits, config: .defaultChunked,
+                into: logits, onProgress: { _ in })
+            position = result.newPosition
+        }
+        #expect(position == tokens.count)
+        dense.drainGPU()
+        let ptr = logits.contents().bindMemory(to: Float16.self, capacity: vocab)
+        #expect(UnsafeBufferPointer(start: ptr, count: vocab).allSatisfy { $0.isFinite })
     }
 
     // MARK: - PLE decode wiring (M3.3)

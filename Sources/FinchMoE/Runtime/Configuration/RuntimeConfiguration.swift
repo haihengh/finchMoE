@@ -37,6 +37,17 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let prefillChunkTokens: Int
     public let prefillAttentionPath: RuntimePrefillAttentionPath
     public let headPath: RuntimeHeadPath
+    /// When false, no QSA sparse-block selector is built and a Qwen 3.8
+    /// full-attention layer takes the dense path for every position — the state
+    /// the documented `FQ_QSA_OFF=1` control selects.
+    ///
+    /// It is settable here rather than only from the environment because
+    /// **nothing else can reach that state**: `validateQwen38Layers` requires
+    /// the indexer tensors on every full layer with no `indexerNumHeads > 0`
+    /// gate, so an install built without them throws `tensorNotFound` before a
+    /// runner exists. A test that must cover the selector-less path therefore
+    /// has to inject it.
+    public let qsaIndexerEnabled: Bool
 
     public init(expertCacheSlots: Int = 16,
                 expertCachePolicy: RuntimeExpertCachePolicy = .lfu,
@@ -44,7 +55,8 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 512,
                 prefillAttentionPath: RuntimePrefillAttentionPath = .fullTensorOps2DPreferred,
-                forceLogitsHead: Bool = false) {
+                forceLogitsHead: Bool = false,
+                qsaIndexerEnabled: Bool = true) {
         precondition(Self.allowedExpertCacheSlots.contains(expertCacheSlots),
                      "unsupported expert-cache slot count")
         precondition(Self.allowedPrefillChunkTokens.contains(prefillChunkTokens),
@@ -56,6 +68,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.prefillChunkTokens = prefillChunkTokens
         self.prefillAttentionPath = prefillAttentionPath
         self.headPath = forceLogitsHead ? .logits : .fusedRows
+        self.qsaIndexerEnabled = qsaIndexerEnabled
     }
 
     public static var production: RuntimeConfiguration {
