@@ -18,12 +18,49 @@ Grounded in: `docs/SYSTEM_DESIGN.md`, `docs/OPTIMIZATION_JOURNEY.md`, `docs/QWEN
 
 ## 1. Prefill speedup
 
-### 1.1 [HIGH impact, LOW risk] Raise `allowedPrefillChunkTokens` ceiling above 128 and re-benchmark
+### 1.1 [DONE 2026-09-15 — 1.89x prefill on a long prompt] Raise `allowedPrefillChunkTokens` ceiling above 128 and re-benchmark
 - **Evidence**: `RuntimeConfiguration.swift:2` hard-caps chunk size at `[32, 64, 128]`. `OPTIMIZATION_JOURNEY.md` shows chunk 32→128 cut a 1,017-token prefill from 92.89s→52.35s (~1.77x) — a strongly monotonic curve that was never pushed past 128 for Qwen specifically (that data point predates the Qwen port; Qwen's chunk-scratch sizing in `PrefillChunkScratch.swift` and MoE tile grouping are different shapes: 256 experts vs 128, `moeIntermediateSize` 512).
 - **Action**: measure 192/256-token chunks against the current 705–2,509-token Qwen prompts (README + the 2,509-token 4K soak in `QWEN36_PORT.md` item 4, which measured 21.3 tok/s pure chunked rate). `PrefillChunkScratch.swift` scratch is currently ~15.6 MiB at 128 tokens; watch the linear scratch growth (est. ~23–31 MiB at 192–256) against the resident budget.
 - **Expected impact**: 10–25% prefill throughput on long prompts if the amortization curve from the 32→128 experiment continues past 128 (diminishing but plausibly still positive since GEMM/QMM setup cost still needs more rows to amortize at 256-expert scale).
 - **Risk**: low — this is a config sweep, not new code; the runtime already supports variable chunk size. Regression risk is in scratch memory growth and MPP tile-size mismatches.
 - **Validate**: re-run the prefill-only benchmark protocol in `RUNTIME_CONTROLS.md` ("Run an experiment") at each chunk size on both the 16GB and 24GiB machines; confirm output token-for-token identical to the 128-chunk baseline (prefill math must be exact, not reordered, per the "Correctness and safety invariants" in `SYSTEM_DESIGN.md`).
+
+#### 1.1 result (measured 2026-09-15) — the ceiling is raised, and it pays far more than predicted
+
+`5a82ecb` raised the ceiling 128 → 1024 and exposed
+`--prefill-chunk-tokens 32/64/128/256/512/1024` (default still 128) plus
+`FQ_PREFILL_COUNTERS`, which prices the mechanism directly: expert bytes read.
+Swept on the quantized-PLE 125B install, greedy T=0, 32 generated tokens,
+`--max-context` 2048/4096, one run per cell:
+
+| prompt (tokens) | chunk | prefill s | pp tok/s | expert bytes | peak |
+| --- | --- | --- | --- | --- | --- |
+| short-explanation (62) | 128 | 9.60 | 6.5 | 20.5 GB | 3.0 GB |
+| | 1024 | 9.64 | 6.4 | 20.5 GB | 3.5 GB |
+| medium-review (426) | 128 | 46.20 | 9.2 | 84.1 GB | 4.2 GB |
+| | 1024 | **29.03** | **14.7** | 33.1 GB | 4.2 GB |
+| long-synthesis (2940) | 128 | 343.84 | 8.6 | 645.2 GB | 4.3 GB |
+| | 1024 | **182.39** | **16.1** | **144.1 GB** | 4.8 GB |
+
+**1.89x prefill on the 2900-token prompt, with 4.5x fewer expert bytes read** —
+well past the 10-25% this item predicted, because the amortization is the whole
+story: the expert read volume, not GEMM setup, is what the chunk size divides.
+tg is unaffected (3.0-3.6 tok/s at every size, as expected for a prefill knob),
+and peak memory grows 0.5 GB from the chunk scratch (154 KiB/token). The
+62-token prompt is one chunk at every size, so its identical numbers are the
+control: the effect is entirely about chunks avoided.
+
+**Token identity holds.** Output is token-for-token identical to the 128
+baseline for both prompts below the QSA ranking boundary (62 and 426 tokens) —
+including medium-review, which goes from 4 chunks to 1, so the chunked prefill
+math is exact and not merely close. `long-synthesis` differs at **one token of
+32 (token 29)**, and that is the engine's known non-reproducibility past 2051
+tokens rather than the chunk size: 256/512/1024 agree *exactly* with each other,
+the same size repeated gives identical tokens, and a genuine boundary-dependent
+math difference would have shown up in the 4-chunks-to-1 case above.
+
+Open follow-up: the default is still 128, so nothing here is realised until it
+moves. 512 captures most of the win at half the scratch of 1024.
 
 ### 1.2 [DONE 2026-09-11] Default the trusted-install receipt in the CLI, the server and the Mac app
 - **Original evidence**: `QWEN36_PORT.md` items 5 and 7 flagged this as an **open gap** — the CLI exposed `--verify trusted-install` (cuts fixed per-run cost from ~8s to <1s per README), but the Mac app's "verification default stays `full-sha256` (no UI setting)" and the server had no `--verify` flag at all, so every server process ate the full layer-SHA256 pass on first expert touch ("8.79s wall, of which ~8s is the first-use layer-SHA pass").
