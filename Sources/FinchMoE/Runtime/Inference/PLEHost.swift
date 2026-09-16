@@ -248,6 +248,13 @@ final class PLEHost {
         return (row / geometry.partRows, row % geometry.partRows)
     }
 
+    /// Bytes this host has read off disk for gathered rows, summed over every
+    /// `gather` call. Read straight off the streamer's stride rather than
+    /// recomputed, so it reports the bytes actually requested — which is what
+    /// prices the table's quantization: a raw-BF16 row costs `rowDim × 2`, an
+    /// int4 row `rowDim/2 + 2 · nGroups · 2`.
+    public private(set) var totalRowBytesRead: UInt64 = 0
+
     /// The head-major `[headCount · rowDim]` gathered rows for one token,
     /// decoded from the part's on-disk row (raw BF16 or int4 affine) into the
     /// engine's FP16 activations.
@@ -270,6 +277,7 @@ final class PLEHost {
             let (part, rowInPart) = location(ofRow: row)
             let streamer = try open(part)
             let bytes = try streamer.readRows(rowInPart..<(rowInPart + 1))
+            totalRowBytesRead &+= UInt64(streamer.byteStride)
             let base = h * rowDim
             switch streamer.layout {
             case .rawBF16:

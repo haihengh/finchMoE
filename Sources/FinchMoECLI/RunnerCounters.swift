@@ -40,6 +40,10 @@ public struct RunnerCounterValues: Equatable, Sendable {
     public var expertMisses: UInt64
     public var pleGatherNanos: UInt64
     public var plePartOpens: UInt64
+    /// Bytes the PLE gather requested. Paired with `pleGathers` it gives the
+    /// per-token figure directly, which is what prices the table's layout.
+    public var pleRowBytes: UInt64
+    public var pleGathers: UInt64
     public var indexerRankedLayers: UInt64
     public var commandBuffers: UInt64
     public var gpuCb1Nanos: UInt64
@@ -75,6 +79,8 @@ public struct RunnerCounterValues: Equatable, Sendable {
                 expertMisses: UInt64 = 0,
                 pleGatherNanos: UInt64 = 0,
                 plePartOpens: UInt64 = 0,
+                pleRowBytes: UInt64 = 0,
+                pleGathers: UInt64 = 0,
                 indexerRankedLayers: UInt64 = 0,
                 commandBuffers: UInt64 = 0,
                 gpuCb1Nanos: UInt64 = 0,
@@ -109,6 +115,8 @@ public struct RunnerCounterValues: Equatable, Sendable {
         self.expertMisses = expertMisses
         self.pleGatherNanos = pleGatherNanos
         self.plePartOpens = plePartOpens
+        self.pleRowBytes = pleRowBytes
+        self.pleGathers = pleGathers
         self.indexerRankedLayers = indexerRankedLayers
         self.commandBuffers = commandBuffers
         self.gpuCb1Nanos = gpuCb1Nanos
@@ -164,6 +172,8 @@ public struct RunnerCounterValues: Equatable, Sendable {
             expertMisses: d(expertMisses, base.expertMisses),
             pleGatherNanos: d(pleGatherNanos, base.pleGatherNanos),
             plePartOpens: d(plePartOpens, base.plePartOpens),
+            pleRowBytes: d(pleRowBytes, base.pleRowBytes),
+            pleGathers: d(pleGathers, base.pleGathers),
             indexerRankedLayers: d(indexerRankedLayers, base.indexerRankedLayers),
             commandBuffers: d(commandBuffers, base.commandBuffers),
             gpuCb1Nanos: d(gpuCb1Nanos, base.gpuCb1Nanos),
@@ -208,6 +218,8 @@ extension RunnerCounterValues {
                   expertMisses: runner.totalExpertMisses,
                   pleGatherNanos: runner.totalPleGatherNanos,
                   plePartOpens: runner.totalPlePartOpens,
+                  pleRowBytes: runner.totalPleRowBytes,
+                  pleGathers: runner.totalPleGathers,
                   indexerRankedLayers: runner.totalIndexerRankedLayers,
                   commandBuffers: runner.totalDecodeCommandBuffers,
                   gpuCb1Nanos: runner.totalGpuCb1Nanos,
@@ -439,6 +451,8 @@ public enum RunnerCounters {
             "hits=\(values.expertHits)",
             "misses=\(values.expertMisses)",
             "ple_opens=\(values.plePartOpens)",
+            "ple_bytes=\(values.pleRowBytes)",
+            "ple_bytes/token=\(values.pleGathers > 0 ? String(format: "%.0f", Double(values.pleRowBytes) / Double(values.pleGathers)) : "-")",
             "indexer_ranked=\(values.indexerRankedLayers)",
             "cbs=\(values.commandBuffers)",
             "cbs/step=\(String(format: "%.1f", Double(values.commandBuffers) / n))",

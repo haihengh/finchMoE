@@ -740,7 +740,12 @@ tokenizer maps `qwen4_exp` into the shared `.qwen3_6` family. Tests:
      server, took **1:31 at a 2.0 GB peak**. Any future cell should score that
      way rather than inside the generation run.
 
-Deferred (documented here): PLE table quant; MTP; vision; indexer cache
+**PLE table quant — DONE 2026-09-15**, no longer deferred: the n-gram table is
+int4 affine group 32, the install is 97 GiB against 162, and EvalPlus on the new
+install scores base 0.945 (unchanged) / HumanEval+ 0.909 against 0.921. Full
+record: `docs/PLE_QUANTIZATION_PLAN.md`.
+
+Deferred (documented here): MTP; vision; indexer cache
 compaction. `docs/QWEN36_PORT.md` remains the GDN/rope/mrope authority and
 the 3.6 hardware findings carry over.
 
