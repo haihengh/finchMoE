@@ -312,6 +312,24 @@ failed the quality gate. It was rejected and removed.
 - **Consistent detail.** In all 276 differing decode records the cell count and pooled count are
   identical (`cells=2051`, one `pooled` per position); only the chosen cells differ. So whatever
   moved did not change *how many* cells the ranking keeps.
+- **Three exclusions, measured.** With duration established as the correlate and no mechanism in hand,
+  the branches that would not be found by measuring longer runs were closed directly.
+  *ThreadSanitizer* (verified against a deliberate race first) reports **no host-side data race**
+  across 908 tests, a real-install run at chunk 128, and — the one that matters — **the exact
+  configuration that diverges**: 2940 tokens, chunk 128, 356.6 s of prefill, 0 reports, exit 0.
+  *Byte stability*: 96.8 GiB of the 97 GiB install (49 expert files, the resident weights, all 128 PLE
+  shards) read cold three times with `F_NOCACHE` — **37,266 block-hash comparisons, zero differing
+  blocks**, so the weights are not changing under the engine. *Read paths*: both streamers loop on
+  short reads and verify the total, so a partial read throws rather than leaving stale bytes in a slot.
+  A fourth check, cheaper than any of them: the MoE route pairs sort on
+  `routedExpertPhysicalOffsets`, a static property of the install, so the summation order does not
+  move with cache state — a cache-dependent order would have produced exactly this symptom legally.
+- **What is left, and what TSan cannot see.** The Metal driver is not instrumented, so a host-write
+  versus GPU-read hazard is invisible to TSan, and that is the shape the surviving suspects take; GPU
+  kernel execution is likewise outside every instrument used here. Note also that nothing in this
+  entry localizes the divergence *within* the prefill: the chunk-boundary selections agree while the
+  final logits differ, and the code has no per-row fingerprint to bisect further — adding one is the
+  work that remains, not more runs of the same length.
 - **Prior art, now a weaker analogy:** [KV-14](#kv-14) was a prefill tiled-attention race whose
   exposure depended on the tiling. That is what the withdrawn reading looked like. The duration
   result moves this away from "a shared-memory reuse hazard in a specific kernel" and toward a race
