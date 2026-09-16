@@ -288,12 +288,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// runs differ in ~99% of their logits, which says the divergence happened
     /// *somewhere earlier*. A fingerprint per step and layer turns that into
     /// the first step and layer that actually moved, which is what a kernel
-    /// investigation needs. Dumped at the end of `produceToken`, after its
-    /// wait, because `qsaSelection` is only valid then — and the prefill path
-    /// has no equivalent point, since `prefillChunked` leaves work in flight.
+    /// investigation needs.
+    ///
+    /// Two phases are dumped. `decode` records come from the end of
+    /// `produceToken`, after its wait, which is the only point where the
+    /// selection is stable. `prefill` records come from the chunk loop in
+    /// `prefillChunked`, after a drain, and describe each full layer's
+    /// selection for that chunk's *last* row — the prefill has no finer safe
+    /// point, since its work is otherwise in flight. The decode records placed
+    /// the divergence in the prefill (it is already present at the first decode
+    /// step), so the prefill records are the ones that can narrow it further.
     private var qsaDumpPath: String? = nil
     /// Best-effort; a diagnostic must never break the run it is diagnosing.
-    private func dumpQSASelection(position: Int) {
+    private func dumpQSASelection(position: Int, phase: String) {
         guard let path = qsaDumpPath, let st = qsaState else { return }
         var lines = ""
         for L in 0..<cfg.numLayers {
@@ -310,7 +317,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             for i in 0..<count {
                 h = (h ^ UInt64(ptr[i])) &* 0x0000_0100_0000_01b3
             }
-            lines += "step=\(position) layer=\(L) cells=\(count)"
+            lines += "\(phase) step=\(position) layer=\(L) cells=\(count)"
                 + " pooled=\(lay.pooledBlocks) hash=\(String(h, radix: 16))\n"
         }
         guard !lines.isEmpty, let data = lines.data(using: .utf8) else { return }
@@ -1175,6 +1182,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 config: config,
                 writeFinalHead: spanIndex == spans.count - 1)
             onProgress(span.completedCount)
+            // `FQ_QSA_DUMP`: the chunk's work is committed by now, so a drain
+            // makes the ranking state readable, and it holds each full layer's
+            // selection for this chunk's LAST row. That is the prefill-side
+            // fingerprint: the decode-side one showed the divergence is already
+            // present at the first decode step, which places it in here.
+            if qsaDumpPath != nil {
+                drainGPU()
+                dumpQSASelection(position: span.startPosition + span.tokenCount - 1,
+                                 phase: "prefill")
+            }
         }
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {
             return PrefillResult(newPosition: startPosition + tokens.count,
@@ -5912,7 +5929,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
         }
 
-        dumpQSASelection(position: position)
+        dumpQSASelection(position: position, phase: "decode")
         kv?.advance()
     }
 
