@@ -466,6 +466,50 @@ from representative holdouts.
   thermal state; this is the magnitude, measured, and the size of the effect it
   invalidates.
 
+### METH-16: The bytes are an assumption until someone reads them twice
+
+- **Hypothesis:** there was none — that is the entry. The engine's long-prompt
+  run-to-run nondeterminism ([KV-15](05-attention-and-kv-cache.md#kv-15)) was
+  chased through the chunk size, the prompt length, and the QSA ranking path
+  before anyone asked whether the *file* returns the same bytes twice. Every
+  weight the engine multiplies comes off a USB4-bridged NVMe, so "the install
+  is stable" was load-bearing for the entire investigation and had never been
+  tested. The `verified-install.json` receipt hashes at first touch and never
+  again.
+- **Variants tested:** Three full passes over the install, hashing every
+  8 MiB block with BLAKE2b, each pass opened `F_NOCACHE` so the OS buffer
+  cache could not serve it — without that the first pass warms the cache and
+  the second proves nothing, which is how the first attempt at this test came
+  back a meaningless null on 7.9 GiB. Blocks are compared across passes, so any
+  single byte differing anywhere changes a block hash.
+- **Evidence:** 96.8 GiB of the 97 GiB install — 49 expert files, the 3.6 GiB
+  resident weights and all 128 PLE shards — read cold three times: **37,266
+  block comparisons, zero differing blocks, zero short reads.** At 0.97-1.08
+  GB/s each pass is about a minute, so the whole check costs a few minutes.
+- **What changed the conclusion:** the read path is now excluded, which is
+  worth as much as the two exclusions it sits beside. The read-path code was
+  checked too: `PreadExpertStreamer` and `PLEPartStreamer` both loop on short
+  reads and verify the total, so a partial read throws rather than silently
+  leaving stale bytes in a slot. And ThreadSanitizer — verified active against
+  a deliberate race — found **no host-side data race** across 908 tests, a
+  real-install run at chunk 128, and the exact configuration that diverges
+  (2940 tokens, chunk 128, 356.6 s of prefill, 0 reports). The MoE route
+  ordering was checked as well: pairs sort on
+  `routedExpertPhysicalOffsets`, a static property of the install, so the
+  summation order does not move with cache state.
+- **Final disposition:** the three negatives are recorded in KV-15 as
+  exclusions. TSan's blind spot is named there too: the Metal driver is not
+  instrumented, so a host-write/GPU-read hazard is invisible to it, and that is
+  the shape the remaining suspects take.
+- **Lesson:** Measure the substrate before measuring the phenomenon. A
+  measurement chain is only as strong as its least-checked assumption, and the
+  cheapest assumptions are the ones nobody writes down — "the weights on disk
+  are the weights on disk" had survived a dozen experiments because reading it
+  seemed too trivial to be worth doing. It is also worth noting *how* the test
+  had to be written: the naive version passes while proving nothing, because
+  the second read of a 7.9 GiB file comes out of RAM. When the subject is a
+  device, the control has to defeat the cache in front of it.
+
 ## Boundaries that were not failed experiments
 
 - ANE/Core ML offload was excluded by the platform and architecture decision;
