@@ -46,6 +46,10 @@ public struct RunnerCounterValues: Equatable, Sendable {
     public var pleGathers: UInt64
     public var indexerRankedLayers: UInt64
     public var commandBuffers: UInt64
+    /// Prefill-side commits, counted separately for the reason the runner gives:
+    /// both profiles commit through the same queue. Printed as `cbs` on a
+    /// `scope=prefill` line, where the decode count is zero by construction.
+    public var prefillCommandBuffers: UInt64
     public var gpuCb1Nanos: UInt64
     public var gpuCb1FullAttnNanos: UInt64
     public var gpuCb1GdnNanos: UInt64
@@ -83,6 +87,7 @@ public struct RunnerCounterValues: Equatable, Sendable {
                 pleGathers: UInt64 = 0,
                 indexerRankedLayers: UInt64 = 0,
                 commandBuffers: UInt64 = 0,
+                prefillCommandBuffers: UInt64 = 0,
                 gpuCb1Nanos: UInt64 = 0,
                 gpuCb1FullAttnNanos: UInt64 = 0,
                 gpuCb1GdnNanos: UInt64 = 0,
@@ -119,6 +124,7 @@ public struct RunnerCounterValues: Equatable, Sendable {
         self.pleGathers = pleGathers
         self.indexerRankedLayers = indexerRankedLayers
         self.commandBuffers = commandBuffers
+        self.prefillCommandBuffers = prefillCommandBuffers
         self.gpuCb1Nanos = gpuCb1Nanos
         self.gpuCb1FullAttnNanos = gpuCb1FullAttnNanos
         self.gpuCb1GdnNanos = gpuCb1GdnNanos
@@ -176,6 +182,7 @@ public struct RunnerCounterValues: Equatable, Sendable {
             pleGathers: d(pleGathers, base.pleGathers),
             indexerRankedLayers: d(indexerRankedLayers, base.indexerRankedLayers),
             commandBuffers: d(commandBuffers, base.commandBuffers),
+            prefillCommandBuffers: d(prefillCommandBuffers, base.prefillCommandBuffers),
             gpuCb1Nanos: d(gpuCb1Nanos, base.gpuCb1Nanos),
             gpuCb1FullAttnNanos: d(gpuCb1FullAttnNanos, base.gpuCb1FullAttnNanos),
             gpuCb1GdnNanos: d(gpuCb1GdnNanos, base.gpuCb1GdnNanos),
@@ -222,6 +229,7 @@ extension RunnerCounterValues {
                   pleGathers: runner.totalPleGathers,
                   indexerRankedLayers: runner.totalIndexerRankedLayers,
                   commandBuffers: runner.totalDecodeCommandBuffers,
+                  prefillCommandBuffers: runner.totalPrefillCommandBuffers,
                   gpuCb1Nanos: runner.totalGpuCb1Nanos,
                   gpuCb1FullAttnNanos: runner.totalGpuCb1FullAttnNanos,
                   gpuCb1GdnNanos: runner.totalGpuCb1GdnNanos,
@@ -368,6 +376,19 @@ public enum RunnerCounters {
         let steps = max(values.forwards, 1)
         let n = Double(steps)
 
+        // A `scope=prefill` line is taken at the prefill/decode boundary, where
+        // `forwards` is still zero, so the divisor above is 1 and every number
+        // on it is already a total. Label it that way: a `/step` suffix on a
+        // prefill total invites dividing it by a decode step count that was
+        // never involved.
+        let unit = scope == "prefill" ? "" : "/step"
+        // `cbs` is the commit count for whichever profile the line describes;
+        // the decode counter is zero on a prefill-scoped line, so printing it
+        // there would report a coverage of zero for a run that committed
+        // thousands of buffers.
+        let commits = scope == "prefill" ? values.prefillCommandBuffers
+                                         : values.commandBuffers
+
         func msPerStep(_ nanos: UInt64) -> String {
             String(format: "%.2f", Double(nanos) / nanosPerMilli / n)
         }
@@ -400,17 +421,17 @@ public enum RunnerCounters {
         ]
         if let slots { fields.append("slots=\(slots)") }
         fields.append(contentsOf: [
-            "cb1_cpu_ms/step=\(msPerStep(values.cb1Nanos))",
-            "other_cpu_ms/step=\(msPerStep(values.cb1OtherNanos))",
-            "attention_cpu_ms/step=\(msPerStep(values.cb1AttentionNanos))",
-            "gdn_proj_cpu_ms/step=\(msPerStep(values.cb1GdnProjNanos))",
-            "gdn_conv_gate_cpu_ms/step=\(msPerStep(values.cb1GdnConvGateNanos))",
-            "gdn_recurrent_cpu_ms/step=\(msPerStep(values.cb1GdnRecurrentNanos))",
-            "router_cpu_ms/step=\(msPerStep(values.cb1RouterNanos))",
-            "wait_cpu_ms/step=\(msPerStep(values.cb1WaitNanos))",
+            "cb1_cpu_ms\(unit)=\(msPerStep(values.cb1Nanos))",
+            "other_cpu_ms\(unit)=\(msPerStep(values.cb1OtherNanos))",
+            "attention_cpu_ms\(unit)=\(msPerStep(values.cb1AttentionNanos))",
+            "gdn_proj_cpu_ms\(unit)=\(msPerStep(values.cb1GdnProjNanos))",
+            "gdn_conv_gate_cpu_ms\(unit)=\(msPerStep(values.cb1GdnConvGateNanos))",
+            "gdn_recurrent_cpu_ms\(unit)=\(msPerStep(values.cb1GdnRecurrentNanos))",
+            "router_cpu_ms\(unit)=\(msPerStep(values.cb1RouterNanos))",
+            "wait_cpu_ms\(unit)=\(msPerStep(values.cb1WaitNanos))",
             "identity=\(identity)",
-            "cb2_cpu_ms/step=\(msPerStep(values.cb2Nanos))",
-            "io_wall_ms/step=\(msPerStep(values.ioNanos))",
+            "cb2_cpu_ms\(unit)=\(msPerStep(values.cb2Nanos))",
+            "io_wall_ms\(unit)=\(msPerStep(values.ioNanos))",
             // The `io` window split, and the one place the suffix rule earns
             // its keep: `plan` is CPU work that happens *outside* the window
             // (between the router readback and the fetch) and is printed beside
@@ -420,51 +441,51 @@ public enum RunnerCounters {
             // `ensureLayerOpened` check. That remainder is per-layer fixed cost
             // on a path that runs once per layer per token, which is the
             // quantity this split exists to expose.
-            "io_plan_cpu_ms/step=\(msPerStep(values.ioPlanNanos))",
-            "io_dispatch_wall_ms/step=\(msPerStep(values.ioDispatchNanos))",
-            "io_read_wall_ms/step=\(msPerStep(values.ioReadNanos))",
+            "io_plan_cpu_ms\(unit)=\(msPerStep(values.ioPlanNanos))",
+            "io_dispatch_wall_ms\(unit)=\(msPerStep(values.ioDispatchNanos))",
+            "io_read_wall_ms\(unit)=\(msPerStep(values.ioReadNanos))",
             // The read window split. `fanout + span + drain` is `io_read_wall`
             // exactly, and `read_identity` is the check that says so; `io_conc`
             // is the achieved parallelism, summed thread time over the span.
             // The four together replace a single number that could not
             // distinguish a slow drive from a fan-out that never widened.
-            "io_fanout_wall_ms/step=\(msPerStep(values.ioFanoutNanos))",
-            "io_span_wall_ms/step=\(msPerStep(values.ioSpanNanos))",
-            "io_drain_wall_ms/step=\(msPerStep(values.ioDrainNanos))",
-            "io_thread_wall_ms/step=\(msPerStep(values.ioThreadNanos))",
+            "io_fanout_wall_ms\(unit)=\(msPerStep(values.ioFanoutNanos))",
+            "io_span_wall_ms\(unit)=\(msPerStep(values.ioSpanNanos))",
+            "io_drain_wall_ms\(unit)=\(msPerStep(values.ioDrainNanos))",
+            "io_thread_wall_ms\(unit)=\(msPerStep(values.ioThreadNanos))",
             "io_conc=\(ioConcurrency(values))",
             "io_read_identity=\(ioReadIdentity(values))",
             // The read split by operation rather than by thread. With
             // staging off the whole of `io_thread_wall` is charged to
             // `pread` and `copy` is zero, because there was no copy.
-            "io_pread_wall_ms/step=\(msPerStep(values.ioPreadNanos))",
-            "io_copy_wall_ms/step=\(msPerStep(values.ioCopyNanos))",
+            "io_pread_wall_ms\(unit)=\(msPerStep(values.ioPreadNanos))",
+            "io_copy_wall_ms\(unit)=\(msPerStep(values.ioCopyNanos))",
             // The shape behind `io_thread_wall / misses`. On 3.8 that mean is
             // 4.65 ms per read where an offline replay of the identical offsets
             // at the same depth reads at 2.62 ms, and only these say whether
             // the difference is in every read or in a tail of them.
             "io_read_latency_ms=\(ioReadLatency(values))",
-            "io_tail_wall_ms/step=\(msPerStep(values.ioTailNanos))",
-            "io_handoff_wall_ms/step=\(msPerStep(ioHandoff(values)))",
-            "head_wall_ms/step=\(msPerStep(values.headNanos))",
-            "ple_wall_ms/step=\(msPerStep(values.pleGatherNanos))",
+            "io_tail_wall_ms\(unit)=\(msPerStep(values.ioTailNanos))",
+            "io_handoff_wall_ms\(unit)=\(msPerStep(ioHandoff(values)))",
+            "head_wall_ms\(unit)=\(msPerStep(values.headNanos))",
+            "ple_wall_ms\(unit)=\(msPerStep(values.pleGatherNanos))",
             "hits=\(values.expertHits)",
             "misses=\(values.expertMisses)",
             "ple_opens=\(values.plePartOpens)",
             "ple_bytes=\(values.pleRowBytes)",
             "ple_bytes/token=\(values.pleGathers > 0 ? String(format: "%.0f", Double(values.pleRowBytes) / Double(values.pleGathers)) : "-")",
             "indexer_ranked=\(values.indexerRankedLayers)",
-            "cbs=\(values.commandBuffers)",
-            "cbs/step=\(String(format: "%.1f", Double(values.commandBuffers) / n))",
-            "gpu_cb1_wall_ms/step=\(msPerStep(values.gpuCb1Nanos))",
+            "cbs=\(commits)",
+            "cbs\(unit)=\(String(format: "%.1f", Double(values.commandBuffers) / n))",
+            "gpu_cb1_wall_ms\(unit)=\(msPerStep(values.gpuCb1Nanos))",
             // The two stacks are alternatives, so these are compared per layer,
             // not per step: divide by the full-attention and GDN layer counts.
             // They sum to `gpu_cb1` on a Qwen install (and are both zero on
             // Gemma, which is not instrumented — the same signature its CPU
             // buckets show).
-            "gpu_cb1_fullattn_wall_ms/step=\(msPerStep(values.gpuCb1FullAttnNanos))",
-            "gpu_cb1_gdn_wall_ms/step=\(msPerStep(values.gpuCb1GdnNanos))",
-            "gpu_routed_wall_ms/step=\(msPerStep(values.gpuRoutedNanos))",
+            "gpu_cb1_fullattn_wall_ms\(unit)=\(msPerStep(values.gpuCb1FullAttnNanos))",
+            "gpu_cb1_gdn_wall_ms\(unit)=\(msPerStep(values.gpuCb1GdnNanos))",
+            "gpu_routed_wall_ms\(unit)=\(msPerStep(values.gpuRoutedNanos))",
             "gpu_samples=\(values.gpuSamples)",
         ])
 
@@ -475,7 +496,7 @@ public enum RunnerCounters {
             // accessor takes a lock and opens the layer, which would add the
             // very per-layer overhead item 2.2 exists to remove.
             let bytes = Double(values.expertMisses &* stride)
-            fields.append("io_mb/step=\(String(format: "%.1f", bytes / 1_048_576.0 / n))")
+            fields.append("io_mb\(unit)=\(String(format: "%.1f", bytes / 1_048_576.0 / n))")
             fields.append("expert_stride=\(stride)")
         }
 

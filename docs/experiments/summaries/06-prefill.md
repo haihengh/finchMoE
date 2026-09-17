@@ -332,10 +332,46 @@ failed the M2 long-row gate.
   overlaps the host load under the previous layer's GPU work. Their target is
   therefore the *host* cost of assembling a layer, not the drive's throughput,
   which is the same conclusion this entry reaches from the other side.
+- **The split, measured (the follow-up this entry called for).** The prefill
+  now records GPU time. Its four CBs per layer are all committed *and waited*
+  already — the layer's own forward, the shared expert, the routed tiles and the
+  tail — so `gpuStartTime`/`gpuEndTime` are available on each, into the same
+  accumulators the decode path uses. Reusing them is sound because every counter
+  here is read as a **delta**: the `scope=prefill` snapshot holds prefill-only
+  values and a decode-scoped line holds decode-only ones, from one set of
+  fields. `totalPrefillCommandBuffers` counts the prefill's commits separately
+  (both profiles commit through the same queue) and is printed as `cbs` on the
+  prefill-scoped line, where the decode count is zero by construction — that is
+  what makes the sample coverage checkable. Only the 3.8 prefill body is
+  instrumented; a 3.6 or Gemma run reports zeros here, which is why the
+  `scope=prefill` unit label drops the `/step` suffix rather than dividing a
+  total by a decode step count.
+- **The answer, on 426 tokens.** At chunk 512 the prefill is 29.65 s: **GDN
+  layers 13.07 s (44%)**, expert I/O 10.68 s (36%), routed MoE 6.19 s (21%),
+  full attention 0.92 s (3%). Coverage is 1720 samples against 1768 commits
+  (97%), and GPU + I/O = 30.87 s against a 29.65 s wall — so the prefill is
+  **essentially serialized**, with about a second of overlap, which is the
+  quantitative form of what the flat tile-depth sweep showed. Per layer, a GDN
+  layer costs ~363 ms against a full-attention layer's ~77 ms: **4.7x**, and the
+  GDN stack is 36 of the 48 layers.
+- **Two independent controls.** (1) The *decode* line must not move with a
+  prefill knob, and does not: at chunk 128 against 512 the decode-scoped
+  per-step values are 265.5 / 283.9 ms of I/O, 60.8 / 63.8 ms of `cb1` and 186 /
+  182 commits per step. (2) The I/O term must move with the chunk size while the
+  GPU terms do not, and that is what happens: chunk 128 re-reads each chunk's
+  expert union, so over the same 426 tokens its I/O is 27.07 s of a 46.77 s
+  prefill (58%) against 10.68 s of 29.65 s, **2.5x**, while `gpu_cb1` moves
+  14.45 -> 14.00 s and the GDN term 13.32 -> 13.07 s. The GPU is doing the same
+  work; only the reads changed.
 - **Final disposition:** the knobs ship (default unchanged at depth 1, tile 8,
   which the sweep says is not leaving anything on the table at these sizes);
-  the tile-depth hypothesis is **refuted**; the prefill's GPU/host split is the
-  open measurement.
+  the tile-depth hypothesis is **refuted**; and the prefill's remaining cost is
+  now attributed. **It is not I/O — it is the GDN stack**, which is more than
+  the whole I/O term, more than twice the routed MoE, and 4.7x the
+  full-attention stack per layer. That is where prefill work goes next, and it
+  is a different program from the whole-layer loading the Edge0 comparison
+  suggested: that would attack the 10.7 s of I/O, of which only the
+  non-overlapped part is reachable.
 
 [Previous: Attention and KV cache](05-attention-and-kv-cache.md) |
 [Experiment inventory](../EXPERIMENT_INVENTORY.md) |
