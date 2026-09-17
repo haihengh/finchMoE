@@ -381,14 +381,38 @@ failed the M2 long-row gate.
   folding a 6% term while 11.9 s of a 29.5 s prefill sits in the two projection
   stages. Per GDN layer that is 241 ms of input projection and 90 ms of output
   projection against 20 ms of scan.
+- **Why the projections cost what they do, read out of the kernel.** Both
+  projection stages run at ~150 GFLOP/s, which is ~3.5% of this GPU's fp16
+  peak, and neither is read-bound: the int4 weights are 21.1 MB per layer, 759 MB
+  across the 36 layers, which is 88 MB/s of effective weight traffic against a
+  drive that serves 3.4 GB/s. `prefill_dequant_int4_qmm_f16_block` says why:
+  **one thread computes one (token, output-row) element and walks the whole
+  weight row itself**, so each weight row is dequantized once *per token* — at
+  T=426 that is 426x redundant dequantization per layer — and consecutive
+  threads in a threadgroup differ in `n`, so their weight reads are a whole row
+  apart and X, W and Y are all uncoalesced. The 8x8 threadgroup tiles (token,
+  row) but nothing is reused across the tile.
+  With K = 2560, qkvDim = 10240, valueDim = 6144 and D = 2560, the input
+  projections are 18.0 GMAC per layer and the output projection 6.7 GMAC, both
+  landing on the same ~150 GFLOP/s — one kernel, one reason.
+- **The prediction this makes, and it is checkable.** A kernel with no reuse
+  across the tile should scale linearly in T, so a prefill token should cost
+  about what a decode token costs. Measured, a prefill token is ~2.5x cheaper
+  (0.57 ms against ~1.4 ms per GDN layer per token) — so there is *some*
+  amortization from the extra threadgroups hiding latency, and it is nowhere
+  near the order of magnitude a real GEMM would give at T=426. That is the
+  shape of the gap, not just its size.
 - **Final disposition:** the knobs ship (default unchanged at depth 1, tile 8,
   which the sweep says is not leaving anything on the table at these sizes);
   the tile-depth hypothesis is **refuted**; the prefill's cost is attributed;
-  and within the largest term — the GDN stack — the split puts the target on
-  **projection kernel tuning**, not on fusing the scan. Both the whole-layer
-  loading the Edge0 comparison suggested and a GDN fusion pass are now measured
-  as smaller prizes than the projection stages: the first would attack 10.7 s of
-  I/O of which a fraction is reachable, the second 0.73 s of conv and scan.
+  and the GDN split answers the question it was built for: **projection kernel
+  tuning, not GDN fusion.** The scan and conv a fusion pass would fold are
+  0.73 s of a 29.5 s prefill; the two projection stages are 11.9 s. A rewritten
+  int4 projection that dequantizes each weight row once and reuses it across the
+  tile is the next piece of work, and `gpu_gdn_proj_ms/split` is the metric to
+  A/B it against. (Estimate, not measurement: at a plausible 2 TFLOP/s for a
+  dequant-then-GEMM kernel the input projections would fall from 8.66 s to
+  under 1 s.)
 
 [Previous: Attention and KV cache](05-attention-and-kv-cache.md) |
 [Experiment inventory](../EXPERIMENT_INVENTORY.md) |
