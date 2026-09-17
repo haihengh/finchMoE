@@ -312,6 +312,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// `FQ_GDN_SPLIT=1`: commit the GDN sub-stages as separate command buffers
     /// so each reports its own GPU time. See `totalGpuGdnProjNanos`.
     private var gdnSubStageSplit = false
+    /// `FQ_INT8_GEMM=1`: batch the int8 projections the GDN layers spend their
+    /// time in, instead of re-walking the weight matrix once per token. See
+    /// `PrefillInt8Gemm`.
+    private var int8ProjectionGemm = false
+    private var prefillInt8Gemm: PrefillInt8Gemm?
     /// The last prefill's row count, for the dump's shape.
     private var rowHashRowCount: Int = 0
 
@@ -824,6 +829,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // 64k. It is opt-in, and the dump reports the cost at startup.
             self.gdnSubStageSplit = ProcessInfo.processInfo
                 .environment["FQ_GDN_SPLIT"] == "1"
+            self.int8ProjectionGemm = ProcessInfo.processInfo
+                .environment["FQ_INT8_GEMM"] == "1"
+            self.prefillInt8Gemm = int8ProjectionGemm
+                ? try PrefillInt8Gemm(context: ctx) : nil
             self.rowHashDumpPath = ProcessInfo.processInfo
                 .environment["FQ_ROW_HASH"]
             if let path = rowHashDumpPath, cfg.isQwen3_8 {
@@ -2202,6 +2211,37 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                              m: UInt32(rows),
                              n: UInt32(columns))
         }
+    }
+
+    /// The batched form of `encodeRepeatedInt8`, for the sites whose output row
+    /// stride equals the row count. Falls back to the per-token GEMV loop when
+    /// the knob is off, the kernel is absent, or the shape is not one the tile
+    /// covers — so the default path is untouched and the A/B is one env var.
+    @discardableResult
+    private func encodeInt8ProjectionBatched(commandBuffer: MTLCommandBuffer,
+                                             weights: TensorView,
+                                             x: MTLBuffer,
+                                             y: MTLBuffer,
+                                             rows: Int,
+                                             columns: Int,
+                                             tokenCount: Int,
+                                             yStrideElements: Int,
+                                             yBaseElements: Int = 0) -> Bool {
+        guard let gemm = prefillInt8Gemm,
+              tokenCount >= PrefillInt8Gemm.tokensPerTile,
+              yStrideElements == rows,
+              PrefillInt8Gemm.supports(columns: columns) else {
+            return false
+        }
+        gemm.encode(commandBuffer: commandBuffer,
+                    weights: weights.buffer, weightsOffset: Int(weights.offset),
+                    scales: weights.buffer, scalesOffset: Int(weights.scaleOffset),
+                    biases: weights.buffer, biasesOffset: Int(weights.biasOffset),
+                    x: x, xOffset: 0,
+                    y: y,
+                    yOffset: yBaseElements * MemoryLayout<Float16>.stride,
+                    tokens: tokenCount, rows: rows, columns: columns)
+        return true
     }
 
     private func encodeInt4Projection(commandBuffer: MTLCommandBuffer,
@@ -4526,24 +4566,36 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // belongs to the layer’s own buffer.
             cb = splitGdnSubStage(cb, closing: nil, into: &gdnSubStages)
             if linearAttnBits == 8 {
-                encodeRepeatedInt8(commandBuffer: cb,
-                                   weights: qkvP,
-                                   x: scratch.normed,
-                                   y: scratch.qwenQKVProj,
-                                   rows: qkvDim,
-                                   columns: D,
-                                   tokenCount: t,
-                                   xStrideElements: D,
-                                   yStrideElements: qkvDim)
-                encodeRepeatedInt8(commandBuffer: cb,
-                                   weights: zP,
-                                   x: scratch.normed,
-                                   y: scratch.qwenZ,
-                                   rows: valueDim,
-                                   columns: D,
-                                   tokenCount: t,
-                                   xStrideElements: D,
-                                   yStrideElements: valueDim)
+                let qkvBatched = encodeInt8ProjectionBatched(
+                    commandBuffer: cb, weights: qkvP, x: scratch.normed,
+                    y: scratch.qwenQKVProj, rows: qkvDim, columns: D,
+                    tokenCount: t, yStrideElements: qkvDim)
+                if !qkvBatched {
+                    encodeRepeatedInt8(commandBuffer: cb,
+                                       weights: qkvP,
+                                       x: scratch.normed,
+                                       y: scratch.qwenQKVProj,
+                                       rows: qkvDim,
+                                       columns: D,
+                                       tokenCount: t,
+                                       xStrideElements: D,
+                                       yStrideElements: qkvDim)
+                }
+                let zBatched = encodeInt8ProjectionBatched(
+                    commandBuffer: cb, weights: zP, x: scratch.normed,
+                    y: scratch.qwenZ, rows: valueDim, columns: D,
+                    tokenCount: t, yStrideElements: valueDim)
+                if !zBatched {
+                    encodeRepeatedInt8(commandBuffer: cb,
+                                       weights: zP,
+                                       x: scratch.normed,
+                                       y: scratch.qwenZ,
+                                       rows: valueDim,
+                                       columns: D,
+                                       tokenCount: t,
+                                       xStrideElements: D,
+                                       yStrideElements: valueDim)
+                }
                 encodeRepeatedInt8(commandBuffer: cb,
                                    weights: aP!,
                                    x: scratch.normed,
@@ -4662,15 +4714,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // after the scan, so it cannot share stage 1’s buffer — which is why
             // four stages, not three, are what sum against the layer’s GDN time.
             cb = splitGdnSubStage(cb, closing: 2, into: &gdnSubStages)
-                encodeRepeatedInt8(commandBuffer: cb,
-                                   weights: outP,
-                                   x: scratch.qwenRecOut,
-                                   y: scratch.qwen38OOut,
-                                   rows: D,
-                                   columns: valueDim,
-                                   tokenCount: t,
-                                   xStrideElements: valueDim,
-                                   yStrideElements: D)
+                let outProjBatched = encodeInt8ProjectionBatched(
+                    commandBuffer: cb, weights: outP, x: scratch.qwenRecOut,
+                    y: scratch.qwen38OOut, rows: D, columns: valueDim,
+                    tokenCount: t, yStrideElements: D)
+                if !outProjBatched {
+                    encodeRepeatedInt8(commandBuffer: cb,
+                                       weights: outP,
+                                       x: scratch.qwenRecOut,
+                                       y: scratch.qwen38OOut,
+                                       rows: D,
+                                       columns: valueDim,
+                                       tokenCount: t,
+                                       xStrideElements: valueDim,
+                                       yStrideElements: D)
+                }
             } else {
                 encodeInt4Projection(commandBuffer: cb,
                                      family: .o,

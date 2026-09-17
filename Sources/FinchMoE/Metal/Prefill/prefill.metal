@@ -1223,3 +1223,129 @@ kernel void row_hash_fnv1a_64(
     // chunk, or each chunk would overwrite the last one's fingerprints.
     dst[dstRowBase + gid] = h;
 }
+
+// MARK: - Batched int8 projection (prefill)
+
+// The linear-attention (GDN) projections are int8 on every shipped Qwen 3.8
+// install, and the prefill path fed them through `dequant_int8_gemv_simd` once
+// per token -- one dispatch per token, each walking the whole weight matrix
+// again. At T=426 that is 426 re-reads of 57 MB per layer, ~46,000 dispatches
+// per chunk, and it measured 11.9 s of a 29.5 s prefill across the GDN stack's
+// four projection stages.
+//
+// This is the batch the GEMV could not express: the weight tile is dequantized
+// once into threadgroup memory and reused across the token dimension, and W, X
+// and Y are all loaded and stored coalesced. The math is the same affine
+// dequantization (w = q * scale + bias, per 64-wide group along K, one pair per
+// row per group) that `dequant_int8_gemv_simd` applies, so the two agree to
+// floating-point reassociation -- accumulation order differs, values do not.
+//
+// Layout notes, because they are where the speed comes from:
+//   * `ws` is transposed to [k][row] so the compute loop walks k in the outer
+//     step and rows contiguously, and it is padded by 4 halves so that walking
+//     k for a fixed row does not stride into the same bank for every thread.
+//   * one BK step is exactly one int8 group, so each row needs exactly one
+//     scale and one bias per step, read once.
+constant constexpr uint kInt8GemmBN = 64;   // output rows per threadgroup
+constant constexpr uint kInt8GemmBT = 32;   // tokens per threadgroup
+constant constexpr uint kInt8GemmBK = kInt8GroupSize;  // K per step == one group
+constant constexpr uint kInt8GemmRowPad = 4;           // halves; see above
+constant constexpr uint kInt8GemmRowsPerThread = 4;
+constant constexpr uint kInt8GemmTokensPerThread = 4;
+
+kernel void prefill_dequant_int8_gemm_f16_block(
+    device const uint8_t* W      [[buffer(0)]],
+    device const bfloat*  scales [[buffer(1)]],
+    device const bfloat*  biases [[buffer(2)]],
+    device const half*    X      [[buffer(3)]],
+    device half*          Y      [[buffer(4)]],
+    constant uint&        T      [[buffer(5)]],
+    constant uint&        M      [[buffer(6)]],
+    constant uint&        K      [[buffer(7)]],
+    uint2                 tid    [[thread_position_in_threadgroup]],
+    uint2                 tgid   [[threadgroup_position_in_grid]]
+) {
+    // Guard the shapes this kernel is dispatched with. K must be a multiple of
+    // the group size, which every projection in this model is; the tile edges
+    // are handled by zero-filling below rather than by a special case.
+    if (K == 0 || (K % kInt8GemmBK) != 0) { return; }
+
+    // The weight tile is fp32, not half: a dequantized weight here is q * scale
+    // + bias and can reach ~120, where fp16 carries 0.03 of absolute error, and
+    // that is 0.8% of a small output. The GEMV this replaces keeps its weights
+    // in fp32 registers, so storing them at half width would make the prefill
+    // less accurate than the decode it has to agree with. The input tile stays
+    // half because that is how x is stored in the buffer — no loss is added.
+    threadgroup float ws[kInt8GemmBK][kInt8GemmBN + kInt8GemmRowPad];
+    threadgroup half  xs[kInt8GemmBK][kInt8GemmBT + kInt8GemmRowPad];
+
+    const uint n0 = tgid.x * kInt8GemmBN;
+    const uint t0 = tgid.y * kInt8GemmBT;
+    const uint lane = tid.y * 16u + tid.x;   // 16 x 8 = 128 threads
+    const uint groups = K / kInt8GemmBK;
+
+    const uint rowBase = tid.x * kInt8GemmRowsPerThread;
+    const uint tokBase = tid.y * kInt8GemmTokensPerThread;
+
+    float acc[kInt8GemmRowsPerThread][kInt8GemmTokensPerThread];
+    for (uint i = 0; i < kInt8GemmRowsPerThread; ++i)
+        for (uint j = 0; j < kInt8GemmTokensPerThread; ++j)
+            acc[i][j] = 0.0f;
+
+    for (uint g = 0; g < groups; ++g) {
+        const uint kBase = g * kInt8GemmBK;
+
+        // Weight tile: dequantize once, transposed into shared memory.
+        // 64 rows x 64 k = 4096 elements over 128 threads = 32 each.
+        for (uint j = 0; j < 32u; ++j) {
+            const uint l = lane + j * 128u;      // 0..4095
+            const uint row = l / kInt8GemmBK;
+            const uint kk = l % kInt8GemmBK;
+            const uint grow = n0 + row;
+            float value = 0.0f;
+            if (grow < M) {
+                const uint8_t q = W[grow * K + kBase + kk];
+                const float s = float(scales[grow * groups + g]);
+                const float b = float(biases[grow * groups + g]);
+                value = fma(float(q), s, b);
+            }
+            ws[kk][row] = value;
+        }
+
+        // Input tile: 32 tokens x 64 k = 2048 elements over 128 threads = 16 each.
+        for (uint j = 0; j < 16u; ++j) {
+            const uint l = lane + j * 128u;      // 0..2047
+            const uint token = l / kInt8GemmBK;
+            const uint kk = l % kInt8GemmBK;
+            const uint gt = t0 + token;
+            xs[kk][token] = gt < T ? X[gt * K + kBase + kk] : half(0.0);
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float wv[kInt8GemmRowsPerThread];
+        half  xv[kInt8GemmTokensPerThread];
+        for (uint kk = 0; kk < kInt8GemmBK; ++kk) {
+            for (uint i = 0; i < kInt8GemmRowsPerThread; ++i)
+                wv[i] = ws[kk][rowBase + i];
+            for (uint j = 0; j < kInt8GemmTokensPerThread; ++j)
+                xv[j] = xs[kk][tokBase + j];
+            for (uint i = 0; i < kInt8GemmRowsPerThread; ++i) {
+                for (uint j = 0; j < kInt8GemmTokensPerThread; ++j)
+                    acc[i][j] = fma(wv[i], float(xv[j]), acc[i][j]);
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    for (uint j = 0; j < kInt8GemmTokensPerThread; ++j) {
+        const uint gt = t0 + tokBase + j;
+        if (gt >= T) { continue; }
+        for (uint i = 0; i < kInt8GemmRowsPerThread; ++i) {
+            const uint gn = n0 + rowBase + i;
+            if (gn >= M) { continue; }
+            Y[gt * M + gn] = half(acc[i][j]);
+        }
+    }
+}

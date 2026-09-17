@@ -16,7 +16,8 @@
 #     allLayerMixerSweep                         1.4 GB
 #     prefillSweepFindsFirstDivergence           1.4 GB
 #     prefillLayerTailsMatchReference            0.9 GB
-#     repackWeightsMatchBf16Checkpoint           2.6 GB
+#     repackWeightsMatchBf16Checkpoint           2.6 GB (see the note in phase 2:
+#                                                      measured up to 5.3 GB since)
 #     ... all twelve pass
 #
 # but all twelve in one process reached 8.8 GB and the guard killed it — and
@@ -86,7 +87,25 @@ if [ "$PART_B" -eq 1 ]; then
     echo "=== phase 2: $SUITE, one test per guarded process (${#TESTS[@]} tests) ==="
     pass=0; fail=0
     for t in "${TESTS[@]}"; do
-        "$GUARD" -- swift test --no-parallel --filter "$SUITE/$t" > "/tmp/heavytests_$t.log" 2>&1
+        # Most of these fit the default guard. One does not any more:
+        # repackWeightsMatchBf16Checkpoint has been measured at 2.6 GB (the
+        # header's number), 3.7 GB and 5.3 GB on the same box, and it is the
+        # test's own working set plus whatever the compressor is already holding
+        # from other activity — on a quiet box it lands under 4 GB, after hours
+        # of prefill runs it does not. It gets a ceiling of its own so the
+        # verdict tracks the test rather than the box's mood.
+        #
+        # This is NOT the cumulative case the header warns about, where a bigger
+        # ceiling only moves the kill later because each test's pages stay
+        # compressed on top of the last one's. Phase 2 recycles the process per
+        # test precisely to keep that from happening; this is one test, alone,
+        # whose peak has grown past a ceiling written for it long ago.
+        guard_args=()
+        case "$t" in
+            repackWeightsMatchBf16Checkpoint) guard_args=(--max-compressed 6) ;;
+        esac
+        "$GUARD" ${guard_args[@]+"${guard_args[@]}"} -- \
+            swift test --no-parallel --filter "$SUITE/$t" > "/tmp/heavytests_$t.log" 2>&1
         rc=$?
         peak=$(grep -oE "peak [0-9.]+ GB compressed" "/tmp/heavytests_$t.log" | tail -1 | sed 's/peak //;s/ GB compressed//')
         secs=$(grep -oE "passed after [0-9.]+ seconds" "/tmp/heavytests_$t.log" | tail -1 | sed 's/passed after //;s/ seconds//')
