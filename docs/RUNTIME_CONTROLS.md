@@ -92,7 +92,16 @@ the changed setting.
   pipeline wait, while `io` and the head are wall clocks that include theirs, so
   the figures overlap and are not a serial timeline. The GPU figures are a third
   kind again — kernel execution time on the device, which no encode clock can
-  see. See [System design](SYSTEM_DESIGN.md) for the bucket table, the per-layer
+  see. **A run that prefills anything gets a second line, `scope=prefill`**,
+  taken from the snapshot at the prefill/decode boundary, so it attributes the
+  prefill itself rather than reporting a decode delta that is all zeros when
+  there is little decode. On it the field names drop the `/step` suffix, because
+  at that boundary `forwards` is still zero and every number is already a total,
+  and `cbs` is the prefill's own commit count (the decode counter is zero there
+  by construction) — which is what makes `gpu_samples` against `cbs` a coverage
+  check. It counts the Qwen 3.8 prefill body only: a 3.6 or Gemma run reports
+  zeros, which is the same "not instrumented" signature their CPU buckets show.
+  See [System design](SYSTEM_DESIGN.md) for the bucket table, the per-layer
   rule for reading the two stack splits, and why `wait` minus `gpu_cb1` is not
   dispatch overhead.
 

@@ -1143,10 +1143,29 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     // larger stakes: the two stacks run different kernels, so one summed figure
     // cannot say which owns it, and the answer decides different work. Read
     // this as a per-layer comparison, not a per-step one.
+    //
+    // The prefill accumulates into these same three fields (see
+    // `recordPrefillLayerGpuTime`), and the split is far sharper there: on a
+    // 426-token prefill the GDN stack is 13.07 s against full attention's
+    // 0.92 s, i.e. ~363 ms per GDN layer against ~77 ms per full-attention one.
+    // The routed and tail buffers go to `totalGpuRoutedNanos` as they do in
+    // decode.
     public private(set) var totalGpuCb1FullAttnNanos: UInt64 = 0
     public private(set) var totalGpuCb1GdnNanos: UInt64 = 0
     public private(set) var totalGpuRoutedNanos: UInt64 = 0
     public private(set) var totalGpuSamples: UInt64 = 0
+
+    // The prefill's command buffers, counted at the prefill commit sites for
+    // the reason `totalDecodeCommandBuffers` gives above: both profiles commit
+    // through the same `ctx.queue`, so one counter would fold them together.
+    //
+    // It exists so the GPU totals can be checked for coverage. `totalGpuSamples`
+    // only counts buffers whose timestamps came back real, and the decode path
+    // deliberately leaves its routed tail unwaited, so a decode total built from
+    // a handful of samples must not read as a whole one. The prefill waits on
+    // every buffer it commits, so here the two numbers should land together --
+    // and if they do not, that is the finding.
+    public private(set) var totalPrefillCommandBuffers: UInt64 = 0
 
     // The PLE n-gram gather, which is Qwen-3.8-only and appears in no other
     // counter: it runs before the layer loop, once per head, and reads rows
@@ -1209,6 +1228,38 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         guard start.isFinite, end.isFinite, start > 0, end > start else { return 0 }
         totalGpuSamples &+= 1
         return UInt64((end - start) * 1_000_000_000)
+    }
+
+    /// Commit a prefill command buffer and count it. See
+    /// `totalPrefillCommandBuffers`.
+    private func commitCountingPrefill(_ cb: MTLCommandBuffer) {
+        totalPrefillCommandBuffers &+= 1
+        cb.commit()
+    }
+
+    /// The prefill's per-layer GPU time, into the same accumulators the decode
+    /// path uses.
+    ///
+    /// Reusing them is sound because every counter here is read as a *delta*
+    /// (`RunnerCounterValues.delta`): a `scope=prefill` line is the snapshot at
+    /// the prefill/decode boundary and so holds prefill-only values, and a
+    /// `scope=decode` line holds decode-only ones, from one set of fields. That
+    /// is also why the split by layer kind carries over cleanly — "cb1" means
+    /// the layer's own forward in both profiles, and the full-attention/GDN
+    /// division is the same property of the same layer.
+    ///
+    /// The prefill's totals need their own plausibility gate, and it is the one
+    /// the decode comment above states: thousands of samples summing to a
+    /// number several times the wall clock means the timestamps are not usable,
+    /// and *that* is the finding.
+    private func recordPrefillLayerGpuTime(_ cb: MTLCommandBuffer, isFull: Bool) {
+        let nanos = recordGpuTime(cb)
+        totalGpuCb1Nanos &+= nanos
+        if isFull {
+            totalGpuCb1FullAttnNanos &+= nanos
+        } else {
+            totalGpuCb1GdnNanos &+= nanos
+        }
     }
 
     private func recordRDAdvice(_ result: ExpertIOAdviceResult, wallNanos: UInt64) {
@@ -4599,11 +4650,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             d: UInt32(D),
             topK: UInt32(cfg.topKExperts),
             hiddenStrideElements: UInt32(D))
-        cb.commit()
+        commitCountingPrefill(cb)
         waitForCompletion(cb)
         if let error = cb.error {
             throw error
         }
+        // The layer’s own forward: attention or GDN, plus its projections.
+        // The same bucket the decode path calls cb1, and the same split by
+        // layer kind.
+        recordPrefillLayerGpuTime(cb, isFull: isFull)
         drainSnapshots()
 
         // CPU readback of the router indices → expert grouping, as in decode.
@@ -4677,11 +4732,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                          h1: scratch.h1, h1Offset: row * D * 2,
                                          n: UInt32(D), d: UInt32(D))
         }
-        sharedCB.commit()
+        commitCountingPrefill(sharedCB)
         waitForCompletion(sharedCB)
         if let error = sharedCB.error {
             throw error
         }
+        totalGpuRoutedNanos &+= recordGpuTime(sharedCB)
 
         // Streamed routed-expert tiles (silu), mirroring the Gemma tile loop.
         let metadata = try prefillGroupedMoE.makeStreamedMetadataBuffers(
@@ -4701,6 +4757,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let pending = pendingTiles.removeFirst()
             withExtendedLifetime((pending.fetch, pending.argumentBuffer)) {
                 waitForCompletion(pending.commandBuffer)
+            totalGpuRoutedNanos &+= recordGpuTime(pending.commandBuffer)
             }
             if let error = pending.commandBuffer.error {
                 throw error
@@ -4815,7 +4872,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 params: streamedParams,
                 pairMicrobatchRows: scratch.layout.routedPairMicrobatchRows,
                 activation: .silu)
-            tileCB.commit()
+            commitCountingPrefill(tileCB)
             pendingTiles.append(PendingPrefillTile(tileIndex: tileIndex,
                                                    commandBuffer: tileCB,
                                                    fetch: fetch,
@@ -4864,12 +4921,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // produced the plane.
         encodePlaneRowHash(scratch, layer: L, stage: 2, tokenCount: t,
                            rowBase: startPosition, into: tailCB)
-        tailCB.commit()
+        commitCountingPrefill(tailCB)
         withExtendedLifetime(metadata) {
             waitForCompletion(tailCB)
         }
         if let error = tailCB.error {
             throw error
+        totalGpuRoutedNanos &+= recordGpuTime(tailCB)
         }
         drainSnapshots()
 
