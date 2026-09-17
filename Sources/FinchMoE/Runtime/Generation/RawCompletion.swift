@@ -234,16 +234,24 @@ public func runRawCompletion(producer: any LogitProducer,
     }
 
     // Dumped here and not later: this is the window in which the buffer holds
-    // the final prefill row. Decode overwrites it on its first `produce`.
-    if let prefillLogitsDumpPath {
-        guard !fusedGreedy else {
+    // the final prefill row, and the one in which the plane the row
+    // fingerprints describe is still the prefill's. Decode overwrites both on
+    // its first `produce`.
+    //
+    // The drain is shared and unconditional across the two dumps, but each is
+    // requested by its own environment variable — the row fingerprints are
+    // useful on a run that never asked for logits, and the reverse. (The first
+    // version of this nested one inside the other's `if let`, so `FQ_ROW_HASH`
+    // alone wrote nothing.)
+    if prefillLogitsDumpPath != nil || producer.wantsRowHashesDump {
+        guard !fusedGreedy || prefillLogitsDumpPath == nil else {
             throw PrefillError.unsupportedPrefillSeed(
                 "a prefill logits dump needs the logits head, but this producer is fused-greedy")
         }
-        // Reading the buffer on the host needs the GPU to be done with it:
-        // `prefillChunked` returns with its last chunk still in flight (unlike
-        // `produce`, which guarantees completion), so without this the dump
-        // reads a buffer that may still be being written.
+        // Reading a GPU-written buffer on the host needs the GPU to be done
+        // with it: `prefillChunked` returns with its last chunk still in
+        // flight (unlike `produce`, which guarantees completion), so without
+        // this a dump reads a buffer that may still be being written.
         //
         // This is a latent-race fix, not the explanation for the run-to-run
         // difference in long-prompt dumps: that difference survived this fix,
@@ -253,7 +261,10 @@ public func runRawCompletion(producer: any LogitProducer,
         // and nothing else tried so far — see KV-15 in
         // docs/experiments/summaries/05-attention-and-kv-cache.md.
         producer.drainGPU()
-        try scratch.writeLogits(to: prefillLogitsDumpPath)
+        producer.dumpRowHashes()
+        if let prefillLogitsDumpPath {
+            try scratch.writeLogits(to: prefillLogitsDumpPath)
+        }
     }
 
     let decodeStart = Date()

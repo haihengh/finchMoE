@@ -330,6 +330,23 @@ failed the quality gate. It was rejected and removed.
   entry localizes the divergence *within* the prefill: the chunk-boundary selections agree while the
   final logits differ, and the code has no per-row fingerprint to bisect further — adding one is the
   work that remains, not more runs of the same length.
+- **The row-level instrument, and what it localized.** `FQ_ROW_HASH=<path>` fingerprints the residual plane
+  *per row* on the GPU — one FNV-1a hash per (layer, stage, row) at three stages of every layer, written to
+  a side buffer and read back once, so no per-chunk commit or wait is added to the run being measured. On
+  the diverging configuration (2940 tokens, chunk 128, two runs at 350.6 and 350.5 s of prefill, logits
+  differing in 246,897 of 248,320): **104,561 of 423,360 hashes differ (24.7%)**, and the first one is
+  **layer 7, stage `attn`, row 2304**. Layer 7 is a full-attention layer (the mask is every fourth layer
+  from 3), and 2304 is exactly **chunk 18's first row** — in other words **chunks 0-17 are bit-identical in
+  both runs at every stage of every layer, and the divergence starts at chunk 18 and persists through
+  chunk 22.** That is a chunk-scoped trigger, not a scattered one, and it is the first evidence in this
+  investigation that points at a specific place rather than at a duration.
+- **One thing in that map does not have a causal explanation yet, and it is worth stating plainly.** From
+  layer 11 onward the affected row set widens *backward*, to rows ≥2053 — but those rows agreed at layers
+  7-10, and causal attention cannot let a difference at row 2304 change row 2053's earlier-layer output.
+  Either a shared per-layer structure (the ranking's pooled blocks and cells are per-layer state, and rows
+  ≥2051 are the ones that use them) is carrying influence backwards, or the row index means something
+  other than position in a way this instrument does not capture. Resolving that comes before reading
+  kernels on the strength of the layer-7 result.
 - **Prior art, now a weaker analogy:** [KV-14](#kv-14) was a prefill tiled-attention race whose
   exposure depended on the tiling. That is what the withdrawn reading looked like. The duration
   result moves this away from "a shared-memory reuse hazard in a specific kernel" and toward a race

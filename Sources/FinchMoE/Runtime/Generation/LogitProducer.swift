@@ -19,11 +19,26 @@ public protocol LogitProducer: AnyObject, Sendable {
     /// `prefillChunked` deliberately does not, so anything reading a prefill
     /// result on the CPU — such as the logits dump — must drain first.
     func drainGPU()
+
+    /// Write the prefill row-fingerprint side buffer, if the instrument is on
+    /// (`FQ_ROW_HASH=<path>`, see `docs/RUNTIME_CONTROLS.md`).
+    ///
+    /// Like the logits dump this is only meaningful at the prefill/decode
+    /// boundary and only after `drainGPU()`: the plane the hashes describe is
+    /// overwritten from the first decode step. A producer that cannot prefill
+    /// has nothing to write.
+    func dumpRowHashes()
+
+    /// Whether `dumpRowHashes` has anything to write, so a caller can decide
+    /// whether to drain when nothing else needs it.
+    var wantsRowHashesDump: Bool { get }
 }
 
 extension LogitProducer {
     /// Producers with no GPU (the scripted test doubles) have nothing to drain.
     public func drainGPU() {}
+    public func dumpRowHashes() {}
+    public var wantsRowHashesDump: Bool { false }
 }
 
 public protocol ContinuableLogitProducer: LogitProducer {

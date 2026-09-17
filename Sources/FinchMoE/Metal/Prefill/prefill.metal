@@ -1182,3 +1182,44 @@ kernel void attention_prefill_full_tensorops_2d_validity_v2(
 }
 
 #endif
+
+// MARK: - Row-level fingerprints (diagnostic)
+
+// One FNV-1a hash per row of a [rows][rowStrideBytes] tensor, computed on the
+// GPU into a side buffer that the host reads once, after the run.
+//
+// Why it exists: the engine's long-prompt run-to-run nondeterminism
+// (docs/experiments/summaries/05-attention-and-kv-cache.md, KV-15) is known to
+// start inside a prefill *chunk* but has no instrument that reaches below it.
+// A chunk's rows all encode into one command buffer, so a host read of an
+// intermediate row would need a commit and a wait per chunk -- which changes the
+// timing that is itself the correlate under investigation. Hashing on the GPU
+// costs one small dispatch per (layer, stage) and leaves the run's shape alone.
+//
+// 64-bit FNV-1a over the row's bytes, the same algorithm and constants as the
+// QSA selection fingerprint in FQ_QSA_DUMP, so the two instruments report
+// comparable values.
+constant constexpr ulong kRowHashOffsetBasis = 0xcbf29ce484222325UL;
+constant constexpr ulong kRowHashPrime = 0x100000001b3UL;
+
+kernel void row_hash_fnv1a_64(
+    device const uchar* src           [[buffer(0)]],
+    device ulong*       dst           [[buffer(1)]],
+    constant uint&      rowBytes      [[buffer(2)]],
+    constant uint&      rowStrideBytes [[buffer(3)]],
+    constant uint&      rowCount      [[buffer(4)]],
+    constant uint&      dstRowBase    [[buffer(5)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= rowCount) { return; }
+    if (rowBytes == 0 || rowStrideBytes < rowBytes) { return; }
+    const device uchar* row = src + (size_t)gid * (size_t)rowStrideBytes;
+    ulong h = kRowHashOffsetBasis;
+    for (uint i = 0; i < rowBytes; ++i) {
+        h = (h ^ (ulong)row[i]) * kRowHashPrime;
+    }
+    // `dstRowBase` exists because every chunk writes the same plane rows: the
+    // row's identity is its position in the sequence, not its index in the
+    // chunk, or each chunk would overwrite the last one's fingerprints.
+    dst[dstRowBase + gid] = h;
+}
