@@ -431,6 +431,41 @@ failed the M2 long-row gate.
   cannot explain; storing fp32 brought it inside the reassociation band. That is
   the difference between "reordered" and "less accurate", and it is the one that
   would have quietly cost model quality.
+- **The battery, and why the default did NOT flip.** Three cases at the
+  documented protocol's sampling. Below the 2051-token boundary, where the
+  engine repeats exactly and tokens are therefore a real signal:
+  `short-explanation` identical for all 32 generated tokens, and
+  `medium-review` identical for **27 then divergent** (`668 5073 55606 13514`
+  against `10814 795 19963 383`). On the 2940-token prompt the engine's own
+  run-to-run variation is the same order as the cross-arm difference (same-arm
+  max |d| 0.34 / median 0.031 against cross-arm 0.61 / 0.042), so that prompt
+  cannot resolve this at all; its top-10 rank band agrees 10/10 in every pair,
+  same-arm and cross-arm alike, which is a coarse pass and no more.
+  **So the stated gate — zero numerical edge-case regressions — is not met as
+  written**, and the default stayed off.
+- **But identity is the wrong bar here, and the repo already said so.**
+  [PF-17](#pf-17) settled the same question for a reordered attention kernel:
+  "reordered floating-point kernels need a direct numerical oracle plus
+  model-quality gates, not identity with one reduction order." This kernel has
+  the oracle — it agrees with the GEMV's arithmetic read from the same bytes,
+  to within the reassociation slack of a 2560-term fp32 sum — and the divergence
+  above is exactly the thin-margin case that lesson anticipates: 27 tokens of
+  agreement then a branch, on a greedy trajectory whose top-1 margin at some
+  step was smaller than the reassociation. What it does not yet have is the
+  second half: a quality gate. EvalPlus HumanEval is the one this project already
+  ran for the PLE change, so it is the flip's precondition, not more identity
+  chasing on prompts that stop after two tokens.
+- **A measured no-op, kept as a note.** Hand-vectorizing the inner loop's shared
+  loads (float4 weights, half4 inputs) moved the projection stages by nothing:
+  2423 ms against 2420-2437 before it, with the scan and the output projection
+  unmoved too. The compiler was already coalescing them. The source records that
+  the loop's apparent 2:1 FMA-to-load ratio is therefore not what limits the
+  kernel — which is what the tuning below has to start from rather than from the
+  assumed load bound.
+- **What the kernel is worth on the long prompt.** The 2940-token case at chunk
+  512, two runs each: input projections 60.1 / 58.9 s -> **16.7 / 17.1 s**, output
+  projection 22.5 / 22.1 s -> **5.6 / 5.5 s**. That is 82.6 s of projection work
+  down to 22.3 s on a prefill whose total at that size is ~215 s.
 - **Where the target was not met.** The plan's bar was the projections reaching
   under 1.5 s; they reached 3.23 s (11.5 -> 3.23). Still ~537 GFLOP/s, so the
   kernel is now compute-bound on something other than weight traffic — larger

@@ -1323,6 +1323,12 @@ kernel void prefill_dequant_int8_gemm_f16_block(
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
+        // Scalar loads here, deliberately: hand-unrolling them into float4/half4
+        // was measured and moved the projection stages by nothing (2423 ms
+        // against 2420-2437 before it), so the compiler was already coalescing
+        // them and the unrolled form was only harder to read. The 2:1
+        // FMA-to-load ratio this loop looks like it has is therefore not what
+        // limits the kernel.
         float wv[kInt8GemmRowsPerThread];
         half  xv[kInt8GemmTokensPerThread];
         for (uint kk = 0; kk < kInt8GemmBK; ++kk) {
