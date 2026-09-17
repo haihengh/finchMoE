@@ -309,6 +309,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var rowHashBuffer: MTLBuffer? = nil
     internal private(set) var rowHashLayout: RowHashLayout? = nil
     private var rowHashDumpPath: String? = nil
+    /// `FQ_GDN_SPLIT=1`: commit the GDN sub-stages as separate command buffers
+    /// so each reports its own GPU time. See `totalGpuGdnProjNanos`.
+    private var gdnSubStageSplit = false
     /// The last prefill's row count, for the dump's shape.
     private var rowHashRowCount: Int = 0
 
@@ -819,6 +822,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // the side buffer is sized by context: 8 bytes x 3 stages x 48
             // layers is 1.1 KiB per position, about 9 MiB at 8k and 75 MiB at
             // 64k. It is opt-in, and the dump reports the cost at startup.
+            self.gdnSubStageSplit = ProcessInfo.processInfo
+                .environment["FQ_GDN_SPLIT"] == "1"
             self.rowHashDumpPath = ProcessInfo.processInfo
                 .environment["FQ_ROW_HASH"]
             if let path = rowHashDumpPath, cfg.isQwen3_8 {
@@ -1167,6 +1172,43 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     // and if they do not, that is the finding.
     public private(set) var totalPrefillCommandBuffers: UInt64 = 0
 
+    // The GDN sub-stage split (`FQ_GDN_SPLIT=1`). `totalGpuCb1GdnNanos` says the
+    // linear-attention stack owns 44% of a prefill without saying which part of
+    // it does, and the three candidates want different work done to them: the
+    // input projections are GEMMs, the conv is a bandwidth-bound stencil, and
+    // the chunked recurrent scan is neither.
+    //
+    // The split is taken by committing the sub-stages as separate command
+    // buffers that are *not* waited on where they are committed -- only their
+    // submission order matters, so the layer's existing wait completes all of
+    // them and then their timestamps can be read. That keeps the sync pattern
+    // (and so the overlap) unchanged, which is the point: an instrument that
+    // adds waits measures a different prefill. What it does change is command
+    // buffer granularity, so the knob's own effect on the total is measured as
+    // its control rather than assumed away.
+    //
+    // Prefill only, and only for the 3.8 body: the decode path does not split.
+    //
+    // **`totalGpuCb1GdnNanos` means something different while this is on.** The
+    // split moves the GDN work into the four stage buffers, so cb1 collapses to
+    // the layer's post-GDN remainder (~259 ms on a run whose unsplit GDN total
+    // is ~13,150 ms). Read the stages against the *unsplit* total; the stages sum
+    // to 95% of it, the rest being the seq mix and the plane combines after the
+    // GDN block.
+    //
+    // What it says on the 125B, 426 tokens at chunk 512: the input projections
+    // are 8.66 s of the 12.64 s those four stages cover, the output projection
+    // 3.24 s, the chunked recurrent scan 0.72 s, and the conv1d with its gated
+    // activation 0.009 s. The GDN stack is a projection story -- 95% GEMMs, 6%
+    // scan -- which is the opposite of what the sequential chunked scan's shape
+    // suggests, and it means a GDN fusion pass would be folding a 6% term.
+    public private(set) var totalGpuGdnProjNanos: UInt64 = 0
+    public private(set) var totalGpuGdnConvNanos: UInt64 = 0
+    public private(set) var totalGpuGdnScanNanos: UInt64 = 0
+    /// The GDN output projection, split out for the reason the split comment
+    /// gives: it is a GEMM but it runs last, so it cannot share stage 1.
+    public private(set) var totalGpuGdnOutProjNanos: UInt64 = 0
+
     // The PLE n-gram gather, which is Qwen-3.8-only and appears in no other
     // counter: it runs before the layer loop, once per head, and reads rows
     // straight off disk from a table far too large to cache. Wall clock, not
@@ -1252,6 +1294,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// the decode comment above states: thousands of samples summing to a
     /// number several times the wall clock means the timestamps are not usable,
     /// and *that* is the finding.
+    /// Close the current GDN sub-stage and open the next one.
+    ///
+    /// The buffer handed in is committed here and recorded for later timing;
+    /// what comes back is fresh. Nothing waits, so the GPU still runs these back
+    /// to back in submission order and the layer's single existing wait covers
+    /// them all -- the only thing that changes is where the buffer boundaries
+    /// fall, and boundaries are what a GPU timestamp can report.
+    private func splitGdnSubStage(_ cb: MTLCommandBuffer, closing stage: Int?,
+                                  into pending: inout [(stage: Int, cb: MTLCommandBuffer)])
+        -> MTLCommandBuffer {
+        guard gdnSubStageSplit, let next = ctx.queue.makeCommandBuffer() else {
+            return cb
+        }
+        commitCountingPrefill(cb)
+        if let stage { pending.append((stage: stage, cb: cb)) }
+        return next
+    }
+
     private func recordPrefillLayerGpuTime(_ cb: MTLCommandBuffer, isFull: Bool) {
         let nanos = recordGpuTime(cb)
         totalGpuCb1Nanos &+= nanos
@@ -3973,8 +4033,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         scratch: PrefillChunkScratchBuffers,
         startPosition: Int,
         tokenCount: Int,
-        cb: MTLCommandBuffer
+        cb inbound: MTLCommandBuffer
     ) async throws -> MTLCommandBuffer {
+        // `cb` is a local so the GDN sub-stage split can move the buffer
+        // boundary mid-layer (see `splitGdnSubStage`); every encode site in this
+        // body keeps saying `commandBuffer: cb` and follows it.
+        var cb = inbound
+        // The buffers the split closed, timed together after this layer’s one
+        // existing wait. Empty unless `FQ_GDN_SPLIT=1`.
+        var gdnSubStages: [(stage: Int, cb: MTLCommandBuffer)] = []
         let t = tokenCount
         let D = cfg.hiddenSize
         let hc = cfg.hyperConnectionCount
@@ -4454,6 +4521,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let scale = 1.0 / Float(cfg.linearKeyHeadDim).squareRoot()
             let betaByteOffset = t * numV * MemoryLayout<Float>.size
 
+            // Stage 1 (the input projections: qkv, z, and the gate) opens here.
+            // Everything before it — the hyper-connection norm into `normed` —
+            // belongs to the layer’s own buffer.
+            cb = splitGdnSubStage(cb, closing: nil, into: &gdnSubStages)
             if linearAttnBits == 8 {
                 encodeRepeatedInt8(commandBuffer: cb,
                                    weights: qkvP,
@@ -4525,6 +4596,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                   n: 2 * numV,
                                   k: D)
             }
+            // Stage 2 (A_log/dt_bias gating and the conv1d) opens here.
+            cb = splitGdnSubStage(cb, closing: 0, into: &gdnSubStages)
             gdnPrefill.encodeGateBatch(commandBuffer: cb,
                                        ab: scratch.qwenAB,
                                        A_log: aLog.buffer, A_logOffset: Int(aLog.offset),
@@ -4547,6 +4620,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                          into: cb, elements: qkvDim)
             snapRowValue("gFloat", scratch.qwenGBeta, snapRow * numV, into: cb,
                          elements: numV, stride: MemoryLayout<Float>.stride)
+            // Stage 3 (the chunked recurrent scan) opens here and carries the
+            // gated RMSNorm that closes it.
+            cb = splitGdnSubStage(cb, closing: 1, into: &gdnSubStages)
             gdnPrefill.encodeRecurrentSeq(commandBuffer: cb,
                                           state: recState,
                                           conv: scratch.qwenQKVConvOut,
@@ -4582,6 +4658,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             snapRowValue("recurrentOut", scratch.qwenRecOut, snapRow * valueDim,
                          into: cb, elements: valueDim)
             if linearAttnBits == 8 {
+            // Stage 4, the output projection. A GEMM like stage 1, but it runs
+            // after the scan, so it cannot share stage 1’s buffer — which is why
+            // four stages, not three, are what sum against the layer’s GDN time.
+            cb = splitGdnSubStage(cb, closing: 2, into: &gdnSubStages)
                 encodeRepeatedInt8(commandBuffer: cb,
                                    weights: outP,
                                    x: scratch.qwenRecOut,
@@ -4604,6 +4684,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      yStrideElements: D)
             }
             snapRowValue("attnBlockOut", scratch.qwen38OOut, snapRow * D, into: cb, elements: D)
+            cb = splitGdnSubStage(cb, closing: 3, into: &gdnSubStages)
         }
 
         // --- attn combine, then the ffn mix on the updated plane ------------
@@ -4659,6 +4740,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // The same bucket the decode path calls cb1, and the same split by
         // layer kind.
         recordPrefillLayerGpuTime(cb, isFull: isFull)
+        // Every split buffer was committed before this one and the queue is
+        // ordered, so the wait above completed them all and their timestamps
+        // are now readable. Nothing was waited on where it was committed.
+        for sub in gdnSubStages {
+            guard sub.cb.status == .completed else { continue }
+            switch sub.stage {
+            case 0: totalGpuGdnProjNanos &+= recordGpuTime(sub.cb)
+            case 1: totalGpuGdnConvNanos &+= recordGpuTime(sub.cb)
+            case 2: totalGpuGdnScanNanos &+= recordGpuTime(sub.cb)
+            default: totalGpuGdnOutProjNanos &+= recordGpuTime(sub.cb)
+            }
+        }
+        gdnSubStages.removeAll()
         drainSnapshots()
 
         // CPU readback of the router indices → expert grouping, as in decode.
