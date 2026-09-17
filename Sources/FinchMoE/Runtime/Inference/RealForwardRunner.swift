@@ -299,6 +299,99 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// the divergence in the prefill (it is already present at the first decode
     /// step), so the prefill records are the ones that can narrow it further.
     private var qsaDumpPath: String? = nil
+
+    // MARK: Row fingerprints (FQ_ROW_HASH)
+
+    /// The row-fingerprint instrument, off unless `FQ_ROW_HASH` names a path.
+    /// `rowHashLayout` sizes its side buffer; both are nil when it is off, and
+    /// every use site guards on them, so the default path pays nothing.
+    private var rowHash: PrefillRowHash? = nil
+    private var rowHashBuffer: MTLBuffer? = nil
+    internal private(set) var rowHashLayout: RowHashLayout? = nil
+    private var rowHashDumpPath: String? = nil
+    /// The last prefill's row count, for the dump's shape.
+    private var rowHashRowCount: Int = 0
+
+    /// Fingerprint the whole residual plane, one hash per row, at one stage of
+    /// one layer. One small dispatch per (layer, stage) — no wait, no readback,
+    /// nothing that changes when the work lands, because the timing of the run
+    /// is itself the variable under investigation.
+    private func encodePlaneRowHash(_ scratch: PrefillChunkScratchBuffers,
+                                    layer L: Int, stage: Int, tokenCount: Int,
+                                    rowBase: Int,
+                                    into target: MTLCommandBuffer) {
+        guard let rowHash, let dst = rowHashBuffer, let layout = rowHashLayout,
+              tokenCount > 0 else { return }
+        let rowBytes = UInt32(cfg.hyperConnectionDim * MemoryLayout<Float16>.stride)
+        rowHash.encode(commandBuffer: target,
+                       src: scratch.qwen38Plane,
+                       dst: dst,
+                       dstOffsetBytes: layout.offsetBytes(layer: L, stage: stage),
+                       dstRowBase: rowBase,
+                       rowCount: UInt32(tokenCount),
+                       rowStrideBytes: rowBytes,
+                       rowBytes: rowBytes)
+    }
+
+    /// Write the side buffer as raw little-endian `UInt64`s, laid out
+    /// `[layer][stage][row]` (see `RowHashLayout`), preceded by a 16-byte
+    /// header of `[magic, layerCount, stageCount, rowCount]` as `UInt32`s.
+    ///
+    /// Best-effort, like the other diagnostics: a failure here must not break
+    /// the run it is diagnosing.
+    ///
+    /// The name matches `LogitProducer.dumpRowHashes` deliberately. It was
+    /// `writeRowHashDump` once, and the protocol's default no-op implementation
+    /// satisfied the call site silently — the instrument ran, hashed, and
+    /// dumped nothing, with no error anywhere.
+    /// Whether the instrument is on. `RawCompletion` needs this to know whether
+    /// to drain at the prefill/decode boundary when no logits dump was asked
+    /// for -- the row fingerprints live on the GPU and are read on the host.
+    public var wantsRowHashesDump: Bool { rowHashDumpPath != nil }
+
+    public func dumpRowHashes() {
+        guard let path = rowHashDumpPath, let dst = rowHashBuffer,
+              let layout = rowHashLayout, rowHashRowCount > 0 else { return }
+        let stride = MemoryLayout<UInt64>.stride
+        var data = Data(capacity: 16 + layout.totalBytes)
+        for value in [UInt32(0x5248_4831), UInt32(layout.layerCount),
+                      UInt32(PrefillRowHash.stageCount), UInt32(rowHashRowCount)] {
+            withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+        }
+        let ptr = dst.contents().bindMemory(to: UInt64.self,
+                                            capacity: layout.totalBytes / stride)
+        for L in 0..<layout.layerCount {
+            for stage in 0..<PrefillRowHash.stageCount {
+                for row in 0..<rowHashRowCount {
+                    let value = ptr[layout.elementIndex(layer: L, stage: stage, row: row)]
+                    withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+                }
+            }
+        }
+        do {
+            try data.write(to: URL(fileURLWithPath: path))
+            // One line a reader can diff before opening the file: a digest over
+            // every hash. Two runs that agree here agree everywhere in it.
+            var digest: UInt64 = 0xcbf2_9ce4_8422_2325
+            for L in 0..<layout.layerCount {
+                for stage in 0..<PrefillRowHash.stageCount {
+                    for row in 0..<rowHashRowCount {
+                        digest = (digest ^ ptr[layout.elementIndex(layer: L, stage: stage,
+                                                                   row: row)])
+                            &* 0x0000_0100_0000_01b3
+                    }
+                }
+            }
+            let line = "row_hash: layers=\(layout.layerCount)"
+                + " stages=\(PrefillRowHash.stageCount) rows=\(rowHashRowCount)"
+                + " digest=\(String(digest, radix: 16)) path=\(path)\n"
+            FileHandle.standardError.write(Data(line.utf8))
+        } catch {
+            let line = "row_hash: failed to write \(path): \(error)\n"
+            FileHandle.standardError.write(Data(line.utf8))
+        }
+    }
+
     /// Best-effort; a diagnostic must never break the run it is diagnosing.
     private func dumpQSASelection(position: Int, phase: String) {
         guard let path = qsaDumpPath, let st = qsaState else { return }
@@ -712,6 +805,32 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // before any runner exists.)
             self.qsaDumpPath = ProcessInfo.processInfo
                 .environment["FQ_QSA_DUMP"]
+            // The row-fingerprint instrument. Rows are positions in the
+            // sequence, not chunk slots (each chunk reuses the same plane rows,
+            // so a per-chunk index would let the last chunk erase the rest), so
+            // the side buffer is sized by context: 8 bytes x 3 stages x 48
+            // layers is 1.1 KiB per position, about 9 MiB at 8k and 75 MiB at
+            // 64k. It is opt-in, and the dump reports the cost at startup.
+            self.rowHashDumpPath = ProcessInfo.processInfo
+                .environment["FQ_ROW_HASH"]
+            if let path = rowHashDumpPath, cfg.isQwen3_8 {
+                let layout = RowHashLayout(maxRows: maxContext,
+                                           layerCount: cfg.numLayers)
+                self.rowHashLayout = layout
+                self.rowHash = try PrefillRowHash(context: ctx)
+                self.rowHashBuffer = try ctx.device.makeBuffer(
+                    length: layout.totalBytes, options: .storageModeShared)
+                if let buf = rowHashBuffer {
+                    // Shared storage, so the dump is a host read of bytes the
+                    // GPU wrote; the caller drains before reading (see
+                    // `dumpRowHashes`).
+                    memset(buf.contents(), 0, layout.totalBytes)
+                }
+                FileHandle.standardError.write(Data((
+                    "row_hash: instrument on, \(layout.layerCount) layers x "
+                    + "\(PrefillRowHash.stageCount) stages x \(layout.maxRows) rows = "
+                    + "\(layout.totalBytes) bytes -> \(path)\n").utf8))
+            }
             // Two ways in, one state: the documented `FQ_QSA_OFF=1` control,
             // and the injectable `qsaIndexerEnabled: false` a test uses (see
             // its doc comment — no install can express this).
@@ -842,6 +961,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         pleHost?.reset()
         memset(pleConvState.contents(), 0, pleConvState.length)
         memset(pleConvStateNext.contents(), 0, pleConvStateNext.length)
+        // The row fingerprints describe one prefill, so the extent resets with
+        // it; a later generation must not report rows it never hashed.
+        rowHashRowCount = 0
         resetTransientState()
     }
 
@@ -1191,6 +1313,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 config: config,
                 writeFinalHead: spanIndex == spans.count - 1)
             onProgress(span.completedCount)
+            // The row fingerprints are written by this chunk's command buffers;
+            // remember how far they reach so the dump knows how much of the
+            // side buffer is live.
+            if rowHashLayout != nil {
+                rowHashRowCount = max(rowHashRowCount,
+                                      span.startPosition + span.tokenCount)
+            }
             // `FQ_QSA_DUMP`: the chunk's work is committed by now, so a drain
             // makes the ranking state readable, and it holds each full layer's
             // selection for this chunk's LAST row. That is the prefill-side
@@ -3849,6 +3978,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             snapshots.removeAll()
         }
         snapRowValue("hc.pre", scratch.qwen38Plane, snapRow * hcDim, into: cb)
+        // Layer entry: the previous layer's output, for every row. Agreement
+        // here and disagreement at the next layer's entry puts the divergence
+        // inside this layer.
+        encodePlaneRowHash(scratch, layer: L, stage: 0, tokenCount: t,
+                           rowBase: startPosition, into: cb)
 
         // --- PLE n-gram block (before the mixer normalizes the plane) --------
         if let ple, L == model.pleLayerIndex {
@@ -4421,6 +4555,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                          d: UInt32(D), hc: UInt32(hc),
                                          tokens: tokens32, invHc: invHc)
         snapRowValue("hc.mid", scratch.qwen38Plane, snapRow * hcDim, into: cb)
+        // After the attention block's write-back, before the routed tail.
+        encodePlaneRowHash(scratch, layer: L, stage: 1, tokenCount: t,
+                           rowBase: startPosition, into: cb)
         encodeQwen38SeqMix(commandBuffer: cb,
                            norm: ffnMixW.hcNorm, down: ffnMixW.mixDown,
                            up: ffnMixW.mixUp, blockInject: ffnMixW.blockInject,
@@ -4714,6 +4851,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                          d: UInt32(D), hc: UInt32(hc),
                                          tokens: tokens32, invHc: invHc)
         snapRowValue("hc.post", scratch.qwen38Plane, snapRow * hcDim, into: tailCB)
+        // After the routed-expert tail. Encode into `tailCB` and not `cb`: this
+        // CB is the one committed here, so the hash lands after the tail that
+        // produced the plane.
+        encodePlaneRowHash(scratch, layer: L, stage: 2, tokenCount: t,
+                           rowBase: startPosition, into: tailCB)
         tailCB.commit()
         withExtendedLifetime(metadata) {
             waitForCompletion(tailCB)
