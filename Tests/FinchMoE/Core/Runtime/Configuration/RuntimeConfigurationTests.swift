@@ -65,4 +65,34 @@ import Testing
             !RealForwardRunner.fusedGreedyHeadEnabled(
                 headPath: .logits, config: .gemma4Toy()))
     }
+
+    /// The prefill tile pipeline's budget rule, as a pure function.
+    ///
+    /// `(depth + 1) * tileExperts <= slots` is what the streamer enforces at
+    /// runtime, and it is the reason the two knobs cannot be set
+    /// independently: depth is how many tiles may be in flight, and each one
+    /// needs its own slots. The measured arms of the sweep are checked here so
+    /// a future default change has to confront the pairing.
+    @Test func prefillTileBudgetPairsDepthWithSlots() {
+        #expect(RuntimeConfiguration().prefillTileDepth == 1)
+        #expect(RuntimeConfiguration().prefillTileExperts == 8)
+
+        let baseline = RuntimeConfiguration(prefillTileDepth: 1, prefillTileExperts: 8)
+        #expect(baseline.prefillTilesFitSlots(16))
+        #expect(!baseline.prefillTilesFitSlots(8))
+
+        let deep = RuntimeConfiguration(prefillTileDepth: 3, prefillTileExperts: 8)
+        #expect(deep.prefillTilesFitSlots(32))
+        #expect(!deep.prefillTilesFitSlots(24))
+        #expect(!deep.prefillTilesFitSlots(16))
+
+        // Same in-flight bytes, fewer experts per tile: the shape the sweep's
+        // `{16,3,4}` arm used, which fits a 16-slot budget.
+        let narrow = RuntimeConfiguration(prefillTileDepth: 3, prefillTileExperts: 4)
+        #expect(narrow.prefillTilesFitSlots(16))
+
+        let widest = RuntimeConfiguration(prefillTileDepth: 7, prefillTileExperts: 8)
+        #expect(widest.prefillTilesFitSlots(64))
+        #expect(!widest.prefillTilesFitSlots(32))
+    }
 }

@@ -289,6 +289,54 @@ failed the M2 long-row gate.
 - **Lesson:** Reordered floating-point kernels need a direct numerical oracle
   plus model-quality gates, not identity with one reduction order.
 
+### PF-18: What the prefill's I/O actually costs, and the tile pipeline that does not change it
+
+- **Hypothesis:** the prefill streams expert bytes at 1.14 GB/s where decode is
+  drive-bound at 3.4, so the drive must be idle most of the prefill, and the
+  cause is the routed-expert **tile** loop: a tile is read and then computed on,
+  so overlap depends on how many tiles ahead the reads are issued. That depth
+  was hardcoded at 1 (`PrefillRoutedTileSchedulerConfig`), which caps the duty
+  cycle at roughly read/compute however fast the drive is.
+- **Change:** the pair became a runtime setting —
+  `RuntimeConfiguration.prefillTileDepth` / `.prefillTileExperts` plus
+  `--prefill-tile-depth` / `--prefill-tile-experts` — with the existing slot
+  budget still enforced (`(depth + 1) * tileExperts <= slots`, refused with the
+  count it needs). Verified live: depth 7 x 8 experts is refused at 16 slots and
+  accepted at 32.
+- **Evidence, and the answer is no.** Five arms x 2 rounds (reverse-ordered),
+  426-token prompt at chunk 512: `{16,1,8}` 29.30/28.87 s, `{32,3,8}`
+  29.10/28.84, `{32,7,4}` 29.05/29.01, `{32,1,8}` 28.95/28.87, `{16,3,4}`
+  28.99/28.93 — a 1.6% spread over a 4x change in tiles in flight, identical
+  bytes (33.11 GB), and **bit-identical logits on every arm**. Back-to-back
+  repeats of one arm are flat too (28.98/28.98/29.01), so the page cache is not
+  hiding anything either.
+- **What the same run did establish, for the first time.** The prefill's own
+  breakdown is now printable (`--counters` emits a `scope=prefill` line from the
+  snapshot already taken at the prefill/decode boundary; without it a
+  prefill-dominated run reported only the decode delta, which is all zeros). For
+  426 tokens, one chunk: the reads occupy **10.59 s of the 29.03 s wall (36%)**,
+  moving 33.11 GB at **3.13 GB/s — essentially the drive's ceiling** — with 6.6
+  reads in flight on average against decode's 5.59. So the drive is idle 64% of
+  the prefill, but that is a **consequence**, not the lever: when the reads do
+  run they are already at the drive's limit, and more lookahead does not extend
+  the windows. Roughly 18.4 s is the rest of the prefill — GPU work and host
+  per-tile cost — and the `gpu_*` counters read zero in the prefill scope
+  because only the decode path accumulates them. **That number is currently
+  uninstrumented, and it is the thing to measure next**: 36% I/O with 64%
+  unaccounted is not yet an optimization target.
+- **How this reads against the Edge0 comparison** (`/Volumes/samsung 2t/code/Edge0`,
+  Apache-2.0, same Qwen3.6-35B-A3B base on Apple Silicon): their prefill win
+  comes from loading the **whole layer** per layer — `load_full_layer` reads 9
+  stacked tensors and notes "9 direct whole-tensor loads, NOT 256x9 per-expert
+  builds" — which needs no routing decision, and `mx.async_eval` per layer
+  overlaps the host load under the previous layer's GPU work. Their target is
+  therefore the *host* cost of assembling a layer, not the drive's throughput,
+  which is the same conclusion this entry reaches from the other side.
+- **Final disposition:** the knobs ship (default unchanged at depth 1, tile 8,
+  which the sweep says is not leaving anything on the table at these sizes);
+  the tile-depth hypothesis is **refuted**; the prefill's GPU/host split is the
+  open measurement.
+
 [Previous: Attention and KV cache](05-attention-and-kv-cache.md) |
 [Experiment inventory](../EXPERIMENT_INVENTORY.md) |
 [Optimization journey](../../OPTIMIZATION_JOURNEY.md) |

@@ -90,7 +90,9 @@ public func run(args: Args,
         let runtime = RuntimeConfiguration(
             expertCacheSlots: args.expertCacheSlots ?? RuntimeConfiguration.production.expertCacheSlots,
             prefillChunkTokens: args.prefillChunkTokens,
-            forceLogitsHead: !config.isPureGreedy || prefillLogitsDumpPath != nil)
+            forceLogitsHead: !config.isPureGreedy || prefillLogitsDumpPath != nil,
+            prefillTileDepth: args.prefillTileDepth,
+            prefillTileExperts: args.prefillTileExperts)
 
         guard MTLCreateSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
@@ -200,6 +202,20 @@ public func run(args: Args,
                 slots: runtime.expertCacheSlots,
                 scope: countersAtDecodeStart == nil ? "whole-run" : "decode")
             stderr.write(Data((line + "\n").utf8))
+            // The prefill's own breakdown, from the snapshot taken at the
+            // prefill/decode boundary. Without it a prefill-dominated run
+            // reports only the decode delta -- all zeros when there is little
+            // decode -- and "how much of the prefill is GPU, how much is I/O,
+            // how much is the host" is exactly the question the chunk-size and
+            // tile-vs-whole-layer work turns on.
+            if let atDecodeStart = countersAtDecodeStart {
+                let prefillLine = RunnerCounters.line(
+                    atDecodeStart,
+                    expertStride: model.routedExpertStrideBytes(),
+                    slots: runtime.expertCacheSlots,
+                    scope: "prefill")
+                stderr.write(Data((prefillLine + "\n").utf8))
+            }
         }
         // Prefill-side I/O, on its own opt-in gate rather than appended to the
         // documented `--counters` schema: the chunk-size question is "does the

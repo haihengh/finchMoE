@@ -451,7 +451,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private static let rdadviseAdaptiveMissCap = 12
     private static let rdadviseAdaptiveByteCap: UInt64 = 384 * 1_048_576
     private static let rdadviseAdaptiveSlowCallNanos: UInt64 = 1_000_000
-    private static let prefillRoutedTileSchedulerConfig = PrefillRoutedTileSchedulerConfig()
+    /// The prefill's routed-expert tile pipeline. Instance state, not a static,
+    /// because the depth and tile width are runtime settings: they set how much
+    /// of the prefill's I/O can overlap its compute, and the default single tile
+    /// of lookahead is what caps the drive's duty cycle (see
+    /// `RuntimeConfiguration.prefillTileDepth`).
+    private let prefillRoutedTileSchedulerConfig: PrefillRoutedTileSchedulerConfig
 
     /// Per-layer `router.scale * D^-0.5` pre-folded into one BF16 buffer
     /// allocation per layer. ~168 KB total at 30 layers × 2816 BF16 — bounded
@@ -502,6 +507,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.useFusedGreedyHead = Self.fusedGreedyHeadEnabled(
             headPath: runtimeConfiguration.headPath, config: model.config)
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
+        self.prefillRoutedTileSchedulerConfig = PrefillRoutedTileSchedulerConfig(
+            maxPendingDepth: runtimeConfiguration.prefillTileDepth,
+            tileExperts: runtimeConfiguration.prefillTileExperts)
         let useFP16Ring = runtimeConfiguration.fp16RingEnabled
         self.rdadvisePolicyMode = runtimeConfiguration.rdadvisePolicy
         self.rdadviseAdaptiveState = RDAdviceAdaptivePolicyState(
@@ -1711,7 +1719,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                                    weights: routeWeights,
                                                                    queryCount: t,
                                                                    topK: cfg.topKExperts)
-                    let schedulerConfig = Self.prefillRoutedTileSchedulerConfig
+                    let schedulerConfig = prefillRoutedTileSchedulerConfig
                     let routeTileExpertCount: Int
                     if let slotCount = model.routedExpertCacheSlotCount(layer: L) {
                         guard schedulerConfig.fitsSlotBudget(slotCount: slotCount) else {
@@ -2703,7 +2711,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                        weights: routeWeights,
                                                        queryCount: t,
                                                        topK: cfg.topKExperts)
-        let schedulerConfig = Self.prefillRoutedTileSchedulerConfig
+        let schedulerConfig = prefillRoutedTileSchedulerConfig
         let routeTileExpertCount: Int
         if let slotCount = model.routedExpertCacheSlotCount(layer: L) {
             guard schedulerConfig.fitsSlotBudget(slotCount: slotCount) else {
@@ -4616,7 +4624,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                        weights: routeWeights,
                                                        queryCount: t,
                                                        topK: cfg.topKExperts)
-        let schedulerConfig = Self.prefillRoutedTileSchedulerConfig
+        let schedulerConfig = prefillRoutedTileSchedulerConfig
         let routeTileExpertCount: Int
         if let slotCount = model.routedExpertCacheSlotCount(layer: L) {
             guard schedulerConfig.fitsSlotBudget(slotCount: slotCount) else {
