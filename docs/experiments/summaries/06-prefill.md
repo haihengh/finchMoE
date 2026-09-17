@@ -363,15 +363,32 @@ failed the M2 long-row gate.
   prefill (58%) against 10.68 s of 29.65 s, **2.5x**, while `gpu_cb1` moves
   14.45 -> 14.00 s and the GDN term 13.32 -> 13.07 s. The GPU is doing the same
   work; only the reads changed.
+- **The GDN stack split four ways, and the surprise.** `FQ_GDN_SPLIT=1` commits
+  the GDN layer's four sub-stages as separate command buffers, committing each
+  without waiting — only submission order matters, so the layer's one existing
+  wait completes them all and the sync pattern (and so the overlap) is
+  unchanged. What it changes is `gpu_cb1_gdn`, which then measures only the
+  layer's post-GDN remainder; the stages are read against the *unsplit* total.
+  The knob's own overhead is measured: prefill 29.95 / 29.53 s off against
+  29.51 / 29.42 s on.
+- **The answer: it is the projections, by a lot.** Over the same 426-token
+  prefill, the four stages sum to **12.64 s against the unsplit GDN total of
+  13.15 s** (95%; the remainder is the seq mix and the plane combines). Of that
+  12.64 s: **input projections 8.66 s, output projection 3.24 s, chunked
+  recurrent scan 0.72 s, conv1d with its gated activation 0.009 s.** So the GDN
+  stack is **95% GEMM and 6% scan** — the reverse of what the sequential chunked
+  scan's shape suggests, and it means a GDN fusion pass (item 2.3) would be
+  folding a 6% term while 11.9 s of a 29.5 s prefill sits in the two projection
+  stages. Per GDN layer that is 241 ms of input projection and 90 ms of output
+  projection against 20 ms of scan.
 - **Final disposition:** the knobs ship (default unchanged at depth 1, tile 8,
   which the sweep says is not leaving anything on the table at these sizes);
-  the tile-depth hypothesis is **refuted**; and the prefill's remaining cost is
-  now attributed. **It is not I/O — it is the GDN stack**, which is more than
-  the whole I/O term, more than twice the routed MoE, and 4.7x the
-  full-attention stack per layer. That is where prefill work goes next, and it
-  is a different program from the whole-layer loading the Edge0 comparison
-  suggested: that would attack the 10.7 s of I/O, of which only the
-  non-overlapped part is reachable.
+  the tile-depth hypothesis is **refuted**; the prefill's cost is attributed;
+  and within the largest term — the GDN stack — the split puts the target on
+  **projection kernel tuning**, not on fusing the scan. Both the whole-layer
+  loading the Edge0 comparison suggested and a GDN fusion pass are now measured
+  as smaller prizes than the projection stages: the first would attack 10.7 s of
+  I/O of which a fraction is reachable, the second 0.73 s of conv and scan.
 
 [Previous: Attention and KV cache](05-attention-and-kv-cache.md) |
 [Experiment inventory](../EXPERIMENT_INVENTORY.md) |

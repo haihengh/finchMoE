@@ -49,6 +49,12 @@ public struct RunnerCounterValues: Equatable, Sendable {
     /// Prefill-side commits, counted separately for the reason the runner gives:
     /// both profiles commit through the same queue. Printed as `cbs` on a
     /// `scope=prefill` line, where the decode count is zero by construction.
+    /// The GDN sub-stage split (`FQ_GDN_SPLIT=1`), prefill only. Zero everywhere
+    /// else: the decode path does not split, and the split is off by default.
+    public var gdnProjNanos: UInt64
+    public var gdnConvNanos: UInt64
+    public var gdnScanNanos: UInt64
+    public var gdnOutProjNanos: UInt64
     public var prefillCommandBuffers: UInt64
     public var gpuCb1Nanos: UInt64
     public var gpuCb1FullAttnNanos: UInt64
@@ -88,6 +94,10 @@ public struct RunnerCounterValues: Equatable, Sendable {
                 indexerRankedLayers: UInt64 = 0,
                 commandBuffers: UInt64 = 0,
                 prefillCommandBuffers: UInt64 = 0,
+                gdnProjNanos: UInt64 = 0,
+                gdnConvNanos: UInt64 = 0,
+                gdnScanNanos: UInt64 = 0,
+                gdnOutProjNanos: UInt64 = 0,
                 gpuCb1Nanos: UInt64 = 0,
                 gpuCb1FullAttnNanos: UInt64 = 0,
                 gpuCb1GdnNanos: UInt64 = 0,
@@ -125,6 +135,10 @@ public struct RunnerCounterValues: Equatable, Sendable {
         self.indexerRankedLayers = indexerRankedLayers
         self.commandBuffers = commandBuffers
         self.prefillCommandBuffers = prefillCommandBuffers
+        self.gdnProjNanos = gdnProjNanos
+        self.gdnConvNanos = gdnConvNanos
+        self.gdnScanNanos = gdnScanNanos
+        self.gdnOutProjNanos = gdnOutProjNanos
         self.gpuCb1Nanos = gpuCb1Nanos
         self.gpuCb1FullAttnNanos = gpuCb1FullAttnNanos
         self.gpuCb1GdnNanos = gpuCb1GdnNanos
@@ -183,6 +197,10 @@ public struct RunnerCounterValues: Equatable, Sendable {
             indexerRankedLayers: d(indexerRankedLayers, base.indexerRankedLayers),
             commandBuffers: d(commandBuffers, base.commandBuffers),
             prefillCommandBuffers: d(prefillCommandBuffers, base.prefillCommandBuffers),
+            gdnProjNanos: d(gdnProjNanos, base.gdnProjNanos),
+            gdnConvNanos: d(gdnConvNanos, base.gdnConvNanos),
+            gdnScanNanos: d(gdnScanNanos, base.gdnScanNanos),
+            gdnOutProjNanos: d(gdnOutProjNanos, base.gdnOutProjNanos),
             gpuCb1Nanos: d(gpuCb1Nanos, base.gpuCb1Nanos),
             gpuCb1FullAttnNanos: d(gpuCb1FullAttnNanos, base.gpuCb1FullAttnNanos),
             gpuCb1GdnNanos: d(gpuCb1GdnNanos, base.gpuCb1GdnNanos),
@@ -230,6 +248,10 @@ extension RunnerCounterValues {
                   indexerRankedLayers: runner.totalIndexerRankedLayers,
                   commandBuffers: runner.totalDecodeCommandBuffers,
                   prefillCommandBuffers: runner.totalPrefillCommandBuffers,
+                  gdnProjNanos: runner.totalGpuGdnProjNanos,
+                  gdnConvNanos: runner.totalGpuGdnConvNanos,
+                  gdnScanNanos: runner.totalGpuGdnScanNanos,
+                  gdnOutProjNanos: runner.totalGpuGdnOutProjNanos,
                   gpuCb1Nanos: runner.totalGpuCb1Nanos,
                   gpuCb1FullAttnNanos: runner.totalGpuCb1FullAttnNanos,
                   gpuCb1GdnNanos: runner.totalGpuCb1GdnNanos,
@@ -486,6 +508,12 @@ public enum RunnerCounters {
             "gpu_cb1_fullattn_wall_ms\(unit)=\(msPerStep(values.gpuCb1FullAttnNanos))",
             "gpu_cb1_gdn_wall_ms\(unit)=\(msPerStep(values.gpuCb1GdnNanos))",
             "gpu_routed_wall_ms\(unit)=\(msPerStep(values.gpuRoutedNanos))",
+            // Zero unless FQ_GDN_SPLIT=1, which is stated in the field name so a
+            // reader does not read "no GDN time" out of an unset knob.
+            "gpu_gdn_proj_ms/split=\(msPerStep(values.gdnProjNanos))",
+            "gpu_gdn_conv_ms/split=\(msPerStep(values.gdnConvNanos))",
+            "gpu_gdn_scan_ms/split=\(msPerStep(values.gdnScanNanos))",
+            "gpu_gdn_outproj_ms/split=\(msPerStep(values.gdnOutProjNanos))",
             "gpu_samples=\(values.gpuSamples)",
         ])
 
