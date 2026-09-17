@@ -16,6 +16,12 @@ public struct Args: Equatable, Sendable {
     public var counters: Bool
     public var expertCacheSlots: Int?
     public var prefillChunkTokens: Int
+    /// Prefill routed-expert tile pipeline: how many tiles may be in flight,
+    /// and how many experts a tile holds. Together they set how much of the
+    /// prefill's I/O overlaps its compute; the pair must satisfy
+    /// `(depth + 1) * tileExperts <= --expert-cache-slots`.
+    public var prefillTileDepth: Int
+    public var prefillTileExperts: Int
     public var verify: ModelIntegrityPreference
 
     public init(model: String,
@@ -33,6 +39,8 @@ public struct Args: Equatable, Sendable {
                 counters: Bool = false,
                 expertCacheSlots: Int? = nil,
                 prefillChunkTokens: Int = 512,
+                prefillTileDepth: Int = 1,
+                prefillTileExperts: Int = 8,
                 verify: ModelIntegrityPreference = .automatic) {
         self.model = model
         self.prompt = prompt
@@ -49,6 +57,8 @@ public struct Args: Equatable, Sendable {
         self.counters = counters
         self.expertCacheSlots = expertCacheSlots
         self.prefillChunkTokens = prefillChunkTokens
+        self.prefillTileDepth = prefillTileDepth
+        self.prefillTileExperts = prefillTileExperts
         self.verify = verify
     }
 }
@@ -161,6 +171,8 @@ extension Args {
         var counters = false
         var expertCacheSlots: Int?
         var prefillChunkTokens = 512
+        var prefillTileDepth = 1
+        var prefillTileExperts = 8
         var verify = ModelIntegrityPreference.automatic
 
         var index = 0
@@ -195,6 +207,20 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 prefillChunkTokens = parsed
+            case "--prefill-tile-depth":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = Int(value), parsed >= 1, parsed <= 64 else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                prefillTileDepth = parsed
+            case "--prefill-tile-experts":
+                let value = try takeValue(argv, &index, flag: flag)
+                // The scheduler caps tiles at 16; the slot budget is checked
+                // where the slots are known, so this only bounds the shape.
+                guard let parsed = Int(value), (1...16).contains(parsed) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                prefillTileExperts = parsed
             case "--model":
                 model = try takeValue(argv, &index, flag: flag)
             case "--prompt":
@@ -287,6 +313,8 @@ extension Args {
                     counters: counters,
                     expertCacheSlots: expertCacheSlots,
                     prefillChunkTokens: prefillChunkTokens,
+                    prefillTileDepth: prefillTileDepth,
+                    prefillTileExperts: prefillTileExperts,
                     verify: verify)
     }
 
