@@ -402,6 +402,40 @@ failed the M2 long-row gate.
   amortization from the extra threadgroups hiding latency, and it is nowhere
   near the order of magnitude a real GEMM would give at T=426. That is the
   shape of the gap, not just its size.
+- **The batched int8 projection, and what it is worth.** The GEMV path exists
+  because the prefill had no batched int8 kernel at all: the linear-attention
+  weights are int8 on every shipped 3.8 install, and `encodeRepeatedInt8` issued
+  **one GEMV dispatch per token** — at T=426, 426 re-reads of the weight matrix
+  per projection, ~46,000 dispatches per chunk. `prefill_dequant_int8_gemm_f16_block`
+  tiles 64 output rows by 32 tokens, dequantizes the weight tile once per K-step
+  into threadgroup memory and reuses it across the token dimension, with W, X and
+  Y coalesced. Behind `FQ_INT8_GEMM=1`, at qkv, z and out_proj (the small a/b
+  pair interleaves in one buffer with a doubled stride, which this store does not
+  express). Measured, two rounds each, with the scan as an unchanged control:
+
+  | stage | per-token GEMV | batched kernel | |
+  | --- | --- | --- | --- |
+  | input projections | 8377.8 / 8362.9 ms | **2436.9 / 2420.3 ms** | 3.45x |
+  | output projection | 3142.3 / 3148.8 ms | **796.9 / 796.3 ms** | 3.95x |
+  | recurrent scan (control) | 728.2 / 712.0 ms | 720.6 / 714.6 ms | unchanged |
+
+  End to end on the same prompt: **prefill 29.17 s -> 20.78 s (1.40x), 14.6 ->
+  20.5 prefill tok/s**, with decode identical (2.46 s, 3.253 tok/s) and the
+  generated token IDs identical.
+
+  The declaration order matters and was checked rather than assumed: the tile is
+  stored **fp32**, not half. A dequantized weight reaches ~120, where fp16 carries
+  0.03 of absolute error — 0.8% of a small output — and the GEMV this replaces
+  keeps its weights in fp32 registers. The first version of the kernel stored the
+  tile as half and the oracle caught it as a 0.8% disagreement, which reassociation
+  cannot explain; storing fp32 brought it inside the reassociation band. That is
+  the difference between "reordered" and "less accurate", and it is the one that
+  would have quietly cost model quality.
+- **Where the target was not met.** The plan's bar was the projections reaching
+  under 1.5 s; they reached 3.23 s (11.5 -> 3.23). Still ~537 GFLOP/s, so the
+  kernel is now compute-bound on something other than weight traffic — larger
+  tiles, more accumulators per thread, or a simdgroup-tiled inner loop are the
+  next increments, and `gpu_gdn_proj_ms/split` prices each one.
 - **Final disposition:** the knobs ship (default unchanged at depth 1, tile 8,
   which the sweep says is not leaving anything on the table at these sizes);
   the tile-depth hypothesis is **refuted**; the prefill's cost is attributed;
