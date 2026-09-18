@@ -136,10 +136,10 @@ import FinchMoERepackCore
     #expect(descriptor.repoID == "Qwen/Qwen3.8-Flash-Next")
     #expect(descriptor.sourceIndexSHA256 == "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de")
     #expect(descriptor.approximateDownloadBytes == 0)
-    #expect(descriptor.installedBytes == 174_403_168_940)
+    #expect(descriptor.installedBytes == 103_925_807_384)
     #expect(descriptor.rangeStagingBytes == 0)
     #expect(descriptor.reserveBytes == 0)
-    #expect(descriptor.requiredFreeBytes == 174_403_168_940)
+    #expect(descriptor.requiredFreeBytes == 103_925_807_384)
   }
 
   @MainActor

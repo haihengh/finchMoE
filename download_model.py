@@ -3,8 +3,8 @@ import sys
 import time
 from huggingface_hub import snapshot_download
 
-repo_id = "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit"
-local_dir = "models/Qwen3.8-Flash-Next-125B.finch"
+repo_id = "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple4bit"
+local_dir = "models/Qwen3.8-Flash-Next-125B-ple4bit.finch"
 
 print(f"Downloading {repo_id} to {local_dir}...")
 start_time = time.time()

@@ -30,7 +30,7 @@ public enum AppModelChoice: String, CaseIterable, Identifiable, Sendable {
         case .qwen3_6:
             return packageRoot.appendingPathComponent("models/Qwen3.6-35B-A3B-4bit.finch", isDirectory: true)
         case .qwen3_8:
-            return packageRoot.appendingPathComponent("models/Qwen3.8-Flash-Next-125B.finch", isDirectory: true)
+            return packageRoot.appendingPathComponent("models/Qwen3.8-Flash-Next-125B-ple4bit.finch", isDirectory: true)
         }
     }
 }
