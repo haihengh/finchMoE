@@ -324,21 +324,36 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// one layer. One small dispatch per (layer, stage) — no wait, no readback,
     /// nothing that changes when the work lands, because the timing of the run
     /// is itself the variable under investigation.
+    /// One row-fingerprint dispatch over an arbitrary buffer. `rowBytes` is what
+    /// is hashed from each row and `rowStrideBytes` what separates them, so a
+    /// caller can fingerprint a plane row (hcDim halves), an attention output
+    /// (qDim) or the QSA selection (capacity UInt32s) with the same call.
+    private func encodeRowHash(_ src: MTLBuffer,
+                               layer L: Int, stage: Int,
+                               rowCount: Int, rowBase: Int,
+                               rowStrideBytes: Int,
+                               rowBytes: Int? = nil,
+                               into target: MTLCommandBuffer) {
+        guard let rowHash, let dst = rowHashBuffer, let layout = rowHashLayout,
+              rowCount > 0 else { return }
+        rowHash.encode(commandBuffer: target,
+                       src: src,
+                       dst: dst,
+                       dstOffsetBytes: layout.offsetBytes(layer: L, stage: stage),
+                       dstRowBase: rowBase,
+                       rowCount: UInt32(rowCount),
+                       rowStrideBytes: UInt32(rowStrideBytes),
+                       rowBytes: UInt32(rowBytes ?? rowStrideBytes))
+    }
+
     private func encodePlaneRowHash(_ scratch: PrefillChunkScratchBuffers,
                                     layer L: Int, stage: Int, tokenCount: Int,
                                     rowBase: Int,
                                     into target: MTLCommandBuffer) {
-        guard let rowHash, let dst = rowHashBuffer, let layout = rowHashLayout,
-              tokenCount > 0 else { return }
-        let rowBytes = UInt32(cfg.hyperConnectionDim * MemoryLayout<Float16>.stride)
-        rowHash.encode(commandBuffer: target,
-                       src: scratch.qwen38Plane,
-                       dst: dst,
-                       dstOffsetBytes: layout.offsetBytes(layer: L, stage: stage),
-                       dstRowBase: rowBase,
-                       rowCount: UInt32(tokenCount),
-                       rowStrideBytes: rowBytes,
-                       rowBytes: rowBytes)
+        encodeRowHash(scratch.qwen38Plane, layer: L, stage: stage,
+                      rowCount: tokenCount, rowBase: rowBase,
+                      rowStrideBytes: cfg.hyperConnectionDim * MemoryLayout<Float16>.stride,
+                      into: target)
     }
 
     /// Write the side buffer as raw little-endian `UInt64`s, laid out
@@ -4378,6 +4393,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // per-row attention sees and the end of the poolable block range.
             let endPosition = startPosition + t
 
+            // A0: the q/k/v projections after the RoPE and norm epilogue. Against
+            // `idxcells` this separates "the projections moved" from "the selection
+            // moved" — the two readings the hunt could not tell apart from the plane.
+            encodeRowHash(scratch.q, layer: L, stage: 3,
+                          rowCount: t, rowBase: startPosition,
+                          rowStrideBytes: qDim * MemoryLayout<Float16>.stride,
+                          into: cb)
             // MARK: QSA indexer (M3.4 chunk form)
             //
             // The chunk's indexer timeline in three sweeps, because the
@@ -4539,6 +4561,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
 
             for row in 0..<t {
+            // A1: the QSA selection for the whole chunk, one row per position, at the
+            // selection width. Hashed here — after the row loop that writes it, not
+            // inside it — because a partial selection would fingerprint as a
+            // divergence of its own. This stage decides whether the ranking is where
+            // a divergence starts.
+            if idxCapacity >= 1 && idxCapacity <= 65536 {
+                encodeRowHash(scratch.qwen38Cells, layer: L, stage: 4,
+                              rowCount: t, rowBase: startPosition,
+                              rowStrideBytes: idxCapacity * MemoryLayout<UInt32>.stride,
+                              into: cb)
+            }
+            // A2: the attention output, before the gate. Differing with `qkv` equal
+            // is the attention itself.
+            encodeRowHash(scratch.attentionOutput, layer: L, stage: 5,
+                          rowCount: t, rowBase: startPosition,
+                          rowStrideBytes: qDim * MemoryLayout<Float16>.stride,
+                          into: cb)
                 qwenFusions.encodeAttnOutputGate(commandBuffer: cb,
                                                  attn: scratch.attentionOutput,
                                                  attnOffset: row * qDim * 2,
@@ -4556,6 +4595,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  tokenCount: t,
                                  xStrideElements: qDim,
                                  yStrideElements: D)
+            // A3: the block output, after the gate and o_proj.
+            encodeRowHash(scratch.qwen38OOut, layer: L, stage: 6,
+                          rowCount: t, rowBase: startPosition,
+                          rowStrideBytes: D * MemoryLayout<Float16>.stride,
+                          into: cb)
             snapRowValue("attnBlockOut", scratch.qwen38OOut, snapRow * D, into: cb, elements: D)
         } else {
             // GDN (linear-attention) layer: identical to the Qwen 3.6 body

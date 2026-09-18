@@ -27,7 +27,7 @@ import struct
 import sys
 
 MAGIC = 0x5248_4831
-STAGES = ["in", "attn", "post"]
+STAGES = ["in", "attn", "post", "qkv", "idxcells", "core", "oproj"]
 
 
 def load(path):
@@ -90,14 +90,27 @@ def main(argv):
     # The stage carries the localization. `in` is the plane on entry, i.e. the
     # previous layer's output, so a first difference there belongs to layer
     # L-1; `attn` and `post` split layer L into its attention block and its
-    # routed-expert tail.
+    # routed-expert tail; and 3-6 go inside the attention block, where `qkv` equal
+    # with `idxcells` different means the QSA ranking moved and not the
+    # projections.
     if s0 == 0:
         where = (f"inside layer {L0 - 1} (its own `post` would have shown it)"
                  if L0 > 0 else "at the first layer's entry")
     elif s0 == 1:
         where = f"inside layer {L0}'s attention block (its input agreed)"
-    else:
+    elif s0 == 2:
         where = f"inside layer {L0}'s routed-expert tail (its attention output agreed)"
+    elif s0 == 3:
+        where = (f"in layer {L0}'s q/k/v projections or their RoPE/norm epilogue "
+                 f"(the layer's input agreed)")
+    elif s0 == 4:
+        where = (f"in layer {L0}'s QSA selection — the projections matched and the "
+                 f"chosen cells did not, so the ranking moved")
+    elif s0 == 5:
+        where = (f"in layer {L0}'s attention itself (projections and selection agreed, "
+                 f"its output did not)")
+    else:
+        where = f"in layer {L0}'s output gate or o_proj (the attention agreed)"
     print(f"  -> the divergence is {where}")
 
     per_layer = {}

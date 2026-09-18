@@ -347,6 +347,40 @@ failed the quality gate. It was rejected and removed.
   ≥2051 are the ones that use them) is carrying influence backwards, or the row index means something
   other than position in a way this instrument does not capture. Resolving that comes before reading
   kernels on the strength of the layer-7 result.
+- **Second row-level pass, four stages deeper, and this one names the mechanism.** The instrument
+  was extended from three plane stages to seven — adding, on full-attention layers, the q/k/v output
+  after the RoPE and norm epilogue, **the QSA selection**, the attention output, and the block output.
+  That split is what the plane alone could not give: it separates "the projections moved" from "the
+  selection moved". Same configuration as before (2940 tokens, chunk 128, two runs at 365.0 and
+  363.6 s, logits differing in 247,655 of 248,320), and the map is far sharper:
+
+  | layer | in | attn | post | qkv | idxcells | core | oproj |
+  | --- | --- | --- | --- | --- | --- | --- | --- |
+  | **3** | - | **1** | 1 | - | - | **1** | **1** |
+  | 4 | 1 | 1916 | 1916 | - | - | - | - |
+  | 7 | 1916 | 1916 | 1916 | 1916 | 105 | 1916 | 1916 |
+  | 15 | 1916 | 1916 | 1916 | 1916 | 844 | 1916 | 1916 |
+
+  **The first difference is one row of one layer: layer 3's attention output, row 1024** — and at that
+  layer the projections and the selection are *bit-identical*. So the divergence is born inside the
+  attention computation for a single row, from identical inputs: a race in the kernel, not a
+  data-flow divergence. Layer 3 is the first full-attention layer (the mask is every fourth from 3),
+  and 1024 is a chunk boundary.
+- **The amplification is causal, and that resolves the anomaly the earlier pass recorded.** One row
+  becomes **1916** at the next layer — and 2940 - 1024 = **1916** exactly: every row at or after the
+  perturbed one, which is what causal attention permits and nothing more. The earlier run's
+  "widening backward" (a first difference at row 2304 with a later layer reaching back to 2053) is
+  therefore not non-causal: each full-attention layer can land the race at a **different row
+  independently**, so a later layer's landing at an earlier row moves that layer's minimum backward
+  while its input still agreed. That also explains why the first affected layer differed between runs
+  — layer 7 then, layer 3 now — for a race whose per-layer probability is small. The anomaly is
+  retired as an anomaly.
+- **Where to look now, specifically.** Rows at or below 2051 take the *dense* prefill path
+  (`attention.encodeFull`, which builds its causal mask from `seqLen`), so the hazard is in the dense
+  prefill attention kernel — not in the cells path, and not in the ranking, which this map exonerates
+  for the rows in question. That is the same subsystem and the same shape as [KV-14](#kv-14): a
+  prefill attention hazard exposed by how the work is tiled. KV-14 was one instance of it, fixed with
+  a two-bank layout; this is a second, and it lands at a chunk boundary.
 - **Prior art, now a weaker analogy:** [KV-14](#kv-14) was a prefill tiled-attention race whose
   exposure depended on the tiling. That is what the withdrawn reading looked like. The duration
   result moves this away from "a shared-memory reuse hazard in a specific kernel" and toward a race

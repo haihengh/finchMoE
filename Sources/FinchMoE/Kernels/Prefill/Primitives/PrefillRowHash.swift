@@ -23,7 +23,12 @@ final class PrefillRowHash {
     /// `in` at layer L agreeing while `in` at layer L+1 differs localizes the
     /// divergence to layer L; `attn` and `post` then split that layer into its
     /// attention block and its routed-expert tail.
-    static let stageNames = ["in", "attn", "post"]
+    /// Stages 0-2 are the residual plane at three points of every layer; 3-6 are
+    /// the attention block's own sub-stages, on full-attention layers only. They
+    /// share one dimension so one dump and one diff cover both — a difference in
+    /// `qkv` with none in `idxcells` puts the divergence in the indexer, and one
+    /// in `in` at layer L puts it inside layer L-1.
+    static let stageNames = ["in", "attn", "post", "qkv", "idxcells", "core", "oproj"]
     static var stageCount: Int { stageNames.count }
 
     private let pso: MTLComputePipelineState
