@@ -62,7 +62,10 @@
 # Output: the per-pair verdicts, then on the first divergence the full stage
 # map and the interpretation above, via tools/row-hash-diff.py. Exit 0 when a
 # pair diverged (and the map is on stdout), 1 when every pair agreed — which
-# means the rate is lower than one in five, not that the bug is gone.
+# means the rate is lower than one in five, not that the bug is gone — and 3
+# when a pair is **void**: a run that did not complete (memguard refused, the
+# box was busy, the CLI errored) is not agreement, and the loop stops rather
+# than reporting a clean sweep of runs that never happened.
 set -u
 
 MAX=${1:-6}
@@ -89,9 +92,27 @@ for pair in $(seq 1 "$MAX"); do
           --model "$MODEL" --messages-file "$PROMPT" \
           --temperature 0 --max-new 4 --max-context 8192 \
           --prefill-chunk-tokens 512 > "/tmp/qor_$i.log" 2>&1
-        printf '  run %s: exit=%s  %s\n' "$i" "$?" \
+        run_rc=$?
+        printf '  run %s: exit=%s  %s\n' "$i" "$run_rc" \
           "$(grep -oE 'prefill=[0-9.]+s \([0-9.]+tok/s\)' "/tmp/qor_$i.log" | tail -1)"
+        if [ "$run_rc" -ne 0 ]; then
+            # A run that did not finish is not an agreeing pair. The first
+            # version of this script counted a refused run as agreement and
+            # printed "6 pairs, none diverged" for twelve memguard refusals
+            # (2026-09-18, the Mac app loading a model underneath it). Nothing
+            # is evidence unless both runs produced their dumps.
+            echo "  ABORT: run $i exited $run_rc — this pair is void, not agreement."
+            if grep -q "memguard: REFUSING" "/tmp/qor_$i.log"; then
+                echo "  (memguard refused: the box is busy; nothing was measured)"
+            fi
+            echo "  see /tmp/qor_$i.log"
+            exit 3
+        fi
     done
+    if [ ! -s /tmp/qor_a_logits.bin ] || [ ! -s /tmp/qor_b_logits.bin ]; then
+        echo "  ABORT: a run exited 0 but wrote no logits dump — void, not agreement."
+        exit 3
+    fi
 
     verdict=$(python3 - <<'PY'
 import numpy as np
