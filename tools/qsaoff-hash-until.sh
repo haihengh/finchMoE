@@ -54,7 +54,18 @@
 # logits dump as the control: if the logits agree, the runs did not diverge and
 # the dumps must agree too, so an agreeing pair is evidence about the rate
 # rather than about the mechanism. Both runs go through `tools/memguard.sh`,
-# which is the rule on this box.
+# which is the rule on this box: the compressed ceiling is raised to 7 GB
+# because a 125B prefill needs it, and every other guard stays at memguard's
+# default.
+#
+# One of those defaults bites when the box is not actually busy. memguard kills
+# on `swap in use > MEMGUARD_MAX_SWAP_MB` (2048 MB), and macOS does not shrink
+# swap promptly once another process has grown it — on 2026-09-18 the Mac app's
+# model load left 2.86 GB of swap behind, so every run died in the first poll
+# at 82% free RAM, which is not a memory-pressure situation at all. Export
+# `MEMGUARD_MAX_SWAP_MB=4096` for that case rather than lowering the floor,
+# which is the guard that actually protects the kernel. The loop reports such a
+# run as void, never as agreement.
 #
 # Usage:
 #   tools/qsaoff-hash-until.sh [maxPairs]     # default 6; each pair ~11 min
