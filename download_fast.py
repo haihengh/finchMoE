@@ -7,8 +7,8 @@ import urllib.error
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-REPO_ID = "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit"
-LOCAL_DIR = "models/Qwen3.8-Flash-Next-125B.finch"
+REPO_ID = "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple4bit"
+LOCAL_DIR = "models/Qwen3.8-Flash-Next-125B-ple4bit.finch"
 BASE_URL = f"https://huggingface.co/{REPO_ID}/resolve/main"
 
 def get_repo_tree():

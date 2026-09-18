@@ -83,20 +83,22 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     /// download.
     ///
     /// `installedBytes` is measured from the install directory rather than
-    /// estimated: 174 403 168 940 bytes, of which 102.4 GB is the PLE n-gram
-    /// shards (128 × 800 003 840 B) and 68.0 GB the packed experts for 512
-    /// experts over 48 layers. It
-    /// feeds only `requiredFreeBytes`, which gates an install path this model
-    /// does not use — but a wrong value there is the kind of number that gets
-    /// trusted later. `revision` is the Hugging Face commit the snapshot was
-    /// fetched at, taken from the local snapshot's download metadata.
+    /// estimated: 103 925 807 384 bytes for the int4-PLE install (`AppModelLocation`'s
+    /// preferred `Qwen3.8-Flash-Next-125B-ple4bit.finch`, also the layout published
+    /// at `haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple4bit` on Hugging Face),
+    /// down from 174 403 168 940 bytes for the raw-BF16-PLE install this repo keeps
+    /// as a fallback. It feeds only `requiredFreeBytes`, which gates an install path
+    /// this model does not use — but a wrong value there is the kind of number that
+    /// gets trusted later. `repoID`/`revision` identify the upstream source
+    /// checkpoint this `.finch` was repacked from, not the `.finch` distribution
+    /// repo itself.
     public static let qwen3_8 = AppModelInstallDescriptor(
         displayName: "Qwen 3.8 Flash-Next 125B",
         repoID: "Qwen/Qwen3.8-Flash-Next",
         revision: "de4b8e4d43b917e7706784d8bb445c9af86a3540",
         sourceIndexSHA256: "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
         approximateDownloadBytes: 0,
-        installedBytes: 174_403_168_940,
+        installedBytes: 103_925_807_384,
         rangeStagingBytes: 0,
         reserveBytes: 0,
         architecture: .qwen3_8_flashNext_125B,

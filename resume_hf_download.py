@@ -6,8 +6,8 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-REPO_ID = "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit"
-LOCAL_DIR = "models/Qwen3.8-Flash-Next-125B.finch"
+REPO_ID = "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple4bit"
+LOCAL_DIR = "models/Qwen3.8-Flash-Next-125B-ple4bit.finch"
 BASE_URL = f"https://huggingface.co/{REPO_ID}/resolve/main"
 TREE_URL = f"https://huggingface.co/api/models/{REPO_ID}/tree/main?recursive=true"
 WORKERS = 8
