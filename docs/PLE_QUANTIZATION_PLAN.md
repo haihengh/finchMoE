@@ -12,6 +12,20 @@ Grounded in: `docs/QWEN38_PORT.md`, `docs/SYSTEM_DESIGN.md`,
 measurement of the installed
 `models/Qwen3.8-Flash-Next-125B.finch/` tree.
 
+## Status: executed and shipped
+
+All six phases ran in September 2026 and each one's result is recorded inline
+under its phase ("Phase N result"). The plan's gate was met, and the outcome is
+the shipping install: `models/Qwen3.8-Flash-Next-125B-ple4bit.finch` at
+103,925,807,384 B (97 GiB against 162), with the app and CLI defaults pointing
+at it and the 162 GiB tree kept directly behind it as the fallback (Phase 6.5).
+Quality: EvalPlus HumanEval base **0.945 (155/164)** — unchanged — and
+HumanEval+ **0.909 (149/164)** against 0.921, three of 164 problems moving in
+both directions on a cell set that is entirely inside the engine's
+bit-reproducible regime (Phase 5.3). Decode-time PLE traffic fell 5120 -> 1600 B
+per token, measured on both installs (Phase 6.3). The later batched int8
+projection kernel re-measured the same install at 0.951 / 0.921.
+
 ## 0. Problem statement, measured
 
 The install is 162 GiB, split three ways:

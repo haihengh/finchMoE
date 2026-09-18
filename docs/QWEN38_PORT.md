@@ -10,12 +10,16 @@ tokenizer and the Gated-DeltaNet (GDN) unit; 3.8 replaces every RMSNorm with
 **hyper-connections**, adds **QSA** sparse-block attention on the full
 attention layers, and adds a **PLE n-gram** hash-embedding on one layer.
 
-Status: **M0–M4 landed; the oracle cross-check ran and its evidence is
-argmax-level, not cosine-level.** The real 174,403,168,940 B (162 GiB)
-install at `models/Qwen3.8-Flash-Next-125B.finch` loads, prefill/decode are
-coherent and inside the 16 GB budget. The oracle now runs reliably and both
-prompts agree on tokenization (byte-exact), argmax, and generation
-(`" Paris"`), with top-10/100 logit cosine 0.995/0.985 — but the whole-vocab
+Status: **M0–M4 landed and shipping.** The engine's default install is
+`models/Qwen3.8-Flash-Next-125B-ple4bit.finch` (**97 GiB**, the same weights
+with the PLE table quantized to int4/group-32), which scores EvalPlus base
+0.951 / HumanEval+ 0.921; the 162 GiB pre-quantization install this document
+measured below stays on disk as the fallback. The oracle cross-check ran and
+its evidence is argmax-level, not cosine-level: the 174,403,168,940 B
+(162 GiB) install at `models/Qwen3.8-Flash-Next-125B.finch` loads, and
+prefill/decode are coherent and inside the 16 GB budget. The oracle now runs
+reliably and both prompts agree on tokenization (byte-exact), argmax, and
+generation (`" Paris"`), with top-10/100 logit cosine 0.995/0.985 — but the whole-vocab
 cosine is 0.88, under the plan's 0.95 bar, because the bar was taken from a
 same-weights comparison and this one is cross-quantization. Full account and
 what it does *not* establish under `### Remaining work` item 7 below. The qwen3_8

@@ -43,6 +43,17 @@ EvalPlus HumanEval run against FinchMoEServer (item 6) scored 90.9% base /
 checkpoint family. The [implementation plan](#implementation-plan) records
 the verified state and the remaining work, in order.
 
+Three things have moved those figures since the status above was written, all
+recorded in [OPTIMIZATION_PLAN.md](OPTIMIZATION_PLAN.md): the prefill chunk
+default went to 512, the linear-attention projections were batched into a tiled
+int8 kernel — 3.6's shipping installs carry int8 GDN weights too, and the
+426-token prefill went 13.44 s -> 9.37 s (**1.44x**), with the per-token GEMV
+reachable again through `FQ_INT8_GEMM=0` — and the long-prompt
+non-determinism was localized rather than fixed. The current numbers on the
+16 GB Mac mini this status names are in the README: 42 prefill tok/s and 8.4
+decode tok/s at 2,940 tokens. The 17.2-18.4 tok/s decode row in item 8 is the
+24 GiB M4 Pro, a different machine.
+
 ## Target model
 
 Local checkpoint: `models/Qwen3.6-35B-A3B-bf16/` (27 bf16 safetensors shards).
