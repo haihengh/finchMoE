@@ -502,13 +502,16 @@ only, consistent with the engine being text-only.
   validated envelope beyond the 16 GB loopback single-model setup. Quality
   itself is now measured on both installs (EvalPlus, above) rather than
   inferred.
-- Long prefills past 2,051 tokens used to be non-reproducible run to run: the
-  indexer's prefill store wrote every key at twice its position, and past half
-  the context length past the end of its own buffer. That store is fixed and
-  pinned by a test, and the configuration that diverged every time now
-  reproduces bit-for-bit; one divergence seen with the indexer disabled is
-  still unexplained. Recorded with the streaming path's remaining read deficit
-  in [the optimization plan](docs/OPTIMIZATION_PLAN.md).
+- Long prefills used to be non-reproducible run to run: the indexer's prefill
+  store wrote every key at twice its position, and past half the context
+  length past the end of its own buffer. That store is fixed and pinned by a
+  test, and the configuration that diverged every time now reproduces
+  bit-for-bit. A second, **intermittent** divergence remains in the dense
+  attention — unrelated to that store, seen once in five pairs at the same
+  configuration, as one row of layer 3's attention output — and is
+  instrumented but not yet explained. Recorded with
+  the streaming path's remaining read deficit in
+  [the optimization plan](docs/OPTIMIZATION_PLAN.md).
 - Build iPhone and iPad apps, then measure inference speed and memory on
   mobile hardware.
 
