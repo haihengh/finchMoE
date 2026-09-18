@@ -28,8 +28,15 @@ final class PrefillRowHash {
     /// share one dimension so one dump and one diff cover both — a difference in
     /// `qkv` with none in `idxcells` puts the divergence in the indexer, and one
     /// in `in` at layer L puts it inside layer L-1.
+    ///
+    /// 12-13 are the K/V **cache** rows, hashed at the copy's destination. They
+    /// exist because 7/8 (`krot`/`vrot`) fingerprint the epilogue's *stage*
+    /// scratch and the attention reads the cache: a difference that the copy or
+    /// the cache introduced would otherwise look exactly like the attention
+    /// kernel disagreeing with itself, on inputs the map reported as equal.
     static let stageNames = ["in", "attn", "post", "qkv", "idxcells", "core", "oproj",
-                             "krot", "vrot", "idxq", "idxk", "idxpool"]
+                             "krot", "vrot", "idxq", "idxk", "idxpool",
+                             "kcache", "vcache"]
     static var stageCount: Int { stageNames.count }
 
     private let pso: MTLComputePipelineState

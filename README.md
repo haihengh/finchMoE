@@ -480,7 +480,7 @@ FinchMoE currently includes:
   head — behind `modelFamily == "qwen3_8"`
 - GPU timers over prefill and decode (`gpu_*` counters per stage), per-token
   I/O and expert-read counters, and opt-in diagnostic instruments: a
-  twelve-stage row-hash map, a GDN sub-stage split (`FQ_GDN_SPLIT=1`), and a
+  fourteen-stage row-hash map, a GDN sub-stage split (`FQ_GDN_SPLIT=1`), and a
   prefill attention determinism fuzz. [Runtime controls](docs/RUNTIME_CONTROLS.md)
   lists them all
 - SSD-backed routed-expert streaming with a bounded expert cache
