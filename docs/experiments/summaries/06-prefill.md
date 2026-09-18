@@ -488,6 +488,18 @@ failed the M2 long-row gate.
   is the *more* perturbed of the two configurations, so a pass there is not
   weaker evidence; but it is a difference and it is recorded as one rather than
   smoothed over.
+- **The same kernel on 3.6, and a scope claim corrected.** The kernel shipped into the 3.8 body
+  first with a note saying 3.6 was unaffected because its GDN is int4. **The manifests say
+  otherwise**: both on-disk 3.6 installs (`Qwen3.6-35B-A3B-4bit.finch` and `.fqturbo`) carry
+  `quant.linearAttention.weightBits = 8`, so 3.6's GDN is int8 on its *shipping* installs, and its
+  body called the same per-token `encodeRepeatedInt8`. Wired there too — qkv, z and out_proj, with
+  the a/b pair left on the GEMV for the same doubled-stride reason as on 3.8. **Measured on the
+  4-bit install at 426 tokens, two interleaved rounds: prefill 13.44 / 13.46 s -> 9.37 / 9.36 s,
+  31.7 -> 45.4 prefill tok/s (1.44x)**, tokens identical, decode identical at 1.10 vs 1.11 s. The
+  lesson worth keeping is narrow and useful: "unaffected" was inferred from a tiering decision
+  instead of read from the install's own manifest, and the manifest took ten seconds to check. The
+  instrumentation scope above is a separate, still-true claim — the *counters* are 3.8-body-only,
+  the *kernel* is not.
 - **Where the target was not met.** The plan's bar was the projections reaching
   under 1.5 s; they reached 3.23 s (11.5 -> 3.23). Still ~537 GFLOP/s, so the
   kernel is now compute-bound on something other than weight traffic — larger
