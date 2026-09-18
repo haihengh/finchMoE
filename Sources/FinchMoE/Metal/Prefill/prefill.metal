@@ -1209,11 +1209,18 @@ kernel void row_hash_fnv1a_64(
     constant uint&      rowStrideBytes [[buffer(3)]],
     constant uint&      rowCount      [[buffer(4)]],
     constant uint&      dstRowBase    [[buffer(5)]],
+    constant uint&      srcRowBase    [[buffer(6)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid >= rowCount) { return; }
     if (rowBytes == 0 || rowStrideBytes < rowBytes) { return; }
-    const device uchar* row = src + (size_t)gid * (size_t)rowStrideBytes;
+    // `srcRowBase` and `dstRowBase` differ by design: the plane and the other
+    // attention scratch are chunk-local, so their row 0 is the chunk's first
+    // row, while the indexer's key timeline and its pooled blocks are indexed by
+    // position and by block. Without the source offset a chunk other than the
+    // first would fingerprint the timeline's *first* rows again — which is what
+    // the idxk stage did before this existed, and why it read as identical.
+    const device uchar* row = src + (size_t)(srcRowBase + gid) * (size_t)rowStrideBytes;
     ulong h = kRowHashOffsetBasis;
     for (uint i = 0; i < rowBytes; ++i) {
         h = (h ^ (ulong)row[i]) * kRowHashPrime;
