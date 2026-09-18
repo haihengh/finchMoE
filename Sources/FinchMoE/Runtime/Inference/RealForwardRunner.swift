@@ -4376,6 +4376,28 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     keySource: scratch.kStage,
                     valueSource: scratch.vStage,
                     bytesPerToken: kvDim * MemoryLayout<Float16>.stride)
+                // A0b: the cache rows this chunk just wrote — the destination of
+                // that copy, and the buffer the attention below actually reads.
+                // Stages 7/8 hash the *source*; with this pair a divergence in
+                // the attention's output on inputs the map called equal has
+                // exactly two readings, the cache or the kernel, and this picks
+                // between them. Rows are physical slots, which equal positions
+                // whenever the cache is unringed, which is every 3.8 full layer.
+                // `endPosition` is computed a few lines below; the cache's
+                // `validTokenCount` is the same quantity (the chunk's last
+                // position plus one), spelled out here rather than moving that
+                // declaration up into the middle of the copy's block.
+                let validThrough = startPosition + t
+                let kCache = kv.keyBuffer(layer: L, validTokenCount: validThrough)
+                let vCache = kv.valueBuffer(layer: L, validTokenCount: validThrough)
+                encodeRowHash(kCache, layer: L, stage: 12,
+                              rowCount: t, rowBase: startPosition,
+                              rowStrideBytes: kvDim * MemoryLayout<Float16>.stride,
+                              into: cb)
+                encodeRowHash(vCache, layer: L, stage: 13,
+                              rowCount: t, rowBase: startPosition,
+                              rowStrideBytes: kvDim * MemoryLayout<Float16>.stride,
+                              into: cb)
             }
 
             let qsaLayer = qsaState.flatMap { st in

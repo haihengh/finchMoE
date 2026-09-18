@@ -27,7 +27,8 @@ import struct
 import sys
 
 MAGIC = 0x5248_4831
-STAGES = ["in", "attn", "post", "qkv", "idxcells", "core", "oproj", "krot", "vrot", "idxq", "idxk", "idxpool"]
+STAGES = ["in", "attn", "post", "qkv", "idxcells", "core", "oproj", "krot", "vrot",
+          "idxq", "idxk", "idxpool", "kcache", "vcache"]
 
 
 def load(path):
@@ -104,6 +105,11 @@ def main(argv):
         which = {3: "queries", 7: "keys", 8: "values"}[s0]
         where = (f"in layer {L0}'s {which} after the RoPE/norm epilogue "
                  f"(the layer's input agreed)")
+    elif s0 in (12, 13):
+        which = {12: "key", 13: "value"}[s0]
+        where = (f"in layer {L0}'s {which} CACHE — the copy's destination, which the "
+                 f"attention reads. The stage scratch matched, so this is the copy or "
+                 f"the cache and not the projections")
     elif s0 == 9:
         where = f"in layer {L0}'s indexer query projection or its layer norm"
     elif s0 == 10:

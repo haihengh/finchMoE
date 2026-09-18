@@ -453,6 +453,59 @@ failed the quality gate. It was rejected and removed.
   result — it read as identical because it was measuring the same 128 rows each time. The kernel now
   takes a `srcRowBase`, with a test that pins it (a source base of 0 would hash row 0). The pooled
   checkpoint above is the first report from the corrected instrument.
+- **Seventh pass: the second mechanism is the dense attention itself, at the same row the first map
+  landed on.** The selector-off configuration — no indexer in the runner at all, so no store, no pool,
+  no ranking — still diverges, so it was run with the row fingerprints on (stages 9-11 are the
+  indexer's and stay zero there; 0-8 cover the plane and the attention block). Two runs at 316.9 /
+  314.2 s of prefill, logits differing in 247,480 of 248,320, and the map reads:
+
+  | layer | in | attn | post | qkv | core | oproj | krot | vrot |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | **3** | - | **1** (row 1024) | **1** | - | **1** | **1** | - | - |
+  | 4 | 1 (row 1024) | 3582 | 3582 | - | - | - | - | - |
+
+  **At layer 3 the queries, the rotated keys and the values have no differing row at all, and the
+  attention's output differs at exactly one row — 1024.** Everything from that row onward is then
+  carried (3582 of 4606 rows from layer 4 on). So the second meeting point is the dense attention
+  block, on bit-identical inputs, and it is the *same landing* the very first map produced — layer 3,
+  row 1024, attention output, inputs equal — which was the one thing the store bug never explained.
+  That map's landing and this one are therefore one mechanism, not two: the hunt's "at least two
+  meeting points" is now (a) the indexer store, fixed, and (b) this.
+
+  **The mechanism is intermittent, and row 1024 is a landing and not a property.** Re-running the same
+  selector-off configuration gave **0 of 248,320 logits differing** — an agreeing pair — where the
+  first had differd in 247,480. So this is a race in the older sense, at something like two pairs in
+  three, and two consequences follow.
+
+  First, **no deterministic arithmetic condition can be the whole of it.** A row that is simply
+  computed *wrongly* on fixed inputs would be wrong identically in both runs, which is the trap this
+  hunt has fallen into before (a deterministic bug cannot by itself make two runs differ; the
+  difference needs something whose *content* varies run to run — a stale slot, an unordered write, a
+  read the driver does not order). Row 1024 is nevertheless the row both diverging runs landed on, and
+  it is both the first row of a prefill chunk (8 at chunk 128, 2 at chunk 512) and the first row whose
+  sequence length exceeds 1024, where the dense split's `chunkLength = ceil(effLen/16)` steps 64 → 65
+  so the last chunk stops being exactly full. **The earlier chunk boundaries did not fire** — 128, 256,
+  …, 896 in one run, 512 in the other — which is evidence against "any chunk boundary" as the trigger
+  and mildly for the geometry step; it is not positive identification, and the CLI's
+  `allowedPrefillChunkTokens = [32, 64, 128, 256, 512, 1024]` means a chunk size that does not divide
+  1024 cannot be asked for, so the two cannot be separated by chunking alone. The constants that could
+  have made the geometry stale are also exonerated: **no Swift code defines `FC_ATTN_NUM_CHUNKS` or
+  `FC_ATTN_RING_CAP`**, so `attention_decode_combine` and both partial kernels read their geometry from
+  the arguments.
+
+  Second, **the landing row is not stable across maps**, which is what an intermittent mechanism should
+  look like: the fifth pass landed at layer 15 row **2063** where these land at layer 3 row 1024.
+
+  A third reading stays live and is now instrumented: **the attention's inputs are not all hashed.**
+  Stages 7/8 fingerprint the K/V *stage* scratch, and the cache the attention actually reads — the
+  destination of `copyPrefillKVToCache` — was not fingerprinted at all, so a cache-side difference
+  would look exactly like this: identical stage rows, one differing attention output. Stages 12/13
+  (`kcache`, `vcache`) hash those rows immediately after the copy; a differing attention output
+  beside *equal* cache rows means the kernel, and *unequal* cache rows means the copy.
+
+  Note also what the indexer-side evidence said about this: the fifth pass's landing at layer 15, row
+  **2063**, is *not* a chunk boundary (2048 is) — consistent with the store bug being driven by the
+  position it wrote to rather than by any tiling, and now measured rather than assumed.
 - **Prior art, now a weaker analogy:** [KV-14](#kv-14) was a prefill tiled-attention race whose
   exposure depended on the tiling. That is what the withdrawn reading looked like. The duration
   result moves this away from "a shared-memory reuse hazard in a specific kernel" and toward a race
@@ -505,9 +558,19 @@ failed the quality gate. It was rejected and removed.
   matched — but it is the first evidence this hunt has produced that the divergence is *removable*
   rather than merely re-describable.
 
-  **What this does not settle.** The `FQ_QSA_OFF` pair at 4606 tokens/359.6 s diverged with **no
-  indexer at all**, so that code path cannot be its cause — either a second mechanism remains, or that
-  result is measuring something else again. And this finding says nothing about the ranking kernels
+  **What this does not settle.** The `FQ_QSA_OFF` pair at 4606 tokens diverged with **no indexer at
+  all**, so the fixed store cannot be its cause: re-run on the day of the fix it still diverges —
+  234,042 of 248,320 logits — on a runner that reports `built without the QSA indexer; attention takes
+  the dense path for every layer`. That is a second mechanism, in the dense path, and it is now the
+  whole of this hunt's open surface.
+
+  **A caveat the fix's day produced, about duration as a proxy.** The same selector-off configuration
+  measured **359.6 s of prefill on 2026-09-16 and 264.5 s on 2026-09-18** — 12.8 → 17.4 prefill tok/s
+  for a byte-identical invocation. Whatever that 36% is (drive state, compressor, page cache), it means
+  elapsed time is a proxy for the machine's state and not a stable name for it: two runs can share a
+  duration on different days and not share the state. The comparison above is therefore stated as *the
+  same duration band with opposite outcomes* — pre-fix 361.9/361.7 s diverged, post-fix 358.9-361.6 s
+  agreed four times — rather than as a clean causal chain, and this sentence is the reason. And this finding says nothing about the ranking kernels
   themselves: the 720,000-dispatch fuzz bound stands, and the two landings at the attention's own
   output (`core` differing with `idxcells` equal) are still unexplained by a mis-stored key.
 - **Final disposition:** open, with **both earlier attributions withdrawn** — the chunk-size reading
