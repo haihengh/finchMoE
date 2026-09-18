@@ -27,7 +27,7 @@ import struct
 import sys
 
 MAGIC = 0x5248_4831
-STAGES = ["in", "attn", "post", "qkv", "idxcells", "core", "oproj"]
+STAGES = ["in", "attn", "post", "qkv", "idxcells", "core", "oproj", "krot", "vrot", "idxq", "idxk", "idxpool"]
 
 
 def load(path):
@@ -100,9 +100,18 @@ def main(argv):
         where = f"inside layer {L0}'s attention block (its input agreed)"
     elif s0 == 2:
         where = f"inside layer {L0}'s routed-expert tail (its attention output agreed)"
-    elif s0 == 3:
-        where = (f"in layer {L0}'s q/k/v projections or their RoPE/norm epilogue "
+    elif s0 in (3, 7, 8):
+        which = {3: "queries", 7: "keys", 8: "values"}[s0]
+        where = (f"in layer {L0}'s {which} after the RoPE/norm epilogue "
                  f"(the layer's input agreed)")
+    elif s0 == 9:
+        where = f"in layer {L0}'s indexer query projection or its layer norm"
+    elif s0 == 10:
+        where = (f"in layer {L0}'s indexer raw key timeline — the keys the "
+                 f"selection is computed from, written in place by this chunk")
+    elif s0 == 11:
+        where = (f"in layer {L0}'s POOLED keys (rows here are blocks, not positions) — "
+                 f"so the multi-chunk page assembly moved, before any scoring")
     elif s0 == 4:
         where = (f"in layer {L0}'s QSA selection — the projections matched and the "
                  f"chosen cells did not, so the ranking moved")

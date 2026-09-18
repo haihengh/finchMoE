@@ -21,7 +21,8 @@ import Testing
     /// meaningful) and returns the hashes written at `rowBase`, reading
     /// `rowCount` of them.
     static func runKernel(rows: [[UInt8]], rowBytes: Int, strideBytes: Int,
-                          rowBase: Int, rowCount: Int) throws -> [UInt64] {
+                          rowBase: Int, rowCount: Int,
+                          srcRowBase: Int = 0) throws -> [UInt64] {
         let ctx = try MetalContext()
         let hash = try PrefillRowHash(context: ctx)
         let layout = RowHashLayout(maxRows: 64, layerCount: 1)
@@ -50,6 +51,7 @@ import Testing
         hash.encode(commandBuffer: cb, src: src, dst: dst,
                     dstOffsetBytes: layout.offsetBytes(layer: 0, stage: 0),
                     dstRowBase: rowBase,
+                    srcRowBase: srcRowBase,
                     rowCount: UInt32(rows.count),
                     rowStrideBytes: UInt32(strideBytes),
                     rowBytes: UInt32(rowBytes))
@@ -113,6 +115,28 @@ import Testing
         let got2 = try Self.runKernel(rows: [a], rowBytes: 64, strideBytes: 64,
                                       rowBase: 0, rowCount: 1)
         #expect(got2[0] != got[0], "the last byte must be covered")
+    }
+
+    /// `srcRowBase` and `dstRowBase` are different offsets on purpose: the
+    /// chunk-local buffers have their row 0 at the chunk's first row, while the
+    /// indexer's key timeline is indexed by position. Without the source offset
+    /// every chunk fingerprints the timeline's *first* rows again — which is what
+    /// the idxk stage did before this parameter existed, and why it read as
+    /// identical when it was measuring nothing.
+    @Test func sourceRowBaseSelectsTheRightRows() throws {
+        let rows: [[UInt8]] = [
+            [10, 11, 12, 13],
+            [20, 21, 22, 23],
+            [30, 31, 32, 33],
+            [40, 41, 42, 43],
+        ]
+        // Hash rows 2..3 of the source, landing them at destination rows 100..
+        let got = try Self.runKernel(rows: rows, rowBytes: 4, strideBytes: 4,
+                                     rowBase: 100, rowCount: 2, srcRowBase: 2)
+        let want = [Self.hostFNV1a(rows[2]), Self.hostFNV1a(rows[3])]
+        #expect(got == want, "kernel \(got) vs host \(want)")
+        #expect(got[0] != Self.hostFNV1a(rows[0]),
+                "a source base of 0 would have hashed row 0")
     }
 
     /// The kernel guards `gid >= rowCount`, so a dispatch rounded up to whole
