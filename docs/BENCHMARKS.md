@@ -9,6 +9,12 @@ Each table states its workload and decoding settings. FinchMoE uses the
 model installed by the [command-line instructions](../README.md#command-line-interface).
 Decode rate excludes model installation, model loading, and prompt prefill.
 
+> **Provenance.** This page was carried over from the upstream TurboFieldfare
+> engine — the dated M5 rows below (2026-07-20) predate the Qwen port — so its
+> rows describe that engine and the model it served, not a Qwen install. The
+> current engine's numbers, on the shipping Qwen 3.6 and 3.8 installs, are in
+> the [README's model comparison](../README.md#model-performance-comparison).
+
 ## Results at a glance
 
 | Host and runtime | Decode rate | Reported memory |

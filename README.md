@@ -77,11 +77,21 @@ both from the same binary.
   stays intact and family dispatch runs both from the same binary.
 - The **Qwen 3.8 Flash-Next 125B path is wired and validated** behind
   `ArchConfig.modelFamily == "qwen3_8"`: hyper-connections replace RMSNorm,
-  QSA sparse-block attention runs on the full-attention layers, the PLE
-  n-gram head is served from bf16 shard files, and the 174,403,168,940-byte
-  `.finch` install loads and decodes coherently inside the 16 GB operating
-  budget. EvalPlus HumanEval on that install scored **94.5% base / 92.1%
-  HumanEval+**.
+  QSA sparse-block attention runs on the full-attention layers, and the PLE
+  n-gram head is served from shard files. The shipping install is
+  `Qwen3.8-Flash-Next-125B-ple4bit.finch` — **97 GiB**, with the PLE table
+  quantized to int4/group-32 and the expert and attention tensors as before.
+  It loads and decodes inside the 16 GB operating budget; the earlier 162 GiB
+  install (PLE table at raw bf16) stays directly behind it as the fallback the
+  app's default-install resolution drops to. EvalPlus HumanEval on the
+  shipping install scores **95.1% base / 92.1% HumanEval+**.
+- **The prefill projections are batched.** The linear-attention (GDN) weights
+  are int8 on every shipped install, and the prefill used to feed them one GEMV
+  per token — 426 re-reads of each weight matrix per chunk. A tiled kernel that
+  dequantizes the weight tile once and reuses it across the token dimension cut
+  the projection stages by 3.5x and the prefill end to end by **~1.4x on both
+  models** (3.6: 13.4 s to 9.4 s at 426 tokens; 3.8: 29.2 s to 20.8 s). It is on
+  by default; `FQ_INT8_GEMM=0` restores the per-token path.
 - The pristine upstream TurboFieldfare source is archived in `reference/`
   (gitignored, alongside `models/`).
 
@@ -115,36 +125,43 @@ press **Generate**.
 
 ## At a glance
 
-Measured 2026-09-05 on a 16 GB Apple Silicon Mac mini (macOS 26, Metal 4)
-with the engine's release CLI, greedy decode, on the local Qwen install
-(page cache warm). Reproduced 2026-09-08 on a 24 GiB Apple M4 Pro
-(macOS 26.6.2) against a freshly repacked install from the public
+Measured 2026-09-18 on a 16 GB Apple Silicon Mac mini (macOS 26, Metal 4) with
+the engine's release CLI, greedy decode, on the local Qwen install (page cache
+warm), against the shipping `Qwen3.6-35B-A3B-4bit.finch`. Earlier rows in this
+table were measured 2026-09-05 and reproduced 2026-09-08 on a 24 GiB Apple M4
+Pro (macOS 26.6.2) against a freshly repacked install from the public
 [`Qwen/Qwen3.6-35B-A3B`](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) bf16
-checkpoint.
+checkpoint; **the prefill figure in particular has moved since**, because the
+int8 projections are now batched — the same 2,940-token prompt that took 81.4 s
+on the M4 Pro in September takes **69.3 s on the 16 GB mini** today.
 
 | Metric   | Qwen 3.6 35B-A3B (`qwen3_5_moe`) install                                                                                                |
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | Model    | 35B total parameters, ~3B active per token; 30 Gated-DeltaNet linear-attention layers + 10 full-attention; MoE 256 experts top-8 + shared |
 | Weights  | GDN projections int8; router int8; shared/routed experts affine 4-bit group 64; fp16 activations, fp32 Metal accumulators                 |
-| Storage  | ~20.0 GB installed text-only `.finch` (streamed from disk during decode)                                                           |
+| Storage  | ~19 GB installed text-only `.finch` (streamed from disk during decode)                                                           |
 | Memory   | ~1.1-1.2 GiB peak resident while decoding (out-of-core expert streaming; OS page cache additional)                                            |
-| Decode   | ~10.5 tok/s (16 GB Mac mini) / ~17-19 tok/s (24 GiB M4 Pro), greedy, flat over 100-300 tokens                                                                                             |
-| Prefill  | ~20 tok/s on long prompts (705 tok, Mac mini) / ~44 tok/s (1,020 tok, M4 Pro); short prompts skip the SHA-256 pass when a verified-install receipt is present (`--verify auto`, the default)            |
+| Decode   | ~8.4 tok/s (16 GB Mac mini, 2,940-token prompt) / ~17-19 tok/s (24 GiB M4 Pro), greedy, flat over 100-300 tokens                                                                                             |
+| Prefill  | **~42 tok/s** on a 2,940-token prompt (16 GB Mac mini, 69.3 s) / ~44 tok/s (1,020 tok, M4 Pro); short prompts skip the SHA-256 pass when a verified-install receipt is present (`--verify auto`, the default)            |
 | Hardware | Apple Silicon Mac (validated on 16 GB and 24 GiB RAM)                                                                                                |
 | Platform | macOS 26, Metal 4, Swift 6.3                                                                                                              |
 
 ### M4 Mac mini performance
 
-This repo's 16 GB M4 Mac mini reference run is for the Qwen 3.6 35B-A3B
-install. It used the release CLI with greedy decode, a local verified install,
-and warm page cache. A matching Qwen 3.8 125B throughput run on that Mac mini is
-not published yet; the 3.8 port docs record that the 162 GiB install loads and
-decodes coherently inside the same 16 GB operating budget.
+Measured 2026-09-18 on a 16 GB M4 Mac mini, release CLI, greedy decode, both
+shipping installs, warm page cache, one run each on the same 2,940-token prompt
+(`long-synthesis`, 128 generated tokens). Both models now have a published
+throughput row; the 3.8 one is new, and the 3.6 prefill figure is more than
+twice what this table said before the int8 projections were batched.
 
 | Host | Model | Workload | Prefill tok/s | Decode tok/s | Peak resident |
 | --- | --- | --- | ---: | ---: | ---: |
-| 16 GB M4 Mac mini | Qwen 3.6 35B-A3B | 705-token prompt; 200-300 token greedy decode | ~20 | ~10.5 | ~1.1 GiB |
-| 16 GB M4 Mac mini | Qwen 3.8 Flash-Next 125B | Load + smoke decode | not yet published | not yet published | inside 16 GB budget |
+| 16 GB M4 Mac mini | Qwen 3.6 35B-A3B | 2,940-token prompt; 128-token greedy decode | **~42** (69.3 s) | ~8.4 | ~1.1 GiB |
+| 16 GB M4 Mac mini | Qwen 3.8 Flash-Next 125B | 2,940-token prompt; 128-token greedy decode | **~19** (157.7 s) | ~2.8 | inside 16 GB budget |
+
+The same two runs at the app's sampling defaults (temperature 0.2, Top-K 64,
+Top-P 0.95) land within about 10% of these: 42.0 and 18.9 prefill tok/s, 7.8 and
+2.6 decode.
 
 Prompt length, generated length, page-cache state, and hardware all affect
 throughput. See [benchmarks](docs/BENCHMARKS.md) for the upstream Gemma
@@ -152,8 +169,14 @@ measurements the fork started from.
 
 ## Model performance comparison
 
-Measured 2026-09-14 on a 24 GB Apple M4 Pro MacBook Pro (`Mac16,7`, macOS
-26.6.2, Swift 6.2.4), using the release `FinchMoECLI`, verified local
+The first table below is the 2026-09-14 comparison on a 24 GB Apple M4 Pro
+(`Mac16,7`, macOS 26.6.2, Swift 6.2.4) — kept because it is an apples-to-apples
+run of both models on one machine. **Its 3.8 rows predate two changes that both
+move prefill**: the shipping install is now the quantized-PLE one rather than the
+167 GB install it names, and the int8 projections are batched. The second table
+is the current engine on the 16 GB mini.
+
+Measured on a 24 GB Apple M4 Pro, release `FinchMoECLI`, verified local
 `.finch` installs, app sampling defaults for the prompt-suite rows
 (`temperature 0.2`, Top-K 64, Top-P 0.95), and a 128-token generation cap.
 Decode rates exclude model load and prompt prefill. Prefill rates are reported
@@ -174,9 +197,25 @@ decode.
 | long-synthesis | Qwen 3.6 35B-A3B | 2,940 | 81.44s | 36.1 | 6.64s | 19.28 | 243.5 MB |
 | long-synthesis | Qwen 3.8 Flash-Next 125B | 2,940 | 198.33s | 14.8 | 26.01s | 4.92 | 719.3 MB |
 
-In this apples-to-apples local run, Qwen 3.6 decodes about **3.9-4.3x faster**
-than Qwen 3.8 across the 128-token prompt suite, while Qwen 3.8 scores **+3.7
-points** on HumanEval base and **+4.3 points** on HumanEval+. The dominant
+Current engine, 16 GB M4 Mac mini, 2026-09-18, same protocol and columns:
+
+| Prompt-suite case | Model | Prompt tokens | Prefill | Prefill tok/s | Decode | Decode tok/s | Expert reads/token |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| short-explanation | Qwen 3.6 35B-A3B | 62 | 4.24s | 14.6 | 12.77s | 10.03 | 217.3 MB |
+| short-explanation | Qwen 3.8 Flash-Next 125B | 62 | 9.35s | 6.6 | 40.42s | 3.17 | 603.0 MB |
+| medium-review | Qwen 3.6 35B-A3B | 426 | 9.10s | 46.8 | 13.15s | 9.73 | 237.2 MB |
+| medium-review | Qwen 3.8 Flash-Next 125B | 426 | 20.59s | 20.7 | 43.37s | 2.95 | 682.4 MB |
+| long-synthesis | Qwen 3.6 35B-A3B | 2,940 | 70.06s | 42.0 | 16.38s | 7.82 | 247.8 MB |
+| long-synthesis | Qwen 3.8 Flash-Next 125B | 2,940 | 155.80s | 18.9 | 49.47s | 2.59 | 726.8 MB |
+
+Both 3.8 prefill figures are roughly 25% better than the September M4 Pro table
+recorded for the same cases (16.5 and 14.8 tok/s), on a smaller machine — the
+batched projections and the quantized-PLE install, against a much slower host.
+
+In this apples-to-apples local run, Qwen 3.6 decodes about **3.0-3.3x faster**
+than Qwen 3.8 across the 128-token prompt suite on the mini (3.9-4.3x on the M4
+Pro), while Qwen 3.8 scores **+4.2 points** on HumanEval base and **+4.3 points**
+on HumanEval+. The dominant
 runtime difference is routed-expert I/O: the 125B install reads roughly
 607-719 MB of expert data per generated token here, versus 215-244 MB/token for
 the 35B install.
@@ -195,11 +234,14 @@ but adds the model-specific pieces that make Flash-Next different:
 | QSA indexer | 4 query heads plus 1 shared key head select sparse attention blocks on full-attention layers |
 | PLE n-gram head | Layer 1 uses 128 bf16 shard files, 3-gram hashing, 8 heads per n-gram, and 160-wide rows |
 | MoE | 512 experts, top-10 routing, 640-wide routed/shared experts, sigmoid shared gate, per-expert router scale |
-| Install | 174,403,168,940 bytes measured on disk; 95 GiB of the 162 GiB payload is the bf16 PLE table |
+| Install | The shipping install is **97 GiB** with the PLE table at int4/group-32; the earlier install is 174,403,168,940 bytes, of which 95 GiB is the PLE table at raw bf16 |
 
-The real install at `models/Qwen3.8-Flash-Next-125B.finch` has completed the
-M1-M4 port path: local repack, schema/load support, hyper-connection + QSA +
-PLE forward wiring, prefill/decode smoke, and llama.cpp oracle checks. The
+The shipping install is `models/Qwen3.8-Flash-Next-125B-ple4bit.finch` (the
+app's default); `models/Qwen3.8-Flash-Next-125B.finch` is the pre-quantization
+install and stays as the fallback. Both have completed the M1-M4 port path:
+local repack, schema/load support, hyper-connection + QSA + PLE forward wiring,
+prefill/decode smoke, llama.cpp oracle checks, and — on the quantized one —
+EvalPlus HumanEval at 95.1% base / 92.1% plus. The
 available oracle evidence is argmax-level rather than whole-vocab cosine-level:
 tokenization is byte-exact, argmax and generation match on the checked prompts,
 and top-10/top-100 logit cosine reached 0.995/0.985, while whole-vocab cosine
@@ -433,21 +475,38 @@ FinchMoE currently includes:
 - The Qwen 3.6 decode-layer path — Gated-DeltaNet layers, full-attention
   layers with the output gate, the Qwen MoE tail, and the untied `lm_head` —
   wired into the forward pass and reference-checked against `qwen3_5_moe`
+- The Qwen 3.8 Flash-Next layer path — hyper-connections in place of RMSNorm,
+  QSA sparse-block attention on the full-attention layers, and the PLE n-gram
+  head — behind `modelFamily == "qwen3_8"`
+- GPU timers over prefill and decode (`gpu_*` counters per stage), per-token
+  I/O and expert-read counters, and opt-in diagnostic instruments: a
+  twelve-stage row-hash map, a GDN sub-stage split (`FQ_GDN_SPLIT=1`), and a
+  prefill attention determinism fuzz. [Runtime controls](docs/RUNTIME_CONTROLS.md)
+  lists them all
 - SSD-backed routed-expert streaming with a bounded expert cache
 - A Swift library, streaming installer, command-line interface, loopback
   OpenAI-compatible server, and native SwiftUI/AppKit Mac app with a one-shot
   local decode service
 
-The target is text-only Qwen 3.6 35B-A3B inference on Apple Silicon Macs with
-at least 8 GB of RAM. The Qwen 3.6 vision path is out of scope — this port
-targets the `text_config` only, consistent with the engine being text-only.
+The target is text-only Qwen inference on Apple Silicon Macs with at least 8 GB
+of RAM — in practice the two shipped tiers: Qwen 3.6 35B-A3B (the reference
+install, ~19 GB on disk) and Qwen 3.8 Flash-Next 125B (~97 GB, streamed). The
+Qwen 3.6 vision path is out of scope — this port targets the `text_config`
+only, consistent with the engine being text-only.
 
 ### Future work
 
 - Close the gaps the 2026-09-07 readiness review left open: an aggregate
-  numeric-fidelity measurement (perplexity-style) and a speed comparison
-  against reference engines; and broaden the validated envelope beyond the
-  16 GB loopback single-model setup.
+  numeric-fidelity measurement (perplexity-style) and a throughput comparison
+  against reference engines on the same Qwen installs; and broaden the
+  validated envelope beyond the 16 GB loopback single-model setup. Quality
+  itself is now measured on both installs (EvalPlus, above) rather than
+  inferred.
+- Two defects are localized but open, both recorded in
+  [the optimization plan](docs/OPTIMIZATION_PLAN.md): long prefills
+  (past 2,051 tokens) are not bit-reproducible, with the divergence narrowed
+  to the QSA scoring and radix select on bit-identical pooled inputs; and the
+  streaming path reaches well under its measured drive ceiling.
 - Build iPhone and iPad apps, then measure inference speed and memory on
   mobile hardware.
 
