@@ -453,11 +453,11 @@ failed the quality gate. It was rejected and removed.
   result — it read as identical because it was measuring the same 128 rows each time. The kernel now
   takes a `srcRowBase`, with a test that pins it (a source base of 0 would hash row 0). The pooled
   checkpoint above is the first report from the corrected instrument.
-- **Seventh pass: the second mechanism is the dense attention itself, at the same row the first map
-  landed on.** The selector-off configuration — no indexer in the runner at all, so no store, no pool,
-  no ranking — still diverges, so it was run with the row fingerprints on (stages 9-11 are the
-  indexer's and stay zero there; 0-8 cover the plane and the attention block). Two runs at 316.9 /
-  314.2 s of prefill, logits differing in 247,480 of 248,320, and the map reads:
+- **Seventh pass: the second mechanism is the dense attention itself.** The selector-off configuration —
+  no indexer in the runner at all, so no store, no pool, no ranking — is untouched by the fix, and it
+  still diverges, so it was run with the row fingerprints on (stages 9-11 are the indexer's and stay
+  zero there; 0-8 cover the plane and the attention block). The first diverging pair, two runs at
+  316.9 / 314.2 s of prefill with logits differing in 247,480 of 248,320, reads:
 
   | layer | in | attn | post | qkv | core | oproj | krot | vrot |
   | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -467,15 +467,20 @@ failed the quality gate. It was rejected and removed.
   **At layer 3 the queries, the rotated keys and the values have no differing row at all, and the
   attention's output differs at exactly one row — 1024.** Everything from that row onward is then
   carried (3582 of 4606 rows from layer 4 on). So the second meeting point is the dense attention
-  block, on bit-identical inputs, and it is the *same landing* the very first map produced — layer 3,
-  row 1024, attention output, inputs equal — which was the one thing the store bug never explained.
-  That map's landing and this one are therefore one mechanism, not two: the hunt's "at least two
-  meeting points" is now (a) the indexer store, fixed, and (b) this.
+  block, and in this pair it landed exactly where the very first map's did — layer 3, row 1024,
+  attention output, inputs equal — which was the one thing the store bug never explained. That map's
+  landing and this one are therefore one mechanism, not two: the hunt's "at least two meeting points"
+  is now (a) the indexer store, fixed, and (b) this. (How stable that row is, is next.)
 
   **The mechanism is intermittent, and row 1024 is a landing and not a property.** Re-running the same
   selector-off configuration gave **0 of 248,320 logits differing** — an agreeing pair — where the
-  first had differd in 247,480. So this is a race in the older sense, at something like two pairs in
-  three, and two consequences follow.
+  first had differed in 247,480, and three further pairs did the same: **one divergent pair in five on
+  the day, all at chunk 512 and 4606 tokens.** Two consequences follow.
+
+  One detail cuts against the duration story that governs the *store* bug: the diverging selector-off
+  pair was the **fastest** of the five (264.5 s of prefill against 312-317 s for the four that
+  agreed), so for this mechanism longer is not more exposed — or elapsed time is simply a coarse
+  proxy for a machine state that moved underneath both.
 
   First, **no deterministic arithmetic condition can be the whole of it.** A row that is simply
   computed *wrongly* on fixed inputs would be wrong identically in both runs, which is the trap this
