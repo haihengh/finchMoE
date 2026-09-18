@@ -38,6 +38,21 @@ so the remaining gap is a real result instead of a harness artifact.
   (`evalplus/provider/base.py`). Confirmed on the wire.
 - Evaluation: `evalplus.evaluate --dataset humaneval` → base pass@1 and HumanEval+ pass@1
 
+## Running the cell: two things that cost a cycle
+
+- **Score with the server stopped.** `run_server_cell.sh` scores in the same
+  process tree that just served 164 problems, so the server is still resident
+  while evalplus starts its own workers, and memguard killed the scoring pass at
+  7.2 GB with the cell's own ceiling. The generations are written before scoring,
+  so the fix is to re-run the scoring command alone
+  (`python -m evalplus.evaluate --dataset humaneval --samples <stem>.jsonl
+  --i-just-wanna-run`) — which is only possible because the samples are on disk,
+  so do not let a driver delete them between the two phases.
+- **Budget ~2 minutes per problem, not seconds.** 164 problems at the 768-token
+  cap took 5 h 24 min on the 125B install. The timestamps on a previous arm's
+  artifacts are last-write times, not durations; reading them as duration
+  underestimates the run by hours.
+
 ## Platform adaptations
 
 The 3090 documented two Windows patches. macOS needs neither, but it needs its own:
