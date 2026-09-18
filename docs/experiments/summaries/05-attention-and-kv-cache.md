@@ -431,6 +431,28 @@ failed the quality gate. It was rejected and removed.
   select, which silently returned the wrong rank; found by reading, fixed).
   The next stage to hash is between the two ends of this one: the pooled keys and the block scores,
   which would separate the pool from the selection and put the radix select in or out.
+- **Fifth pass: the pool is clean, so it is the scoring and the radix select.** One more checkpoint
+  between the two ends of the previous pass — the **pooled keys**, hashed where the pool writes them
+  and before any score reads them — splits the ranking's pipeline in two. On a fresh pair (2940
+  tokens, chunk 128, 361.9 and 361.7 s, logits differing in 247,731 of 248,320), the first landing is
+  layer 15 row 2063, and it reads:
+
+  | attn | qkv | idxcells | core | oproj | krot | vrot | idxq | idxk | **idxpool** |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | **842** | - | **842** | 842 | 842 | - | - | - | - | **-** |
+
+  **The pooled keys are identical and the cells differ.** So the multi-chunk page assembly is not
+  where this starts: with the plane, the attention's q/k/v, the indexer's query, its raw key timeline
+  *and* the pooled keys all bit-identical, the divergence is in **score → radix-select → cells-write**
+  — the reduction and the selection, on identical inputs. That is the isolation this hunt has been
+  working toward, and it is a different place from where the `FQ_QSA_OFF` story pointed.
+- **An instrument bug found on the way, which had made one stage lie.** The hash kernel indexed its
+  source from row 0 and offset only the destination, so a chunk-local buffer (the plane, the attention
+  scratch) was handled correctly while a buffer indexed by position or block was not: every chunk
+  fingerprinted the timeline's *first* rows again. That is the whole of the `idxk` stage's first
+  result — it read as identical because it was measuring the same 128 rows each time. The kernel now
+  takes a `srcRowBase`, with a test that pins it (a source base of 0 would hash row 0). The pooled
+  checkpoint above is the first report from the corrected instrument.
 - **Prior art, now a weaker analogy:** [KV-14](#kv-14) was a prefill tiled-attention race whose
   exposure depended on the tiling. That is what the withdrawn reading looked like. The duration
   result moves this away from "a shared-memory reuse hazard in a specific kernel" and toward a race

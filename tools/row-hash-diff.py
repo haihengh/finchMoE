@@ -27,7 +27,7 @@ import struct
 import sys
 
 MAGIC = 0x5248_4831
-STAGES = ["in", "attn", "post", "qkv", "idxcells", "core", "oproj", "krot", "vrot", "idxq", "idxk"]
+STAGES = ["in", "attn", "post", "qkv", "idxcells", "core", "oproj", "krot", "vrot", "idxq", "idxk", "idxpool"]
 
 
 def load(path):
@@ -109,6 +109,9 @@ def main(argv):
     elif s0 == 10:
         where = (f"in layer {L0}'s indexer raw key timeline — the keys the "
                  f"selection is computed from, written in place by this chunk")
+    elif s0 == 11:
+        where = (f"in layer {L0}'s POOLED keys (rows here are blocks, not positions) — "
+                 f"so the multi-chunk page assembly moved, before any scoring")
     elif s0 == 4:
         where = (f"in layer {L0}'s QSA selection — the projections matched and the "
                  f"chosen cells did not, so the ranking moved")

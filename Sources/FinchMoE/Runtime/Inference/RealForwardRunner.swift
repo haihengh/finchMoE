@@ -332,6 +332,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                layer L: Int, stage: Int,
                                rowCount: Int, rowBase: Int,
                                rowStrideBytes: Int,
+                               srcRowBase: Int = 0,
                                rowBytes: Int? = nil,
                                into target: MTLCommandBuffer) {
         guard let rowHash, let dst = rowHashBuffer, let layout = rowHashLayout,
@@ -341,6 +342,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                        dst: dst,
                        dstOffsetBytes: layout.offsetBytes(layer: L, stage: stage),
                        dstRowBase: rowBase,
+                       srcRowBase: srcRowBase,
                        rowCount: UInt32(rowCount),
                        rowStrideBytes: UInt32(rowStrideBytes),
                        rowBytes: UInt32(rowBytes ?? rowStrideBytes))
@@ -4485,6 +4487,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 encodeRowHash(lay.rawKeys, layer: L, stage: 10,
                               rowCount: t, rowBase: startPosition,
                               rowStrideBytes: idxDim * MemoryLayout<Float16>.stride,
+                              srcRowBase: startPosition,
                               into: cb)
                 // Blocks whose every cell this chunk has written. `bFirst` is
                 // the block holding `startPosition`, which an earlier chunk
@@ -4510,6 +4513,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         theta: st.theta,
                         eps: st.eps)
                     st.advancePooledBlocks(li, by: poolCount)
+                    // The pooled keys, immediately after the pool writes them and
+                    // before any score reads them. This is the checkpoint the
+                    // pool-vs-selection question needs: a difference here is the
+                    // aggregation, and no difference here with the cells
+                    // differing is the scoring and the radix select. Rows are
+                    // *blocks* for this stage, indexed absolutely, so the source
+                    // and the destination both start at the first new block.
+                    encodeRowHash(lay.pooled, layer: L, stage: 11,
+                                  rowCount: poolCount, rowBase: bFirst,
+                                  rowStrideBytes: idxDim * MemoryLayout<Float16>.stride,
+                                  srcRowBase: bFirst,
+                                  into: cb)
                 }
                 for row in 0..<t {
                     let pos = startPosition + row
