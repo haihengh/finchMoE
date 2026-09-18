@@ -381,6 +381,78 @@ failed the quality gate. It was rejected and removed.
   for the rows in question. That is the same subsystem and the same shape as [KV-14](#kv-14): a
   prefill attention hazard exposed by how the work is tiled. KV-14 was one instance of it, fixed with
   a two-bank layout; this is a second, and it lands at a chunk boundary.
+- **Third pass: the kernel fuzz comes back clean, and clears four suspects.** The kernel audit the
+  localization pointed at was done by reading and then by repetition. Read and cleared:
+  `block_reduce_sum` has both barriers (the write→read edge *and* the read→next-write edge KV-14 was
+  about); the empty-chunk case is handled explicitly — a chunk with no positions writes
+  `(-inf, 0, 0)`, which the combine weights to zero via `e^{-inf}`, and `chunkLength = ceil(len/N)`
+  means no chunk is skipped anyway; `partialPipeline` only selects the 16-chunk specialization when
+  the runtime count *is* 16, so there is no function-constant/geometry mismatch, and this model takes
+  the generic PSOs regardless (head_dim 256, 24 query heads, 2 KV heads matches neither prebuilt
+  pair); and both the attention scratch and the KV cache are `.storageModeShared` with **tracked**
+  hazards, so cross-encoder and cross-kernel ordering on them is the driver's.
+- **The repetition test, which is the one that could have found a rare race.**
+  `PrefillAttentionDeterminismTests` runs the same dispatch on fixed inputs and compares bit-exactly,
+  over both paths and across both boundaries the maps landed on — 1024 (below the selection width,
+  dense) and 2051/2064 (above it, cells): **20,000 rounds x 9 lengths x 2 paths = 360,000 dispatches,
+  zero mismatches**, and the same again under four CPU burners (360,000 more). A pass is a bound and
+  not a proof, but it rules the hazard out as something reachable by repeating the dispatch in
+  isolation — which is consistent with everything else this hunt has found: what matters is the
+  machine's state during a long prefill, not the dispatch itself.
+- **What the two maps disagree on, stated rather than smoothed.** The first landing was layer 3's
+  *dense attention output* with q, k, v and the cells all identical. The second was layer 7's
+  **cells**, which moved *before* the attention output did, at row 2064 — and there the attention's
+  own q/k/v were identical too. Both are boundary rows, but they are different paths, so either there
+  are two hazards or one upstream that neither pass has instrumented. **The gap is now specific: the
+  indexer has its own q and k** (`index_qk_proj` into `qwen38IdxQ`/`qwen38IdxK`), and no stage hashes
+  them. Hashing those is the next instrument, not another pair of prefill runs.
+- **Fourth pass: eleven stages, and it lands on the ranking.** Two more stages — the indexer's own
+  query (`qwen38IdxQ`) and its **raw key timeline** (`lay.rawKeys`, a persistent per-layer buffer this
+  chunk writes in place at the row's position and a later chunk pools in completed blocks) — separate
+  "the indexer's inputs moved" from "the selection moved". On a fresh diverging pair (2940 tokens,
+  chunk 128, 361.9 and 361.0 s, logits differing in 247,303 of 248,320):
+
+  | layer | in | attn | post | qkv | idxcells | core | oproj | krot | vrot | idxq | idxk |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | **3** | - | **837** | 837 | - | **837** | 837 | 837 | - | - | **-** | **-** |
+  | 7 | 875 | 876 | 876 | 875 | 791 | 876 | 876 | 875 | 875 | 875 | - |
+
+  At layer 3 the attention's q/k/v are identical, **and so are the indexer's query and its raw keys**,
+  while the cells differ. So the divergence is inside **pool → score → radix-select → cells-write**:
+  the QSA ranking's own kernels, on identical inputs.
+- **What that does and does not change.** It does not contradict the earlier refutation — a
+  selector-less pair still diverged, so the ranking is not *necessary* for the phenomenon. But it is
+  now a *sufficient* meeting point, with far better evidence than the `FQ_QSA_OFF` isolation had
+  before that. Combined with the first landing (dense attention output, row 1024, cells identical),
+  the honest reading is **at least two meeting points**: the ranking's pipeline and the attention's.
+  They share a shape — a reduction over a variable-length set, dispatched per row — and the ranking
+  version is the subsystem that already produced one UB bug
+  ([[metal-divergent-threadgroup-barrier]]: a barrier inside `if (simd_group == 0)` in the radix
+  select, which silently returned the wrong rank; found by reading, fixed).
+  The next stage to hash is between the two ends of this one: the pooled keys and the block scores,
+  which would separate the pool from the selection and put the radix select in or out.
+- **Fifth pass: the pool is clean, so it is the scoring and the radix select.** One more checkpoint
+  between the two ends of the previous pass — the **pooled keys**, hashed where the pool writes them
+  and before any score reads them — splits the ranking's pipeline in two. On a fresh pair (2940
+  tokens, chunk 128, 361.9 and 361.7 s, logits differing in 247,731 of 248,320), the first landing is
+  layer 15 row 2063, and it reads:
+
+  | attn | qkv | idxcells | core | oproj | krot | vrot | idxq | idxk | **idxpool** |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | **842** | - | **842** | 842 | 842 | - | - | - | - | **-** |
+
+  **The pooled keys are identical and the cells differ.** So the multi-chunk page assembly is not
+  where this starts: with the plane, the attention's q/k/v, the indexer's query, its raw key timeline
+  *and* the pooled keys all bit-identical, the divergence is in **score → radix-select → cells-write**
+  — the reduction and the selection, on identical inputs. That is the isolation this hunt has been
+  working toward, and it is a different place from where the `FQ_QSA_OFF` story pointed.
+- **An instrument bug found on the way, which had made one stage lie.** The hash kernel indexed its
+  source from row 0 and offset only the destination, so a chunk-local buffer (the plane, the attention
+  scratch) was handled correctly while a buffer indexed by position or block was not: every chunk
+  fingerprinted the timeline's *first* rows again. That is the whole of the `idxk` stage's first
+  result — it read as identical because it was measuring the same 128 rows each time. The kernel now
+  takes a `srcRowBase`, with a test that pins it (a source base of 0 would hash row 0). The pooled
+  checkpoint above is the first report from the corrected instrument.
 - **Prior art, now a weaker analogy:** [KV-14](#kv-14) was a prefill tiled-attention race whose
   exposure depended on the tiling. That is what the withdrawn reading looked like. The duration
   result moves this away from "a shared-memory reuse hazard in a specific kernel" and toward a race

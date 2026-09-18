@@ -332,6 +332,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                layer L: Int, stage: Int,
                                rowCount: Int, rowBase: Int,
                                rowStrideBytes: Int,
+                               srcRowBase: Int = 0,
                                rowBytes: Int? = nil,
                                into target: MTLCommandBuffer) {
         guard let rowHash, let dst = rowHashBuffer, let layout = rowHashLayout,
@@ -341,6 +342,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                        dst: dst,
                        dstOffsetBytes: layout.offsetBytes(layer: L, stage: stage),
                        dstRowBase: rowBase,
+                       srcRowBase: srcRowBase,
                        rowCount: UInt32(rowCount),
                        rowStrideBytes: UInt32(rowStrideBytes),
                        rowBytes: UInt32(rowBytes ?? rowStrideBytes))
@@ -4396,6 +4398,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // A0: the q/k/v projections after the RoPE and norm epilogue. Against
             // `idxcells` this separates "the projections moved" from "the selection
             // moved" — the two readings the hunt could not tell apart from the plane.
+            // The rotated K and V beside the queries: A0 alone covers only `q`, and
+            // "the projections matched" is a claim about all three.
+            encodeRowHash(scratch.kStage, layer: L, stage: 7,
+                          rowCount: t, rowBase: startPosition,
+                          rowStrideBytes: kvDim * MemoryLayout<Float16>.stride,
+                          into: cb)
+            encodeRowHash(scratch.vStage, layer: L, stage: 8,
+                          rowCount: t, rowBase: startPosition,
+                          rowStrideBytes: kvDim * MemoryLayout<Float16>.stride,
+                          into: cb)
             encodeRowHash(scratch.q, layer: L, stage: 3,
                           rowCount: t, rowBase: startPosition,
                           rowStrideBytes: qDim * MemoryLayout<Float16>.stride,
@@ -4461,6 +4473,22 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         theta: st.theta,
                         eps: st.eps)
                 }
+                // The indexer's own q and its raw key timeline, after the
+                // projection and the layer norms. The keys are the interesting
+                // one: they live in a persistent per-layer timeline that this
+                // chunk writes in place and a later chunk pools in completed
+                // blocks, so a difference here is the indexer moving rather than
+                // anything the attention or the planes did.
+                encodeRowHash(scratch.qwen38IdxQ, layer: L, stage: 9,
+                              rowCount: t, rowBase: startPosition,
+                              rowStrideBytes: nHeads * idxDim
+                                  * MemoryLayout<Float16>.stride,
+                              into: cb)
+                encodeRowHash(lay.rawKeys, layer: L, stage: 10,
+                              rowCount: t, rowBase: startPosition,
+                              rowStrideBytes: idxDim * MemoryLayout<Float16>.stride,
+                              srcRowBase: startPosition,
+                              into: cb)
                 // Blocks whose every cell this chunk has written. `bFirst` is
                 // the block holding `startPosition`, which an earlier chunk
                 // may already have partly filled; `endPosition / r` blocks are
@@ -4485,6 +4513,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         theta: st.theta,
                         eps: st.eps)
                     st.advancePooledBlocks(li, by: poolCount)
+                    // The pooled keys, immediately after the pool writes them and
+                    // before any score reads them. This is the checkpoint the
+                    // pool-vs-selection question needs: a difference here is the
+                    // aggregation, and no difference here with the cells
+                    // differing is the scoring and the radix select. Rows are
+                    // *blocks* for this stage, indexed absolutely, so the source
+                    // and the destination both start at the first new block.
+                    encodeRowHash(lay.pooled, layer: L, stage: 11,
+                                  rowCount: poolCount, rowBase: bFirst,
+                                  rowStrideBytes: idxDim * MemoryLayout<Float16>.stride,
+                                  srcRowBase: bFirst,
+                                  into: cb)
                 }
                 for row in 0..<t {
                     let pos = startPosition + row

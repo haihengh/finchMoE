@@ -28,7 +28,8 @@ final class PrefillRowHash {
     /// share one dimension so one dump and one diff cover both — a difference in
     /// `qkv` with none in `idxcells` puts the divergence in the indexer, and one
     /// in `in` at layer L puts it inside layer L-1.
-    static let stageNames = ["in", "attn", "post", "qkv", "idxcells", "core", "oproj"]
+    static let stageNames = ["in", "attn", "post", "qkv", "idxcells", "core", "oproj",
+                             "krot", "vrot", "idxq", "idxk", "idxpool"]
     static var stageCount: Int { stageNames.count }
 
     private let pso: MTLComputePipelineState
@@ -53,6 +54,7 @@ final class PrefillRowHash {
                 dst: MTLBuffer,
                 dstOffsetBytes: Int,
                 dstRowBase: Int,
+                srcRowBase: Int = 0,
                 rowCount: UInt32,
                 rowStrideBytes: UInt32,
                 rowBytes: UInt32) {
@@ -68,10 +70,12 @@ final class PrefillRowHash {
         var stride = rowStrideBytes
         var rows = rowCount
         var rowBase = UInt32(dstRowBase)
+        var srcBase = UInt32(srcRowBase)
         enc.setBytes(&bytes, length: MemoryLayout<UInt32>.size, index: 2)
         enc.setBytes(&stride, length: MemoryLayout<UInt32>.size, index: 3)
         enc.setBytes(&rows, length: MemoryLayout<UInt32>.size, index: 4)
         enc.setBytes(&rowBase, length: MemoryLayout<UInt32>.size, index: 5)
+        enc.setBytes(&srcBase, length: MemoryLayout<UInt32>.size, index: 6)
         let threads = min(pso.maxTotalThreadsPerThreadgroup, 256)
         let groups = (Int(rowCount) + threads - 1) / threads
         enc.dispatchThreadgroups(MTLSize(width: groups, height: 1, depth: 1),
