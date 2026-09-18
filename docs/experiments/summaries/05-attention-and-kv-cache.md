@@ -381,6 +381,31 @@ failed the quality gate. It was rejected and removed.
   for the rows in question. That is the same subsystem and the same shape as [KV-14](#kv-14): a
   prefill attention hazard exposed by how the work is tiled. KV-14 was one instance of it, fixed with
   a two-bank layout; this is a second, and it lands at a chunk boundary.
+- **Third pass: the kernel fuzz comes back clean, and clears four suspects.** The kernel audit the
+  localization pointed at was done by reading and then by repetition. Read and cleared:
+  `block_reduce_sum` has both barriers (the write→read edge *and* the read→next-write edge KV-14 was
+  about); the empty-chunk case is handled explicitly — a chunk with no positions writes
+  `(-inf, 0, 0)`, which the combine weights to zero via `e^{-inf}`, and `chunkLength = ceil(len/N)`
+  means no chunk is skipped anyway; `partialPipeline` only selects the 16-chunk specialization when
+  the runtime count *is* 16, so there is no function-constant/geometry mismatch, and this model takes
+  the generic PSOs regardless (head_dim 256, 24 query heads, 2 KV heads matches neither prebuilt
+  pair); and both the attention scratch and the KV cache are `.storageModeShared` with **tracked**
+  hazards, so cross-encoder and cross-kernel ordering on them is the driver's.
+- **The repetition test, which is the one that could have found a rare race.**
+  `PrefillAttentionDeterminismTests` runs the same dispatch on fixed inputs and compares bit-exactly,
+  over both paths and across both boundaries the maps landed on — 1024 (below the selection width,
+  dense) and 2051/2064 (above it, cells): **20,000 rounds x 9 lengths x 2 paths = 360,000 dispatches,
+  zero mismatches**, and the same again under four CPU burners (360,000 more). A pass is a bound and
+  not a proof, but it rules the hazard out as something reachable by repeating the dispatch in
+  isolation — which is consistent with everything else this hunt has found: what matters is the
+  machine's state during a long prefill, not the dispatch itself.
+- **What the two maps disagree on, stated rather than smoothed.** The first landing was layer 3's
+  *dense attention output* with q, k, v and the cells all identical. The second was layer 7's
+  **cells**, which moved *before* the attention output did, at row 2064 — and there the attention's
+  own q/k/v were identical too. Both are boundary rows, but they are different paths, so either there
+  are two hazards or one upstream that neither pass has instrumented. **The gap is now specific: the
+  indexer has its own q and k** (`index_qk_proj` into `qwen38IdxQ`/`qwen38IdxK`), and no stage hashes
+  them. Hashing those is the next instrument, not another pair of prefill runs.
 - **Prior art, now a weaker analogy:** [KV-14](#kv-14) was a prefill tiled-attention race whose
   exposure depended on the tiling. That is what the withdrawn reading looked like. The duration
   result moves this away from "a shared-memory reuse hazard in a specific kernel" and toward a race

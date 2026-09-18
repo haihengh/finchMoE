@@ -4396,6 +4396,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // A0: the q/k/v projections after the RoPE and norm epilogue. Against
             // `idxcells` this separates "the projections moved" from "the selection
             // moved" — the two readings the hunt could not tell apart from the plane.
+            // The rotated K and V beside the queries: A0 alone covers only `q`, and
+            // "the projections matched" is a claim about all three.
+            encodeRowHash(scratch.kStage, layer: L, stage: 7,
+                          rowCount: t, rowBase: startPosition,
+                          rowStrideBytes: kvDim * MemoryLayout<Float16>.stride,
+                          into: cb)
+            encodeRowHash(scratch.vStage, layer: L, stage: 8,
+                          rowCount: t, rowBase: startPosition,
+                          rowStrideBytes: kvDim * MemoryLayout<Float16>.stride,
+                          into: cb)
             encodeRowHash(scratch.q, layer: L, stage: 3,
                           rowCount: t, rowBase: startPosition,
                           rowStrideBytes: qDim * MemoryLayout<Float16>.stride,

@@ -28,7 +28,8 @@ final class PrefillRowHash {
     /// share one dimension so one dump and one diff cover both — a difference in
     /// `qkv` with none in `idxcells` puts the divergence in the indexer, and one
     /// in `in` at layer L puts it inside layer L-1.
-    static let stageNames = ["in", "attn", "post", "qkv", "idxcells", "core", "oproj"]
+    static let stageNames = ["in", "attn", "post", "qkv", "idxcells", "core", "oproj",
+                             "krot", "vrot"]
     static var stageCount: Int { stageNames.count }
 
     private let pso: MTLComputePipelineState
