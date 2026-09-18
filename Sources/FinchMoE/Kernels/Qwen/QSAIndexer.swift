@@ -69,12 +69,23 @@ final class QSAIndexer {
     /// rotated at `pos` into `qOut`; the key head is copied verbatim into the
     /// raw timeline at cell `pos`, because pooling precedes both the norm and
     /// the rotation (qwen4exp.cpp:533-538).
+    ///
+    /// `kRaw` is the layer's raw timeline *from its start*, and `pos` is the
+    /// token's absolute position — the kernel addresses the store as
+    /// `k_raw + pos · idxDim`, so a caller that also binds `kRaw` at an offset
+    /// would shift the store twice. This encoder used to take a `kRawOffset`,
+    /// and the chunked prefill passed `pos · idxDim` into it: every prefill
+    /// key landed at `2 · pos`, which mis-pools every block the prefill
+    /// completes *and* writes past the end of the timeline once `pos` passes
+    /// half the context length. The parameter is gone rather than defaulted,
+    /// because a prefill chunk has no reason to want a base: the pool kernel
+    /// indexes cells absolutely, and the decode path reuses the same slots.
     func encodeQKPost(
         commandBuffer: MTLCommandBuffer,
         qk: MTLBuffer, qkOffset: Int = 0,
         qGamma: MTLBuffer, qGammaOffset: Int = 0,
         qOut: MTLBuffer, qOutOffset: Int = 0,
-        kRaw: MTLBuffer, kRawOffset: Int = 0,
+        kRaw: MTLBuffer,
         pos: UInt32,
         nHeads: UInt32,
         idxDim: UInt32,
@@ -85,12 +96,20 @@ final class QSAIndexer {
         precondition(idxDim <= UInt32(Self.maxDim),
                      "indexer head dim \(idxDim) exceeds the kernels' one-thread-per-dim width (\(Self.maxDim))")
         precondition(nRot <= idxDim, "rotary width \(nRot) exceeds the head dim \(idxDim)")
+        // The store is the one write in this file that can leave its buffer: a
+        // caller handing over a timeline shorter than `pos + 1` rows (a
+        // chunk-local slice, say) would have the kernel write past its end,
+        // where the driver cannot order that write against anything. Say the
+        // bound here rather than leaving it to the kernel's arithmetic.
+        precondition(kRaw.length >= Int(pos + 1) * Int(idxDim) * MemoryLayout<Float16>.stride,
+                     "raw timeline is \(kRaw.length) bytes, too short for position \(pos) "
+                     + "at idxDim \(idxDim)")
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(psoQKPost)
         enc.setBuffer(qk,     offset: qkOffset,     index: 0)
         enc.setBuffer(qGamma, offset: qGammaOffset, index: 1)
         enc.setBuffer(qOut,   offset: qOutOffset,   index: 2)
-        enc.setBuffer(kRaw,   offset: kRawOffset,   index: 3)
+        enc.setBuffer(kRaw,   offset: 0,            index: 3)
         var posVar = pos
         var nHeadsVar = nHeads
         var idxDimVar = idxDim
@@ -118,9 +137,14 @@ final class QSAIndexer {
     /// Blocks are passed here only when complete — the mean divides by `r`.
     /// An incomplete block is exactly the one the score kernel force-visibles
     /// (its bias is +1e9), so its pooled key is never read.
+    ///
+    /// `kRaw` is the whole timeline, as in `encodeQKPost`: the kernel addresses
+    /// block `b` as `k_raw + b·r·idxDim`, so a binding offset shifts every
+    /// block by one. Neither encoder takes one now — the two cannot disagree
+    /// about where the timeline starts.
     func encodeBlockPoolNormRope(
         commandBuffer: MTLCommandBuffer,
-        kRaw: MTLBuffer, kRawOffset: Int = 0,
+        kRaw: MTLBuffer,
         kGamma: MTLBuffer, kGammaOffset: Int = 0,
         pooled: MTLBuffer, pooledOffset: Int = 0,
         firstBlock: UInt32,
@@ -137,7 +161,7 @@ final class QSAIndexer {
         precondition(nRot <= idxDim, "rotary width \(nRot) exceeds the head dim \(idxDim)")
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(psoPool)
-        enc.setBuffer(kRaw,   offset: kRawOffset,   index: 0)
+        enc.setBuffer(kRaw,   offset: 0,            index: 0)
         enc.setBuffer(kGamma, offset: kGammaOffset, index: 1)
         enc.setBuffer(pooled, offset: pooledOffset, index: 2)
         var firstVar = firstBlock
