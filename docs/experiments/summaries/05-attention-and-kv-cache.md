@@ -457,6 +457,59 @@ failed the quality gate. It was rejected and removed.
   exposure depended on the tiling. That is what the withdrawn reading looked like. The duration
   result moves this away from "a shared-memory reuse hazard in a specific kernel" and toward a race
   whose *window* opens under timing perturbation the run accumulates.
+- **Sixth pass: the prefill was storing its indexer keys at twice their position, and the fix removes
+  the divergence.** The fifth pass left exactly one un-hashed link between "the pooled keys are
+  identical" and "the cells differ": the `scores` array. Reading the scoring and select kernels for a
+  guard whose coverage depends on the input found nothing — every barrier there sits at the same
+  control-flow level for all threads, and the one early return (`b·r >= tail_start`) is threadgroup-
+  uniform. Reading the *call site* instead found the store's index arithmetic: `encodeQKPost` takes a
+  `kRawOffset` buffer binding **and** a `pos` argument, and the kernel addresses the store as
+  `k_raw + pos·idxDim`; the chunked prefill passed both, so every prefill key landed at `2·pos`. It
+  has been there since the M3.4 chunked-prefill commit.
+
+  Two consequences, one arithmetic and one about memory. **Arithmetic:** a block pooled during a
+  multi-chunk prefill is the mean of the wrong cells, so the prefill's ranking scored the wrong blocks
+  — that is a selection that is wrong but plausible, which is why the engine stayed coherent and why
+  the toy-level chunk-vs-decode test (tier-1 equality at a GDN layer, tier-2 logits cosine ≈ 0.98)
+  never saw it. **Memory:** `rawKeys` is `maxContext · idxDim` halves, so the store leaves the buffer
+  entirely once `pos >= maxContext/2` — at the hunt's `--max-context 4096` that is position **2048**,
+  and the 2940-token pairs wrote up to **456 KB past the end of a 1 MB buffer, per full layer**, into
+  whatever the allocator had placed next (per layer, in allocation order: `pooled`, `scores`, `cells`,
+  `cellCount`, `qkProj`, `qIdx`). Metal cannot associate that write with the dispatch that made it, so
+  its ordering against the dispatches that legitimately read and write those buffers is undefined —
+  which is the shape this hunt has been looking for, and it is invisible to ThreadSanitizer for the
+  same reason the other surviving suspects are.
+
+  Note what that does to the boundary evidence. The original framing put the trigger at
+  `idxCapacity = min(maxContext, budget + r − 1) = 2051`; the out-of-bounds threshold for the same
+  runs is `maxContext/2 = 2048`. **The two are three positions apart**, and the truncated probes are
+  equally consistent with both: 2065 tokens is 17 rows past either threshold and reproduced, 2511 is
+  463 rows past and diverged. That evidence never separated them because both stories predict the same
+  ordering of the two probes.
+
+  **Pinned by a test.** `QSAIndexerTests/chunkFormPostsUseAbsolutePositions` drives the chunk form with
+  the engine's own argument shape — a chunk starting at position 8 that pools blocks 2 and 3. Before the
+  fix it reports `timeline slot 8 [0] = 0.0 but the chunk's post for that position stored nothing
+  there` (the key went to slot 16) and `chunk-form pool relErr=1.0` (the pool read zeros); after it,
+  all eleven indexer tests pass. The `kRawOffset` parameter is **removed** rather than defaulted — a
+  chunk has no reason to want a base, and an unused parameter that double-shifts is a trap, not an
+  option.
+
+  **The experiment.** `--max-context 4096`, chunk 128, the same 2940-token prompt, the configuration
+  that had diverged in every pair tried before: **four runs in two pairs, at 361.64 / 359.14 s and
+  360.26 / 358.88 s of prefill, now agree bit-for-bit** — 0 of 248,320 logits differ, all 1,693,440
+  row hashes are identical within each pair, and all four dumps carry the same digest
+  (`5a49bf89320002a1`). The pre-fix pair at the same durations differed in 247,731 of 248,320. Two
+  agreements at a duration where the old code never reproduced is not a proof — the phenomenon was
+  probabilistic, and this file's own history has an uncontrolled set of four pre-fix runs of which two
+  matched — but it is the first evidence this hunt has produced that the divergence is *removable*
+  rather than merely re-describable.
+
+  **What this does not settle.** The `FQ_QSA_OFF` pair at 4606 tokens/359.6 s diverged with **no
+  indexer at all**, so that code path cannot be its cause — either a second mechanism remains, or that
+  result is measuring something else again. And this finding says nothing about the ranking kernels
+  themselves: the 720,000-dispatch fuzz bound stands, and the two landings at the attention's own
+  output (`core` differing with `idxcells` equal) are still unexplained by a mis-stored key.
 - **Final disposition:** open, with **both earlier attributions withdrawn** — the chunk-size reading
   and the ranking-path isolation were each refuted by a control of their own. What is left: the
   instrument, the negative on the ranking's *sampled selections*, the two refutations, and duration as

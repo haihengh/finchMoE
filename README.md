@@ -502,11 +502,13 @@ only, consistent with the engine being text-only.
   validated envelope beyond the 16 GB loopback single-model setup. Quality
   itself is now measured on both installs (EvalPlus, above) rather than
   inferred.
-- Two defects are localized but open, both recorded in
-  [the optimization plan](docs/OPTIMIZATION_PLAN.md): long prefills
-  (past 2,051 tokens) are not bit-reproducible, with the divergence narrowed
-  to the QSA scoring and radix select on bit-identical pooled inputs; and the
-  streaming path reaches well under its measured drive ceiling.
+- Long prefills past 2,051 tokens used to be non-reproducible run to run: the
+  indexer's prefill store wrote every key at twice its position, and past half
+  the context length past the end of its own buffer. That store is fixed and
+  pinned by a test, and the configuration that diverged every time now
+  reproduces bit-for-bit; one divergence seen with the indexer disabled is
+  still unexplained. Recorded with the streaming path's remaining read deficit
+  in [the optimization plan](docs/OPTIMIZATION_PLAN.md).
 - Build iPhone and iPad apps, then measure inference speed and memory on
   mobile hardware.
 

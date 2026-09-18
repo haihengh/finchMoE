@@ -510,6 +510,19 @@ tokenizer maps `qwen4_exp` into the shared `.qwen3_6` family. Tests:
      (0.05141066 → 4.9e-3, so it is now held at `tolerance` — 0.010184287,
      tighter than the 0.06 ceiling it had), and only `2|recState` moved the
      other way (0.009862052 → 0.013246425).
+   * **One more bug from this commit, found 2026-09-18** ([KV-15](experiments/summaries/05-attention-and-kv-cache.md#kv-15)'s
+     sixth pass): the chunk form's `encodeQKPost` call passed both a
+     `kRawOffset` binding *and* an absolute `pos`, and the kernel stores at
+     `k_raw + pos·idxDim` — so every prefill key landed at `2·pos`. Every block
+     pooled during a multi-chunk prefill was therefore the mean of the wrong
+     cells (a selection that is wrong but plausible), and past `maxContext/2`
+     the store left the timeline buffer entirely, which for the 2940-token runs
+     at 4k context wrote up to 456 KB past a 1 MB buffer per full layer. The
+     toy geometries never reach half their context and the tier-2 logit cosine
+     above cannot see a wrong-but-plausible selection, which is why this item's
+     measurements were green throughout. Fixed — the parameter is gone rather
+     than defaulted — and pinned by
+     `QSAIndexerTests/chunkFormPostsUseAbsolutePositions`.
    * **The toy's first greedy token is `<|im_end|>`**, so the CLI run ends
      `stop=eos new=1tok` with an empty stdout delta (a special token has no
      detokenized text). The smoke therefore asserts on the stderr footer

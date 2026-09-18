@@ -146,6 +146,89 @@ import FinchMoEValidationSupport
         }
     }
 
+    /// The chunk form of the same store: a prefill chunk hands the kernel a
+    /// chunk-local projection buffer (`qkOffset` by row) and a timeline the
+    /// chunk only partly fills (`kRaw` is the layer's persistent buffer, and
+    /// `pos` is the token's *absolute* position). The store must still land at
+    /// slot `pos` — the pool kernel indexes cells absolutely, and a decode
+    /// step later reuses the same slots — so a chunk's posts and a chunk's
+    /// pools have to agree with the positions they name, not with the chunk's
+    /// own origin.
+    @Test("chunk-form posts store each key at its absolute position, and the chunk's pools read them back")
+    func chunkFormPostsUseAbsolutePositions() throws {
+        let nHeads = 4, idxDim = 128, nRot = 64, r = 4
+        let base = 8          // the chunk starts inside block 2, so pos != row
+        let T = 8             // two complete blocks (2 and 3)
+        var rng = SeedTree(0x9A1).key("idx-chunk-post")
+        let ctx = try MetalContext()
+        let kernel = try QSAIndexer(context: ctx)
+
+        // One row per token, chunk-local — the shape `qwen38IdxQKProj` has.
+        let projDim = (nHeads + 1) * idxDim
+        let qk = Self.fp16(&rng, T * projDim, -1.0, 1.0)
+        let gamma = Self.bf16(&rng, idxDim, 0.5, 1.5)
+        let nCells = base + T
+
+        guard let qkBuf = Fp16Buffer.make(ctx.device, halves: qk),
+              let gBuf = Self.bf16Buffer(ctx.device, gamma),
+              let qOutBuf = Fp16Buffer.make(ctx.device, count: T * nHeads * idxDim),
+              let kBuf = Fp16Buffer.make(ctx.device, count: nCells * idxDim),
+              let pBuf = Fp16Buffer.make(ctx.device, count: (nCells / r) * idxDim) else {
+            Issue.record("alloc failed"); return
+        }
+
+        let cb = ctx.queue.makeCommandBuffer()!
+        for row in 0..<T {
+            let pos = base + row
+            kernel.encodeQKPost(commandBuffer: cb,
+                                qk: qkBuf, qkOffset: row * projDim * MemoryLayout<Float16>.stride,
+                                qGamma: gBuf,
+                                qOut: qOutBuf,
+                                qOutOffset: row * nHeads * idxDim * MemoryLayout<Float16>.stride,
+                                kRaw: kBuf,
+                                pos: UInt32(pos), nHeads: UInt32(nHeads),
+                                idxDim: UInt32(idxDim), nRot: UInt32(nRot),
+                                theta: Self.theta, eps: Self.eps)
+        }
+        kernel.encodeBlockPoolNormRope(commandBuffer: cb, kRaw: kBuf, kGamma: gBuf,
+                                       pooled: pBuf, firstBlock: UInt32(base / r),
+                                       blockCount: UInt32(T / r), r: UInt32(r),
+                                       idxDim: UInt32(idxDim), nRot: UInt32(nRot),
+                                       theta: Self.theta, eps: Self.eps)
+        cb.commit(); cb.waitUntilCompleted()
+
+        // The timeline the reference pools from: each row's key head verbatim
+        // at its own absolute slot, and nothing anywhere else.
+        var rawRef = [Float](repeating: 0, count: nCells * idxDim)
+        for row in 0..<T {
+            let pos = base + row
+            for i in 0..<idxDim {
+                rawRef[pos * idxDim + i] = Float(qk[row * projDim + nHeads * idxDim + i])
+            }
+        }
+        let stored = Fp16Buffer.read(kBuf, count: nCells * idxDim)
+        let expected = rawRef.map { Float(Float16($0)) }
+        for i in 0..<(nCells * idxDim) where stored[i] != expected[i] {
+            Issue.record("timeline slot \(i / idxDim) [\(i % idxDim)] = \(stored[i]) but the chunk's post for that position stored nothing there, so the posts are not using absolute positions")
+            break
+        }
+
+        // …and the chunk's own pools must be the mean of those cells.
+        var pooledRef: [Float] = []
+        for b in (base / r)..<(base / r + T / r) {
+            pooledRef += QSAIndexerRef.meanPool(Array((b * r)..<((b + 1) * r)),
+                                                raw: rawRef, idxDim: idxDim)
+        }
+        let ref = QSAIndexerRef.normRope(
+            pooledRef, perVector: T / r, gamma: gamma,
+            pos: ((base / r)..<(base / r + T / r)).map { $0 * r },
+            dim: idxDim, eps: Self.eps, nRot: nRot, theta: Self.theta)
+        let pooled = Fp16Buffer.read(pBuf, count: (nCells / r) * idxDim)
+        let window = Array(pooled[((base / r) * idxDim)..<(((base / r) + T / r) * idxDim)])
+        let relErr = RelError.compute(actual: window, reference: ref)
+        #expect(relErr < Tolerance.fp16Reduction, "chunk-form pool relErr=\(relErr)")
+    }
+
     @Test("indexer query rope tracks the token position, not a fixed one")
     func qPost_ropeTracksPosition() throws {
         let nHeads = 4, idxDim = 128, nRot = 64, pos = 13

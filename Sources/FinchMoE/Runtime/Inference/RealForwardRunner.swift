@@ -4465,7 +4465,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         qOut: scratch.qwen38IdxQ,
                         qOutOffset: row * nHeads * idxDim * MemoryLayout<Float16>.stride,
                         kRaw: lay.rawKeys,
-                        kRawOffset: pos * idxDim * MemoryLayout<Float16>.stride,
                         pos: UInt32(pos),
                         nHeads: UInt32(nHeads),
                         idxDim: UInt32(idxDim),
