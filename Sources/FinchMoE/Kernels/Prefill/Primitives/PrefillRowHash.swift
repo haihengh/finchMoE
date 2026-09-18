@@ -29,7 +29,7 @@ final class PrefillRowHash {
     /// `qkv` with none in `idxcells` puts the divergence in the indexer, and one
     /// in `in` at layer L puts it inside layer L-1.
     static let stageNames = ["in", "attn", "post", "qkv", "idxcells", "core", "oproj",
-                             "krot", "vrot"]
+                             "krot", "vrot", "idxq", "idxk"]
     static var stageCount: Int { stageNames.count }
 
     private let pso: MTLComputePipelineState

@@ -4471,6 +4471,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         theta: st.theta,
                         eps: st.eps)
                 }
+                // The indexer's own q and its raw key timeline, after the
+                // projection and the layer norms. The keys are the interesting
+                // one: they live in a persistent per-layer timeline that this
+                // chunk writes in place and a later chunk pools in completed
+                // blocks, so a difference here is the indexer moving rather than
+                // anything the attention or the planes did.
+                encodeRowHash(scratch.qwen38IdxQ, layer: L, stage: 9,
+                              rowCount: t, rowBase: startPosition,
+                              rowStrideBytes: nHeads * idxDim
+                                  * MemoryLayout<Float16>.stride,
+                              into: cb)
+                encodeRowHash(lay.rawKeys, layer: L, stage: 10,
+                              rowCount: t, rowBase: startPosition,
+                              rowStrideBytes: idxDim * MemoryLayout<Float16>.stride,
+                              into: cb)
                 // Blocks whose every cell this chunk has written. `bFirst` is
                 // the block holding `startPosition`, which an earlier chunk
                 // may already have partly filled; `endPosition / r` blocks are
