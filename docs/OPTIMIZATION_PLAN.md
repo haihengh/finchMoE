@@ -43,6 +43,12 @@ Swept on the quantized-PLE 125B install, greedy T=0, 32 generated tokens,
 | long-synthesis (2940) | 128 | 343.84 | 8.6 | 645.2 GB | 4.3 GB |
 | | 1024 | **182.39** | **16.1** | **144.1 GB** | 4.8 GB |
 
+*(Historical, on the prefill seconds only: this table was measured before the GDN
+projection kernel was batched on 2026-09-17. The same prompts are faster now — the
+426-token case went 29.17 s -> 20.78 s — so read the seconds as the shape of the
+chunk-size effect rather than as current throughput. The byte columns are
+unaffected, and they are the point this table makes.)*
+
 **1.89x prefill on the 2900-token prompt, with 4.5x fewer expert bytes read** —
 well past the 10-25% this item predicted, because the amortization is the whole
 story: the expert read volume, not GEMM setup, is what the chunk size divides.
@@ -80,14 +86,74 @@ is unaffected, and the cost is ~0.3 GB more peak on a 2900-token prompt.
   All three produced the same text and the same 9 output tokens. On a warm page cache the receipt path measures ~2.2 s; the spread across runs is the file cache, not the policy. **The saving is the hash pass only** — the eager `manifest.json` + `model_weights.bin` + `packed_experts/layout.json` hash runs in *both* modes and is not part of it.
 - **Validate**: done — `ModelLoaderTests+IntegrityPreference.swift` discriminates the two paths by flipping a byte in a layer file (a size-preserving change only SHA can catch, so a suppressed hash and a wrong stored policy each fail a different assertion); the CLI smoke tests cover the default end-to-end plus the stderr warning for an unusable receipt; the server logs `model integrity ...` at boot and carries `integrity=...` on the ready line; the app persists the choice and shows the resolved outcome in its diagnostics pane.
 
-### 1.3 [MEDIUM impact, MEDIUM risk] Parallelize expert prefetch across prefill tiles further
+### 1.3 [DONE 2026-09-17 — measured FLAT, and the reason is now known] Parallelize expert prefetch across prefill tiles further
+
+#### 1.3 result: the depth was 1, not 2, and raising it to 7 changes nothing
+
+The item asked to "confirm tile depth is tunable, and try issuing the read for tile N+2". It was not
+tunable — `PrefillRoutedTileSchedulerConfig` hardcoded `maxPendingDepth: 1, tileExperts: 8` — so
+the first step was making the pair a runtime setting (`prefillTileDepth` / `prefillTileExperts`,
+`--prefill-tile-depth` / `--prefill-tile-experts`, slot budget still enforced: depth 7 x 8 experts is
+refused at 16 slots with the count it needs). Then the sweep, 5 arms x 2 rounds in reverse order,
+426-token prompt at chunk 512:
+
+| arm | slots | depth | tile | prefill |
+| --- | --- | --- | --- | --- |
+| baseline | 16 | 1 | 8 | 29.30 / 28.87 s |
+| deep | 32 | 3 | 8 | 29.10 / 28.84 s |
+| deeper, narrower | 32 | 7 | 4 | 29.05 / 29.01 s |
+| slots only | 32 | 1 | 8 | 28.95 / 28.87 s |
+| narrow | 16 | 3 | 4 | 28.99 / 28.93 s |
+
+**A 1.6% spread across a 4x change in tiles in flight, identical bytes, and bit-identical logits on
+every arm.** Back-to-back repeats of one arm are flat too (28.98/28.98/29.01), so the page cache is
+not hiding it either.
+
+Why it could not have worked, measured in the same session: the reads are **36% of the prefill and
+already at the drive's ceiling** when they run (10.59 s of 29.03 s, 33.11 GB at 3.13 GB/s, 6.6 reads
+in flight against decode's 5.59). More lookahead cannot extend windows that are already full — the
+drive is idle 64% of the prefill as a *consequence* of the reads finishing early, not as a shortage
+of outstanding requests. See [PF-18](experiments/summaries/06-prefill.md#pf-18).
+
+The byte-identity check this item asked for passed trivially: the change is scheduling-only and the
+logits came back identical on every arm.
+
+### 1.3 (original item, kept for the record)
 - **Evidence**: `SYSTEM_DESIGN.md` "Prefill" section: the runtime already "may fetch the next tile while GPU work for the current tile remains queued, with both tiles fitting in the 16-slot cache" and streams "in tiles of at most eight." `docs/OPTIMIZATION_JOURNEY.md` shows fine-grained overlap failed for decode (regressed 4.799→4.648 tok/s) specifically because per-read launches broke synchronization — but that experiment was against single-token decode granularity, not the larger multi-row prefill tiles where read latency can be hidden behind a bigger GEMM.
 - **Action**: audit `PrefillRoutedTileScheduler.swift` (67 lines — small, worth a full read before changing) to confirm tile depth is tunable, and try issuing the *read* for tile N+2 while tile N computes and tile N+1's read is in flight (currently 2-deep per doc; test 3-deep bounded by slot count 16 ÷ 8-per-tile = 2 tiles max resident, so this requires either more slots (`[MEMORY RISK]`, bounded by `allowedExpertCacheSlots` up to 32) or smaller tiles with more overlap depth at the same slot budget).
 - **Expected impact**: 5–15% on prefill I/O-bound phases (this is prefill, so GEMM tends to dominate over I/O already per the journey doc — "not every strong isolated result still mattered to the whole prefill" is a real risk here).
 - **Risk**: medium — the decode-side lesson (finer overlap can regress) may generalize; must be measured end-to-end, not on the isolated I/O phase.
 - **Validate**: full prefill benchmark (README long-prompt protocol) plus output byte-identity check (no reordering of floating point should occur here — this is purely a scheduling change, not a math change).
 
-### 1.4 [LOW impact, LOW risk] Confirm 256-expert MoE prefill batching didn't inherit the Gemma diminishing-returns ceiling
+### 1.4 [DONE 2026-09-17 — the breakdown now exists for Qwen 3.8] Confirm 256-expert MoE prefill batching didn't inherit the Gemma diminishing-returns ceiling
+
+#### 1.4 result: the per-phase prefill breakdown, measured
+
+This item's ask was "profile a representative Qwen prefill chunk ... this number isn't in the docs
+for Qwen yet and should gate whether further MoE-kernel-only optimization is worth doing at all."
+It now exists, measured rather than traced, on the 125B install at 426 tokens and chunk 512
+(29.65 s of prefill, GPU time from the prefill-scoped counters):
+
+| phase | time | share |
+| --- | --- | --- |
+| GDN (linear attention) layers, 36 of 48 | 13.07 s | **44%** |
+| expert I/O | 10.68 s | 36% |
+| routed MoE | 6.19 s | 21% |
+| full attention, 12 of 48 | 0.92 s | 3% |
+
+GPU + I/O sums to 30.87 s against a 29.65 s wall, so the prefill is essentially serialized (~1 s of
+overlap). **The routed MoE this item asks about is 21% — not the dominant term, and smaller than the
+linear-attention stack**, so a MoE-kernel-only optimization has a fifth of the prefill at most to
+work with. The GDN stack was the larger target and has since been taken (items 1.5 and 2.3's
+re-pricing below). See [PF-18](experiments/summaries/06-prefill.md#pf-18).
+
+The item's underlying question — did Qwen inherit Gemma's "kernel got faster, e2e barely moved"
+pattern — got a sharper answer than a profile would have given: it happened again, in the same shape.
+Batching the int8 projections cut 82.6 s of projection work to 22.3 s on a 2940-token prefill, and
+the end-to-end prefill fell by 1.40x on 426 tokens. The gap between the kernel win (3.5x) and the
+end-to-end win (1.4x) is the serialization above, not a measurement artifact.
+
+### 1.4 (original item, kept for the record)
 - **Evidence**: `OPTIMIZATION_JOURNEY.md`: "Batched routed MoE reduced its kernel time by about 31%. End-to-end prefill improved by only about 2%" (Gemma, 128 experts). Qwen doubles the expert count per layer (256) and runs a router+MoE tail on **all 40 layers** vs Gemma's routed-MoE-on-30-layers-of-30 — so the routed-MoE fraction of prefill time is structurally larger for Qwen. Re-profile before assuming the old "kernel got faster, e2e barely moved" conclusion still holds.
 - **Action**: profile a representative Qwen prefill chunk with Instruments/Metal System Trace to get the current per-phase breakdown (attention vs router vs routed-MoE vs shared-expert vs epilogue) — this number isn't in the docs for Qwen yet and should gate whether further MoE-kernel-only optimization (1.3, act-tile reuse) is worth doing at all, per the journey doc's core lesson ("profile the whole token step first").
 - **Expected impact**: N/A (this is a measurement task, prerequisite to prioritizing 1.1/1.3/2.2 correctly).
@@ -95,6 +161,37 @@ is unaffected, and the cost is ~0.3 GB more peak on a 2900-token prompt.
 - **Validate**: N/A — this produces the baseline the other prefill items should be judged against.
 
 ---
+
+### 1.5 [DONE 2026-09-17 — 1.40x prefill on 3.8, shipped and on by default] The GDN projections were one int8 GEMV dispatch per token
+
+- **What it was**: the linear-attention projections are int8 on every shipped 3.8 install
+  (`quant.linearAttention.weightBits = 8`), and the prefill had no batched int8 kernel: it called
+  `encodeRepeatedInt8`, which issues **one GEMV dispatch per token**, each re-walking the whole
+  weight matrix. At T=426 that is 426 re-reads of 57 MB per layer and ~46,000 dispatches per chunk —
+  measured as 88 MB/s of effective weight traffic and ~150 GFLOP/s, which is 3.5% of this GPU's fp16
+  peak and not a bandwidth limit at all.
+- **What changed**: `prefill_dequant_int8_gemm_f16_block` takes a 64-row x 32-token tile, dequantizes
+  the weight tile once per K-step into threadgroup memory and reuses it across the token dimension,
+  with W, X and Y coalesced (`PrefillInt8Gemm`). Wired at qkv, z and out_proj; the small a/b pair
+  keeps the GEMV because its vectors interleave in one buffer with a doubled stride.
+- **Measured**: input projections 3.45x, output projection 3.95x, with the recurrent scan unmoved as
+  the control. 426 tokens: prefill **29.17 s -> 20.78 s (14.6 -> 20.5 prefill tok/s)**, decode
+  identical. 2940 tokens at chunk 512: **82.6 s -> 22.3 s** of projection work.
+- **Gate and status**: on by default since `4c2c9f7`, `FQ_INT8_GEMM=0` restores the GEMV. Gated by an
+  oracle against the GEMV's own arithmetic and EvalPlus HumanEval at **0.951 base / 0.921 plus against
+  0.945 / 0.909** for the same install without it.
+- **Two things it cost to learn**: the tile must be stored **fp32**, not half (a dequantized weight
+  reaches ~120, where fp16 carries 0.03 — 0.8% of a small output — and the GEMV keeps fp32
+  registers, so half would have made prefill less accurate than decode); and hand-vectorizing the
+  inner loop's shared loads is a **measured no-op**, so the kernel is not limited by its load ratio.
+  See [PF-18](experiments/summaries/06-prefill.md#pf-18).
+- **Remaining headroom**: the projections now run at ~537 GFLOP/s, still compute-bound on something
+  other than weight traffic. An MPP tensor-ops int8 path is the larger prize and the larger job.
+- **Scope, so nobody assumes it is fixed everywhere**: the kernel is wired into the **3.8** prefill
+  body only. Qwen **3.6's** body calls the same `encodeRepeatedInt8` with the same per-token GEMV, and
+  its `FINCHMOE_GDN8=1` tier uses int8 GDN weights, so that tier carries the same cost and takes the
+  same fix — `PrefillInt8Gemm` is generic and needs the call-site wiring and an A/B, not a new kernel.
+  The 3.6 default tier is int4 GDN and is unaffected either way.
 
 ## 2. Decode speedup
 
@@ -319,7 +416,34 @@ is unaffected, and the cost is ~0.3 GB more peak on a 2900-token prompt.
 
   **Action 1 is done, not deferred**: the CB count is reported as `cbs` / `cbs/step` on every `--counters` line, so the prediction stays checkable at any slot count or install without re-instrumenting. **Recommendation: close this item.** Coalescing miss-tile CBs cannot recover a cost that measures at 0.27%, and the section's own risk note — that removing the early-committed shared-expert buffer could regress the overlap it exists to provide — argues against spending the risk budget on a 0.27% target. The one thing that would reopen it is a machine whose `io` window is far shorter than this one's, where a fixed CPU cost would be a larger share; on this box at this operating point it is not.
 
-### 2.3 [MEDIUM impact, LOW-MEDIUM risk] Fuse the GDN gate + recurrent-step epilogue further, or batch value-head dispatch
+### 2.3 [RE-PRICED 2026-09-17 — the fusion targets a 6% term; the projection path was the money] Fuse the GDN gate + recurrent-step epilogue further, or batch value-head dispatch
+
+#### 2.3 re-pricing: the GDN stack is 95% projections and 6% scan
+
+This item fuses a specific pair of GDN sub-stages and expected 3-8% decode. The sub-stages are now
+measurable — `FQ_GDN_SPLIT=1` commits each as its own command buffer without waiting, so the layer's
+existing wait completes them and the timestamps are readable without changing the run's sync pattern
+(its own overhead measured: 29.95 / 29.53 s off against 29.51 / 29.42 s on). On a 426-token prefill,
+whose four stages sum to 12.64 s against the unsplit GDN total of 13.15 s:
+
+| GDN sub-stage | time | per layer | share |
+| --- | --- | --- | --- |
+| input projections (qkv, z, gate) | 8.66 s | 241 ms | 69% |
+| output projection | 3.24 s | 90 ms | 26% |
+| chunked recurrent scan | 0.72 s | 20 ms | 6% |
+| conv1d + gated activation | 0.009 s | 0.2 ms | 0.07% |
+
+**So the two sub-stages this item fuses are 6% and 0.07% of the stack**, and the projection stages it
+does not touch are 95%. That is not a reason the fusion is wrong — it is a reason its ceiling is low,
+and the projection path turned out to be worth 82.6 s -> 22.3 s on a long prefill (item 1.5) instead
+of the 3-8% this item predicted for decode.
+
+**Two caveats, stated rather than glossed.** The split instruments the *prefill* body only, so these
+shares are prefill shares; the decode path has no GPU sub-stage split yet, and this item is a decode
+item. And the mechanism can be extended to decode — that is the remaining instrumentation step, not a
+re-run of the same measurement.
+
+### 2.3 (original item, kept for the record)
 - **Evidence**: `Metal/LinearAttn/gdn.metal` currently dispatches `gdn_conv_update`, `gdn_gate`/`gdn_gate_gemv`, `gdn_recurrent` (one threadgroup per value head — 32 threadgroups per GDN layer, 30 layers = 960 threadgroup dispatches per token just for the recurrent step, likely as separate kernel launches per layer given the per-layer state buffer indexing in `RealForwardRunner.swift:1658-1768`), and `gdn_rmsnorm_gated` as **separate kernel dispatches** per layer. Each GDN layer's recurrent-state read+write is only ~2 MiB (per `QWEN36_PORT.md`: "32 heads × 128 × 128 × 4B = 2MiB per GDN layer") — computationally trivial (O(V·D²) ≈ 524K fp32 ops/layer) but currently paying full per-kernel dispatch overhead (PSO bind, argument encode, barrier) for ~4 separate kernels × 30 layers = 120 dispatches/token, on data that's small enough to be dispatch-bound rather than compute- or bandwidth-bound.
 - **Action**: fuse `gdn_gate` (or `gdn_gate_gemv`) directly into `gdn_recurrent`'s prologue (both already run per-value-head in threadgroup-parallel form; the gate is a tiny elementwise op computed once and read by all threads in `gdn_recurrent`) to eliminate a barrier+kernel-launch round trip per layer. Similarly examine whether `gdn_rmsnorm_gated` can read directly from `gdn_recurrent`'s output buffer inside the same command encoder without an intervening dispatch boundary (Metal doesn't require separate CBs for sequential dispatches within one encoder — check whether these are currently issued as separate encoders unnecessarily).
 - **Expected impact**: 3-8% decode speedup — smaller than 2.1/2.2 because this is pure dispatch-overhead removal on already-tiny kernels, similar in kind to the "LM-head tiling" experiment in the journey doc that saved 1.1ms out of 167.7ms (inconclusive end-to-end) — flag as a **candidate, not a committed win**, exactly per that precedent.
@@ -484,7 +608,7 @@ Three consequences for the §3.2 proposal. **(a)** The quantizable surface is 10
   **Added 2026-09-13 (later) — `--hist-dump`, because percentiles are not a distribution.** The percentiles say where a distribution's edges are; they cannot say what it is made of, and three of the five fields are blind to a change confined to the middle. IO-21 needed the difference: the replay's per-read population is bimodal with its median in the empty valley between the modes, which makes p50 hop a whole bucket on a few points of mixture change while the mean moves 3%. `--hist-dump` prints every non-empty bucket as `[lower, upper)` with its count and share, and it is the instrument to reach for before quoting any p50 here. Two companions came with it: `tools/read-sweep/gpu_load.swift` (a Metal ring reader whose dose is set in **bytes per burst and burst length**, not a rate — the engine's 16.7 GB/s is compute-bound, so a flat-out read is a dose no engine run produces) and `mem_load.c` (the same bytes from CPUs, the specificity control). `gpu-contention.sh` interleaves any load program against an unloaded arm, alternating order. **Fixed 2026-09-14, after it produced a false null:** the flag set is now built per program (`mem_load` has no `--gbps` and had been exiting 2 on its first argument, so every "loaded" arm of the CPU control ran empty and read exactly like a real negative), and the harness now aborts if a loader dies during startup rather than measuring an arm with nothing in it. The dose is **calibrated, not commanded** — a burst that does not divide the ring leaves a sliver at the wrap, so 1297.6 and 2027.5 MiB/period both delivered 7.05 GB/s while 648.8 delivered 3.52. Rungs that divide the ring evenly span 0.86 → 13.80 GB/s, and the penalty is flat across them.
 
 - **What this decides**:
-  - **2.3 (GDN fusion) — reconsidered, and still not yet priced.** The first pass called this a no-go because the whole GDN split was 0.65 ms/step of *encode*. That reasoning was sound but empty on the GPU side, and the GPU side now answers the half that matters: GDN is 82% of `gpu_cb1` and 16.8% of the token, so the stack 2.3 targets is unambiguously where the time is. What is still missing is the split *within* GDN — the 1.718 ms/layer covers `gdn_proj`, `gdn_conv_gate`, `gdn_recurrent`, `gdn_rmsnorm_gated` and `gdn_o_proj` together, and 2.3 fuses a specific pair of them. Per-kernel GPU timestamps inside the GDN stack are the next instrumentation step, not a re-run of this one.
+  - **2.3 (GDN fusion) — priced 2026-09-17, and the answer is in the prefill split.** The first pass called this a no-go because the whole GDN split was 0.65 ms/step of *encode*. That reasoning was sound but empty on the GPU side, and the GPU side then answered the half that matters: GDN is 82% of `gpu_cb1` and 16.8% of the token, so the stack 2.3 targets is unambiguously where the time is. The split *within* GDN now exists — `FQ_GDN_SPLIT=1`, four command buffers per GDN layer in the prefill body — and it puts **95% of the stack in the projections** (8.66 s input + 3.24 s output of 12.64 s) against **6% in the chunked recurrent scan and 0.07% in the conv**. So 2.3's fusion is a 6% prize, and the projection path it does not touch is where the 82.6 s -> 22.3 s came from (item 1.5). **The one thing still missing is the decode-side split**: `FQ_GDN_SPLIT` covers the prefill body only, so these are prefill shares and 2.3 remains un-priced *for decode* specifically.
   - **3.4 (router GEMV) — unchanged, and now for a measured reason.** The router bucket is 0.20-0.31 ms/step of encode on both installs. It is not broken out on the GPU side at all, so the kernel question stays open — but the attention curve above says where the GPU headroom is, and it is not the router.
   - **2.2 (CB coalescing) — refuted, not merely unsized.** The first pass read `wait` = 121.05 ms/step as reachable overhead and made it 2.2's target. The corrected residue is 0.055 ms/CB: after both GPU figures are subtracted, per-buffer overhead is already an order of magnitude cheaper than a kernel dispatch. There is no three-figure pool of dispatch tax to reclaim, and the stand-alone rejections of ORCH-15 and ORCH-12 are not overturned by anything here.
   - **3.2 (int8 KV) — promoted by the attention curve.** The earlier note that a CPU encode bucket could not price a KV-format change was correct; the GPU split prices the *stack*, and the stack grows 2.4x per layer over 1.7K tokens of context while everything else in the layer stays flat. That curve is the case for 3.2, and it is measurable with the instrument now in place.

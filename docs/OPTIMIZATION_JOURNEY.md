@@ -218,6 +218,48 @@ final logits slightly. Better checks showed the differences were harmless.
 
 TensorOps is now the Apple10 path. Earlier GPUs keep tiled attention.
 
+## The prefill turned out to be projections
+
+For a long time the prefill had a number without a name: it streamed expert
+bytes well below what the drive could serve, and every guess about which part was
+slow was a guess, because nothing in the run attributed prefill time at all. The
+decode counters existed; the prefill recorded bytes and nothing else.
+
+Instrumenting it moved the question. Three things came out of it in order.
+
+The drive was not the problem. The reads occupy about a third of a prefill and,
+when they run, they run at the drive's ceiling — so the idle time is a
+consequence of the reads finishing early, not a shortage of overlap. Raising the
+tile pipeline's lookahead fourfold, which is the obvious response to an idle
+drive, changed the prefill by 1.6% and the tokens not at all.
+
+The linear-attention stack was. On a 426-token prefill of the 125B install it is
+44% of the time — more than the expert I/O, more than the routed experts, and
+4.7x a full-attention layer per layer.
+
+And inside it, the projections. Splitting the stack's four sub-stages showed 95%
+of it in two matrix stages and 6% in the chunked recurrent scan — the reverse of
+what a sequential scan's shape suggests, and the end of a fusion idea that had
+looked like the obvious next move.
+
+The projections were slow for a reason that a profile would have hidden: the
+linear-attention weights are int8, and the prefill had no batched int8 kernel, so
+it issued one GEMV dispatch per token, re-walking the weight matrix each time.
+Forty-six thousand dispatches per chunk, and 88 MB/s of effective weight traffic
+against a drive that serves 3,400. A tiled kernel that dequantizes the weight
+tile once and reuses it across the token dimension cut the projection stages by
+3.5x and 3.95x, and the prefill end to end from 29.17 to 20.78 seconds — with the
+recurrent scan unmoved as the control that the measurement was about what it
+claimed.
+
+The same shape as the earlier items appears here too: the kernel win was 3.5x, the
+end-to-end win 1.4x, because the prefill is essentially serialized — GPU plus I/O
+sums to the wall clock with about a second of overlap. And the same discipline was
+needed to ship it: the batched kernel reassociates a sum, so identity with the old
+path was never the bar. A numerical oracle against the old kernel's own arithmetic
+and a quality measurement (EvalPlus, 0.951 base / 0.921 plus against 0.945 /
+0.909) were.
+
 ## Sampling removed repeated vocabulary scans
 
 Sampling revealed an algorithmic problem rather than a slow kernel.

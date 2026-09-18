@@ -414,6 +414,38 @@ command buffer, no extra wait, and no change to commit order:
 | `gpu_routed` | the shared-expert and routed-expert tail, plus the early-committed hit-phase buffer |
 | `gpu_samples` | completed buffers that returned a real timestamp |
 
+**The prefill records the same three fields, and gets a `scope=prefill` line.**
+Its four buffers per layer — the layer's own forward, the shared expert, the routed
+tiles and the tail — are all committed *and waited*, so the timestamps were always
+available; only the decode path was reading them. That line is taken from the
+snapshot at the prefill/decode boundary, which is why its field names drop the
+`/step` suffix (`forwards` is still zero there, so every number is already a total)
+and why `cbs` on it is `totalPrefillCommandBuffers` rather than the decode count,
+which is zero by construction. The pairing is what turns `gpu_samples` against
+`cbs` into a coverage check. **`gpu_cb1_gdn` means something different while
+`FQ_GDN_SPLIT=1` is on**: the split moves the GDN work into four sub-stage buffers,
+so cb1 falls to the layer's post-GDN remainder (~260 ms against ~13,150 ms
+unsplit), and the stages are read against the unsplit total. Only the 3.8 prefill
+body is instrumented; a 3.6 or Gemma run reports zeros there, the same "not
+instrumented" signature its CPU buckets show.
+
+| Split field (`FQ_GDN_SPLIT=1`) | Span |
+| --- | --- |
+| `gpu_gdn_proj_ms/split` | the GDN input projections: qkv, z and the gate |
+| `gpu_gdn_conv_ms/split` | A_log/dt_bias gating and the conv1d |
+| `gpu_gdn_scan_ms/split` | the chunked recurrent scan and its gated RMSNorm |
+| `gpu_gdn_outproj_ms/split` | the GDN output projection |
+
+Those four are committed as separate command buffers **without waiting where they
+are committed** — only submission order matters, so the layer's one existing wait
+completes them all and the sync pattern, and so the overlap, is unchanged. The
+knob's own cost is measured rather than assumed: prefill wall is 29.95 / 29.53 s
+with it off against 29.51 / 29.42 s with it on. They sum to 95% of the unsplit
+`gpu_cb1_gdn`, the remainder being the seq mix and the plane combines after the
+GDN block. On the 125B they put 8.66 s of a 12.64 s GDN stack in the input
+projections, 3.24 s in the output projection, 0.72 s in the scan and 0.009 s in
+the conv — see `experiments/summaries/06-prefill.md` PF-18.
+
 `gpu_cb1_fullattn + gpu_cb1_gdn == gpu_cb1` by construction: both come from one
 `recordGpuTime` sample branched on the layer kind, so calling it twice -- which
 would also double `gpu_samples` -- is the only way to break the sum. As with the
