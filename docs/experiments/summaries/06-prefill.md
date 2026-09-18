@@ -466,6 +466,28 @@ failed the M2 long-row gate.
   512, two runs each: input projections 60.1 / 58.9 s -> **16.7 / 17.1 s**, output
   projection 22.5 / 22.1 s -> **5.6 / 5.5 s**. That is 82.6 s of projection work
   down to 22.3 s on a prefill whose total at that size is ~215 s.
+- **The quality gate, and the flip.** EvalPlus 0.3.1 HumanEval, the same
+  harness, protocol and install as the PLE arm, `model-id
+  finchmoe-qwen38-int8gemm`, greedy, 768-token cap: **base pass@1 0.951,
+  HumanEval+ 0.921**, against the same install's recorded **0.945 / 0.909**. One
+  more base problem and two more on the stricter suite — inside the
+  handful-of-flips band this project treats as noise, and in the improving
+  direction, so there is nothing to attribute. Generation took 5 h 24 min for
+  164 problems (~2 min each at the 768-token cap); the scoring pass had to be
+  re-run because memguard killed it at 7.2 GB with the server still resident,
+  and the generations survive in `results/humaneval/`, which is why the score
+  was recoverable at all.
+  **With that, the default flipped**: `int8ProjectionGemm` is on unless
+  `FQ_INT8_GEMM=0`, verified live rather than assumed — with no environment
+  variable the 426-token prefill measures 20.82 s of 2437 ms projections, and
+  with `FQ_INT8_GEMM=0` it returns to 28.98 s of 8315 ms.
+- **One caveat on what the gate measured.** The scored arm ran with
+  `FQ_GDN_SPLIT=1` alongside, because the sub-stage metrics were wanted in the
+  same pass — so strictly it is GEMM + split, while the shipping default has the
+  split off. The split moves command-buffer boundaries and no arithmetic, and it
+  is the *more* perturbed of the two configurations, so a pass there is not
+  weaker evidence; but it is a difference and it is recorded as one rather than
+  smoothed over.
 - **Where the target was not met.** The plan's bar was the projections reaching
   under 1.5 s; they reached 3.23 s (11.5 -> 3.23). Still ~537 GFLOP/s, so the
   kernel is now compute-bound on something other than weight traffic — larger

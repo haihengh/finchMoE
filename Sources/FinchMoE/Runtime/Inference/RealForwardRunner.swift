@@ -312,10 +312,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// `FQ_GDN_SPLIT=1`: commit the GDN sub-stages as separate command buffers
     /// so each reports its own GPU time. See `totalGpuGdnProjNanos`.
     private var gdnSubStageSplit = false
-    /// `FQ_INT8_GEMM=1`: batch the int8 projections the GDN layers spend their
-    /// time in, instead of re-walking the weight matrix once per token. See
-    /// `PrefillInt8Gemm`.
-    private var int8ProjectionGemm = false
+    /// Batch the int8 projections the GDN layers spend their time in, instead
+    /// of re-walking the weight matrix once per token. On by default;
+    /// `FQ_INT8_GEMM=0` restores the per-token GEMV. See `PrefillInt8Gemm`.
+    private var int8ProjectionGemm = true
     private var prefillInt8Gemm: PrefillInt8Gemm?
     /// The last prefill's row count, for the dump's shape.
     private var rowHashRowCount: Int = 0
@@ -829,8 +829,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // 64k. It is opt-in, and the dump reports the cost at startup.
             self.gdnSubStageSplit = ProcessInfo.processInfo
                 .environment["FQ_GDN_SPLIT"] == "1"
+            // On by default: the batched kernel replaces one GEMV dispatch per
+            // token with a tiled one that reuses the weight tile across the
+            // token dimension, worth 82.6 s -> 22.3 s of projection work on a
+            // 2940-token prefill. `FQ_INT8_GEMM=0` restores the per-token GEMV,
+            // which is also what a shape the tile cannot cover falls back to.
             self.int8ProjectionGemm = ProcessInfo.processInfo
-                .environment["FQ_INT8_GEMM"] == "1"
+                .environment["FQ_INT8_GEMM"] != "0"
             self.prefillInt8Gemm = int8ProjectionGemm
                 ? try PrefillInt8Gemm(context: ctx) : nil
             self.rowHashDumpPath = ProcessInfo.processInfo
