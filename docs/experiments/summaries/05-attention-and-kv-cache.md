@@ -406,6 +406,31 @@ failed the quality gate. It was rejected and removed.
   are two hazards or one upstream that neither pass has instrumented. **The gap is now specific: the
   indexer has its own q and k** (`index_qk_proj` into `qwen38IdxQ`/`qwen38IdxK`), and no stage hashes
   them. Hashing those is the next instrument, not another pair of prefill runs.
+- **Fourth pass: eleven stages, and it lands on the ranking.** Two more stages — the indexer's own
+  query (`qwen38IdxQ`) and its **raw key timeline** (`lay.rawKeys`, a persistent per-layer buffer this
+  chunk writes in place at the row's position and a later chunk pools in completed blocks) — separate
+  "the indexer's inputs moved" from "the selection moved". On a fresh diverging pair (2940 tokens,
+  chunk 128, 361.9 and 361.0 s, logits differing in 247,303 of 248,320):
+
+  | layer | in | attn | post | qkv | idxcells | core | oproj | krot | vrot | idxq | idxk |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | **3** | - | **837** | 837 | - | **837** | 837 | 837 | - | - | **-** | **-** |
+  | 7 | 875 | 876 | 876 | 875 | 791 | 876 | 876 | 875 | 875 | 875 | - |
+
+  At layer 3 the attention's q/k/v are identical, **and so are the indexer's query and its raw keys**,
+  while the cells differ. So the divergence is inside **pool → score → radix-select → cells-write**:
+  the QSA ranking's own kernels, on identical inputs.
+- **What that does and does not change.** It does not contradict the earlier refutation — a
+  selector-less pair still diverged, so the ranking is not *necessary* for the phenomenon. But it is
+  now a *sufficient* meeting point, with far better evidence than the `FQ_QSA_OFF` isolation had
+  before that. Combined with the first landing (dense attention output, row 1024, cells identical),
+  the honest reading is **at least two meeting points**: the ranking's pipeline and the attention's.
+  They share a shape — a reduction over a variable-length set, dispatched per row — and the ranking
+  version is the subsystem that already produced one UB bug
+  ([[metal-divergent-threadgroup-barrier]]: a barrier inside `if (simd_group == 0)` in the radix
+  select, which silently returned the wrong rank; found by reading, fixed).
+  The next stage to hash is between the two ends of this one: the pooled keys and the block scores,
+  which would separate the pool from the selection and put the radix select in or out.
 - **Prior art, now a weaker analogy:** [KV-14](#kv-14) was a prefill tiled-attention race whose
   exposure depended on the tiling. That is what the withdrawn reading looked like. The duration
   result moves this away from "a shared-memory reuse hazard in a specific kernel" and toward a race
