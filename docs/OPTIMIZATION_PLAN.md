@@ -187,11 +187,16 @@ end-to-end win (1.4x) is the serialization above, not a measurement artifact.
   See [PF-18](experiments/summaries/06-prefill.md#pf-18).
 - **Remaining headroom**: the projections now run at ~537 GFLOP/s, still compute-bound on something
   other than weight traffic. An MPP tensor-ops int8 path is the larger prize and the larger job.
-- **Scope, so nobody assumes it is fixed everywhere**: the kernel is wired into the **3.8** prefill
-  body only. Qwen **3.6's** body calls the same `encodeRepeatedInt8` with the same per-token GEMV, and
-  its `FINCHMOE_GDN8=1` tier uses int8 GDN weights, so that tier carries the same cost and takes the
-  same fix — `PrefillInt8Gemm` is generic and needs the call-site wiring and an A/B, not a new kernel.
-  The 3.6 default tier is int4 GDN and is unaffected either way.
+- **Scope, corrected**: the kernel was wired into the 3.8 body first, and an earlier version of this
+  note said 3.6 was unaffected because its GDN is int4. **That was wrong on the manifests**: both
+  on-disk 3.6 installs (`Qwen3.6-35B-A3B-4bit.finch` and `.fqturbo`) carry
+  `quant.linearAttention.weightBits = 8`, so 3.6's GDN is int8 on its *shipping* installs, and its
+  body called the same per-token `encodeRepeatedInt8`. Wired there too — qkv, z and out_proj; the a/b
+  pair keeps the GEMV on 3.6 as on 3.8, because it interleaves in one buffer with a doubled stride.
+  **Measured on the 4-bit install, 426 tokens, two interleaved rounds: prefill 13.44 / 13.46 s ->
+  9.37 / 9.36 s, 31.7 -> 45.4 prefill tok/s (1.44x)**, tokens identical, decode identical at 1.10
+  vs 1.11 s. So the fix was not a 3.8-only win; it is a prefill win on both models, and the earlier
+  note would have left 3.6's users waiting for it.
 
 ## 2. Decode speedup
 

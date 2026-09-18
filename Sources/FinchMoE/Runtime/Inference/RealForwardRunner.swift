@@ -2588,24 +2588,36 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 // int8 linear_attn projections: no batched int8 QMM exists,
                 // so each chunk token runs one decode-style int8 GEMV per
                 // projection (the 4-bit fused a|b block is not assembled).
-                encodeRepeatedInt8(commandBuffer: cb,
-                                   weights: qkvP,
-                                   x: scratch.normed,
-                                   y: scratch.qwenQKVProj,
-                                   rows: qkvDim,
-                                   columns: D,
-                                   tokenCount: t,
-                                   xStrideElements: D,
-                                   yStrideElements: qkvDim)
-                encodeRepeatedInt8(commandBuffer: cb,
-                                   weights: zP,
-                                   x: scratch.normed,
-                                   y: scratch.qwenZ,
-                                   rows: valueDim,
-                                   columns: D,
-                                   tokenCount: t,
-                                   xStrideElements: D,
-                                   yStrideElements: valueDim)
+                let qkvBatched = encodeInt8ProjectionBatched(
+                    commandBuffer: cb, weights: qkvP, x: scratch.normed,
+                    y: scratch.qwenQKVProj, rows: qkvDim, columns: D,
+                    tokenCount: t, yStrideElements: qkvDim)
+                if !qkvBatched {
+                    encodeRepeatedInt8(commandBuffer: cb,
+                                       weights: qkvP,
+                                       x: scratch.normed,
+                                       y: scratch.qwenQKVProj,
+                                       rows: qkvDim,
+                                       columns: D,
+                                       tokenCount: t,
+                                       xStrideElements: D,
+                                       yStrideElements: qkvDim)
+                }
+                let zBatched = encodeInt8ProjectionBatched(
+                    commandBuffer: cb, weights: zP, x: scratch.normed,
+                    y: scratch.qwenZ, rows: valueDim, columns: D,
+                    tokenCount: t, yStrideElements: valueDim)
+                if !zBatched {
+                    encodeRepeatedInt8(commandBuffer: cb,
+                                       weights: zP,
+                                       x: scratch.normed,
+                                       y: scratch.qwenZ,
+                                       rows: valueDim,
+                                       columns: D,
+                                       tokenCount: t,
+                                       xStrideElements: D,
+                                       yStrideElements: valueDim)
+                }
                 // a-rows then b-rows into the [T][2V] ab scratch the batched
                 // gate kernel reads (same layout the fused QMM wrote).
                 encodeRepeatedInt8(commandBuffer: cb,
@@ -2718,15 +2730,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                tokens: t,
                                                eps: eps)
             if linearAttnBits == 8 {
-                encodeRepeatedInt8(commandBuffer: cb,
-                                   weights: outP,
-                                   x: scratch.qwenRecOut,
-                                   y: scratch.h1,
-                                   rows: D,
-                                   columns: valueDim,
-                                   tokenCount: t,
-                                   xStrideElements: valueDim,
-                                   yStrideElements: D)
+                let outProjBatched = encodeInt8ProjectionBatched(
+                    commandBuffer: cb, weights: outP, x: scratch.qwenRecOut,
+                    y: scratch.h1, rows: D, columns: valueDim,
+                    tokenCount: t, yStrideElements: D)
+                if !outProjBatched {
+                    encodeRepeatedInt8(commandBuffer: cb,
+                                       weights: outP,
+                                       x: scratch.qwenRecOut,
+                                       y: scratch.h1,
+                                       rows: D,
+                                       columns: valueDim,
+                                       tokenCount: t,
+                                       xStrideElements: valueDim,
+                                       yStrideElements: D)
+                }
             } else {
                 encodeInt4Projection(commandBuffer: cb,
                                      family: .o,
