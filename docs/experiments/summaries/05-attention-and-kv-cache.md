@@ -501,6 +501,12 @@ failed the quality gate. It was rejected and removed.
   Second, **the landing row is not stable across maps**, which is what an intermittent mechanism should
   look like: the fifth pass landed at layer 15 row **2063** where these land at layer 3 row 1024.
 
+  **Reproduce it with `tools/qsaoff-hash-until.sh [pairs]`** — the loop that pairs the two runs, keeps
+  the prefill logits as the control, and prints this same map on the first pair that diverges. It uses
+  the prompt the pairs actually ran on, committed for the purpose as
+  `docs/benchmark-prompts/real-generation-v1/long-matched.json` (`long-synthesis` plus an appended
+  tail, 4606 tokens), so the arm is a command rather than a memory of one.
+
   A third reading stays live and is now instrumented: **the attention's inputs are not all hashed.**
   Stages 7/8 fingerprint the K/V *stage* scratch, and the cache the attention actually reads — the
   destination of `copyPrefillKVToCache` — was not fingerprinted at all, so a cache-side difference
