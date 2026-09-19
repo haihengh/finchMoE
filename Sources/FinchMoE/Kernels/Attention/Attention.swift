@@ -380,6 +380,18 @@ final class Attention {
         let partialGroups = geometry.partialThreadgroups
         p1.dispatchThreadgroups(MTLSize(width: partialGroups, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
+        // `FQ_ATTN_BARRIER=1`: an explicit buffer barrier between the split's
+        // two passes. These buffers are `makeBuffer`-allocated and therefore
+        // hazard-tracked, so by the documentation this is redundant — which is
+        // exactly why it is the experiment: the second long-prefill
+        // non-reproducibility shows one row of one layer's attention output
+        // differing with every input the map hashes bit-identical, and the one
+        // thing it cannot see is the scratch these two passes share across rows
+        // and layers. If the divergence stops under this barrier, the ordering
+        // was the mechanism and the tracking was not covering it.
+        if Self.explicitSplitBarrier {
+            p1.memoryBarrier(scope: .buffers)
+        }
         p1.endEncoding()
 
         guard let p2 = commandBuffer.makeComputeCommandEncoder() else { return }
@@ -401,6 +413,13 @@ final class Attention {
                                 threadsPerThreadgroup: MTLSize(width: combineTGWidth, height: 1, depth: 1))
         p2.endEncoding()
     }
+
+    /// Whether to put an explicit buffer barrier between the split-KV passes.
+    /// Diagnostic: `FQ_ATTN_BARRIER=1`. Off by default, because the scratch is
+    /// hazard-tracked and the barrier should be redundant — see the experiment
+    /// note at its use in `encodeSplit`.
+    static let explicitSplitBarrier =
+        ProcessInfo.processInfo.environment["FQ_ATTN_BARRIER"] == "1"
 
     /// `1 / sqrt(head_dim)` — the classic transformer scaling. Used as the
     /// default for non-Gemma callers (and for the existing tests that pre-date
