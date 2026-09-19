@@ -517,6 +517,56 @@ failed the quality gate. It was rejected and removed.
   Note also what the indexer-side evidence said about this: the fifth pass's landing at layer 15, row
   **2063**, is *not* a chunk boundary (2048 is) — consistent with the store bug being driven by the
   position it wrote to rather than by any tiling, and now measured rather than assumed.
+- **Eighth pass: contention catches it, and the K/V cache is clean, so the copy is out.** The
+  mechanism is a race, and waiting on a quiet box pays one hit in eleven valid pairs. Contention is
+  the cheaper lever, and it worked on the **first** pair: four CPU hammer threads (the harness's
+  `QSAOFF_BURNERS=4`), two runs at 312.7 / 313.6 s of prefill — the *same* durations as the quiet
+  pairs, so the burners did not slow the work, they only perturbed the schedule — and logits differing
+  in **185,754 of 248,320**. Fourteen stages this time, including the two added for exactly this
+  question, and the map reads:
+
+  | layer | in | attn | post | qkv | core | oproj | krot | vrot | **kcache** | **vcache** |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | **43** | - | **1** (row 4096) | **1** | - | **1** | **1** | - | - | **-** | **-** |
+  | 44 | 1 | 510 | 510 | - | - | - | - | - | - | - |
+
+  **Every K/V cache row is bit-identical** — zero differing rows across the whole dump — while the
+  attention's output differs at one row, 4096. That is the branch the two-stage instrumentation was
+  built for, and it resolves the way the earlier evidence could not: `copyPrefillKVToCache` and its
+  source are both out, and what the kernel read is what the map says it read. Layers 43-47 carry it
+  from row 4096 on (510 rows).
+
+  The landing row moved again — 4096 where the quiet pairs landed on 1024 and the indexer-on fifth
+  pass on 2063 — and 4096 is again the first row whose sequence length exceeds a multiple of 1024,
+  where `chunkLength = ceil(effLen/16)` steps 256 -> 257 so the last chunk stops being exactly full.
+  That is now three landings out of four on such a row, which is a pattern and not yet a mechanism: the
+  remaining landings need a hypothesis that predicts them.
+
+- **Ninth pass (audit): the split path's structure is clean, and one buffer in it is un-hashed.** With
+  the copy excluded, the audit went into `attention.encodeFull`'s split — `encodeSplit`, the two
+  partial kernels and `attention_decode_combine`. Reading found no data-dependent control flow: every
+  `threadgroup_barrier` sits at the same level for all threads (including the two inside
+  `block_reduce_sum`, which the p-loop calls once per cell), both partial kernels get their geometry
+  from kernel arguments, and the combine is a plain reduction with no barriers at all. The one
+  register-array bound, `kPerThread = ceil(kAttnMaxHeadDim / kAttnThreads) = 2` against
+  `headDim = 256` at a dispatch width of 256, holds with one iteration to spare — it is safe only
+  while the dispatch width stays `>= 128`, which is why the encoders' `min(threadsPerGroup,
+  pso.maxTotalThreadsPerThreadgroup)` matters.
+
+  Two structural facts came out of it. **Qwen 3.8 never uses the specialized split pipelines**:
+  `partialPipeline`/`combinePipeline` select on `(headDim, numQHeads, numKVHeads)` with 16 q-heads,
+  and the 3.8 full layer has 24, so every row takes the generic `psoPartial`/`psoCombine`. The
+  `numChunks == 16` specializations — and with them `FC_ATTN_NUM_CHUNKS` — are therefore dead for this
+  model, which is why the earlier "no stale geometry specialization" check passed, though for a
+  different reason than it claimed. Harmless today, and worth knowing that the two paths are untested
+  against the only model that could exercise them.
+
+  **And the one buffer in this path that no stage hashes is the split's own scratch**:
+  `mPartial`/`dPartial`/`oPartial`, one shared allocation per `Attention` instance, rewritten by every
+  row of every layer. Everything the kernel *reads* is fingerprinted; the accumulator it *writes and
+  re-reads* between its two passes is not. A combine that folded in a partial it should not have would
+  show exactly the measured signature — identical q/k/v, identical cache, one differing row, nothing
+  upstream to point at — so that is the hypothesis the next experiment tests.
 - **Prior art, now a weaker analogy:** [KV-14](#kv-14) was a prefill tiled-attention race whose
   exposure depended on the tiling. That is what the withdrawn reading looked like. The duration
   result moves this away from "a shared-memory reuse hazard in a specific kernel" and toward a race
