@@ -34,9 +34,16 @@ final class PrefillRowHash {
     /// scratch and the attention reads the cache: a difference that the copy or
     /// the cache introduced would otherwise look exactly like the attention
     /// kernel disagreeing with itself, on inputs the map reported as equal.
+    /// 14-15 are the split-KV accumulator (`m`, `d`) for the row being
+    /// attended: the values `attention_decode_combine` folds, hashed between
+    /// the split's two passes and its merge. They are not per-position data —
+    /// the scratch is one region every row rewrites — so the dump records what
+    /// the row *saw*, which is the question: a combine that folded a stale
+    /// partial differs here, and a kernel that disagrees with itself on
+    /// identical inputs does not.
     static let stageNames = ["in", "attn", "post", "qkv", "idxcells", "core", "oproj",
                              "krot", "vrot", "idxq", "idxk", "idxpool",
-                             "kcache", "vcache"]
+                             "kcache", "vcache", "mscratch", "dscratch"]
     static var stageCount: Int { stageNames.count }
 
     private let pso: MTLComputePipelineState

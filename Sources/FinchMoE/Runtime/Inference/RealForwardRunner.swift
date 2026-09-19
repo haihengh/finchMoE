@@ -4619,6 +4619,34 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         nCells: UInt32(idxCapacity),
                         scale: nil)   // rsqrt(head_dim)
                 }
+                // A0c: the split-KV accumulator this row's merge folded — the
+                // per-chunk `(m, d)` from `attention_decode_partial`, which the
+                // combine turns into its weights. It is the one buffer in this
+                // path no other stage covers, and the one whose content depends
+                // on every row that ran before this one: a combine that folded a
+                // stale partial shows up here, a kernel that disagrees with
+                // itself on identical inputs does not.
+                //
+                // Hashed immediately after this row's two passes, so what lands
+                // in the dump is what this row saw before the next row rewrites
+                // the same region.
+                if rowHash != nil {
+                    let scratch = attention.splitScratchForDiagnostics
+                    // The row's live region is `numQHeads * numChunks`
+                    // floats from the base — the kernels index it
+                    // `q_head * NC + chunk` — and `NC` is the same
+                    // `chunkCount` the encoder used for this row.
+                    let mdBytes = numQ * Attention.chunkCount(effLen: pos + 1)
+                        * MemoryLayout<Float>.stride
+                    encodeRowHash(scratch.m, layer: L, stage: 14,
+                                  rowCount: 1, rowBase: pos,
+                                  rowStrideBytes: mdBytes, rowBytes: mdBytes,
+                                  into: cb)
+                    encodeRowHash(scratch.d, layer: L, stage: 15,
+                                  rowCount: 1, rowBase: pos,
+                                  rowStrideBytes: mdBytes, rowBytes: mdBytes,
+                                  into: cb)
+                }
             }
 
             for row in 0..<t {
