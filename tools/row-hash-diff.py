@@ -28,7 +28,7 @@ import sys
 
 MAGIC = 0x5248_4831
 STAGES = ["in", "attn", "post", "qkv", "idxcells", "core", "oproj", "krot", "vrot",
-          "idxq", "idxk", "idxpool", "kcache", "vcache"]
+          "idxq", "idxk", "idxpool", "kcache", "vcache", "mscratch", "dscratch"]
 
 
 def load(path):
@@ -105,6 +105,12 @@ def main(argv):
         which = {3: "queries", 7: "keys", 8: "values"}[s0]
         where = (f"in layer {L0}'s {which} after the RoPE/norm epilogue "
                  f"(the layer's input agreed)")
+    elif s0 in (14, 15):
+        which = {14: "max", 15: "denominator"}[s0]
+        where = (f"in layer {L0}'s split-KV accumulator — the per-chunk {which} this "
+                 f"row's merge folded. Every input matched, so a difference here is a "
+                 f"partial the row should not have seen: a stale one, the scratch being "
+                 f"reused across rows before the merge read it")
     elif s0 in (12, 13):
         which = {12: "key", 13: "value"}[s0]
         where = (f"in layer {L0}'s {which} CACHE — the copy's destination, which the "

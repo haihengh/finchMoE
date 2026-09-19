@@ -414,6 +414,16 @@ final class Attention {
         p2.endEncoding()
     }
 
+    /// The split-KV accumulator scratch, for the prefill row-fingerprint
+    /// instrument only. These are the one set of buffers in the attention path
+    /// that no stage hashes — everything the split's kernels *read* is
+    /// fingerprinted, and this is what they write and re-read between their two
+    /// passes, shared by every row of every layer. Exposed so a divergence can
+    /// be asked whether it came from here rather than argued about.
+    var splitScratchForDiagnostics: (m: MTLBuffer, d: MTLBuffer, o: MTLBuffer) {
+        (mPartial, dPartial, oPartial)
+    }
+
     /// Whether to put an explicit buffer barrier between the split-KV passes.
     /// Diagnostic: `FQ_ATTN_BARRIER=1`. Off by default, because the scratch is
     /// hazard-tracked and the barrier should be redundant — see the experiment
