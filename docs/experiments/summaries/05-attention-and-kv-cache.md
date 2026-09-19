@@ -567,6 +567,43 @@ failed the quality gate. It was rejected and removed.
   re-reads* between its two passes is not. A combine that folded in a partial it should not have would
   show exactly the measured signature — identical q/k/v, identical cache, one differing row, nothing
   upstream to point at — so that is the hypothesis the next experiment tests.
+- **Tenth pass: the split's accumulator differs before its output does, and every landing is a chunk
+  start.** Stages 14/15 (`mscratch`, `dscratch`) hash the region the split's two passes hand each
+  other, per row, immediately after that row's passes. The first contended pair carried them and
+  diverged at once (247,676 of 248,320 logits; 847,906 of 3,537,408 hashes), and the map reads:
+
+  | layer | in | attn | post | qkv | core | oproj | krot | vrot | kcache | vcache | **mscratch** | **dscratch** |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | **7** | - | **1** (row 2560) | **1** | **1** | **1** | **1** | - | - | - | - | **1** | **1** |
+
+  **The accumulator differs at exactly the landing row, with every input to it identical.** The
+  queries, the rotated keys and values, and both K/V cache stages show no differing row at that layer;
+  the partial pass that computes `m`/`d` reads only those. So the divergence is visible *upstream* of
+  the attention output for the first time, and it is visible in the one buffer that had no fingerprint
+  until an hour before this run — which is also why five earlier passes could not see it.
+
+  Two readings, and they argue in opposite directions. **Either the region was read while it was being
+  written** — the hash catching the next row's partial pass mid-flight, in which case the ordering
+  between a row's merge and the next row's write is not enforced, and the merge itself can read a torn
+  region — **or the partial kernel computed different values from identical inputs**, which would be a
+  much stranger claim and would put the question inside the kernel's own execution rather than between
+  dispatches. The evidence cannot separate them yet: a hash that races sees the same tear a merge
+  would.
+
+  What it can do is name where to look. **Every landing this configuration has produced is the first
+  row of a prefill chunk**: 1024, 2048, 2560 and 4096, with the chunk at 512 — and 2560 is the one that
+  settles the pattern, because it is a chunk start (5 x 512) and *not* a multiple of 1024, which the
+  three earlier landings had made look like the rule. Rows inside a chunk are tightly sequenced; the
+  first row after a boundary is where a chunk's worth of prior work meets the next chunk's, and that is
+  where a scratch whose lifetime is "one row" but whose region is shared across rows, layers and chunk
+  boundaries would show a gap first. The single landing that is *not* a chunk start — the indexer-on
+  fifth pass at row 2063 — came from a configuration whose first mechanism was the store bug, and is
+  not a counterexample to this one.
+
+  The next experiment follows from that: make the accumulator's lifetime match its naming — either a
+  region per chunk, or an explicit ordering point at the chunk boundary — and see whether the
+  divergence survives. That is a smaller job than another hour of pairs, and unlike the barrier
+  experiment it is aimed at a buffer that has now been seen to differ.
 - **Prior art, now a weaker analogy:** [KV-14](#kv-14) was a prefill tiled-attention race whose
   exposure depended on the tiling. That is what the withdrawn reading looked like. The duration
   result moves this away from "a shared-memory reuse hazard in a specific kernel" and toward a race
