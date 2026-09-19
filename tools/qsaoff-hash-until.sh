@@ -46,6 +46,21 @@
 # The row to reason about is the *first* one the diff prints, not the layer's
 # total: from that row on, a causal pipeline carries the difference.
 #
+# CONTENTION
+#
+# The mechanism is a race, so the runs can be measured under deliberate load:
+# `QSAOFF_BURNERS=4 tools/qsaoff-hash-until.sh 6` spins up four CPU hammer
+# threads for the length of the loop. That is the lever the attention fuzz
+# used to clear the kernels in 720,000 dispatches (METH-14) — here for the
+# opposite reason: a race's window widens when the machine is busy, so
+# contention buys hit rate that waiting on a quiet box cannot.
+#
+# The burners are this harness's own responsibility, and it treats them that
+# way: explicit PIDs in an array, killed by a `trap` on every exit path, and
+# verified gone before it returns. The previous attempt at this shape sat in
+# `kill %1 %2 %3 %4`, the job table was empty by the time it ran, and two
+# threads spun at 100% for two and a half hours before anyone noticed.
+#
 # WHAT IT DOES
 #
 # Two runs of the same prompt and flags as the pairs recorded in KV-15 —
@@ -80,6 +95,7 @@
 set -u
 
 MAX=${1:-6}
+BURNER_COUNT=${QSAOFF_BURNERS:-0}
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO" || exit 2
 
@@ -91,6 +107,33 @@ OUT=/tmp/qsaoff_hash_until_last.txt
 [ -x "$CLI" ] || { echo "ABORT: build the release CLI first (swift build -c release)"; exit 2; }
 [ -f "$PROMPT" ] || { echo "ABORT: $PROMPT is missing"; exit 2; }
 [ -f "$MODEL/manifest.json" ] || { echo "ABORT: no manifest under $MODEL"; exit 2; }
+
+BURNER_PIDS=()
+burners_gone() {
+    for pid in ${BURNER_PIDS[@]+"${BURNER_PIDS[@]}"}; do
+        kill -0 "$pid" 2>/dev/null && return 1
+    done
+    return 0
+}
+stop_burners() {
+    for pid in ${BURNER_PIDS[@]+"${BURNER_PIDS[@]}"}; do
+        kill -KILL "$pid" 2>/dev/null
+    done
+    # A kill that was never delivered is the failure this guards against, so
+    # wait for the PIDs to actually disappear rather than assuming.
+    for _ in $(seq 10); do burners_gone && break; sleep 1; done
+    burners_gone || echo "WARNING: burners still alive: ${BURNER_PIDS[*]}" >&2
+}
+trap stop_burners EXIT INT TERM
+
+if [ "$BURNER_COUNT" -gt 0 ]; then
+    for _ in $(seq 1 "$BURNER_COUNT"); do
+        ( while :; do :; done ) &
+        BURNER_PIDS+=($!)
+    done
+    sleep 2
+    echo "contention: ${#BURNER_PIDS[@]} burners up (pids ${BURNER_PIDS[*]})"
+fi
 
 for pair in $(seq 1 "$MAX"); do
     echo "=== pair $pair of $MAX  $(date '+%H:%M:%S') ==="
