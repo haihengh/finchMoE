@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/finchmoe-logo.jpg" alt="FinchMoE logo" width="280">
+  <img src="docs/assets/finchmoe-app-icon.png" alt="FinchMoE logo" width="280">
 </p>
 
 <h1 align="center">FinchMoE</h1>
