@@ -16,6 +16,8 @@ public struct Args: Equatable, Sendable {
     public var counters: Bool
     public var expertCacheSlots: Int?
     public var prefillChunkTokens: Int
+    /// `--kv-int8`: store full-attention K/V as int8 plus per-64-block fp16 scales.
+    public var kvInt8: Bool
     /// Prefill routed-expert tile pipeline: how many tiles may be in flight,
     /// and how many experts a tile holds. Together they set how much of the
     /// prefill's I/O overlaps its compute; the pair must satisfy
@@ -39,6 +41,7 @@ public struct Args: Equatable, Sendable {
                 counters: Bool = false,
                 expertCacheSlots: Int? = nil,
                 prefillChunkTokens: Int = 512,
+                kvInt8: Bool = false,
                 prefillTileDepth: Int = 1,
                 prefillTileExperts: Int = 8,
                 verify: ModelIntegrityPreference = .automatic) {
@@ -57,6 +60,7 @@ public struct Args: Equatable, Sendable {
         self.counters = counters
         self.expertCacheSlots = expertCacheSlots
         self.prefillChunkTokens = prefillChunkTokens
+        self.kvInt8 = kvInt8
         self.prefillTileDepth = prefillTileDepth
         self.prefillTileExperts = prefillTileExperts
         self.verify = verify
@@ -131,6 +135,9 @@ extension Args {
                                 (default 16). Same knob the app and the server
                                 expose. A count below the model's top-k is
                                 rejected rather than left to trap.
+      --kv-int8
+            Store full-attention K/V as int8 with one fp16 scale per
+            64-element block. Experimental; Qwen 3.6 only.
       --prefill-chunk-tokens <n>
                                 Prompt-prefill chunk size, one of
                                 \(prefillChunkList) (default 512). Chunked
@@ -171,6 +178,7 @@ extension Args {
         var counters = false
         var expertCacheSlots: Int?
         var prefillChunkTokens = 512
+        var kvInt8 = false
         var prefillTileDepth = 1
         var prefillTileExperts = 8
         var verify = ModelIntegrityPreference.automatic
@@ -207,6 +215,12 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 prefillChunkTokens = parsed
+            case "--kv-int8":
+                // A bare flag, like --quiet: the value-taking cases advance the
+                // cursor inside takeValue, this one has to advance it itself or
+                // the loop re-reads the same argument forever.
+                kvInt8 = true
+                index += 1
             case "--prefill-tile-depth":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Int(value), parsed >= 1, parsed <= 64 else {

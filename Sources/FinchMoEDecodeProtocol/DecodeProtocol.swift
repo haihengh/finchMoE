@@ -7,18 +7,23 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
     public var prefillChunkTokens: Int
     public var rdadvisePolicy: String
     public var modelVerification: String
+    /// `fp16` or `int8`. Optional on the wire so a request written before this
+    /// field existed still decodes; absent means fp16, the shipping default.
+    public var kvStorageMode: String?
 
     public init(expertCacheSlots: Int = 16,
                 expertCachePolicy: String = "lfu",
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 512,
                 rdadvisePolicy: String = "off",
-                modelVerification: String = "full-sha256") {
+                modelVerification: String = "full-sha256",
+                kvStorageMode: String = "fp16") {
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
         self.prefillEnabled = prefillEnabled
         self.prefillChunkTokens = prefillChunkTokens
         self.rdadvisePolicy = rdadvisePolicy
+        self.kvStorageMode = kvStorageMode
         self.modelVerification = modelVerification
     }
 }

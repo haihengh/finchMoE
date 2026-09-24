@@ -339,7 +339,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             prefillEnabled: options.prefillEnabled,
             prefillChunkTokens: options.prefillChunkTokens,
             rdadvisePolicy: options.rdadvisePolicy.rawValue,
-            modelVerification: options.modelVerification.rawValue)
+            modelVerification: options.modelVerification.rawValue,
+            kvStorageMode: options.kvCacheMode.rawValue)
     }
 
     private static func removeLaunchJob(label: String) {

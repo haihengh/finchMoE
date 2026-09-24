@@ -784,7 +784,8 @@ public final class AppModel {
             prefillEnabled: runtimeOptions.prefillEnabled,
             modelVerification: runtimeOptions.modelVerification,
             newlineShortcut: newlineShortcut,
-            sentPromptBehavior: sentPromptBehavior)
+            sentPromptBehavior: sentPromptBehavior,
+            kvCacheMode: runtimeOptions.kvCacheMode)
         let modelDirectory = URL(fileURLWithPath: modelPathText, isDirectory: true)
         try? MacAppSettingsFileStore.save(
             settings,

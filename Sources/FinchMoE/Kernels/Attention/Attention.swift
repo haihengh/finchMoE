@@ -23,6 +23,17 @@ struct AttentionSplitGeometry: Sendable, Equatable {
 ///   - `v`   : same shape as `k`. Full-layer K and V must remain distinct after
 ///             their separate per-head normalization and RoPE paths.
 ///   - `out` : `[numQHeads, headDim]`
+/// The int8 K/V timelines an attention pass reads instead of fp16.
+///
+/// `values` are int8 rows and `scales` one fp16 scale per 64-element block,
+/// both laid out per token exactly as `KVCacheManager.int8Target` writes them.
+struct AttentionInt8KV {
+    let keyValues: MTLBuffer
+    let keyScales: MTLBuffer
+    let valueValues: MTLBuffer
+    let valueScales: MTLBuffer
+}
+
 final class Attention {
     private let ctx: MetalContext
     private let psoPartial: MTLComputePipelineState
@@ -211,12 +222,17 @@ final class Attention {
                            numQHeads: UInt32,
                            numKVHeads: UInt32,
                            seqLen: UInt32,
-                           scale: Float? = nil) {
+                           scale: Float? = nil,
+                           int8: AttentionInt8KV? = nil) {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads for GQA")
         precondition(headDim <= 512,
                      "head_dim must be <= 512 (kernel scratch is sized for the full-attn case)")
         precondition(seqLen > 0, "full attention requires at least one KV position")
+        if int8 != nil {
+            precondition(headDim % 64 == 0,
+                         "int8 KV storage needs a head_dim that is a whole number of 64-element blocks")
+        }
         let sc = scale ?? Self.defaultScale(headDim: headDim)
 
 
@@ -225,7 +241,7 @@ final class Attention {
                     v: v, vOffset: vOffset, out: out, outOffset: outOffset,
                     headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
                     seqLen: seqLen, kvStart: 0, scale: sc,
-                    preferGQASWA: false)
+                    preferGQASWA: false, int8: int8)
     }
 
     /// Full attention restricted to an explicit ascending list of K/V cells —
@@ -260,7 +276,8 @@ final class Attention {
                          numQHeads: UInt32,
                          numKVHeads: UInt32,
                          nCells: UInt32,
-                         scale: Float? = nil) {
+                         scale: Float? = nil,
+                         int8: AttentionInt8KV? = nil) {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads for GQA")
         precondition(headDim <= 512,
@@ -274,9 +291,16 @@ final class Attention {
 
         let nChunks = Self.chunkCount(effLen: Int(nCells))
         let chunkLen = (Int(nCells) + nChunks - 1) / nChunks
+        let cellsPSO = int8 == nil
+            ? psoCellsPartial
+            : Self.int8CellsPipeline(ctx,
+                                     headDim: headDim,
+                                     numQHeads: numQHeads,
+                                     numKVHeads: numKVHeads,
+                                     numChunks: nChunks)
 
         guard let p1 = commandBuffer.makeComputeCommandEncoder() else { return }
-        p1.setComputePipelineState(psoCellsPartial)
+        p1.setComputePipelineState(cellsPSO)
         p1.setBuffer(q,     offset: qOffset,     index: 0)
         p1.setBuffer(k,     offset: kOffset,     index: 1)
         p1.setBuffer(v,     offset: vOffset,     index: 2)
@@ -294,6 +318,10 @@ final class Attention {
         p1.setBytes(&cl,   length: MemoryLayout<UInt32>.size, index: 11)
         p1.setBytes(&nch,  length: MemoryLayout<UInt32>.size, index: 12)
         p1.setBytes(&scv,  length: MemoryLayout<Float>.size,  index: 13)
+        p1.setBuffer(int8?.keyValues ?? k, offset: 0, index: 14)
+        p1.setBuffer(int8?.keyScales ?? k, offset: 0, index: 15)
+        p1.setBuffer(int8?.valueValues ?? v, offset: 0, index: 16)
+        p1.setBuffer(int8?.valueScales ?? v, offset: 0, index: 17)
         let tgWidth = min(Self.threadsPerGroup,
                           Int(psoCellsPartial.maxTotalThreadsPerThreadgroup))
         p1.dispatchThreadgroups(
@@ -336,7 +364,8 @@ final class Attention {
                              headDim: UInt32, numQHeads: UInt32, numKVHeads: UInt32,
                              seqLen: UInt32, kvStart: UInt32, scale: Float,
                              preferGQASWA: Bool,
-                             ringCapacity: UInt32 = 0) {
+                             ringCapacity: UInt32 = 0,
+                             int8: AttentionInt8KV? = nil) {
         precondition(Int(numQHeads) <= Self.maxQHeads,
                      "numQHeads \(numQHeads) exceeds split-KV scratch (max \(Self.maxQHeads))")
         precondition(Int(headDim) <= Self.maxHeadDim,
@@ -351,12 +380,23 @@ final class Attention {
         let useSWAGQAPartial = geometry.useSWAGroupedPartial
         let nChunks = geometry.numChunks
         let chunkLen = geometry.chunkLength
-        let partialPSO = partialPipeline(headDim: headDim,
+        let partialPSO: MTLComputePipelineState
+        if int8 != nil {
+            precondition(ringCapacity == 0 && !useSWAGQAPartial,
+                         "int8 KV storage is only available on the dense full-attention path")
+            partialPSO = Self.int8PartialPipeline(ctx,
+                                                  headDim: headDim,
+                                                  numQHeads: numQHeads,
+                                                  numKVHeads: numKVHeads,
+                                                  numChunks: nChunks)
+        } else {
+            partialPSO = partialPipeline(headDim: headDim,
                                          numQHeads: numQHeads,
                                          numKVHeads: numKVHeads,
                                          numChunks: nChunks,
                                          useGQAPartial: useSWAGQAPartial,
                                          ringCapacity: ringCapacity)
+        }
         let tgWidth = min(Self.threadsPerGroup, Int(partialPSO.maxTotalThreadsPerThreadgroup))
 
         guard let p1 = commandBuffer.makeComputeCommandEncoder() else { return }
@@ -377,6 +417,12 @@ final class Attention {
         p1.setBytes(&cl,  length: MemoryLayout<UInt32>.size, index: 11)
         p1.setBytes(&nc,  length: MemoryLayout<UInt32>.size, index: 12)
         p1.setBytes(&sc,  length: MemoryLayout<Float>.size,  index: 13)
+        // Bound unconditionally: the fp16 specialization folds these reads
+        // away, but a declared parameter still has to name a buffer.
+        p1.setBuffer(int8?.keyValues ?? k, offset: 0, index: 14)
+        p1.setBuffer(int8?.keyScales ?? k, offset: 0, index: 15)
+        p1.setBuffer(int8?.valueValues ?? v, offset: 0, index: 16)
+        p1.setBuffer(int8?.valueScales ?? v, offset: 0, index: 17)
         let partialGroups = geometry.partialThreadgroups
         p1.dispatchThreadgroups(MTLSize(width: partialGroups, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
@@ -444,7 +490,8 @@ final class Attention {
                                             numQHeads: UInt32,
                                             numKVHeads: UInt32,
                                             numChunks: UInt32? = nil,
-                                            ringCapacity: UInt32? = nil) throws -> MTLComputePipelineState {
+                                            ringCapacity: UInt32? = nil,
+                                            int8: Bool = false) throws -> MTLComputePipelineState {
         var constants = [
             MetalFunctionConstant(index: 60, value: .uint32(headDim)),
             MetalFunctionConstant(index: 61, value: .uint32(numQHeads)),
@@ -457,7 +504,49 @@ final class Attention {
         if let ringCapacity {
             constants.append(MetalFunctionConstant(index: 69, value: .uint32(ringCapacity)))
         }
+        if int8 {
+            constants.append(MetalFunctionConstant(index: 74, value: .bool(true)))
+        }
         return try context.pipeline(name, constants: constants)
+    }
+
+    /// The int8 specializations of the two decode partials. Built on demand
+    /// (they are cached by `MetalContext`) because the chunk count varies with
+    /// context length.
+    private static func int8PartialPipeline(_ context: MetalContext,
+                                            headDim: UInt32,
+                                            numQHeads: UInt32,
+                                            numKVHeads: UInt32,
+                                            numChunks: Int) -> MTLComputePipelineState {
+        do {
+            return try specializedPipeline(context,
+                                           "attention_decode_partial",
+                                           headDim: headDim,
+                                           numQHeads: numQHeads,
+                                           numKVHeads: numKVHeads,
+                                           numChunks: UInt32(numChunks),
+                                           int8: true)
+        } catch {
+            preconditionFailure("failed to build int8 KV decode attention pipeline: \(error)")
+        }
+    }
+
+    private static func int8CellsPipeline(_ context: MetalContext,
+                                          headDim: UInt32,
+                                          numQHeads: UInt32,
+                                          numKVHeads: UInt32,
+                                          numChunks: Int) -> MTLComputePipelineState {
+        do {
+            return try specializedPipeline(context,
+                                           "attention_decode_cells_partial",
+                                           headDim: headDim,
+                                           numQHeads: numQHeads,
+                                           numKVHeads: numKVHeads,
+                                           numChunks: UInt32(numChunks),
+                                           int8: true)
+        } catch {
+            preconditionFailure("failed to build int8 KV cells attention pipeline: \(error)")
+        }
     }
 
     private func partialPipeline(headDim: UInt32,

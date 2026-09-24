@@ -169,13 +169,20 @@ import FinchMoEDecodeProtocol
             throw AppInferenceError.invalidRequest(
                 "unknown model verification \(options.modelVerification)")
         }
+        // Absent on the wire means fp16: the field post-dates the first requests.
+        let requestedKV = options.kvStorageMode ?? "fp16"
+        guard let kvCacheMode = AppKVCacheMode(rawValue: requestedKV) else {
+            throw AppInferenceError.invalidRequest(
+                "unknown KV storage mode \(requestedKV)")
+        }
         let resolved = AppRuntimeOptions(
             expertCacheSlots: options.expertCacheSlots,
             expertCachePolicy: cachePolicy,
             prefillEnabled: options.prefillEnabled,
             prefillChunkTokens: options.prefillChunkTokens,
             rdadvisePolicy: rdadvisePolicy,
-            modelVerification: modelVerification)
+            modelVerification: modelVerification,
+            kvCacheMode: kvCacheMode)
         try resolved.validate()
         return resolved
     }

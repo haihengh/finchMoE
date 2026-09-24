@@ -79,12 +79,21 @@ public enum AppKVCacheMode: String, CaseIterable, Codable, Sendable, Identifiabl
     public var label: String {
         switch self {
         case .fp16: return "FP16 (16-bit)"
-        case .int8: return "8-bit (Planned)"
+        case .int8: return "Int8 (block scale)"
         case .turbo4bit: return "Turbo 4-bit (Planned)"
         }
     }
 
-    public var isAvailable: Bool { self == .fp16 }
+    /// int8 ships; turbo-4bit is still a planned format with no kernel behind
+    /// it, so it stays disabled rather than pretending to load.
+    public var isAvailable: Bool { self == .fp16 || self == .int8 }
+
+    public var kvStorageMode: KVStorageMode {
+        switch self {
+        case .int8: return .int8
+        case .fp16, .turbo4bit: return .fp16
+        }
+    }
 }
 
 public struct AppRuntimeOptions: Equatable, Sendable {
@@ -97,19 +106,24 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public var prefillChunkTokens: Int
     public var rdadvisePolicy: AppRDAdvicePolicy
     public var modelVerification: AppModelVerification
+    /// How full-attention K/V bytes are stored. Load-time: changing it forces a
+    /// reload, which is why it lives in the runtime key as well.
+    public var kvCacheMode: AppKVCacheMode
 
     public init(expertCacheSlots: Int = 16,
                 expertCachePolicy: AppExpertCachePolicy = .lfu,
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 512,
                 rdadvisePolicy: AppRDAdvicePolicy = .off,
-                modelVerification: AppModelVerification = .automatic) {
+                modelVerification: AppModelVerification = .automatic,
+                kvCacheMode: AppKVCacheMode = .fp16) {
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
         self.prefillEnabled = prefillEnabled
         self.prefillChunkTokens = prefillChunkTokens
         self.rdadvisePolicy = rdadvisePolicy
         self.modelVerification = modelVerification
+        self.kvCacheMode = kvCacheMode
     }
 
     /// The one way persisted settings become runtime options. There are two
@@ -120,7 +134,8 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     init(persisted settings: MacAppSettings) {
         self.init(expertCacheSlots: settings.expertCacheSlots,
                   prefillEnabled: settings.prefillEnabled,
-                  modelVerification: settings.modelVerification)
+                  modelVerification: settings.modelVerification,
+                  kvCacheMode: settings.kvCacheMode)
     }
 
     public func validate() throws {
@@ -173,7 +188,8 @@ public struct AppRuntimeOptions: Equatable, Sendable {
             rdadvisePolicy: rdadvisePolicy.runtimeValue,
             prefillEnabled: prefillEnabled,
             prefillChunkTokens: prefillChunkTokens,
-            forceLogitsHead: forceLogitsHead)
+            forceLogitsHead: forceLogitsHead,
+            kvStorageMode: kvCacheMode.kvStorageMode)
     }
 }
 
@@ -184,6 +200,7 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
     public var expertCachePolicy: AppExpertCachePolicy
     public var rdadvisePolicy: AppRDAdvicePolicy
     public var modelVerification: AppModelVerification
+    public var kvCacheMode: AppKVCacheMode
     public var forceLogitsHead: Bool
 
     public init(modelDirectory: URL,
@@ -196,6 +213,7 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
         self.expertCachePolicy = options.expertCachePolicy
         self.rdadvisePolicy = options.rdadvisePolicy
         self.modelVerification = options.modelVerification
+        self.kvCacheMode = options.kvCacheMode
         self.forceLogitsHead = forceLogitsHead
     }
 }

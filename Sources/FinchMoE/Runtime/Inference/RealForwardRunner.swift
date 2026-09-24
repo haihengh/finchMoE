@@ -142,6 +142,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let model: Model
     private let ctx: MetalContext
     private let kv: KVCacheManager?
+    /// The int8 KV writer. Built only when the runtime asked for int8 storage,
+    /// so the fp16 path pays nothing for it.
+    private let kvQuantize: KVQuantize?
+    /// `FQ_KV_INT4_SIM` — the 4-bit KV precision probe. nil unless the
+    /// environment arms it.
+    private let kvPrecisionSim: KVPrecisionSimulation?
     private let cfg: ArchConfig
 
     // Kernels
@@ -548,7 +554,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      maxContext: maxContext,
                                      fp16RingEnabled: useFP16Ring,
                                      slidingWindow: cfg.slidingWindow,
-                                     maxPrefillChunkTokens: PrefillRuntimeConfig.maxChunkTokens)
+                                     maxPrefillChunkTokens: PrefillRuntimeConfig.maxChunkTokens,
+                                     storageMode: runtimeConfiguration.kvStorageMode)
+        if runtimeConfiguration.kvStorageMode == .int8 {
+            // Only the Qwen 3.6 prefill and decode bodies quantize on write and
+            // bind the int8 timelines on read. Anything else must fail here
+            // rather than read a timeline nobody writes.
+            precondition(model.config.isQwenHybrid && !model.config.isQwen3_8,
+                         "int8 KV storage is wired for the Qwen 3.6 body only")
+        }
+        self.kvQuantize = runtimeConfiguration.kvStorageMode == .int8
+            ? try KVQuantize(context: context)
+            : nil
+        self.kvPrecisionSim = try KVPrecisionSimulation.make(context: context)
 
         self.embedInt4 = try EmbedLookupInt4(context: context)
         self.rms       = try RMSNorm(context: context)
@@ -2355,6 +2373,53 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         blit.endEncoding()
     }
 
+    /// Quantizes `rows` staged fp16 K/V rows into an int8 timeline.
+    ///
+    /// The staged source is contiguous `[rows][kvDim]`; the destination is the
+    /// same shape at `startPosition`, one fp16 scale per 64 elements beside it.
+    /// Callers pass the staging buffer the projection GEMV and the norm/RoPE
+    /// epilogue already wrote, so no extra copy exists on the write path.
+    private func encodeInt8KVQuantize(_ cb: MTLCommandBuffer,
+                                      kv: KVCacheManager,
+                                      layer: Int,
+                                      startPosition: Int,
+                                      rows: Int,
+                                      keySource: MTLBuffer, keySourceOffset: Int,
+                                      valueSource: MTLBuffer, valueSourceOffset: Int) {
+        guard let kvQuantize, kv.usesInt8Storage(layer: layer), rows > 0 else { return }
+        let rowDim = kv.int8RowElementCount()
+        let keyTarget = kv.int8Target(layer: layer, isKey: true, position: startPosition)
+        kvQuantize.encode(commandBuffer: cb,
+                          source: keySource, sourceOffset: keySourceOffset,
+                          rows: rows,
+                          destination: keyTarget.values,
+                          destinationOffset: keyTarget.valuesOffset,
+                          scales: keyTarget.scales,
+                          scalesOffset: keyTarget.scalesOffset,
+                          rowDim: rowDim)
+        let valueTarget = kv.int8Target(layer: layer, isKey: false, position: startPosition)
+        kvQuantize.encode(commandBuffer: cb,
+                          source: valueSource, sourceOffset: valueSourceOffset,
+                          rows: rows,
+                          destination: valueTarget.values,
+                          destinationOffset: valueTarget.valuesOffset,
+                          scales: valueTarget.scales,
+                          scalesOffset: valueTarget.scalesOffset,
+                          rowDim: rowDim)
+    }
+
+    /// The int8 timelines a decode layer reads instead of fp16, or nil when the
+    /// layer is fp16-stored (which is every layer unless int8 was requested).
+    private func attentionInt8(_ kv: KVCacheManager?,
+                               layer: Int,
+                               validTokenCount: Int) -> AttentionInt8KV? {
+        guard let kv, kv.usesInt8Storage(layer: layer) else { return nil }
+        let key = kv.keyInt8View(layer: layer, validTokenCount: validTokenCount)
+        let value = kv.valueInt8View(layer: layer, validTokenCount: validTokenCount)
+        return AttentionInt8KV(keyValues: key.values, keyScales: key.scales,
+                               valueValues: value.values, valueScales: value.scales)
+    }
+
     private func copyPrefillKVToCache(commandBuffer: MTLCommandBuffer,
                                       kv: KVCacheManager,
                                       layer: Int,
@@ -2363,6 +2428,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                       keySource: MTLBuffer,
                                       valueSource: MTLBuffer,
                                       bytesPerToken: Int) throws {
+        precondition(!kv.usesInt8Storage(layer: layer),
+                     "an int8 KV layer must be quantized, not blitted")
         let capacity = kv.capacity(layer: layer)
         let physicalStart = startPosition % capacity
         let firstSpan = min(tokenCount, capacity - physicalStart)
@@ -2516,7 +2583,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     eps: eps)
             }
 
-            if let kv {
+            if let sim = kvPrecisionSim, !(kv?.usesInt8Storage(layer: L) ?? false) {
+                sim.simulate(commandBuffer: cb,
+                             rows: scratch.kStage, rowsOffset: 0,
+                             rowCount: t, rowDim: kvDim)
+                sim.simulate(commandBuffer: cb,
+                             rows: scratch.vStage, rowsOffset: 0,
+                             rowCount: t, rowDim: kvDim)
+            }
+
+            if let kv, kv.usesInt8Storage(layer: L) {
+                // The chunk's staged rows quantize straight into the timeline;
+                // the prefill attention below reads them back as int8.
+                encodeInt8KVQuantize(cb, kv: kv, layer: L,
+                                     startPosition: startPosition, rows: t,
+                                     keySource: scratch.kStage, keySourceOffset: 0,
+                                     valueSource: scratch.vStage, valueSourceOffset: 0)
+            } else if let kv {
                 let bytes = t * kvDim * MemoryLayout<Float16>.stride
                 try copyPrefillKVToCache(commandBuffer: cb,
                                          kv: kv,
@@ -2552,7 +2635,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     out: scratch.attentionOutput,
                     params: params,
                     kvRingCapacity: 0,
-                    path: prefillAttentionPath)
+                    path: prefillAttentionPath,
+                    int8: attentionInt8(kv, layer: L,
+                                        validTokenCount: startPosition + t))
             }
 
             for row in 0..<t {
@@ -3646,6 +3731,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     rotaryDim: rotaryDim,
                     eps: eps)
             }
+            let decodeInt8KV = attentionInt8(kv, layer: L,
+                                             validTokenCount: Int(seqLen))
             let gAttention: (MTLCommandBuffer) -> Void = { [self] cb in
                 attention.encodeFull(commandBuffer: cb,
                                      q: qScratch,
@@ -3660,7 +3747,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      numQHeads: numQ,
                                      numKVHeads: numKV,
                                      seqLen: seqLen,
-                                     scale: nil)   // rsqrt(head_dim) — Qwen's scaling
+                                     scale: nil,   // rsqrt(head_dim) — Qwen's scaling
+                                     int8: decodeInt8KV)
             }
             let gGate: (MTLCommandBuffer) -> Void = { [self] cb in
                 qwenFusions.encodeAttnOutputGate(commandBuffer: cb,
@@ -3681,6 +3769,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             totalCb1OtherNanos &+= lapseCb1(&cb1Cursor)
             gProj(cb)
             gEpilogue(cb)
+            // `FQ_KV_INT4_SIM`: round the staged K and V to 4 bits in place
+            // before anything reads them. Values only — the storage, the
+            // layout and every byte count stay fp16.
+            if let sim = kvPrecisionSim, !(kv?.usesInt8Storage(layer: L) ?? false) {
+                sim.simulate(commandBuffer: cb,
+                             rows: kSlot.buffer, rowsOffset: kSlot.offset,
+                             rowCount: 1, rowDim: Int(numKV * headDim))
+                sim.simulate(commandBuffer: cb,
+                             rows: vSlot.buffer, rowsOffset: vSlot.offset,
+                             rowCount: 1, rowDim: Int(numKV * headDim))
+            }
+            // The epilogue has normed and RoPE'd the staged row in place; this
+            // is where it enters the int8 timeline the attention below reads.
+            if let kv {
+                encodeInt8KVQuantize(cb, kv: kv, layer: L,
+                                     startPosition: position, rows: 1,
+                                     keySource: kSlot.buffer, keySourceOffset: kSlot.offset,
+                                     valueSource: vSlot.buffer, valueSourceOffset: vSlot.offset)
+            }
             gAttention(cb)
             gGate(cb)
             gOProj(cb)

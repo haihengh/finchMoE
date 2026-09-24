@@ -19,6 +19,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     // before the chat UI are moved onto these once, see `init(from:)`.
     var newlineShortcut: AppNewlineShortcut = .shiftReturn
     var sentPromptBehavior: AppSentPromptBehavior = .clear
+    /// Full-attention K/V storage. Load-time: the app's reload key carries it.
+    var kvCacheMode: AppKVCacheMode = .fp16
     /// True once a file has been through that move. Written as `true` by any
     /// settings this build saves, so the migration runs exactly once.
     var chatComposerMigrated: Bool = true
@@ -36,6 +38,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case modelVerification
         case newlineShortcut
         case sentPromptBehavior
+        case kvCacheMode
         case chatComposerMigrated
     }
 
@@ -51,6 +54,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          modelVerification: AppModelVerification = .automatic,
          newlineShortcut: AppNewlineShortcut = .shiftReturn,
          sentPromptBehavior: AppSentPromptBehavior = .clear,
+         kvCacheMode: AppKVCacheMode = .fp16,
          chatComposerMigrated: Bool = true) {
         self.version = version
         self.contextTokens = contextTokens
@@ -64,6 +68,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.modelVerification = modelVerification
         self.newlineShortcut = newlineShortcut
         self.sentPromptBehavior = sentPromptBehavior
+        self.kvCacheMode = kvCacheMode
         self.chatComposerMigrated = chatComposerMigrated
     }
 
@@ -94,6 +99,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         sentPromptBehavior = try container.decodeIfPresent(
             AppSentPromptBehavior.self,
             forKey: .sentPromptBehavior) ?? .clear
+        kvCacheMode = try container.decodeIfPresent(
+            AppKVCacheMode.self, forKey: .kvCacheMode) ?? .fp16
 
         // A file with no marker was written before the window became a chat:
         // Return was the newline key and the composer deliberately kept the

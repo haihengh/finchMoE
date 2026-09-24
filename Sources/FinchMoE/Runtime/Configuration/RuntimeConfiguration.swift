@@ -66,6 +66,12 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// runner exists. A test that must cover the selector-less path therefore
     /// has to inject it.
     public let qsaIndexerEnabled: Bool
+    /// How full-attention K/V bytes are stored. `fp16` is the shipping default;
+    /// `int8` keeps an fp16 scale per 64-element block beside an int8 row. Only
+    /// the Qwen 3.6 body quantizes on write and binds the int8 timelines on
+    /// read, and the runner refuses other models rather than read a timeline
+    /// nothing writes (`KVStorageMode` in `KVCacheManager.swift`).
+    public let kvStorageMode: KVStorageMode
 
     public init(expertCacheSlots: Int = 16,
                 expertCachePolicy: RuntimeExpertCachePolicy = .lfu,
@@ -76,7 +82,8 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 forceLogitsHead: Bool = false,
                 qsaIndexerEnabled: Bool = true,
                 prefillTileDepth: Int = 1,
-                prefillTileExperts: Int = 8) {
+                prefillTileExperts: Int = 8,
+                kvStorageMode: KVStorageMode = .fp16) {
         precondition(Self.allowedExpertCacheSlots.contains(expertCacheSlots),
                      "unsupported expert-cache slot count")
         precondition(Self.allowedPrefillChunkTokens.contains(prefillChunkTokens),
@@ -92,6 +99,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.prefillAttentionPath = prefillAttentionPath
         self.headPath = forceLogitsHead ? .logits : .fusedRows
         self.qsaIndexerEnabled = qsaIndexerEnabled
+        self.kvStorageMode = kvStorageMode
         self.prefillTileDepth = prefillTileDepth
         self.prefillTileExperts = prefillTileExperts
     }
