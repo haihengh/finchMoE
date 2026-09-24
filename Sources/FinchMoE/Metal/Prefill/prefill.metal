@@ -849,6 +849,9 @@ static inline float prefill_attention_tg_sum_single_bank(
     return result;
 }
 
+// `FC_ATTN_INT8_KV` (function constant 70) is declared in attention.metal,
+// which `MetalContext.compileShaderLibrary` concatenates ahead of this module;
+// the int8 K/V timelines are the same store the decode partials read.
 [[kernel, max_total_threads_per_threadgroup(512)]]
 kernel void attention_prefill_causal_tiled(
     device const half* Q [[buffer(0)]],
@@ -856,6 +859,10 @@ kernel void attention_prefill_causal_tiled(
     device const half* V [[buffer(2)]],
     device half* O [[buffer(3)]],
     constant PrefillAttentionParams& p [[buffer(4)]],
+    device const char* K8 [[buffer(5)]],
+    device const half* KScale [[buffer(6)]],
+    device const char* V8 [[buffer(7)]],
+    device const half* VScale [[buffer(8)]],
     uint3 tg [[threadgroup_position_in_grid]],
     uint3 tid [[thread_position_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],
@@ -879,6 +886,11 @@ kernel void attention_prefill_causal_tiled(
     }
     const uint last_exclusive = min(p.kvValidCount, abs_q + 1u);
 
+    const bool int8KV = is_function_constant_defined(FC_ATTN_INT8_KV)
+        && FC_ATTN_INT8_KV;
+    const uint blocksPerHead = p.headDim >> 6;
+    const uint scaleRowStride = p.numKVHeads * blocksPerHead;
+
     device const half* q_row = Q + t * p.qTokenStrideElements + qh * p.headDim;
     float row_max = -INFINITY;
     float row_sum = 0.0f;
@@ -887,8 +899,14 @@ kernel void attention_prefill_causal_tiled(
     for (uint key = first; key < last_exclusive; ++key) {
         const uint phys_key = prefill_kv_slot(key);
         device const half* k_row = K + phys_key * p.kvTokenStrideElements + kvh * p.headDim;
+        device const char* k_row8 = K8 + phys_key * p.kvTokenStrideElements + kvh * p.headDim;
+        device const half* k_scale = KScale + phys_key * scaleRowStride
+                                    + kvh * blocksPerHead;
         const float qv = owns ? float(q_row[d]) : 0.0f;
-        const float kv = owns ? float(k_row[d]) : 0.0f;
+        const float kv = owns
+            ? (int8KV ? (float(k_row8[d]) * float(k_scale[d >> 6]))
+                      : float(k_row[d]))
+            : 0.0f;
         const uint bank = key & 1u;
         const float score = prefill_attention_tg_sum(
             qv * kv,
@@ -902,7 +920,12 @@ kernel void attention_prefill_causal_tiled(
         const float new_scale = fast::exp(score - new_max);
         if (owns) {
             device const half* v_row = V + phys_key * p.kvTokenStrideElements + kvh * p.headDim;
-            acc = fma(new_scale, float(v_row[d]), acc * old_scale);
+            device const char* v_row8 = V8 + phys_key * p.kvTokenStrideElements + kvh * p.headDim;
+            device const half* v_scale = VScale + phys_key * scaleRowStride
+                                        + kvh * blocksPerHead;
+            const float vv = int8KV ? (float(v_row8[d]) * float(v_scale[d >> 6]))
+                                    : float(v_row[d]);
+            acc = fma(new_scale, vv, acc * old_scale);
         }
         row_sum = row_sum * old_scale + new_scale;
         row_max = new_max;

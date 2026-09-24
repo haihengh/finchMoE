@@ -4,7 +4,6 @@ import SwiftUI
 
 struct InspectorView: View {
     @Bindable var model: AppModel
-    @State private var kvCacheMode: AppKVCacheMode = .fp16
 
     var body: some View {
         Form {
@@ -154,7 +153,7 @@ struct InspectorView: View {
                 .labelsHidden()
             }
             LabeledContent("KV cache") {
-                Picker("KV cache", selection: $kvCacheMode) {
+                Picker("KV cache", selection: $model.runtimeOptions.kvCacheMode) {
                     ForEach(AppKVCacheMode.allCases) { mode in
                         Text(mode.label)
                             .tag(mode)
@@ -164,10 +163,13 @@ struct InspectorView: View {
                 .pickerStyle(.menu)
                 .labelsHidden()
             }
-            .onChange(of: kvCacheMode) { _, newValue in
-                guard newValue.isAvailable else { kvCacheMode = .fp16; return }
+            .onChange(of: model.runtimeOptions.kvCacheMode) { _, newValue in
+                guard newValue.isAvailable else {
+                    model.runtimeOptions.kvCacheMode = .fp16
+                    return
+                }
             }
-            Text("FP16 KV is the available runtime path in this build. 8-bit and Turbo 4-bit are shown for the planned quantized KV modes and remain disabled until the core backend lands.")
+            Text(kvCacheDetail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             LabeledContent("Slots") {
@@ -259,6 +261,18 @@ struct InspectorView: View {
             }
         }
         .disabled(model.isRunning || model.loadState.isLoading)
+    }
+
+    /// What the selected KV format actually costs and where it is wired.
+    private var kvCacheDetail: String {
+        switch model.runtimeOptions.kvCacheMode {
+        case .fp16:
+            return "FP16 K/V on the full-attention layers. Applies after a reload."
+        case .int8:
+            return "Int8 K/V with one FP16 scale per 64-element block on the full-attention layers: about 48% less K/V while decoding, and a quantize step on each write. Qwen 3.6 only — other models refuse to load with it. Applies after a reload."
+        case .turbo4bit:
+            return "Turbo 4-bit is a planned format with no kernel behind it and stays disabled."
+        }
     }
 
     private var modelChoiceBinding: Binding<AppModelChoice?> {

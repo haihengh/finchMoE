@@ -92,7 +92,8 @@ public func run(args: Args,
             prefillChunkTokens: args.prefillChunkTokens,
             forceLogitsHead: !config.isPureGreedy || prefillLogitsDumpPath != nil,
             prefillTileDepth: args.prefillTileDepth,
-            prefillTileExperts: args.prefillTileExperts)
+            prefillTileExperts: args.prefillTileExperts,
+            kvStorageMode: args.kvInt8 ? .int8 : .fp16)
 
         guard MTLCreateSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)

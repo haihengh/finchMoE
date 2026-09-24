@@ -43,11 +43,15 @@ struct PrefillAttentionParams: Sendable, Equatable {
 final class PrefillAttention {
     private let context: MetalContext
     private let psoCausalTiled: MTLComputePipelineState
+    private let psoCausalTiledInt8: MTLComputePipelineState
     private let psoFullTensorOps2DValidityV2: MTLComputePipelineState?
 
     init(context: MetalContext) throws {
         self.context = context
         self.psoCausalTiled = try context.pipeline("attention_prefill_causal_tiled")
+        self.psoCausalTiledInt8 = try context.pipeline(
+            "attention_prefill_causal_tiled",
+            constants: [MetalFunctionConstant(index: 74, value: .bool(true))])
         self.psoFullTensorOps2DValidityV2 = context.device.supportsFamily(.apple10)
             ? try? context.pipeline("attention_prefill_full_tensorops_2d_validity_v2")
             : nil
@@ -60,15 +64,23 @@ final class PrefillAttention {
                              out: MTLBuffer, outOffset: Int = 0,
                              params: PrefillAttentionParams,
                              kvRingCapacity: UInt32 = 0,
-                             path: RuntimePrefillAttentionPath = .causalTiled) {
+                             path: RuntimePrefillAttentionPath = .causalTiled,
+                             int8: AttentionInt8KV? = nil) {
         validate(params)
+        if int8 != nil {
+            precondition(kvRingCapacity == 0,
+                         "int8 KV storage is not available on the FP16 ring prefill path")
+            precondition(params.headDim % 64 == 0,
+                         "int8 KV storage needs a head_dim that is a whole number of 64-element blocks")
+        }
 
         let requestsTensorOps = path == .fullTensorOps2DPreferred
             || path == .fullTensorOps2DValidityV2
         // The pinned model uses 512/16/2 only for full attention; its
         // sliding-window layers use 256/16/8. A future model that reuses this
         // shape for sliding attention must add a full-visibility check here.
-        let tensorOpsShape = requestsTensorOps
+        let tensorOpsShape = int8 == nil
+            && requestsTensorOps
             && kvRingCapacity == 0
             && params.headDim == 512
             && params.numQHeads == 16
@@ -85,7 +97,9 @@ final class PrefillAttention {
         } else {
             // Explicit mode also falls back for incompatible shapes. Benchmark
             // fixtures must use 512/16/2 to prove that TensorOps ran.
-            pipeline = causalTiledPipeline(kvRingCapacity: kvRingCapacity)
+            pipeline = int8 == nil
+                ? causalTiledPipeline(kvRingCapacity: kvRingCapacity)
+                : psoCausalTiledInt8
         }
         let headDim = Int(params.headDim)
         let threadWidth = max(1, pipeline.threadExecutionWidth)
@@ -103,6 +117,11 @@ final class PrefillAttention {
         enc.setBuffer(out, offset: outOffset, index: 3)
         var p = params
         enc.setBytes(&p, length: MemoryLayout<PrefillAttentionParams>.stride, index: 4)
+        // Bound unconditionally; the fp16 specialization never reads them.
+        enc.setBuffer(int8?.keyValues ?? k, offset: kOffset, index: 5)
+        enc.setBuffer(int8?.keyScales ?? k, offset: 0, index: 6)
+        enc.setBuffer(int8?.valueValues ?? v, offset: vOffset, index: 7)
+        enc.setBuffer(int8?.valueScales ?? v, offset: 0, index: 8)
         let groups = useTensorOps
             ? MTLSize(width: Int(params.queryCount),
                       height: Int(params.numQHeads) / 8,

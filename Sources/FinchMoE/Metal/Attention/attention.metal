@@ -45,6 +45,10 @@ constant bool FC_ATTN_USE_FC [[function_constant(63)]];
 constant float FC_ATTN_SCALE [[function_constant(64)]];
 constant uint FC_ATTN_NUM_CHUNKS [[function_constant(65)]];
 constant uint FC_ATTN_RING_CAP [[function_constant(69)]];
+// int8 K/V timelines (values + one fp16 scale per 64-element block). Set only
+// for full-attention layers on a KVCacheManager running in `.int8` storage;
+// the fp16 specialization never reads buffers 14-17.
+constant bool FC_ATTN_INT8_KV [[function_constant(74)]];
 
 static inline uint attn_fc_head_dim(constant uint& head_dim) {
     return (is_function_constant_defined(FC_ATTN_USE_FC) &&
@@ -86,6 +90,22 @@ static inline uint attn_ring_slot(uint p) {
 
 static inline float attn_softmax_exp(float x) {
     return fast::exp(x);
+}
+
+static inline bool attn_int8_kv(void) {
+    return is_function_constant_defined(FC_ATTN_INT8_KV) && FC_ATTN_INT8_KV;
+}
+
+// One int8 element scaled by its 64-element block scale. `i` indexes within a
+// single KV head's row, and a head is a whole number of blocks (256/64 = 4),
+// so the block offset within the token row is head * blocksPerHead + i/64.
+static inline float attn_kv_element(bool int8_kv,
+                                    device const half* row16,
+                                    device const char* row8,
+                                    device const half* scale_row,
+                                    uint i) {
+    return int8_kv ? (float(row8[i]) * float(scale_row[i >> 6]))
+                   : float(row16[i]);
 }
 
 // Block reduce: per-SIMD-group simd_sum, write partial to scratch, lane 0 of
@@ -147,6 +167,10 @@ void attention_decode_partial(
     constant     uint&  chunk_len     [[buffer(11)]],
     constant     uint&  num_chunks    [[buffer(12)]],
     constant     float& scale         [[buffer(13)]],
+    device const char*  K8            [[buffer(14)]],  // int8 K timeline
+    device const half*  KScale        [[buffer(15)]],  // fp16 block scales
+    device const char*  V8            [[buffer(16)]],  // int8 V timeline
+    device const half*  VScale        [[buffer(17)]],  // fp16 block scales
     uint tg_id           [[threadgroup_position_in_grid]],
     uint lid             [[thread_position_in_threadgroup]],
     uint lsize           [[threads_per_threadgroup]],
@@ -161,6 +185,8 @@ void attention_decode_partial(
     const uint NQ = attn_fc_num_q_heads(num_q_heads);
     const uint NKV = attn_fc_num_kv_heads(num_kv_heads);
     const uint NC = attn_fc_num_chunks(num_chunks);
+    const bool int8KV = attn_int8_kv();
+    const uint blocksPerHead = HD >> 6;
 
     const uint q_head = tg_id / NC;
     const uint chunk  = tg_id % NC;
@@ -190,10 +216,18 @@ void attention_decode_partial(
         const uint phys_p = attn_ring_slot(p);
         device const half* K_row = K + (phys_p * NKV + kv_head) * HD;
         device const half* V_row = V + (phys_p * NKV + kv_head) * HD;
+        device const char* K_row8 = K8 + (phys_p * NKV + kv_head) * HD;
+        device const char* V_row8 = V8 + (phys_p * NKV + kv_head) * HD;
+        device const half* K_scale = KScale + phys_p * (NKV * blocksPerHead)
+                                   + kv_head * blocksPerHead;
+        device const half* V_scale = VScale + phys_p * (NKV * blocksPerHead)
+                                   + kv_head * blocksPerHead;
 
         float partial = 0.0f;
         for (uint i = lid; i < HD; i += lsize) {
-            partial = fma(q_smem[i], float(K_row[i]), partial);
+            partial = fma(q_smem[i],
+                          attn_kv_element(int8KV, K_row, K_row8, K_scale, i),
+                          partial);
         }
         float s = block_reduce_sum(partial,
                                    simd_lane_id, simd_group_id, simdgroups,
@@ -207,7 +241,8 @@ void attention_decode_partial(
 
         uint slot = 0;
         for (uint i = lid; i < HD; i += lsize) {
-            o_local[slot] = o_local[slot] * alpha + p_exp * float(V_row[i]);
+            o_local[slot] = o_local[slot] * alpha
+                + p_exp * attn_kv_element(int8KV, V_row, V_row8, V_scale, i);
             slot += 1;
         }
         m_run = m_new;
@@ -267,6 +302,10 @@ void attention_decode_cells_partial(
     constant     uint&  chunk_len     [[buffer(11)]],
     constant     uint&  num_chunks    [[buffer(12)]],
     constant     float& scale         [[buffer(13)]],
+    device const char*  K8            [[buffer(14)]],  // int8 K timeline
+    device const half*  KScale        [[buffer(15)]],  // fp16 block scales
+    device const char*  V8            [[buffer(16)]],  // int8 V timeline
+    device const half*  VScale        [[buffer(17)]],  // fp16 block scales
     uint tg_id           [[threadgroup_position_in_grid]],
     uint lid             [[thread_position_in_threadgroup]],
     uint lsize           [[threads_per_threadgroup]],
@@ -281,6 +320,8 @@ void attention_decode_cells_partial(
     const uint NQ = attn_fc_num_q_heads(num_q_heads);
     const uint NKV = attn_fc_num_kv_heads(num_kv_heads);
     const uint NC = attn_fc_num_chunks(num_chunks);
+    const bool int8KV = attn_int8_kv();
+    const uint blocksPerHead = HD >> 6;
 
     const uint q_head = tg_id / NC;
     const uint chunk  = tg_id % NC;
@@ -310,10 +351,18 @@ void attention_decode_cells_partial(
         const uint p = cells[j];
         device const half* K_row = K + (p * NKV + kv_head) * HD;
         device const half* V_row = V + (p * NKV + kv_head) * HD;
+        device const char* K_row8 = K8 + (p * NKV + kv_head) * HD;
+        device const char* V_row8 = V8 + (p * NKV + kv_head) * HD;
+        device const half* K_scale = KScale + p * (NKV * blocksPerHead)
+                                   + kv_head * blocksPerHead;
+        device const half* V_scale = VScale + p * (NKV * blocksPerHead)
+                                   + kv_head * blocksPerHead;
 
         float partial = 0.0f;
         for (uint i = lid; i < HD; i += lsize) {
-            partial = fma(q_smem[i], float(K_row[i]), partial);
+            partial = fma(q_smem[i],
+                          attn_kv_element(int8KV, K_row, K_row8, K_scale, i),
+                          partial);
         }
         float s = block_reduce_sum(partial,
                                    simd_lane_id, simd_group_id, simdgroups,
@@ -327,7 +376,8 @@ void attention_decode_cells_partial(
 
         uint slot = 0;
         for (uint i = lid; i < HD; i += lsize) {
-            o_local[slot] = o_local[slot] * alpha + p_exp * float(V_row[i]);
+            o_local[slot] = o_local[slot] * alpha
+                + p_exp * attn_kv_element(int8KV, V_row, V_row8, V_scale, i);
             slot += 1;
         }
         m_run = m_new;
@@ -493,5 +543,103 @@ void attention_decode_combine(
             acc += o_base[c * HD + i] * attn_softmax_exp(m_row[c] - m_glob);
         }
         out_row[i] = half(acc * inv_d);
+    }
+}
+
+// ============================================================================
+// kv_quantize_int8_rows — the int8 KV storage writer.
+//
+// One threadgroup per row (a token's K or V row for one layer), eight
+// SIMD-groups per threadgroup, each SIMD-group owning one 64-element block of a
+// 512-element row. Symmetric int8: scale = absmax / 127, values rounded and
+// clamped to [-127, 127]; every reader multiplies by the same fp16 scale.
+//
+// Symmetric rather than affine because a KV row is zero-centred (RMS-normed
+// keys, raw values), so an affine zero point would spend a second fp16 per
+// block on a range the data does not use.
+// ============================================================================
+
+constant constexpr uint kKVQuantBlockElements = 64;
+constant constexpr uint kKVQuantThreads       = 256;
+
+[[kernel, max_total_threads_per_threadgroup(kKVQuantThreads)]]
+kernel void kv_quantize_int8_rows(
+    device const half*  src         [[buffer(0)]],
+    device       char*  dst         [[buffer(1)]],
+    device       half*  scales      [[buffer(2)]],
+    constant     uint&  rowDim      [[buffer(3)]],
+    constant     uint&  blockElems  [[buffer(4)]],
+    uint tg          [[threadgroup_position_in_grid]],
+    uint sg          [[simdgroup_index_in_threadgroup]],
+    uint lane        [[thread_index_in_simdgroup]],
+    uint simdgroups  [[simdgroups_per_threadgroup]]
+) {
+    // One SIMD-group per block; the threadgroup walks however many blocks the
+    // row has (8 for Qwen's 512-element full KV row, 16 for Gemma's 1024).
+    const uint blocks = rowDim / blockElems;
+    for (uint b = sg; b < blocks; b += simdgroups) {
+        const uint base = tg * rowDim + b * blockElems;
+        float mx = 0.0f;
+        for (uint i = lane; i < blockElems; i += 32) {
+            mx = max(mx, fabs(float(src[base + i])));
+        }
+        mx = simd_max(mx);
+
+        const float scale = mx > 0.0f ? (mx / 127.0f) : 0.0f;
+        const float inv   = scale > 0.0f ? (1.0f / scale) : 0.0f;
+        for (uint i = lane; i < blockElems; i += 32) {
+            const int q = int(round(float(src[base + i]) * inv));
+            dst[base + i] = char(clamp(q, -127, 127));
+        }
+        if (lane == 0) {
+            scales[tg * blocks + b] = half(scale);
+        }
+    }
+}
+
+// ============================================================================
+// kv_simulate_int4_roundtrip_rows — a precision probe, not a storage format.
+//
+// Rewrites fp16 K/V rows in place as dequantize(quantize(x)) at `bits` bits
+// with a symmetric scale per `groupElems`-element group. The result stays fp16
+// in the fp16 cache, so every attention kernel, every layout and every byte
+// count is exactly what ships today: the only variable is how much precision
+// the K/V values carry. That is what makes it a quality probe for a 4-bit KV
+// format that does not exist yet — if the answer is that 4-bit K/V breaks the
+// model, the packing, the unpack kernels and the metadata layout were never
+// worth writing.
+//
+// `FQ_KV_INT4_SIM=<group>` selects group 32/64/128; unset means off.
+// ============================================================================
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+kernel void kv_simulate_int4_roundtrip_rows(
+    device half*    rows        [[buffer(0)]],   // [rows][rowDim], modified
+    constant uint&  rowDim      [[buffer(1)]],
+    constant uint&  groupElems  [[buffer(2)]],
+    constant uint&  bits        [[buffer(3)]],
+    uint tg         [[threadgroup_position_in_grid]],
+    uint sg         [[simdgroup_index_in_threadgroup]],
+    uint lane       [[thread_index_in_simdgroup]],
+    uint simdgroups [[simdgroups_per_threadgroup]]
+) {
+    const uint groups = rowDim / groupElems;
+    const float levels = float((1u << (bits - 1u)) - 1u);   // 7 at 4 bits
+    for (uint g = sg; g < groups; g += simdgroups) {
+        const uint base = tg * rowDim + g * groupElems;
+        float mx = 0.0f;
+        for (uint i = lane; i < groupElems; i += 32) {
+            mx = max(mx, fabs(float(rows[base + i])));
+        }
+        mx = simd_max(mx);
+        const float scale = mx > 0.0f ? (mx / levels) : 0.0f;
+        const float inv   = scale > 0.0f ? (1.0f / scale) : 0.0f;
+        // Read-modify-write stays inside one lane's own indices, so the in-place
+        // update needs no barrier behind the absmax reduction.
+        for (uint i = lane; i < groupElems; i += 32) {
+            const float x = float(rows[base + i]);
+            const float q = clamp(round(x * inv), -levels, levels);
+            rows[base + i] = half(q * scale);
+        }
     }
 }
