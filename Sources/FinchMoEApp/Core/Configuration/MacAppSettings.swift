@@ -14,9 +14,14 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var topP: Double = 0.95
     var prefillEnabled: Bool = true
     var modelVerification: AppModelVerification = .automatic
-    var newlineShortcut: AppNewlineShortcut = .return
-    var showPromptExamples: Bool = true
+    // Chat-window conventions: Return sends, Shift-Return makes a new line,
+    // and the box empties once the message is in the transcript. Files written
+    // before the chat UI are moved onto these once, see `init(from:)`.
+    var newlineShortcut: AppNewlineShortcut = .shiftReturn
     var sentPromptBehavior: AppSentPromptBehavior = .clear
+    /// True once a file has been through that move. Written as `true` by any
+    /// settings this build saves, so the migration runs exactly once.
+    var chatComposerMigrated: Bool = true
 
     private enum CodingKeys: String, CodingKey {
         case version
@@ -30,8 +35,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case prefillEnabled
         case modelVerification
         case newlineShortcut
-        case showPromptExamples
         case sentPromptBehavior
+        case chatComposerMigrated
     }
 
     init(version: Int = currentVersion,
@@ -44,9 +49,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          topP: Double = 0.95,
          prefillEnabled: Bool = true,
          modelVerification: AppModelVerification = .automatic,
-         newlineShortcut: AppNewlineShortcut = .return,
-         showPromptExamples: Bool = true,
-         sentPromptBehavior: AppSentPromptBehavior = .clear) {
+         newlineShortcut: AppNewlineShortcut = .shiftReturn,
+         sentPromptBehavior: AppSentPromptBehavior = .clear,
+         chatComposerMigrated: Bool = true) {
         self.version = version
         self.contextTokens = contextTokens
         self.expertCacheSlots = expertCacheSlots
@@ -58,8 +63,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.prefillEnabled = prefillEnabled
         self.modelVerification = modelVerification
         self.newlineShortcut = newlineShortcut
-        self.showPromptExamples = showPromptExamples
         self.sentPromptBehavior = sentPromptBehavior
+        self.chatComposerMigrated = chatComposerMigrated
     }
 
     init(from decoder: Decoder) throws {
@@ -85,13 +90,25 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             .flatMap(AppModelVerification.init(rawValue:)) ?? .automatic
         newlineShortcut = try container.decodeIfPresent(
             AppNewlineShortcut.self,
-            forKey: .newlineShortcut) ?? .return
-        showPromptExamples = try container.decodeIfPresent(
-            Bool.self,
-            forKey: .showPromptExamples) ?? true
+            forKey: .newlineShortcut) ?? .shiftReturn
         sentPromptBehavior = try container.decodeIfPresent(
             AppSentPromptBehavior.self,
             forKey: .sentPromptBehavior) ?? .clear
+
+        // A file with no marker was written before the window became a chat:
+        // Return was the newline key and the composer deliberately kept the
+        // prompt for another run. In a chat window that reads as "Enter does
+        // nothing and the box never clears", so those two values are moved to
+        // the chat conventions once. Everything else in the file is kept, and
+        // both remain user-selectable in the Settings menu.
+        let alreadyMigrated = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .chatComposerMigrated) ?? false
+        if !alreadyMigrated {
+            newlineShortcut = .shiftReturn
+            sentPromptBehavior = .clear
+        }
+        chatComposerMigrated = true
     }
 
     func isValid() -> Bool {

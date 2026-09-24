@@ -334,15 +334,36 @@ installation is accepted only after its manifest and file hashes validate.
 #### Load and generate
 
 1. Choose **Load Model**.
-2. Enter a prompt in the composer.
-3. Choose **Generate**, or press <kbd>Command</kbd>+<kbd>Return</kbd>. Use
-   **Settings > Send Message With** to choose Return or Command-Return.
+2. Enter a message in the composer.
+3. Choose send, or press <kbd>Return</kbd>; <kbd>Shift</kbd>+<kbd>Return</kbd>
+   adds a line. Use **Settings > Send Message With** to send with
+   <kbd>Command</kbd>+<kbd>Return</kbd> instead.
 4. Use the stop button or <kbd>Escape</kbd> to end generation early.
 
 The status bar shows generation progress, decode speed, and memory use. Use the
 right pane to configure sampling, context length, expert-cache slots, and
 runtime options. See [Runtime controls](docs/RUNTIME_CONTROLS.md) for details
 and defaults.
+
+#### Chats
+
+The window is a chat client: the left column lists every conversation, the
+middle column is the transcript, and either column can be collapsed.
+
+- Each session keeps its own history. Earlier turns of the open chat are
+  replayed with the next message, so follow-up questions can refer to what was
+  already said. Finished answers are rendered as markdown — headings, lists,
+  quotes and code panels; a reply that is still streaming stays plain text, and
+  a stopped or failed reply keeps the partial text it reached.
+- **New Chat** (<kbd>Command</kbd>+<kbd>N</kbd>) starts a fresh conversation,
+  **Regenerate Reply** (<kbd>Command</kbd>+<kbd>R</kbd>) asks the last question
+  again, and **Clear Chat** empties the open conversation without deleting it.
+  Rename, copy or delete a chat from its context menu in the sidebar.
+- History is stored in
+  `~/Library/Application Support/FinchMoE/chat-sessions.json` and reloaded at
+  launch. A conversation longer than the context window is trimmed from the
+  oldest exchange forward, so the newest question always fits.
+- The composer's **Prompt tips** popover covers what this model answers well.
 
 ### Command-line interface
 

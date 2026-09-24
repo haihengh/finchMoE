@@ -1,8 +1,23 @@
 import Foundation
 
+/// One earlier turn of a conversation, replayed to the model ahead of the new
+/// prompt so a follow-up question can refer to what was already said.
+public struct AppChatTurn: Equatable, Sendable {
+    public var role: ChatRole
+    public var text: String
+
+    public init(role: ChatRole, text: String) {
+        self.role = role
+        self.text = text
+    }
+}
+
 public struct AppGenerationRequest: Equatable, Sendable {
     public var modelDirectory: URL
     public var prompt: String
+    /// Earlier completed turns, oldest first. Empty for the first question of
+    /// a conversation.
+    public var history: [AppChatTurn]
     public var maxNewTokens: Int
     public var maxContextTokens: Int
     public var temperature: Float
@@ -13,6 +28,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
 
     public init(modelDirectory: URL,
                 prompt: String,
+                history: [AppChatTurn] = [],
                 maxNewTokens: Int = 4_096,
                 maxContextTokens: Int = 4096,
                 temperature: Float = 0.2,
@@ -22,6 +38,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
                 runtimeOptions: AppRuntimeOptions = AppRuntimeOptions()) {
         self.modelDirectory = modelDirectory
         self.prompt = prompt
+        self.history = history
         self.maxNewTokens = maxNewTokens
         self.maxContextTokens = maxContextTokens
         self.temperature = temperature

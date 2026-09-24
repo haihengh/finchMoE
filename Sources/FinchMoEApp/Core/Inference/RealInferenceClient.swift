@@ -271,6 +271,34 @@ actor RealInferenceSession {
         min(requested, max(0, maxContext - promptTokenCount))
     }
 
+    /// The messages handed to the tokenizer's chat template: the replayed
+    /// conversation followed by the new question.
+    static func chatMessages(prompt: String,
+                             history: [AppChatTurn]) -> [GFTokenizer.Message] {
+        history.map { turn in
+            GFTokenizer.Message(
+                role: turn.role == .user ? .user : .assistant,
+                content: turn.text)
+        } + [GFTokenizer.Message(role: .user, content: prompt)]
+    }
+
+    /// Drops the oldest turns until `fits` accepts what is left.
+    ///
+    /// Turns go in pairs: a replayed assistant reply with no question in front
+    /// of it is not a conversation the model ever saw, so the trim removes the
+    /// oldest user turn and its answer together.
+    static func trimmedHistory(
+        _ history: [AppChatTurn],
+        fits: ([AppChatTurn]) -> Bool
+    ) -> [AppChatTurn] {
+        var candidate = history
+        while !candidate.isEmpty {
+            if fits(candidate) { return candidate }
+            candidate.removeFirst(min(2, candidate.count))
+        }
+        return []
+    }
+
     func unload() {
         runner = nil
         scratch = nil
@@ -303,9 +331,22 @@ actor RealInferenceSession {
                 throw AppInferenceError.modelLoadFailed("session lost its loaded state")
             }
 
-            let renderedPrompt = try tokenizer.applyChatTemplate([
-                GFTokenizer.Message(role: .user, content: request.prompt)
-            ])
+            // The whole conversation is replayed every turn, so a long chat can
+            // outgrow the window. Oldest exchanges are dropped until the
+            // rendered prompt still leaves room for an answer, because a
+            // prompt that exactly fills the context generates nothing.
+            let answerReserve = min(request.maxNewTokens,
+                                    max(1, runner.maxContext / 4))
+            let fits: ([AppChatTurn]) -> Bool = { candidate in
+                guard let rendered = try? tokenizer.applyChatTemplate(
+                    Self.chatMessages(prompt: request.prompt, history: candidate))
+                else { return false }
+                return tokenizer.encode(rendered, addBOS: false).count + answerReserve
+                    <= runner.maxContext
+            }
+            let history = Self.trimmedHistory(request.history, fits: fits)
+            let renderedPrompt = try tokenizer.applyChatTemplate(
+                Self.chatMessages(prompt: request.prompt, history: history))
             let promptIds = tokenizer.encode(renderedPrompt, addBOS: false)
             progress.promptTokenCount = promptIds.count
             guard promptIds.count < runner.maxContext else {

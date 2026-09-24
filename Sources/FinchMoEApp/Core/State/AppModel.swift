@@ -32,7 +32,11 @@ public final class AppModel {
     public var modelPathText: String
     public private(set) var selectedModelChoice: AppModelChoice?
     public var promptText: String = ""
-    public private(set) var outputPromptText: String = ""
+    // `internal(set)` rather than `private(set)`: the chat layer lives in
+    // `AppModel+Chat.swift`, and `private` setters are only visible inside the
+    // file that declares them. Still hidden from the SwiftUI target, which is
+    // a separate module.
+    public internal(set) var outputPromptText: String = ""
     public var outputText: String = ""
     public var runState: RunState = .idle
     public var runtimeOptions = AppRuntimeOptions()
@@ -44,8 +48,12 @@ public final class AppModel {
     public var topPEnabled: Bool = true
     public var topP: Double = 0.95
     public private(set) var newlineShortcut: AppNewlineShortcut = .return
-    public private(set) var showPromptExamples: Bool = true
     public private(set) var sentPromptBehavior: AppSentPromptBehavior = .clear
+    /// Every conversation, newest first. Never empty: an empty list is
+    /// normalized back to one fresh session so the chat UI always has a
+    /// session to show.
+    public internal(set) var sessions: [ChatSession] = []
+    public internal(set) var activeSessionID: UUID = UUID()
     public var diagnostics: AppDiagnostics?
     public var error: AppInferenceError?
     public var localServerPort: Int = 8080
@@ -83,6 +91,13 @@ public final class AppModel {
     private var hasHandledTerminalEvent = false
     private let memorySampler: AppMemorySampler
     private let settingsPersistenceEnabled: Bool
+    /// nil disables chat persistence, which is what the tests want: a unit
+    /// test must not read or write the developer's real chat history.
+    let chatStore: ChatSessionFileStore?
+    /// The assistant message the running generation is filling in. Held as an
+    /// id rather than an index so a session switch (or a trim) cannot make the
+    /// stream write into the wrong bubble.
+    var streamingAssistantMessageID: UUID?
     private let installETAClock: SuspendingClock
     private let installETAOrigin: SuspendingClock.Instant
     private var installETAEstimator = DownloadETAEstimator()
@@ -91,7 +106,8 @@ public final class AppModel {
                 client: any AppInferenceClient = RealInferenceClient(),
                 installer: (any AppModelInstallerClient)? = nil,
                 memorySampler: AppMemorySampler = AppMemorySampler(),
-                settingsPersistenceEnabled: Bool = false) {
+                settingsPersistenceEnabled: Bool = false,
+                chatStore: ChatSessionFileStore? = nil) {
         let directory = (modelDirectory ?? AppModelLocation.defaultURL()).standardizedFileURL
         // The descriptor must key off the directory's checkpoint (Qwen or
         // Gemma), because it drives the probe, the install UI, and the
@@ -112,7 +128,6 @@ public final class AppModel {
         self.topPEnabled = settings.topPEnabled
         self.topP = settings.topP
         self.newlineShortcut = settings.newlineShortcut
-        self.showPromptExamples = settings.showPromptExamples
         self.sentPromptBehavior = settings.sentPromptBehavior
         self.installationStatus = AppModelInstallationProbe.status(at: directory,
                                                                     descriptor: descriptor)
@@ -120,8 +135,10 @@ public final class AppModel {
         self.installer = installer ?? RepackModelInstallerClient(descriptor: descriptor)
         self.memorySampler = memorySampler
         self.settingsPersistenceEnabled = settingsPersistenceEnabled
+        self.chatStore = chatStore
         self.installETAClock = installETAClock
         self.installETAOrigin = installETAClock.now
+        restoreChatSessions()
         refreshInstallReadiness()
     }
 
@@ -385,12 +402,6 @@ public final class AppModel {
     public func setNewlineShortcut(_ shortcut: AppNewlineShortcut) {
         guard newlineShortcut != shortcut else { return }
         newlineShortcut = shortcut
-        persistSettings()
-    }
-
-    public func setShowPromptExamples(_ show: Bool) {
-        guard showPromptExamples != show else { return }
-        showPromptExamples = show
         persistSettings()
     }
 
@@ -757,7 +768,6 @@ public final class AppModel {
         topPEnabled = settings.topPEnabled
         topP = settings.topP
         newlineShortcut = settings.newlineShortcut
-        showPromptExamples = settings.showPromptExamples
         sentPromptBehavior = settings.sentPromptBehavior
     }
 
@@ -774,7 +784,6 @@ public final class AppModel {
             prefillEnabled: runtimeOptions.prefillEnabled,
             modelVerification: runtimeOptions.modelVerification,
             newlineShortcut: newlineShortcut,
-            showPromptExamples: showPromptExamples,
             sentPromptBehavior: sentPromptBehavior)
         let modelDirectory = URL(fileURLWithPath: modelPathText, isDirectory: true)
         try? MacAppSettingsFileStore.save(
@@ -838,6 +847,7 @@ public final class AppModel {
         generationTranscriptMailbox?.reset()
         diagnostics = nil
         error = nil
+        clearActiveSessionMessages()
     }
 
     public func run() {
@@ -858,6 +868,7 @@ public final class AppModel {
         generationTranscriptMailbox?.reset()
         outputPromptText = request.prompt
         outputText = ""
+        beginChatExchange(prompt: request.prompt)
         diagnostics = nil
         error = nil
         hasHandledTerminalEvent = false
@@ -902,6 +913,11 @@ public final class AppModel {
         let request = AppGenerationRequest(
             modelDirectory: URL(fileURLWithPath: modelPathText),
             prompt: promptText,
+            history: activeSession.replayableMessages.map {
+                AppChatTurn(
+                    role: $0.role,
+                    text: $0.text)
+            },
             maxNewTokens: maxNewTokensOverride ?? maxContextTokens,
             maxContextTokens: maxContextTokens,
             temperature: Float(temperature),
@@ -931,6 +947,8 @@ public final class AppModel {
             if !token.textDelta.isEmpty {
                 outputText += token.textDelta
             }
+            updateStreamingAssistantMessage(
+                with: generationTranscriptMailbox?.completeText ?? outputText)
         case .finished(let diagnostics):
             finishSuccessfully(diagnostics)
         case .cancelled(let diagnostics):
@@ -982,6 +1000,7 @@ public final class AppModel {
         isCancellationPending = false
         activeRunRuntimeKey = nil
         runTask = nil
+        endChatExchange(failureText: chatFailureText(for: error))
     }
 
     private func clearLoadTask(generation: UInt64) {

@@ -42,8 +42,23 @@ public struct DecodeLoadRequest: Codable, Sendable {
     }
 }
 
+/// One earlier conversation turn carried to the service, which is the side
+/// that owns the tokenizer and therefore the chat template.
+public struct DecodeChatTurn: Codable, Sendable, Equatable {
+    public var role: String
+    public var text: String
+
+    public init(role: String, text: String) {
+        self.role = role
+        self.text = text
+    }
+}
+
 public struct DecodeGenerationRequest: Codable, Sendable {
     public var prompt: String
+    /// Older turns, oldest first. Absent on the wire means "no history",
+    /// which keeps a request from a build that predates chat history decodable.
+    public var history: [DecodeChatTurn]
     public var maxNewTokens: Int
     public var maxContextTokens: Int
     public var temperature: Float
@@ -51,17 +66,38 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     public var runtimeOptions: DecodeRuntimeOptions
     public var generationID: UUID
 
-    public init(prompt: String, maxNewTokens: Int, maxContextTokens: Int,
+    public init(prompt: String, history: [DecodeChatTurn] = [],
+                maxNewTokens: Int, maxContextTokens: Int,
                 temperature: Float, repetitionPenalty: Float = 1,
                 runtimeOptions: DecodeRuntimeOptions = DecodeRuntimeOptions(),
                 generationID: UUID = UUID()) {
         self.prompt = prompt
+        self.history = history
         self.maxNewTokens = maxNewTokens
         self.maxContextTokens = maxContextTokens
         self.temperature = temperature
         self.repetitionPenalty = repetitionPenalty
         self.runtimeOptions = runtimeOptions
         self.generationID = generationID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case prompt, history, maxNewTokens, maxContextTokens
+        case temperature, repetitionPenalty, runtimeOptions, generationID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        prompt = try container.decode(String.self, forKey: .prompt)
+        history = try container.decodeIfPresent(
+            [DecodeChatTurn].self, forKey: .history) ?? []
+        maxNewTokens = try container.decode(Int.self, forKey: .maxNewTokens)
+        maxContextTokens = try container.decode(Int.self, forKey: .maxContextTokens)
+        temperature = try container.decode(Float.self, forKey: .temperature)
+        repetitionPenalty = try container.decode(Float.self, forKey: .repetitionPenalty)
+        runtimeOptions = try container.decode(
+            DecodeRuntimeOptions.self, forKey: .runtimeOptions)
+        generationID = try container.decode(UUID.self, forKey: .generationID)
     }
 }
 
