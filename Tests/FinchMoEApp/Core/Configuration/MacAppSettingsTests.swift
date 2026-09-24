@@ -55,7 +55,7 @@ import Testing
         #expect(settings == MacAppSettings())
     }
 
-    @Test func legacySettingsDefaultToReturnWithoutLosingValues() throws {
+    @Test func legacySettingsGetChatComposerDefaultsWithoutLosingValues() throws {
         let data = Data("""
         {
           "version": 1,
@@ -81,9 +81,43 @@ import Testing
         #expect(settings.topP == 0.8)
         #expect(!settings.prefillEnabled)
         #expect(settings.modelVerification == .automatic)
-        #expect(settings.newlineShortcut == .return)
-        #expect(settings.showPromptExamples)
+        // No migration marker: a file from the single-shot app is moved onto
+        // the chat conventions.
+        #expect(settings.newlineShortcut == .shiftReturn)
         #expect(settings.sentPromptBehavior == .clear)
+        #expect(settings.chatComposerMigrated)
+    }
+
+    @Test func theComposerMigrationRunsOnceAndKeepsLaterChoices() throws {
+        let beforeChat = Data("""
+        {
+          "version": 1,
+          "contextTokens": 4096,
+          "expertCacheSlots": 16,
+          "temperature": 0.2,
+          "topKEnabled": true,
+          "topK": 64,
+          "topPEnabled": true,
+          "topP": 0.95,
+          "prefillEnabled": true,
+          "newlineShortcut": "return",
+          "sentPromptBehavior": "keep"
+        }
+        """.utf8)
+
+        let migrated = try JSONDecoder().decode(MacAppSettings.self, from: beforeChat)
+        #expect(migrated.newlineShortcut == .shiftReturn)
+        #expect(migrated.sentPromptBehavior == .clear)
+
+        // Saving writes the marker, so the user's next choice sticks.
+        let chosen = MacAppSettings(
+            newlineShortcut: .return,
+            sentPromptBehavior: .keep)
+        let roundTripped = try JSONDecoder().decode(
+            MacAppSettings.self,
+            from: JSONEncoder().encode(chosen))
+        #expect(roundTripped.newlineShortcut == .return)
+        #expect(roundTripped.sentPromptBehavior == .keep)
     }
 
     @Test(arguments: AppNewlineShortcut.allCases)
@@ -146,16 +180,6 @@ import Testing
         #expect(settings.newlineShortcut == .shiftReturn)
     }
 
-    @Test(arguments: [true, false])
-    func showPromptExamplesRoundTrips(_ show: Bool) throws {
-        let initial = MacAppSettings(showPromptExamples: show)
-        let decoded = try JSONDecoder().decode(
-            MacAppSettings.self,
-            from: JSONEncoder().encode(initial))
-
-        #expect(decoded == initial)
-    }
-
     @Test(arguments: AppSentPromptBehavior.allCases)
     func sentPromptBehaviorRoundTrips(_ behavior: AppSentPromptBehavior) throws {
         let initial = MacAppSettings(sentPromptBehavior: behavior)
@@ -211,7 +235,6 @@ import Testing
             prefillEnabled: false,
             modelVerification: .trustedInstall,
             newlineShortcut: .shiftReturn,
-            showPromptExamples: false,
             sentPromptBehavior: .clear)
         try MacAppSettingsFileStore.save(initial, forModelDirectory: modelDirectory)
 
@@ -228,7 +251,6 @@ import Testing
         #expect(!model.runtimeOptions.prefillEnabled)
         #expect(model.runtimeOptions.modelVerification == .trustedInstall)
         #expect(model.newlineShortcut == .shiftReturn)
-        #expect(!model.showPromptExamples)
         #expect(model.sentPromptBehavior == .clear)
 
         model.temperature = 0.6
@@ -249,7 +271,6 @@ import Testing
         #expect(saved.prefillEnabled)
         #expect(saved.modelVerification == .fullSha256)
         #expect(saved.newlineShortcut == .shiftReturn)
-        #expect(!saved.showPromptExamples)
         #expect(saved.sentPromptBehavior == .clear)
         model.cancel()
     }
@@ -268,22 +289,6 @@ import Testing
         let saved = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: modelDirectory)
         #expect(saved.newlineShortcut == .shiftReturn)
-    }
-
-    @MainActor
-    @Test func showPromptExamplesPersistsImmediately() throws {
-        let root = try makeTemporaryRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let modelDirectory = root.appendingPathComponent("gemma4.finch", isDirectory: true)
-        let model = AppModel(
-            modelDirectory: modelDirectory,
-            settingsPersistenceEnabled: true)
-
-        model.setShowPromptExamples(false)
-
-        let saved = MacAppSettingsFileStore.loadOrCreate(
-            forModelDirectory: modelDirectory)
-        #expect(!saved.showPromptExamples)
     }
 
     @MainActor
@@ -309,19 +314,17 @@ import Testing
         let first = root.appendingPathComponent("first/model.finch", isDirectory: true)
         let second = root.appendingPathComponent("second/model.finch", isDirectory: true)
         try MacAppSettingsFileStore.save(
-            MacAppSettings(newlineShortcut: .return, showPromptExamples: true),
+            MacAppSettings(newlineShortcut: .return),
             forModelDirectory: first)
         try MacAppSettingsFileStore.save(
-            MacAppSettings(newlineShortcut: .shiftReturn, showPromptExamples: false),
+            MacAppSettings(newlineShortcut: .shiftReturn),
             forModelDirectory: second)
         let model = AppModel(modelDirectory: first, settingsPersistenceEnabled: true)
         #expect(model.newlineShortcut == .return)
-        #expect(model.showPromptExamples)
 
         model.setModelURL(second)
 
         #expect(model.newlineShortcut == .shiftReturn)
-        #expect(!model.showPromptExamples)
     }
 
     private func makeTemporaryRoot() throws -> URL {

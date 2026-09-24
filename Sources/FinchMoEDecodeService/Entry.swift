@@ -100,6 +100,11 @@ import FinchMoEDecodeProtocol
                     let options = try appRuntimeOptions(request.runtimeOptions)
                     let generation = AppGenerationRequest(
                         modelDirectory: modelDirectory, prompt: request.prompt,
+                        history: request.history.map { turn in
+                            AppChatTurn(
+                                role: turn.role == "assistant" ? .assistant : .user,
+                                text: turn.text)
+                        },
                         maxNewTokens: request.maxNewTokens,
                         maxContextTokens: request.maxContextTokens,
                         temperature: request.temperature,

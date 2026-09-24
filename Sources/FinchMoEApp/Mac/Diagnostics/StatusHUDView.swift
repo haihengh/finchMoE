@@ -4,12 +4,38 @@ import SwiftUI
 
 struct StatusHUDView: View {
     let model: AppModel
+    @Binding var showsSidebar: Bool
+    /// False once the session list sits at the window's left edge under the
+    /// traffic lights, so the strip does not leave room for them twice.
+    var clearsTrafficLights = true
 
     var body: some View {
-        strip
-            .padding(.top, 10)
-            .padding(.leading, 84)
-            .padding(.trailing, 20)
+        HStack(spacing: 10) {
+            sidebarToggle
+            strip
+        }
+        .padding(.top, 10)
+        .padding(.leading, clearsTrafficLights ? 84 : 12)
+        .padding(.trailing, 20)
+    }
+
+    private var sidebarToggle: some View {
+        Button {
+            showsSidebar.toggle()
+        } label: {
+            Image(systemName: "sidebar.left")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(showsSidebar ? FinchMoEMacTheme.accentColor : .secondary)
+                .frame(width: 28, height: 28)
+                .contentShape(Circle())
+                .background(.regularMaterial, in: Circle())
+                .overlay {
+                    Circle().stroke(.separator.opacity(0.5), lineWidth: 0.5)
+                }
+        }
+        .buttonStyle(.plain)
+        .help(showsSidebar ? "Hide chats" : "Show chats")
+        .accessibilityLabel(showsSidebar ? "Hide chat list" : "Show chat list")
     }
 
     private var strip: some View {

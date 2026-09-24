@@ -4,64 +4,53 @@ import SwiftUI
 
 struct GenerateControl: View {
     let model: AppModel
-    private let controlHeight: CGFloat = 34
 
     var body: some View {
         if model.isRunning {
-            runningPill
+            stopButton
         } else {
-            generateButton
+            sendButton
         }
     }
 
-    private var generateButton: some View {
+    private var sendButton: some View {
         Button {
             model.run()
         } label: {
-            Label("Generate", systemImage: "arrow.up")
-                .font(.callout.weight(.semibold))
-                .padding(.horizontal, 24)
-                .frame(minWidth: 124, minHeight: controlHeight)
-                .contentShape(Capsule())
+            Image(systemName: "arrow.up")
+                .font(.system(size: 14, weight: .bold))
+                .frame(width: 30, height: 30)
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .foregroundStyle(.white)
-        .background(FinchMoEMacTheme.accentColor, in: .capsule)
+        .background(FinchMoEMacTheme.accentColor, in: .circle)
         .overlay {
-            Capsule().stroke(.white.opacity(0.16), lineWidth: 0.5)
+            Circle().stroke(.white.opacity(0.16), lineWidth: 0.5)
         }
         .keyboardShortcut(.return, modifiers: .command)
         .disabled(!model.canRun)
-        .opacity(model.canRun ? 1 : 0.62)
+        .opacity(model.canRun ? 1 : 0.45)
+        .help("Send message (\u{2318}\u{21A9})")
+        .accessibilityLabel("Send message")
     }
 
-    private var runningPill: some View {
+    private var stopButton: some View {
         Button {
             model.cancel()
         } label: {
-            HStack(spacing: 10) {
-                if model.isCancellationPending {
-                    Text("Stopping")
-                        .font(.callout.weight(.medium))
-                } else if model.phase == .prefill {
-                    Text(model.presentation.label)
-                        .font(.callout.weight(.medium))
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
-                } else {
-                    Text("\(MetricFormat.rate(model.liveTokensPerSecond)) tok/s")
-                        .font(.callout.weight(.semibold))
+            HStack(spacing: 7) {
+                if !model.isCancellationPending, model.phase == .decode {
+                    Text(MetricFormat.rate(model.liveTokensPerSecond))
+                        .font(.caption.weight(.semibold))
                         .monospacedDigit()
                         .contentTransition(.numericText())
                 }
-                Label("Stop generation", systemImage: "stop.fill")
-                    .labelStyle(.iconOnly)
-                    .font(.callout)
-                    .frame(width: 28, height: 28)
+                Image(systemName: "stop.fill")
+                    .font(.system(size: 11, weight: .bold))
             }
-            .padding(.leading, 18)
-            .padding(.trailing, 4)
-            .frame(minWidth: 140, minHeight: controlHeight)
+            .padding(.horizontal, 10)
+            .frame(minWidth: 30, minHeight: 30)
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -72,7 +61,8 @@ struct GenerateControl: View {
         }
         .keyboardShortcut(.cancelAction)
         .disabled(!model.canCancel)
-        .help("Stop generation")
+        .help("Stop generating")
+        .accessibilityLabel("Stop generating")
         .animation(.smooth(duration: 0.2), value: model.presentation.label)
     }
 }

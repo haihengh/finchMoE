@@ -4,17 +4,25 @@ import SwiftUI
 
 struct RootView: View {
     let model: AppModel
-    @State private var conversationChromeHeight: CGFloat = 0
+    @State private var showsSidebar = true
 
     var body: some View {
         HStack(spacing: 0) {
+            if showsSidebar {
+                ChatSessionSidebar(model: model)
+                    .frame(maxHeight: .infinity)
+                    .transition(.move(edge: .leading))
+            }
+
+            Divider()
+
             primaryContent
-                .frame(minWidth: 700, maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
 
             Divider()
 
             InspectorView(model: model)
-                .frame(width: 340)
+                .frame(width: 320)
                 .frame(maxHeight: .infinity)
                 .background(Color(nsColor: .windowBackgroundColor))
         }
@@ -30,6 +38,7 @@ struct RootView: View {
                 endPoint: .bottom)
         }
         .tint(FinchMoEMacTheme.accentColor)
+        .animation(.smooth(duration: 0.25), value: showsSidebar)
         .animation(.smooth(duration: 0.3), value: model.requiresModelInstallation)
         .animation(.smooth(duration: 0.25), value: model.error)
         .animation(.smooth(duration: 0.2), value: model.presentation.conversationAction)
@@ -49,68 +58,32 @@ struct RootView: View {
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
-            StatusHUDView(model: model)
+            StatusHUDView(
+                model: model,
+                showsSidebar: $showsSidebar,
+                clearsTrafficLights: !showsSidebar)
         }
     }
 
+    /// Chat transcript above, composer pinned below: the ordinary shape of a
+    /// chat window, and the reason the old floating-chrome measurement could
+    /// go away.
     private var conversationView: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .bottom) {
-                if model.hasOutputTranscript {
-                    OutputPaneView(model: model)
-                        .padding(.bottom, conversationChromeHeight)
-                } else if conversationChromeHeight > 0 {
-                    OutputPaneView(model: model)
-                        .frame(
-                            height: max(
-                                0,
-                                geometry.size.height - conversationChromeHeight))
-                        .frame(maxHeight: .infinity, alignment: .top)
-                }
+        VStack(spacing: 0) {
+            ChatTranscriptView(model: model)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                conversationChrome
-                    .background {
-                        GeometryReader { chromeGeometry in
-                            Color.clear.preference(
-                                key: ConversationChromeHeightKey.self,
-                                value: chromeGeometry.size.height)
-                        }
-                    }
-            }
-            .onPreferenceChange(ConversationChromeHeightKey.self) { height in
-                guard height > 0 else { return }
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) {
-                    conversationChromeHeight = height
-                }
-            }
+            conversationChrome
         }
     }
 
     private var conversationChrome: some View {
         VStack(spacing: 10) {
             ErrorBanner(model: model)
-            if model.promptText.isEmpty && model.showPromptExamples && !model.isRunning {
-                PromptExamplesView { preset in
-                    model.promptText = preset.prompt
-                }
-            }
             ModelActionBanner(model: model)
             PromptComposerView(model: model)
         }
         .padding(.horizontal, 20)
         .padding(.bottom, 16)
-        .animation(.smooth(duration: 0.2), value: model.promptText.isEmpty)
-        .animation(.smooth(duration: 0.2), value: model.showPromptExamples)
-    }
-
-}
-
-private struct ConversationChromeHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
     }
 }

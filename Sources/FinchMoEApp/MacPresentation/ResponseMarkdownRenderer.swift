@@ -41,19 +41,15 @@ public struct ResponseMarkdownRenderer {
         guard !source.isEmpty else {
             return Result(attributedString: NSAttributedString(), usedFallback: false)
         }
-        guard !requiresRawFallback(source) else { return fallback(source) }
-        let presentationSource = source.replacingOccurrences(
-            of: #"(?m)^([ \t]*\*\*[^*\n]+\*\*[ \t]*)\n(?=\S)"#,
-            with: "$1\n\n",
-            options: .regularExpression)
+        guard !MarkdownSourcePolicy.requiresRawRendering(source) else {
+            return fallback(source)
+        }
 
         do {
-            let parsed = try AttributedString(
-                markdown: presentationSource,
-                options: .init(
-                    interpretedSyntax: .full,
-                    failurePolicy: .returnPartiallyParsedIfPossible))
-            guard !containsUnsupportedBlock(in: parsed) else { return fallback(source) }
+            let parsed = try MarkdownSourcePolicy.parsed(source)
+            guard !MarkdownSourcePolicy.containsTable(parsed) else {
+                return fallback(source)
+            }
 
             let output = NSMutableAttributedString()
             var previousBlock: Block?
@@ -94,32 +90,6 @@ public struct ResponseMarkdownRenderer {
 
     public func plainText(_ source: String) -> String {
         render(source).attributedString.string
-    }
-
-    private func requiresRawFallback(_ source: String) -> Bool {
-        let fenceCount = source.components(separatedBy: "```").count - 1
-        if !fenceCount.isMultiple(of: 2) { return true }
-        if source.range(
-            of: #"</?[A-Za-z][^>]*>"#,
-            options: .regularExpression) != nil {
-            return true
-        }
-        return source.range(
-            of: #"!\[[^\]]*\]\([^\)]*\)"#,
-            options: .regularExpression) != nil
-    }
-
-    private func containsUnsupportedBlock(in parsed: AttributedString) -> Bool {
-        parsed.runs.contains { run in
-            run.presentationIntent?.components.contains { component in
-                switch component.kind {
-                case .table, .tableHeaderRow, .tableRow, .tableCell:
-                    return true
-                default:
-                    return false
-                }
-            } == true
-        }
     }
 
     private func block(for intent: PresentationIntent?) -> Block {

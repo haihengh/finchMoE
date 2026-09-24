@@ -29,20 +29,35 @@ struct FinchMoEMacApp: App {
     @State private var model: AppModel
 
     init() {
+        #if DEBUG
+        SnapshotHarness.runIfRequested()
+        #endif
         _model = State(initialValue: AppModel(
             client: DecodeServiceInferenceClient(),
-            settingsPersistenceEnabled: true))
+            settingsPersistenceEnabled: true,
+            chatStore: ChatSessionFileStore(
+                fileURL: ChatSessionFileStore.defaultFileURL())))
     }
 
     var body: some Scene {
         Window("FinchMoE", id: "main") {
             RootView(model: model)
-                .frame(minWidth: 1040, minHeight: 560)
+                .frame(minWidth: 1000, minHeight: 560)
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1040, height: 720)
+        .defaultSize(width: 1240, height: 800)
         .windowResizability(.contentMinSize)
         .commands {
+            CommandMenu("Chat") {
+                Button("New Chat", action: model.newSession)
+                    .keyboardShortcut("n", modifiers: .command)
+                    .disabled(!model.canStartNewSession)
+                Button("Regenerate Reply", action: model.regenerateLastReply)
+                    .keyboardShortcut("r", modifiers: .command)
+                    .disabled(!model.canRegenerateLastReply)
+                Button("Clear Chat", action: model.clearOutput)
+                    .disabled(model.isRunning || !model.activeSession.hasMessages)
+            }
             CommandMenu("Generation") {
                 Button("Cancel Generation") { model.cancel() }
                     .keyboardShortcut(".", modifiers: .command)
@@ -64,10 +79,6 @@ struct FinchMoEMacApp: App {
                         Text(shortcut.sendMessageLabel).tag(shortcut)
                     }
                 }
-                Picker("Prompt Examples", selection: showPromptExamplesBinding) {
-                    Text("Show").tag(true)
-                    Text("Hide").tag(false)
-                }
                 Picker("After Sending", selection: sentPromptBehaviorBinding) {
                     ForEach(AppSentPromptBehavior.allCases) { behavior in
                         Text(behavior.settingsLabel).tag(behavior)
@@ -82,14 +93,6 @@ struct FinchMoEMacApp: App {
             model.newlineShortcut
         } set: { shortcut in
             model.setNewlineShortcut(shortcut)
-        }
-    }
-
-    private var showPromptExamplesBinding: Binding<Bool> {
-        Binding {
-            model.showPromptExamples
-        } set: { show in
-            model.setShowPromptExamples(show)
         }
     }
 

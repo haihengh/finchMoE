@@ -59,10 +59,7 @@ let package = Package(
         .target(
             name: "FinchMoEAppCore",
             dependencies: ["FinchMoE", "FinchMoERepackCore", "FinchMoEDecodeProtocol"],
-            path: "Sources/FinchMoEApp/Core",
-            resources: [
-                .copy("Resources/app-prompts.json"),
-            ]
+            path: "Sources/FinchMoEApp/Core"
         ),
         .target(
             name: "FinchMoEMacPresentation",
