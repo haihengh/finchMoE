@@ -353,8 +353,10 @@ middle column is the transcript, and either column can be collapsed.
 - Each session keeps its own history. Earlier turns of the open chat are
   replayed with the next message, so follow-up questions can refer to what was
   already said. Finished answers are rendered as markdown — headings, lists,
-  quotes and code panels; a reply that is still streaming stays plain text, and
-  a stopped or failed reply keeps the partial text it reached.
+  quotes, code panels and tables, plus the charts and box-drawn tables a model
+  draws out of characters, which are kept line for line in a monospace panel.
+  A reply that is still streaming stays plain text, and a stopped or failed
+  reply keeps the partial text it reached.
 - **New Chat** (<kbd>Command</kbd>+<kbd>N</kbd>) starts a fresh conversation,
   **Regenerate Reply** (<kbd>Command</kbd>+<kbd>R</kbd>) asks the last question
   again, and **Clear Chat** empties the open conversation without deleting it.
