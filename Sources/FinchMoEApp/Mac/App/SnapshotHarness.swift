@@ -32,7 +32,7 @@ enum SnapshotHarness {
     static func renderMessages(
         to path: String,
         width: CGFloat = 820,
-        height: CGFloat = 1200
+        height: CGFloat = 1800
     ) {
         let model = makeModel()
         let content = VStack(alignment: .leading, spacing: 18) {
@@ -67,20 +67,51 @@ enum SnapshotHarness {
             size: size)
     }
 
+    /// Draws the view through a real (offscreen) window rather than through
+    /// `ImageRenderer`.
+    ///
+    /// `ImageRenderer` draws a `ScrollView`'s frame and nothing inside it — an
+    /// answer's code panels and tables are scrollable, so they came out as
+    /// empty boxes. A hosted window lays the view out for real, so what lands
+    /// in the PNG is what the window shows.
     @MainActor
     private static func write<V: View>(
         _ content: V,
         to path: String,
         size: CGSize
     ) {
-        let renderer = ImageRenderer(
-            content: content.frame(width: size.width, height: size.height))
-        renderer.scale = 2
+        let hosting = NSHostingView(
+            rootView: content.frame(width: size.width, height: size.height))
+        hosting.frame = CGRect(origin: .zero, size: size)
 
-        guard let image = renderer.nsImage,
-              let tiff = image.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiff),
-              let png = bitmap.representation(using: .png, properties: [:]) else {
+        let window = NSWindow(
+            contentRect: hosting.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false)
+        window.contentView = hosting
+        window.layoutIfNeeded()
+        hosting.layoutSubtreeIfNeeded()
+
+        let scale: CGFloat = 2
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(size.width * scale),
+            pixelsHigh: Int(size.height * scale),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0) else {
+            FileHandle.standardError.write(Data("snapshot: no bitmap\n".utf8))
+            exit(1)
+        }
+        bitmap.size = size
+        hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+
+        guard let png = bitmap.representation(using: .png, properties: [:]) else {
             FileHandle.standardError.write(Data("snapshot: render failed\n".utf8))
             exit(1)
         }
@@ -145,11 +176,53 @@ enum SnapshotHarness {
                     createdAt: now.addingTimeInterval(-110)),
                 ChatMessage(
                     role: .user,
-                    text: "Short follow-up.",
+                    text: "Compare the quantization options, with numbers.",
                     createdAt: now.addingTimeInterval(-60)),
+                // The rendering regression case: a title, a markdown table, a
+                // box-drawing table, an ASCII chart in a fence, generics in
+                // prose, and an unterminated fence. Every one of these used to
+                // take the whole answer down to plain text.
                 ChatMessage(
                     role: .assistant,
-                    text: "Right — decode speed is bounded by how often the cache misses.",
+                    text: """
+                    ## Where the 4-bit install lands
+
+                    | Precision | Size | Speed | Notes |
+                    |:----------|-----:|------:|:------|
+                    | 4-bit     | 1.95 GB | 11.4 tok/s | the default |
+                    | 3-bit     | 1.4 GB | 12.4 tok/s | quality cliff |
+                    | GGUF Q4_K | 20 GB | 1.7 tok/s | streaming |
+
+                    The same numbers as a box table, which the model draws by hand:
+
+                    ┌───────────┬────────┬────────────┐
+                    │ Precision │  Size  │   Speed    │
+                    ├───────────┼────────┼────────────┤
+                    │ 4-bit     │ 1.95GB │ 11.4 tok/s │
+                    │ 3-bit     │ 1.40GB │ 12.4 tok/s │
+                    └───────────┴────────┴────────────┘
+
+                    And the decode rate as a chart:
+
+                    ```text
+                    tok/s
+                     14 |        ███
+                     12 |  ███   ███
+                     10 |  ███   ███
+                      8 |  ███   ███   ███
+                        +------------------
+                          4bit  3bit  GGUF
+                    ```
+
+                    1. The router picks experts per token.
+                       - `Array<Int>` indices, k = 8
+                       - the rest stay on disk
+                    2. Only the hot set stays resident.
+
+                    ```swift
+                    let experts: [Int] = router.topK(token, k: 8)
+                    ```
+                    """,
                     createdAt: now.addingTimeInterval(-50)),
             ])
         let earlier = ChatSession(
