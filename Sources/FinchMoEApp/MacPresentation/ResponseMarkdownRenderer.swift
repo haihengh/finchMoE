@@ -41,12 +41,13 @@ public struct ResponseMarkdownRenderer {
         guard !source.isEmpty else {
             return Result(attributedString: NSAttributedString(), usedFallback: false)
         }
-        guard !MarkdownSourcePolicy.requiresRawRendering(source) else {
-            return fallback(source)
-        }
+        let source = MarkdownSourcePolicy.normalized(source)
 
         do {
             let parsed = try MarkdownSourcePolicy.parsed(source)
+            // A table is the one thing this renderer cannot lay out — it has
+            // no grid to put the cells in — so it is shown as it was written.
+            // The chat window uses the SwiftUI renderer, which can.
             guard !MarkdownSourcePolicy.containsTable(parsed) else {
                 return fallback(source)
             }
