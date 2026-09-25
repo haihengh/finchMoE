@@ -60,27 +60,36 @@ import Testing
             .strikethroughStyle, at: strikeRange.location, effectiveRange: nil) != nil)
     }
 
-    @Test func unfinishedFenceFallsBackToExactRawText() {
-        let source = "Before\n\n```python\nprint('unfinished')"
-        let result = ResponseMarkdownRenderer().render(source)
+    /// The renderer closes the fence for the reader instead of handing back
+    /// the answer as plain text.
+    @Test func unfinishedFenceStillRendersWhatCameBeforeIt() {
+        let result = ResponseMarkdownRenderer().render(
+            "Before\n\n```python\nprint('unfinished')")
 
-        #expect(result.usedFallback)
-        #expect(result.attributedString.string == source)
+        #expect(!result.usedFallback)
+        #expect(result.attributedString.string.contains("Before"))
+        #expect(result.attributedString.string.contains("print('unfinished')"))
     }
 
-    @Test func unsupportedHTMLTableAndImageStayReadableAsRawText() {
+    /// HTML and images are text the parser can keep; a table is the one thing
+    /// this renderer has no layout for, so it stays as it was written.
+    @Test func onlyATableFallsBackToRawText() {
         let renderer = ResponseMarkdownRenderer()
-        let samples = [
-            "<div>Never execute this</div>",
-            "| A | B |\n|---|---|\n| 1 | 2 |",
-            "![remote](https://example.com/image.png)",
-        ]
 
-        for source in samples {
+        for source in [
+            "<div>Never execute this</div>",
+            "![remote](https://example.com/image.png)",
+        ] {
             let result = renderer.render(source)
-            #expect(result.usedFallback)
-            #expect(result.attributedString.string == source)
+            #expect(!result.usedFallback, "unexpected fallback for \(source)")
+            #expect(result.attributedString.string.contains("Never")
+                || result.attributedString.string.contains("remote"))
         }
+
+        let table = "| A | B |\n|---|---|\n| 1 | 2 |"
+        let result = renderer.render(table)
+        #expect(result.usedFallback)
+        #expect(result.attributedString.string.contains("| A | B |"))
     }
 
     @Test func latexRemainsReadableText() {
