@@ -76,9 +76,34 @@ import FinchMoE
     /// Regression guard for the bug this replaced: every installable
     /// descriptor must carry its own architecture, because the menu sizes its
     /// figures off it and a fallback silently reported Gemma's numbers.
+    ///
+    /// The table is asserted against `installable` rather than listing
+    /// descriptors by hand, and that coverage assertion is the part that earns
+    /// its keep: this test used to name three descriptors explicitly, so the
+    /// abliterated pair would have been added with no KV figures checked at all
+    /// and nothing would have failed. Now a descriptor added to the scan
+    /// without an expectation here breaks the coverage line.
+    ///
+    /// Note an abliterated entry deliberately shares its base's architecture —
+    /// same layers, same heads — so the expectations below matching pairwise is
+    /// correct, not a copy-paste slip.
     @Test func installableDescriptorsCarryTheirOwnArchitecture() {
-        #expect(AppModelInstallDescriptor.qwen3_6.architecture == .qwen3_6_35B_A3B)
-        #expect(AppModelInstallDescriptor.qwen3_8.architecture == .qwen3_8_flashNext_125B)
+        let expected: [(AppModelInstallDescriptor, ArchConfig)] = [
+            (.qwen3_6, .qwen3_6_35B_A3B),
+            (.qwen3_6_abliterated, .qwen3_6_35B_A3B),
+            (.qwen3_8, .qwen3_8_flashNext_125B),
+            (.qwen3_8_abliterated, .qwen3_8_flashNext_125B),
+        ]
+        // Compared order-insensitively: reordering `installable` is legitimate
+        // (it only steers the fallback scan), but dropping or adding an entry
+        // without an expectation here is not.
+        #expect(expected.map(\.0.displayName).sorted()
+                    == AppModelInstallDescriptor.installable.map(\.displayName).sorted(),
+                "the architecture expectations must cover exactly the installable set")
+        for (descriptor, architecture) in expected {
+            #expect(descriptor.architecture == architecture,
+                    "\(descriptor.displayName) carries the wrong architecture")
+        }
         #expect(AppModelInstallDescriptor.default.architecture == .gemma4_26B_A4B)
     }
 }

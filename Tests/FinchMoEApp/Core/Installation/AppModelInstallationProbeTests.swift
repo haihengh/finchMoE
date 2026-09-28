@@ -124,16 +124,88 @@ import FinchMoE
     /// Every descriptor the app can recognise must be reachable from the
     /// scan — an entry that exists but is not in `installable` is dead code
     /// that reads as "unknown checkpoint" at runtime.
+    ///
+    /// Uniqueness is asserted on `weightsSHA256`, **not** `sourceIndexSHA256`.
+    /// That used to be the right field and no longer is: a base install and its
+    /// abliterated twin genuinely share a source snapshot hash, because that
+    /// hash covers the tensor index and abliteration does not change any name,
+    /// shape or offset. Two entries colliding there is the expected state, not
+    /// the failure it would be for the weights digest — which is exactly why
+    /// `matchingDescriptor` consults the weights digest first. The invariant the
+    /// original assertion protected ("the scan can tell them apart") is
+    /// preserved here, on the field that can actually carry it.
     @Test func everyDescriptorResolvesFromItsOwnHash() {
         for descriptor in AppModelInstallDescriptor.installable {
             #expect(!descriptor.sourceIndexSHA256.isEmpty,
                     "\(descriptor.displayName) has no source hash to match on")
+            #expect(descriptor.weightsSHA256?.isEmpty == false,
+                    "\(descriptor.displayName) pins no weights digest; the scan cannot tell it apart from an architecture twin")
         }
-        #expect(Set(AppModelInstallDescriptor.installable.map(\.sourceIndexSHA256)).count
+        #expect(Set(AppModelInstallDescriptor.installable.compactMap(\.weightsSHA256)).count
                     == AppModelInstallDescriptor.installable.count,
-                "two descriptors share a source hash; the scan cannot tell them apart")
+                "two descriptors share a weights digest; the scan cannot tell them apart")
         #expect(AppModelInstallDescriptor.installable.contains(.qwen3_6))
+        #expect(AppModelInstallDescriptor.installable.contains(.qwen3_6_abliterated))
         #expect(AppModelInstallDescriptor.installable.contains(.qwen3_8))
+        #expect(AppModelInstallDescriptor.installable.contains(.qwen3_8_abliterated))
+    }
+
+    /// The regression guard for the abliterated entries. The two installs below
+    /// are built from descriptors that agree on *everything* the scan used to
+    /// look at — same `sourceIndexSHA256`, same architecture, same model id, so
+    /// the fixture writes the same `sourceSnapshotHash` — and differ only in the
+    /// resident-weights digest. Before `weightsSHA256` existed both directories
+    /// resolved to whichever entry came first, which is how a repacked
+    /// abliterated install ended up labelled as the base model.
+    @Test func baseAndAbliteratedTwinsResolveApart() throws {
+        #expect(AppModelInstallDescriptor.qwen3_6.sourceIndexSHA256
+                    == AppModelInstallDescriptor.qwen3_6_abliterated.sourceIndexSHA256,
+                "premise of this test: the twin descriptors share a source hash")
+
+        let base = try makeCompleteModelInstall(
+            "twin-base",
+            arch: ArchConfig.qwen3_6_35B_A3B,
+            modelID: "local/Qwen3.6-35B-A3B",
+            descriptor: .qwen3_6)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let abliterated = try makeCompleteModelInstall(
+            "twin-abliterated",
+            arch: ArchConfig.qwen3_6_35B_A3B,
+            modelID: "local/Qwen3.6-35B-A3B",
+            descriptor: .qwen3_6_abliterated)
+        defer { try? FileManager.default.removeItem(at: abliterated) }
+
+        #expect(AppModelInstallationProbe.matchingDescriptor(at: base) == .qwen3_6)
+        #expect(AppModelInstallationProbe.matchingDescriptor(at: abliterated) == .qwen3_6_abliterated)
+        #expect(AppModelInstallationProbe.matchingDescriptor(at: base)
+                    != AppModelInstallationProbe.matchingDescriptor(at: abliterated))
+    }
+
+    /// The weights digest is consulted first, but it must not become a hard
+    /// requirement: an install whose digest no descriptor recognises still
+    /// resolves by its source snapshot rather than collapsing to Gemma.
+    @Test func unrecognisedWeightsDigestFallsBackToSourceSnapshot() throws {
+        let install = try makeCompleteModelInstall(
+            "unknown-weights",
+            arch: ArchConfig.qwen3_6_35B_A3B,
+            modelID: "local/Qwen3.6-35B-A3B",
+            descriptor: .qwen3_6)
+        defer { try? FileManager.default.removeItem(at: install) }
+
+        // Rewrite the manifest with a digest no descriptor pins, keeping the
+        // source snapshot hash intact.
+        let manifestURL = install.appendingPathComponent("manifest.json")
+        var manifest = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: manifestURL)) as? [String: Any] ?? [:]
+        var files = manifest["files"] as? [String: Any] ?? [:]
+        files["model_weights.bin"] = ["size": 0,
+                                      "sha256": String(repeating: "a", count: 64)]
+        manifest["files"] = files
+        try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
+            .write(to: manifestURL)
+
+        #expect(AppModelInstallationProbe.matchingDescriptor(at: install) == .qwen3_6)
     }
 
     @Test func matchingDescriptorWithoutManifestFallsBackToDefault() {
