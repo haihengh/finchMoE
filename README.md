@@ -85,6 +85,14 @@ both from the same binary.
   install (PLE table at raw bf16) stays directly behind it as the fallback the
   app's default-install resolution drops to. EvalPlus HumanEval on the
   shipping install scores **95.1% base / 92.1% HumanEval+**.
+- **Abliterated (uncensored) variants of both Qwen models are built, measured
+  and published** (2026-09-27). They are repacked by the same pipeline at the
+  same quantization settings, so only the weights differ, and EvalPlus shows
+  **no measurable regression** against the base weights — 3.6 abliterated
+  scores 93.3% base / 90.2% HumanEval+ against the base install's
+  90.9% / 87.8%, and 3.8 abliterated 94.5% / 92.7% against 94.5% / 92.1%. The
+  app's Preset picker lists them and prefers them when a checkout holds one.
+  See [Abliterated (uncensored) installs](#abliterated-uncensored-installs).
 - **The prefill projections are batched.** The linear-attention (GDN) weights
   are int8 on every shipped install, and the prefill used to feed them one GEMV
   per token — 426 re-reads of each weight matrix per chunk. A tiled kernel that
@@ -188,6 +196,10 @@ decode.
 | Qwen 3.6 35B-A3B | ~19 GB `.finch` | 90.9% (149/164) | 87.8% (144/164) |
 | Qwen 3.8 Flash-Next 125B | ~167 GB `.finch` | 94.5% (155/164) | 92.1% (151/164) |
 
+Both models also exist as abliterated (uncensored) installs, measured separately
+so the rows above stay a single-machine comparison — see
+[Abliterated (uncensored) installs](#abliterated-uncensored-installs).
+
 | Prompt-suite case | Model | Prompt tokens | Prefill | Prefill tok/s | Decode | Decode tok/s | Expert reads/token |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | short-explanation | Qwen 3.6 35B-A3B | 62 | 2.29s | 27.1 | 5.42s | 23.61 | 214.7 MB |
@@ -274,6 +286,70 @@ fp32 reference before any layer is wired in. Full details, the locked GDN
 math, and the target-model spec live in
 [docs/QWEN36_PORT.md](docs/QWEN36_PORT.md).
 
+## Abliterated (uncensored) installs
+
+Both Qwen models also exist here in an **abliterated** variant: the refusal
+direction removed from the weights *upstream*, not by prompting and not by
+anything the runtime does. They are repacked by the same `FinchMoERepack`
+pipeline with the same quantization settings as the base installs, so every
+engine path is identical and the weights are the only variable.
+
+| | Qwen 3.6 35B-A3B | Qwen 3.8 Flash-Next 125B |
+| --- | --- | --- |
+| Hugging Face | [finchmoe-4bit-abliterated](https://huggingface.co/haihengh/Qwen3.6-35B-A3B-finchmoe-4bit-abliterated) | [finchmoe-4bit-ple4bit-abliterated](https://huggingface.co/haihengh/Qwen3.8-Flash-Next-125B-finchmoe-4bit-ple4bit-abliterated) |
+| Install size | 18.7 GiB | 96.9 GiB |
+| Upstream abliteration | [`huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated`](https://huggingface.co/huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated) | [`windowsxp811203/Qwen3.8-Flash-Next-Abliterated`](https://huggingface.co/windowsxp811203/Qwen3.8-Flash-Next-Abliterated) |
+| Licence | Apache-2.0 | Qwen Community License 1.0 |
+
+The app's Preset picker lists all four Qwen entries, with each abliterated entry
+directly after the base entry it is a variant of. When a checkout holds an
+abliterated install, that install is the one the app starts on.
+
+### Measured quality
+
+EvalPlus HumanEval, greedy, 164 problems, the frozen server protocol — same
+harness, same 768-token cap, context 4096 — measured 2026-09-27 on the 16 GB
+mini. Each pair differs **only** in the weights: same engine, same quantization,
+same context, so the delta is attributable to the abliteration.
+
+| Install | HumanEval base pass@1 | HumanEval+ pass@1 |
+| --- | ---: | ---: |
+| Qwen 3.6 35B-A3B (base weights) | 90.9% (149/164) | 87.8% (144/164) |
+| **Qwen 3.6 35B-A3B abliterated** | **93.3% (153/164)** | **90.2% (148/164)** |
+| Qwen 3.8 Flash-Next 125B (base weights) | 94.5% (155/164) | 92.1% (151/164) |
+| **Qwen 3.8 Flash-Next 125B abliterated** | **94.5% (155/164)** | **92.7% (152/164)** |
+
+**Do not read the 3.6 gain as abliteration improving coding.** The binomial
+standard error at p≈0.91, n=164 is 2.2 points, so +2.4 pt is about one standard
+error — it is noise, and problems moved in both directions (gained 95, 99, 113,
+124, 147, 160; lost 54, 116). The defensible claim, and the one worth having, is
+**no measurable regression** — which is what an abliterated derivative needs to
+demonstrate and is not obvious in advance, since abliteration rewrites
+residual-writing tensors.
+
+Read the residual failures with the cap in mind. Of 3.6 abliterated's 11
+failures, 4 are `length`-capped by the harness budget rather than genuinely
+wrong (HumanEval/116, 129, 130, 132); of 3.8 abliterated's 9, **7 are capped**
+(32, 93, 113, 116, 129, 130, 132) and only 2 are genuine (145, 163). A stable
+core — HumanEval/32, 93, 129, 130, 132, 145, 163 — fails on the base weights too,
+so it is model difficulty, not abliteration.
+
+**Refusal behaviour itself is not measured here.** EvalPlus says nothing about
+what a model will or will not refuse, and no cell in this project probes it. What
+the numbers above establish is that general capability survived; they are not a
+claim about what these models decline to do.
+
+### How the app tells them apart
+
+An abliterated install and its base twin carry the **same
+`sourceSnapshotHash`** — that hash covers the tensor index (names, shapes,
+layout), which abliteration does not change, so both 3.6 installs hash to
+`41b93561…` and both 3.8 installs to `99e81524…`. Identification therefore keys
+on `model_weights.bin`'s SHA-256, which does differ
+(`9644b61a…` vs `f6862341…` for 3.6, `c522877f…` vs `6af82b55…` for 3.8), with
+the snapshot hash retained as the fallback for unrecognised installs. See
+`AppModelInstallDescriptor.weightsSHA256`.
+
 ## Using FinchMoE
 
 FinchMoE provides a native Mac app, a command-line interface, and an
@@ -314,9 +390,15 @@ swift build -c release
 ```
 
 Build the complete package so the app and its sibling decode service are both
-available. When launched from this checkout, the app prefers the repack-made
-Qwen 3.6 install at `models/Qwen3.6-35B-A3B-4bit.finch` when it is present;
-otherwise it targets `scratch/gemma4.finch`.
+available. When launched from this checkout the app resolves its model from
+`models/`, preferring the Qwen 3.6 family over 3.8 (a 125B needs far more memory
+to run) and, within a family, the abliterated install over its base; with no
+`.finch` install present it falls back to `scratch/gemma4.finch`.
+
+The **Preset** picker in the inspector lists every entry — Gemma, both Qwen
+families in base and abliterated form, and **Local directory** for an install
+elsewhere on disk. Selecting a preset while a model is loaded is ignored; unload
+first.
 
 #### Install the model
 
@@ -562,6 +644,18 @@ FinchMoE's source and documentation are licensed under the
 
 Model weights are not included. The installer downloads them separately from
 the pinned checkpoint, and the weights remain governed by their source terms.
+
+Repack-made `.finch` installs are published on Hugging Face and carry the terms
+of the checkpoint they were repacked from, which differ between the two families:
+
+| Install | Licence |
+| --- | --- |
+| Qwen 3.6 35B-A3B, base and abliterated | Apache-2.0 |
+| Qwen 3.8 Flash-Next 125B, base and abliterated | Qwen Community License 1.0 |
+
+Abliteration does not change a model's licence — it is a derivative work and
+inherits the terms of the checkpoint it was derived from, along with the
+copyright and permission notices those terms require.
 
 ## Credits
 
