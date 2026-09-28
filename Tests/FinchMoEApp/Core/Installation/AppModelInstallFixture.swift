@@ -13,8 +13,14 @@ func makeCompleteModelInstall(_ tag: String,
     try FileManager.default.createDirectory(at: experts, withIntermediateDirectories: true)
     try Data("{}".utf8).write(to: experts.appendingPathComponent("layout.json"))
 
+    // The resident-weights digest is what `matchingDescriptor` keys on first, so
+    // it has to come from the descriptor or every fixture install would present
+    // the same identity and the base/abliterated pair could not be told apart.
+    // Descriptors that pin no weights (`.default`) keep the all-zeros digest.
     var files: [String: Any] = [
-        "model_weights.bin": ["size": 0, "sha256": String(repeating: "0", count: 64)],
+        "model_weights.bin": ["size": 0,
+                              "sha256": descriptor.weightsSHA256
+                                  ?? String(repeating: "0", count: 64)],
         "packed_experts/layout.json": ["size": 2, "sha256": String(repeating: "0", count: 64)],
     ]
     for layer in 0..<arch.numLayers {

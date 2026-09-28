@@ -58,10 +58,17 @@ enum AppModelLocation {
     /// is installed yet). Outside a checkout the Application Support Gemma
     /// target above remains the fallback.
     ///
-    /// Order matters, and 3.6 stays first: 3.8 is a 125B, 512-expert model
-    /// that needs far more memory than 3.6 to run, so a checkout holding both
-    /// must keep starting on 3.6. 3.8 is the entry for a checkout that holds
-    /// only it.
+    /// Order matters, and the 3.6 *family* stays first: 3.8 is a 125B,
+    /// 512-expert model that needs far more memory than 3.6 to run, so a
+    /// checkout holding both must keep starting on a 3.6. 3.8 is the entry for
+    /// a checkout that holds only it. That reasoning is about 3.6 against 3.8
+    /// and is untouched by the abliterated entries below.
+    ///
+    /// Within a family, an abliterated install is tried before its base: the
+    /// two are the same architecture and the same quality band (EvalPlus
+    /// 2026-09-27 measured no regression), and a checkout that has deliberately
+    /// repacked one means to run it. A checkout holding only the base keeps
+    /// starting on the base, so no existing install changes behaviour.
     ///
     /// Within the 3.8 pair the quantized-PLE install comes first and the
     /// original is kept directly behind it as the fallback: they are the same
@@ -71,7 +78,9 @@ enum AppModelLocation {
     private static func preferredInstallURL(inPackageRoot root: URL,
                                             fileExists: (String) -> Bool) -> URL {
         let installed = [
+            "models/Qwen3.6-35B-A3B-abliterated-4bit.finch",
             "models/Qwen3.6-35B-A3B-4bit.finch",
+            "models/Qwen3.8-Flash-Next-abliterated-ple4bit.finch",
             "models/Qwen3.8-Flash-Next-125B-ple4bit.finch",   // 97 GiB, int4 PLE
             "models/Qwen3.8-Flash-Next-125B.finch",           // 162 GiB, raw BF16 PLE (fallback)
         ]

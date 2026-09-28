@@ -32,6 +32,23 @@ public enum AppModelInstallationProbe {
             let manifest = try ManifestReader.load(
                 directoryURL: directory,
                 expecting: try ManifestReader.detectPreset(directoryURL: directory))
+            // Weights first. A base install and its abliterated twin carry the
+            // *same* source snapshot hash — it covers the tensor index, which
+            // abliteration does not change — so the snapshot scan alone cannot
+            // separate them and would hand both directories the entry that
+            // happens to come first. The resident-weights digest is what
+            // actually differs.
+            if let weights = manifest.files["model_weights.bin"]?.sha256,
+               let match = AppModelInstallDescriptor.installable.first(where: {
+                   $0.weightsSHA256 == weights
+               }) {
+                return match
+            }
+            // The fallback is load-bearing, not decorative: an install whose
+            // weights digest is missing or unrecognised (an older repack, a
+            // future layout that renames the resident file, a descriptor that
+            // declines to pin weights) still resolves exactly as it did before
+            // this existed, rather than falling through to Gemma.
             return AppModelInstallDescriptor.installable.first {
                 manifest.sourceSnapshotHash == "sha256:" + $0.sourceIndexSHA256
             } ?? .default
