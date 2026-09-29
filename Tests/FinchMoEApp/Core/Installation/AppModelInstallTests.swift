@@ -116,6 +116,7 @@ import FinchMoERepackCore
     #expect(descriptor.shortName == "Qwen 3.6 35B-A3B")
     #expect(descriptor.repoID == "Qwen/Qwen3.6-35B-A3B")
     #expect(descriptor.sourceIndexSHA256 == "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83")
+    #expect(descriptor.weightsSHA256 == "9644b61a7369787c4397f2f8272e9e95f3eaaf11d6d7be40164a6ec288a8228d")
     #expect(descriptor.approximateDownloadBytes == 0)
     #expect(descriptor.installedBytes == 20_014_114_816)
     #expect(descriptor.rangeStagingBytes == 0)
@@ -135,11 +136,52 @@ import FinchMoERepackCore
     #expect(descriptor.shortName == "Qwen 3.8 125B")
     #expect(descriptor.repoID == "Qwen/Qwen3.8-Flash-Next")
     #expect(descriptor.sourceIndexSHA256 == "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de")
+    #expect(descriptor.weightsSHA256 == "c522877f166d128e0c30ce58bf93322d48e3ebbda55ccf9b2c8dae86efa82a06")
     #expect(descriptor.approximateDownloadBytes == 0)
     #expect(descriptor.installedBytes == 103_925_807_384)
     #expect(descriptor.rangeStagingBytes == 0)
     #expect(descriptor.reserveBytes == 0)
     #expect(descriptor.requiredFreeBytes == 103_925_807_384)
+  }
+
+  /// The abliterated pair. Each shares its base counterpart's
+  /// `sourceIndexSHA256` deliberately — abliteration rewrites weight *values*
+  /// and leaves the tensor index untouched — so `weightsSHA256` is the only
+  /// field that separates them, and the assertion that it differs from the
+  /// base's is the point of the test rather than a formality.
+  @MainActor
+  @Test func qwenAbliteratedInstallDescriptorsMatchPinnedAudit() {
+    let qwen36 = AppModelInstallDescriptor.qwen3_6_abliterated
+    #expect(qwen36.displayName == "Qwen 3.6 35B-A3B (Abliterated)")
+    #expect(qwen36.shortName == "Qwen 3.6 Abl.")
+    #expect(qwen36.repoID == "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated")
+    #expect(qwen36.sourceIndexSHA256
+              == AppModelInstallDescriptor.qwen3_6.sourceIndexSHA256)
+    #expect(qwen36.weightsSHA256
+              == "f6862341c9688e234c682cef186af5a92445be1dbcdd36d59637338634d311bd")
+    #expect(qwen36.weightsSHA256 != AppModelInstallDescriptor.qwen3_6.weightsSHA256)
+    #expect(qwen36.approximateDownloadBytes == 0)
+    #expect(qwen36.installedBytes == 20_059_538_761)
+    #expect(qwen36.rangeStagingBytes == 0)
+    #expect(qwen36.reserveBytes == 0)
+    #expect(qwen36.requiredFreeBytes == 20_059_538_761)
+    #expect(qwen36.architecture == .qwen3_6_35B_A3B)
+
+    let qwen38 = AppModelInstallDescriptor.qwen3_8_abliterated
+    #expect(qwen38.displayName == "Qwen 3.8 Flash-Next 125B (Abliterated)")
+    #expect(qwen38.shortName == "Qwen 3.8 Abl.")
+    #expect(qwen38.repoID == "windowsxp811203/Qwen3.8-Flash-Next-Abliterated")
+    #expect(qwen38.sourceIndexSHA256
+              == AppModelInstallDescriptor.qwen3_8.sourceIndexSHA256)
+    #expect(qwen38.weightsSHA256
+              == "6af82b557d8207e470f50c1fba5dbb14e7ff4b48139a5b0b2e4f8ac56d188acb")
+    #expect(qwen38.weightsSHA256 != AppModelInstallDescriptor.qwen3_8.weightsSHA256)
+    #expect(qwen38.approximateDownloadBytes == 0)
+    #expect(qwen38.installedBytes == 104_002_831_190)
+    #expect(qwen38.rangeStagingBytes == 0)
+    #expect(qwen38.reserveBytes == 0)
+    #expect(qwen38.requiredFreeBytes == 104_002_831_190)
+    #expect(qwen38.architecture == .qwen3_8_flashNext_125B)
   }
 
   @MainActor

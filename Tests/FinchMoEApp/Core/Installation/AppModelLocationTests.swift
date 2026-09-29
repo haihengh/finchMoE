@@ -71,6 +71,11 @@ import Testing
     /// With both installed, 3.6 stays the default: 3.8 is a 174 GB model that
     /// needs far more memory to run, so it must not become the app's implicit
     /// choice for a checkout that happens to hold it.
+    ///
+    /// This is now specifically the *no-abliterated-install* case of that rule;
+    /// see `abliteratedWinsWithinItsFamily` and
+    /// `familyOrderingSurvivesTheAbliteratedPreference` for the cases the
+    /// abliterated entries added.
     @Test func qwen36WinsWhenBothInstallsArePresent() {
         let files: Set<String> = [
             "/repo/Package.swift",
@@ -85,6 +90,68 @@ import Testing
             applicationSupportURL: URL(fileURLWithPath: "/support"),
             fileExists: files.contains)
         #expect(result.path == "/repo/models/Qwen3.6-35B-A3B-4bit.finch")
+    }
+
+    /// Within a family the abliterated install is tried first. It is the same
+    /// architecture and the same measured quality band — EvalPlus 2026-09-27 on
+    /// both families found no regression against the base weights — and a
+    /// checkout that went to the trouble of repacking one means to run it.
+    ///
+    /// A checkout holding only the base still starts on the base, so this
+    /// preference cannot change behaviour for an install that has no
+    /// abliterated twin.
+    @Test func abliteratedWinsWithinItsFamily() {
+        let both: Set<String> = [
+            "/repo/Package.swift",
+            "/repo/Sources/FinchMoEApp/Mac",
+            "/repo/models/Qwen3.6-35B-A3B-4bit.finch/manifest.json",
+            "/repo/models/Qwen3.6-35B-A3B-abliterated-4bit.finch/manifest.json",
+        ]
+        #expect(resolve(inPackage: both).path
+                    == "/repo/models/Qwen3.6-35B-A3B-abliterated-4bit.finch")
+
+        let baseOnly: Set<String> = [
+            "/repo/Package.swift",
+            "/repo/Sources/FinchMoEApp/Mac",
+            "/repo/models/Qwen3.6-35B-A3B-4bit.finch/manifest.json",
+        ]
+        #expect(resolve(inPackage: baseOnly).path
+                    == "/repo/models/Qwen3.6-35B-A3B-4bit.finch")
+
+        let qwen38Pair: Set<String> = [
+            "/repo/Package.swift",
+            "/repo/Sources/FinchMoEApp/Mac",
+            "/repo/models/Qwen3.8-Flash-Next-125B-ple4bit.finch/manifest.json",
+            "/repo/models/Qwen3.8-Flash-Next-abliterated-ple4bit.finch/manifest.json",
+        ]
+        #expect(resolve(inPackage: qwen38Pair).path
+                    == "/repo/models/Qwen3.8-Flash-Next-abliterated-ple4bit.finch")
+    }
+
+    /// Preferring abliterated must not disturb the 3.6-before-3.8 ordering
+    /// above, which exists for memory reasons that have nothing to do with
+    /// which variant of a family is installed. Every install except the 3.8
+    /// base is present here, and the answer is still a 3.6 — the abliterated
+    /// 125B must not win merely by being abliterated.
+    @Test func familyOrderingSurvivesTheAbliteratedPreference() {
+        let files: Set<String> = [
+            "/repo/Package.swift",
+            "/repo/Sources/FinchMoEApp/Mac",
+            "/repo/models/Qwen3.6-35B-A3B-4bit.finch/manifest.json",
+            "/repo/models/Qwen3.6-35B-A3B-abliterated-4bit.finch/manifest.json",
+            "/repo/models/Qwen3.8-Flash-Next-abliterated-ple4bit.finch/manifest.json",
+        ]
+        #expect(resolve(inPackage: files).path
+                    == "/repo/models/Qwen3.6-35B-A3B-abliterated-4bit.finch")
+    }
+
+    private func resolve(inPackage files: Set<String>) -> URL {
+        AppModelLocation.resolve(
+            explicitURL: nil,
+            executableURL: URL(fileURLWithPath: "/repo/.build/debug/FinchMoEMac"),
+            currentDirectoryURL: URL(fileURLWithPath: "/elsewhere"),
+            applicationSupportURL: URL(fileURLWithPath: "/support"),
+            fileExists: files.contains)
     }
 
     @Test func absentQwenManifestKeepsGemmaTargetEvenWhenModelsDirExists() {
