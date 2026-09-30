@@ -1,0 +1,8 @@
+This design suffers from critical race conditions and resource management flaws that violate its core goals of correctness and bounded memory.
+
+**1. The "Harmless" Race Condition is Fatal**
+The assumption that two concurrent misses selecting the same slot are harmless is incorrect. If Request A and Request B both target Slot X:
+*   Request A starts reading into Slot X.
+*   Request B sees Slot X is "oldest" (or stale) and *also* initiates a read into Slot X.
+*   **Corruption:** Both tasks write to the same buffer concurrently. The resulting data is garbage.
+*

@@ -1,0 +1,5 @@
+### Critical Risks
+
+1.  **Data Corruption & Race Conditions**: The design is fundamentally broken. Multiple misses selecting the same slot concurrently cause simultaneous writes to the same buffer. This results in interleaved data corruption. Furthermore, returning a view into a mutable buffer while another thread is writing to it violates memory safety.
+2.  **Unbounded Memory**: The lack of payload length validation allows malicious or corrupt files to trigger massive buffer allocations, causing OOM crashes.
+3.  **Stale/Corrupt Data Retention**: Failed reads leave invalid data in the cache. Subsequent hits return corrupted bytes. Additionally, atomic
