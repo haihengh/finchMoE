@@ -1,0 +1,4 @@
+### Critical Risks
+
+**1. Data Corruption via Buffer Reuse (Correctness)**
+The most severe flaw is returning a view into a shared, reusable buffer. When a miss occurs, the dictionary is updated to point the key to a slot. If a second request for the *same* key arrives before the first async read completes, the dictionary lookup returns the same slot. The second request will await the *same* future. However, if the first read fails or is cancelled, the slot’s buffer content is undefined or stale. More critically, if the design allows multiple keys to map to the same slot (as implied by

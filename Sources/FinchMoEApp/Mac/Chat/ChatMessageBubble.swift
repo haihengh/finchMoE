@@ -1,4 +1,3 @@
-import AppKit
 import FinchMoEAppCore
 import FinchMoEMacPresentation
 import SwiftUI
@@ -10,6 +9,10 @@ import SwiftUI
 /// normal chat app is. A finished answer is rendered as markdown blocks; a
 /// still-streaming one stays plain text, because re-parsing markdown on every
 /// token costs more than the formatting is worth mid-flight.
+///
+/// A bubble can be copied two ways: the buttons that fade in under it on
+/// hover, and the right-click menu, which is where the second kind of copy —
+/// the answer as markdown rather than as it reads — lives.
 struct ChatMessageBubble: View {
     let message: ChatMessage
     /// Non-nil only for the reply currently being written.
@@ -23,6 +26,16 @@ struct ChatMessageBubble: View {
     private var isUser: Bool { message.role == .user }
 
     var body: some View {
+        // A message with nothing to copy and nothing to regenerate offers no
+        // menu at all, rather than an empty one.
+        if hasMenuItems {
+            row.contextMenu { menuItems }
+        } else {
+            row
+        }
+    }
+
+    private var row: some View {
         // The row is a single full-width view aligned to the correct edge
         // rather than an HStack of content plus Spacer: a Spacer only pushes
         // when the container proposes the full width, which a lazy stack does
@@ -46,6 +59,10 @@ struct ChatMessageBubble: View {
     }
 
     private var isStreaming: Bool { streamingText != nil }
+
+    /// What the bubble is showing, which while a reply streams is the partial
+    /// answer rather than the message it is filling in.
+    private var visibleText: String { streamingText ?? message.text }
 
     @ViewBuilder
     private var bubble: some View {
@@ -111,16 +128,78 @@ struct ChatMessageBubble: View {
         }
     }
 
+    // MARK: - Copying
+
+    /// True when there is something for "Copy" to put on the clipboard.
+    private var canCopy: Bool { !visibleText.isEmpty }
+
+    private var hasMenuItems: Bool { canCopy || canRegenerate }
+
+    /// The right-click menu.
+    ///
+    /// The answer is parsed here rather than in `body` so that the transcript
+    /// does not rebuild every answer's plain text on every render — the
+    /// menu's contents are only ever wanted once it is open.
+    @ViewBuilder
+    private var menuItems: some View {
+        if canCopy {
+            Button("Copy", action: copyPlainText)
+            // A streaming reply is plain text on screen and a user's own turn
+            // is not markdown, so neither has a second form to offer.
+            if !isUser, !isStreaming {
+                Button("Copy as Markdown") { copyText(message.text) }
+                codeItems
+            }
+        }
+        if canRegenerate {
+            if canCopy { Divider() }
+            Button("Regenerate Reply", action: onRegenerate)
+        }
+    }
+
+    /// One code block copies on click; several need a submenu, because a
+    /// single "Copy Code" would have to guess which one is meant.
+    @ViewBuilder
+    private var codeItems: some View {
+        let blocks = MessageCopyFormatter.codeBlocks(
+            of: MarkdownDocumentCache.document(for: message.text))
+        if blocks.count == 1 {
+            Button("Copy Code") { copyText(blocks[0]) }
+        } else if !blocks.isEmpty {
+            Menu("Copy Code") {
+                ForEach(Array(blocks.enumerated()), id: \.offset) { index, code in
+                    Button(MessageCopyFormatter.codeBlockLabel(for: code, index: index)) {
+                        copyText(code)
+                    }
+                }
+            }
+        }
+    }
+
+    /// What "Copy" means: the answer as it reads. A finished reply is written
+    /// in markdown, so copying its source would paste the `**` and the `#`
+    /// along with it.
+    private func copyPlainText() {
+        if isUser || isStreaming {
+            copyText(visibleText)
+        } else {
+            copyText(MessageCopyFormatter.plainText(
+                of: MarkdownDocumentCache.document(for: message.text)))
+        }
+    }
+
+    private func copyText(_ text: String) {
+        Clipboard.copy(text)
+        withAnimation(.easeIn(duration: 0.12)) { copyFeedback = true }
+    }
+
     private var actions: some View {
         HStack(spacing: 4) {
             actionButton(
                 systemName: copyFeedback ? "checkmark.circle.fill" : "doc.on.doc",
                 label: copyFeedback ? "Copied" : "Copy",
-                tint: copyFeedback ? FinchMoEMacTheme.accentColor : .secondary
-            ) {
-                copyToPasteboard(message.text)
-                withAnimation(.easeIn(duration: 0.12)) { copyFeedback = true }
-            }
+                tint: copyFeedback ? FinchMoEMacTheme.accentColor : .secondary,
+                action: copyPlainText)
             if canRegenerate {
                 actionButton(
                     systemName: "arrow.clockwise",
@@ -148,11 +227,6 @@ struct ChatMessageBubble: View {
         .buttonStyle(.borderless)
         .help(label)
         .accessibilityLabel(label)
-    }
-
-    private func copyToPasteboard(_ text: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
     }
 }
 

@@ -1,0 +1,4 @@
+### Critical Correctness Risks
+
+1.  **Data Races on Shared Buffers**
+    The most severe risk is concurrent access to the reusable byte buffer. Since the dictionary maps keys to *slots* (which own buffers) but does not protect the buffer’s internal state during asynchronous reads, two concurrent misses selecting the same slot (due to the race in choosing the "oldest" slot) will overwrite each other’s data. Even if they are distinct keys, if the slot is reused rapidly, a reader might see a partially written buffer or stale data from a previous key. Furthermore, if the buffer is a single shared instance
