@@ -177,19 +177,42 @@ measurements the fork started from.
 
 ## Model performance comparison
 
-The first table below is the 2026-09-14 comparison on a 24 GB Apple M4 Pro
-(`Mac16,7`, macOS 26.6.2, Swift 6.2.4) — kept because it is an apples-to-apples
-run of both models on one machine. **Its 3.8 rows predate two changes that both
-move prefill**: the shipping install is now the quantized-PLE one rather than the
-167 GB install it names, and the int8 projections are batched. The second table
-is the current engine on the 16 GB mini.
+Three hosts have prompt-suite rows: a 24 GB Apple M4 Pro (`Mac16,7`, macOS
+26.6.2, Swift 6.2.4, 2026-09-14), a 16 GB M4 Mac mini (2026-09-18), and a 16 GB
+M6 Mac mini (`Mac18,5`, macOS 27.0, Swift 6.4, 2026-09-30). The throughput
+comparison below puts them side by side; the tables after it are the rows behind
+it.
 
-Measured on a 24 GB Apple M4 Pro, release `FinchMoECLI`, verified local
-`.finch` installs, app sampling defaults for the prompt-suite rows
-(`temperature 0.2`, Top-K 64, Top-P 0.95), and a 128-token generation cap.
-Decode rates exclude model load and prompt prefill. Prefill rates are reported
-separately because long prompts exercise a different path than token-by-token
-decode.
+The M4 Pro run is kept because it measures both models in one sitting on one
+machine, but **its 3.8 rows predate two changes that both move prefill**: the
+shipping install is now the quantized-PLE one rather than the 167 GB install it
+names, and the int8 projections are batched. Both mini runs are the current
+engine.
+
+All rows use the release `FinchMoECLI` against verified local `.finch` installs,
+with the app sampling defaults (`temperature 0.2`, Top-K 64, Top-P 0.95) and a
+128-token generation cap. Decode rates exclude model load and prompt prefill.
+Prefill rates are reported separately because long prompts exercise a different
+path than token-by-token decode.
+
+### Throughput across hosts
+
+Tokens per second on the three frozen cases. Each cell is ordered
+`short-explanation / medium-review / long-synthesis`:
+
+| Host | Model | Prefill tok/s | Decode tok/s |
+| --- | --- | ---: | ---: |
+| 24 GB M4 Pro † | Qwen 3.6 35B-A3B | 27.1 / 40.7 / 36.1 | 23.61 / 23.46 / 19.28 |
+| 24 GB M4 Pro † | Qwen 3.8 Flash-Next 125B | 10.7 / 16.5 / 14.8 | 6.08 / 5.52 / 4.92 |
+| 16 GB M4 Mac mini | Qwen 3.6 35B-A3B | 14.6 / 46.8 / 42.0 | 10.03 / 9.73 / 7.82 |
+| 16 GB M4 Mac mini | Qwen 3.8 Flash-Next 125B | 6.6 / 20.7 / 18.9 | 3.17 / 2.95 / 2.59 |
+| 16 GB M6 Mac mini | Qwen 3.6 35B-A3B | 17.8 / 62.7 / 59.3 | 8.46 / 8.57 / 7.74 |
+| 16 GB M6 Mac mini | Qwen 3.8 Flash-Next 125B | 7.6 / 24.9 / 23.2 | 3.21 / 2.67 / 2.43 |
+
+† Pre-quantized-PLE install and per-token int8 projections, so both 3.8 numbers
+are not comparable to the mini rows — see the note above.
+
+### Quality
 
 | Model | Install | HumanEval base pass@1 | HumanEval+ pass@1 |
 | --- | ---: | ---: | ---: |
@@ -199,6 +222,13 @@ decode.
 Both models also exist as abliterated (uncensored) installs, measured separately
 so the rows above stay a single-machine comparison — see
 [Abliterated (uncensored) installs](#abliterated-uncensored-installs).
+
+### Per-case detail
+
+The rows behind the comparison table, host by host.
+
+24 GB M4 Pro, 2026-09-14 — the run whose 3.8 rows predate the quantized-PLE
+install and the batched projections:
 
 | Prompt-suite case | Model | Prompt tokens | Prefill | Prefill tok/s | Decode | Decode tok/s | Expert reads/token |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -220,17 +250,42 @@ Current engine, 16 GB M4 Mac mini, 2026-09-18, same protocol and columns:
 | long-synthesis | Qwen 3.6 35B-A3B | 2,940 | 70.06s | 42.0 | 16.38s | 7.82 | 247.8 MB |
 | long-synthesis | Qwen 3.8 Flash-Next 125B | 2,940 | 155.80s | 18.9 | 49.47s | 2.59 | 726.8 MB |
 
-Both 3.8 prefill figures are roughly 25% better than the September M4 Pro table
-recorded for the same cases (16.5 and 14.8 tok/s), on a smaller machine — the
-batched projections and the quantized-PLE install, against a much slower host.
+Current engine, 16 GB M6 Mac mini, 2026-09-30, same protocol and columns:
 
-In this apples-to-apples local run, Qwen 3.6 decodes about **3.0-3.3x faster**
-than Qwen 3.8 across the 128-token prompt suite on the mini (3.9-4.3x on the M4
-Pro), while Qwen 3.8 scores **+4.2 points** on HumanEval base and **+4.3 points**
-on HumanEval+. The dominant
-runtime difference is routed-expert I/O: the 125B install reads roughly
-607-719 MB of expert data per generated token here, versus 215-244 MB/token for
-the 35B install.
+| Prompt-suite case | Model | Prompt tokens | Prefill | Prefill tok/s | Decode | Decode tok/s | Expert reads/token |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| short-explanation | Qwen 3.6 35B-A3B | 62 | 3.49s | 17.8 | 15.13s | 8.46 | 222.0 MB |
+| short-explanation | Qwen 3.8 Flash-Next 125B | 62 | 8.20s | 7.6 | 39.93s | 3.21 | 602.5 MB |
+| medium-review | Qwen 3.6 35B-A3B | 426 | 6.79s | 62.7 | 14.94s | 8.57 | 232.7 MB |
+| medium-review | Qwen 3.8 Flash-Next 125B | 426 | 17.08s | 24.9 | 47.90s | 2.67 | 671.7 MB |
+| long-synthesis | Qwen 3.6 35B-A3B | 2,940 | 49.57s | 59.3 | 16.53s | 7.74 | 242.9 MB |
+| long-synthesis | Qwen 3.8 Flash-Next 125B | 2,940 | 126.99s | 23.2 | 52.59s | 2.43 | 727.3 MB |
+
+Both M4 mini 3.8 prefill figures are roughly 25% better than the September M4 Pro
+table recorded for the same cases (16.5 and 14.8 tok/s), on a smaller machine —
+the batched projections and the quantized-PLE install, against a much slower
+host.
+
+Qwen 3.6 decodes about **3.0-3.3x faster** than Qwen 3.8 on the minis and
+**3.9-4.3x** on the M4 Pro, while Qwen 3.8 scores **+4.2 points** on HumanEval
+base and **+4.3 points** on HumanEval+. The dominant runtime difference is
+routed-expert I/O: the 125B install reads roughly 602-727 MB of expert data per
+generated token across the three hosts, versus 215-248 MB/token for the 35B
+install.
+
+The M4 Pro decodes about **2.4-2.8x faster** than either mini on the 3.6
+install, and that is not routing or cache policy: its per-token expert hit and
+miss counts match the M6 mini's within about a point (short-explanation, 60.2%
+hits against 58.9%; the 3.8 install agrees likewise, 52.1% against 52.5%). What
+differs is how fast a miss is served, which the host's memory and storage path
+decide.
+
+The M6 mini's edge over the M4 mini is prefill, which is compute-bound: 59.3
+tok/s against 42.0 on the 2,940-token 3.6 case, and 23.2 against 18.9 for 3.8.
+Decode is level between them — 7.74 against 7.82, and 2.43 against 2.59. The M6
+rows are one measured run per case after a discarded warmup, so read differences
+of a few percent as noise; that is most visible on short-explanation, the
+shortest case.
 
 ## The Qwen 3.8 Flash-Next 125B port
 
@@ -338,6 +393,25 @@ so it is model difficulty, not abliteration.
 what a model will or will not refuse, and no cell in this project probes it. What
 the numbers above establish is that general capability survived; they are not a
 claim about what these models decline to do.
+
+### Measured throughput
+
+The same pairs on the prompt suite — 16 GB M6 Mac mini, 2026-09-30, the protocol
+in [Model performance comparison](#model-performance-comparison), each cell
+ordered `short-explanation / medium-review / long-synthesis`:
+
+| Install | Prefill tok/s | Decode tok/s | Expert reads/token |
+| --- | ---: | ---: | ---: |
+| Qwen 3.6 35B-A3B (base weights) | 17.8 / 62.7 / 59.3 | 8.46 / 8.57 / 7.74 | 222 / 233 / 243 MB |
+| **Qwen 3.6 35B-A3B abliterated** | 17.4 / 61.3 / 59.6 | 11.13 / 8.48 / 8.00 | 216 / 229 / 251 MB |
+| Qwen 3.8 Flash-Next 125B (base weights) | 7.6 / 24.9 / 23.2 | 3.21 / 2.67 / 2.43 | 603 / 672 / 727 MB |
+| **Qwen 3.8 Flash-Next 125B abliterated** | 7.6 / 25.7 / 23.3 | 3.17 / 2.64 / 2.49 | 605 / 703 / 729 MB |
+
+Abliteration rewrites a handful of tensors and nothing else — same shapes, same
+quantization, same routing — so each pair lands within run-to-run noise of the
+other, and the gap between the two models stays where the base installs put it.
+The exception is 3.6 on short-explanation, 11.13 against 8.46 tok/s: that is the
+shortest and noisiest case, at a single sample per install.
 
 ### How the app tells them apart
 
