@@ -30,8 +30,7 @@ struct InspectorView: View {
                         .foregroundStyle(.secondary)
                         .help(model.modelPathText)
                     Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(model.modelPathText, forType: .string)
+                        Clipboard.copy(model.modelPathText)
                     } label: {
                         Label("Copy model path", systemImage: "doc.on.doc")
                             .labelStyle(.iconOnly)
