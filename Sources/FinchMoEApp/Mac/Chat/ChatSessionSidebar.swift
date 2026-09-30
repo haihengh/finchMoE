@@ -132,7 +132,7 @@ struct ChatSessionSidebar: View {
                 renameTarget = session
             }
             Button("Copy Conversation") {
-                copyToPasteboard(session.plainTextTranscript)
+                Clipboard.copy(session.plainTextTranscript)
             }
             .disabled(session.messages.isEmpty)
             Divider()
@@ -177,8 +177,4 @@ struct ChatSessionSidebar: View {
         }
     }
 
-    private func copyToPasteboard(_ text: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-    }
 }

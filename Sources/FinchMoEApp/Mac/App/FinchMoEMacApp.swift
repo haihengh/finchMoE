@@ -1,5 +1,6 @@
 import AppKit
 import FinchMoEAppCore
+import FinchMoEMacPresentation
 import SwiftUI
 
 // Run as a regular foreground app even when launched as a bare SwiftPM
@@ -52,6 +53,9 @@ struct FinchMoEMacApp: App {
                 Button("New Chat", action: model.newSession)
                     .keyboardShortcut("n", modifiers: .command)
                     .disabled(!model.canStartNewSession)
+                Button("Copy Last Reply", action: copyLastReply)
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+                    .disabled(!canCopyLastReply)
                 Button("Regenerate Reply", action: model.regenerateLastReply)
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(!model.canRegenerateLastReply)
@@ -86,6 +90,19 @@ struct FinchMoEMacApp: App {
                 }
             }
         }
+    }
+
+    /// The keyboard path to what a reply bubble's own "Copy" does: the answer
+    /// as it reads, with the markdown syntax consumed rather than copied.
+    private func copyLastReply() {
+        guard let message = model.activeSession.lastAssistantMessage,
+              !message.text.isEmpty else { return }
+        Clipboard.copy(MessageCopyFormatter.plainText(
+            of: MarkdownDocumentCache.document(for: message.text)))
+    }
+
+    private var canCopyLastReply: Bool {
+        !(model.activeSession.lastAssistantMessage?.text.isEmpty ?? true)
     }
 
     private var newlineShortcutBinding: Binding<AppNewlineShortcut> {
