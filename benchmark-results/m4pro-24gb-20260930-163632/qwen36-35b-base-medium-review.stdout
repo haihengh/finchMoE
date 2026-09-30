@@ -1,0 +1,6 @@
+### Critical Risks
+
+**1. Data Corruption via Buffer Overwrite (Correctness)**
+The most severe flaw is the reuse of a single byte buffer per slot without synchronization. When two concurrent misses select the same "oldest" slot, both asynchronous reads write into the same memory region. Since the design allows a "hit" (dictionary lookup success) to return a view into this slot even while a replacement read is in flight, callers may receive views pointing to partially written or overwritten data. This violates the immutability guarantee and leads to silent data corruption.
+
+**2. Unbounded Memory Allocation (Performance/Stability)**

@@ -1,0 +1,6 @@
+**Technical Assessment: TurboFieldfare Runtime**
+
+TurboFieldfare is a specialized inference engine for Apple Silicon that enables the execution of the Gemma 4 26B-A4B model on systems with only 2 GB of available RAM. It achieves this by decoupling the model’s memory footprint from the system’s physical memory limits through a hybrid resident/streamed architecture.
+
+**Resource Constraints and Data Partitioning**
+The central constraint is the strict ~2 GB memory budget, which is insufficient to hold the model’s full 14.3 GB weight set. To resolve this, the runtime partitions weights into two

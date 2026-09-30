@@ -1,0 +1,6 @@
+### Critical Risks Analysis
+
+The proposed design contains fundamental flaws that violate the core requirements of bounded memory, data integrity, and correct metrics.
+
+**1. Data Corruption and Memory Safety (Critical)**
+The most severe issue is the lack of synchronization on slot state. Since multiple threads can map different keys to the same "oldest" slot, concurrent writes to the same buffer result in a **race condition**. If Thread A and Thread B both select Slot 1, Thread A’s read may overwrite the payload while Thread B is still reading or about to read, leading to corrupted data or crashes. Furthermore, returning a view into a

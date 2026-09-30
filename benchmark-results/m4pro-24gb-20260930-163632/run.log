@@ -1,0 +1,33 @@
+##### Qwen 3.6 35B-A3B (base) #####
+=== qwen36-35b-base / short-explanation : warmup (discarded) ===
+[qwen36-35b-base/short-explanation] [stop=maxTokens prefill=62tok new=128tok decode=5.29s tok/s=24.192 prefill=2.48s (25.0tok/s)]
+=== qwen36-35b-base / short-explanation : measured ===
+[qwen36-35b-base/short-explanation] [stop=maxTokens prefill=62tok new=128tok decode=5.31s tok/s=24.104 prefill=2.04s (30.4tok/s)]
+[stop=maxTokens prefill=62tok new=128tok decode=5.31s tok/s=24.104 prefill=2.04s (30.4tok/s)]
+=== qwen36-35b-base / medium-review : warmup (discarded) ===
+[qwen36-35b-base/medium-review] [stop=maxTokens prefill=426tok new=128tok decode=5.58s tok/s=22.938 prefill=5.39s (79.0tok/s)]
+=== qwen36-35b-base / medium-review : measured ===
+[qwen36-35b-base/medium-review] [stop=maxTokens prefill=426tok new=128tok decode=5.72s tok/s=22.365 prefill=5.40s (78.9tok/s)]
+[stop=maxTokens prefill=426tok new=128tok decode=5.72s tok/s=22.365 prefill=5.40s (78.9tok/s)]
+=== qwen36-35b-base / long-synthesis : warmup (discarded) ===
+[qwen36-35b-base/long-synthesis] [stop=maxTokens prefill=2940tok new=128tok decode=6.20s tok/s=20.639 prefill=41.22s (71.3tok/s)]
+=== qwen36-35b-base / long-synthesis : measured ===
+[qwen36-35b-base/long-synthesis] [stop=maxTokens prefill=2940tok new=128tok decode=6.27s tok/s=20.411 prefill=41.18s (71.4tok/s)]
+[stop=maxTokens prefill=2940tok new=128tok decode=6.27s tok/s=20.411 prefill=41.18s (71.4tok/s)]
+##### Qwen 3.8 Flash-Next 125B (base) #####
+=== qwen38-125b-base / short-explanation : warmup (discarded) ===
+[qwen38-125b-base/short-explanation] [stop=maxTokens prefill=62tok new=128tok decode=19.73s tok/s=6.489 prefill=5.54s (11.2tok/s)]
+=== qwen38-125b-base / short-explanation : measured ===
+[qwen38-125b-base/short-explanation] [stop=maxTokens prefill=62tok new=128tok decode=19.31s tok/s=6.630 prefill=5.41s (11.5tok/s)]
+[stop=maxTokens prefill=62tok new=128tok decode=19.31s tok/s=6.630 prefill=5.41s (11.5tok/s)]
+=== qwen38-125b-base / medium-review : warmup (discarded) ===
+[qwen38-125b-base/medium-review] [stop=maxTokens prefill=426tok new=128tok decode=22.06s tok/s=5.802 prefill=12.56s (33.9tok/s)]
+=== qwen38-125b-base / medium-review : measured ===
+[qwen38-125b-base/medium-review] [stop=maxTokens prefill=426tok new=128tok decode=21.75s tok/s=5.884 prefill=12.61s (33.8tok/s)]
+[stop=maxTokens prefill=426tok new=128tok decode=21.75s tok/s=5.884 prefill=12.61s (33.8tok/s)]
+=== qwen38-125b-base / long-synthesis : warmup (discarded) ===
+[qwen38-125b-base/long-synthesis] [stop=maxTokens prefill=2940tok new=128tok decode=23.27s tok/s=5.501 prefill=95.12s (30.9tok/s)]
+=== qwen38-125b-base / long-synthesis : measured ===
+[qwen38-125b-base/long-synthesis] [stop=maxTokens prefill=2940tok new=128tok decode=23.17s tok/s=5.525 prefill=95.10s (30.9tok/s)]
+[stop=maxTokens prefill=2940tok new=128tok decode=23.17s tok/s=5.525 prefill=95.10s (30.9tok/s)]
+##### ALL DONE Wed Sep 30 16:49:44 EDT 2026 #####

@@ -133,15 +133,14 @@ press **Generate**.
 
 ## At a glance
 
-Measured 2026-09-18 on a 16 GB Apple Silicon Mac mini (macOS 26, Metal 4) with
-the engine's release CLI, greedy decode, on the local Qwen install (page cache
-warm), against the shipping `Qwen3.6-35B-A3B-4bit.finch`. Earlier rows in this
-table were measured 2026-09-05 and reproduced 2026-09-08 on a 24 GiB Apple M4
-Pro (macOS 26.6.2) against a freshly repacked install from the public
-[`Qwen/Qwen3.6-35B-A3B`](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) bf16
-checkpoint; **the prefill figure in particular has moved since**, because the
-int8 projections are now batched — the same 2,940-token prompt that took 81.4 s
-on the M4 Pro in September takes **69.3 s on the 16 GB mini** today.
+Measured 2026-09-30 on a 24 GiB Apple M4 Pro (`Mac16,7`, macOS 26.7) and
+2026-09-18 on a 16 GB Apple Silicon Mac mini, both with the engine's release CLI
+against the shipping `Qwen3.6-35B-A3B-4bit.finch` (page cache warm). The M4 Pro
+is the faster host on both axes: it decodes **~20 tok/s** against the mini's
+~8.4, and the same 2,940-token prompt it prefills in **41.2 s** takes the 16 GB
+mini 70.1 s. The M4 Pro figures are at the app sampling defaults (temperature
+0.2, Top-K 64, Top-P 0.95); see the
+[model comparison](#model-performance-comparison) for all three hosts.
 
 | Metric   | Qwen 3.6 35B-A3B (`qwen3_5_moe`) install                                                                                                |
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
@@ -149,10 +148,10 @@ on the M4 Pro in September takes **69.3 s on the 16 GB mini** today.
 | Weights  | GDN projections int8; router int8; shared/routed experts affine 4-bit group 64; fp16 activations, fp32 Metal accumulators                 |
 | Storage  | ~19 GB installed text-only `.finch` (streamed from disk during decode)                                                           |
 | Memory   | ~1.1-1.2 GiB peak resident while decoding (out-of-core expert streaming; OS page cache additional)                                            |
-| Decode   | ~8.4 tok/s (16 GB Mac mini, 2,940-token prompt) / ~17-19 tok/s (24 GiB M4 Pro), greedy, flat over 100-300 tokens                                                                                             |
-| Prefill  | **~42 tok/s** on a 2,940-token prompt (16 GB Mac mini, 69.3 s) / ~44 tok/s (1,020 tok, M4 Pro); short prompts skip the SHA-256 pass when a verified-install receipt is present (`--verify auto`, the default)            |
+| Decode   | **~20 tok/s** (24 GiB M4 Pro) / ~8.4 tok/s (16 GB Mac mini), 2,940-token prompt, 128-token decode                                                                                             |
+| Prefill  | **~71 tok/s** on a 2,940-token prompt (24 GiB M4 Pro, 41.2 s) / ~42 tok/s (16 GB Mac mini, 70.1 s); short prompts skip the SHA-256 pass when a verified-install receipt is present (`--verify auto`, the default)            |
 | Hardware | Apple Silicon Mac (validated on 16 GB and 24 GiB RAM)                                                                                                |
-| Platform | macOS 26, Metal 4, Swift 6.3                                                                                                              |
+| Platform | macOS 26, Metal 4, Swift 6.4                                                                                                              |
 
 ### M4 Mac mini performance
 
@@ -178,16 +177,10 @@ measurements the fork started from.
 ## Model performance comparison
 
 Three hosts have prompt-suite rows: a 24 GB Apple M4 Pro (`Mac16,7`, macOS
-26.6.2, Swift 6.2.4, 2026-09-14), a 16 GB M4 Mac mini (2026-09-18), and a 16 GB
+26.7, Swift 6.4, 2026-09-30), a 16 GB M4 Mac mini (2026-09-18), and a 16 GB
 M6 Mac mini (`Mac18,5`, macOS 27.0, Swift 6.4, 2026-09-30). The throughput
 comparison below puts them side by side; the tables after it are the rows behind
-it.
-
-The M4 Pro run is kept because it measures both models in one sitting on one
-machine, but **its 3.8 rows predate two changes that both move prefill**: the
-shipping install is now the quantized-PLE one rather than the 167 GB install it
-names, and the int8 projections are batched. Both mini runs are the current
-engine.
+it. All three runs are on the current engine.
 
 All rows use the release `FinchMoECLI` against verified local `.finch` installs,
 with the app sampling defaults (`temperature 0.2`, Top-K 64, Top-P 0.95) and a
@@ -202,15 +195,12 @@ Tokens per second on the three frozen cases. Each cell is ordered
 
 | Host | Model | Prefill tok/s | Decode tok/s |
 | --- | --- | ---: | ---: |
-| 24 GB M4 Pro † | Qwen 3.6 35B-A3B | 27.1 / 40.7 / 36.1 | 23.61 / 23.46 / 19.28 |
-| 24 GB M4 Pro † | Qwen 3.8 Flash-Next 125B | 10.7 / 16.5 / 14.8 | 6.08 / 5.52 / 4.92 |
+| 24 GB M4 Pro | Qwen 3.6 35B-A3B | 30.4 / 78.9 / 71.4 | 24.10 / 22.37 / 20.41 |
+| 24 GB M4 Pro | Qwen 3.8 Flash-Next 125B | 11.5 / 33.8 / 30.9 | 6.63 / 5.88 / 5.53 |
 | 16 GB M4 Mac mini | Qwen 3.6 35B-A3B | 14.6 / 46.8 / 42.0 | 10.03 / 9.73 / 7.82 |
 | 16 GB M4 Mac mini | Qwen 3.8 Flash-Next 125B | 6.6 / 20.7 / 18.9 | 3.17 / 2.95 / 2.59 |
 | 16 GB M6 Mac mini | Qwen 3.6 35B-A3B | 17.8 / 62.7 / 59.3 | 8.46 / 8.57 / 7.74 |
 | 16 GB M6 Mac mini | Qwen 3.8 Flash-Next 125B | 7.6 / 24.9 / 23.2 | 3.21 / 2.67 / 2.43 |
-
-† Pre-quantized-PLE install and per-token int8 projections, so both 3.8 numbers
-are not comparable to the mini rows — see the note above.
 
 ### Quality
 
@@ -227,17 +217,17 @@ so the rows above stay a single-machine comparison — see
 
 The rows behind the comparison table, host by host.
 
-24 GB M4 Pro, 2026-09-14 — the run whose 3.8 rows predate the quantized-PLE
-install and the batched projections:
+Current engine, 24 GB M4 Pro, 2026-09-30 (one measured run per case after a
+discarded warmup, fresh processes, no other FinchMoE process active):
 
 | Prompt-suite case | Model | Prompt tokens | Prefill | Prefill tok/s | Decode | Decode tok/s | Expert reads/token |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| short-explanation | Qwen 3.6 35B-A3B | 62 | 2.29s | 27.1 | 5.42s | 23.61 | 214.7 MB |
-| short-explanation | Qwen 3.8 Flash-Next 125B | 62 | 5.81s | 10.7 | 21.04s | 6.08 | 607.1 MB |
-| medium-review | Qwen 3.6 35B-A3B | 426 | 10.48s | 40.7 | 5.46s | 23.46 | 236.0 MB |
-| medium-review | Qwen 3.8 Flash-Next 125B | 426 | 25.81s | 16.5 | 23.21s | 5.52 | 695.1 MB |
-| long-synthesis | Qwen 3.6 35B-A3B | 2,940 | 81.44s | 36.1 | 6.64s | 19.28 | 243.5 MB |
-| long-synthesis | Qwen 3.8 Flash-Next 125B | 2,940 | 198.33s | 14.8 | 26.01s | 4.92 | 719.3 MB |
+| short-explanation | Qwen 3.6 35B-A3B | 62 | 2.04s | 30.4 | 5.31s | 24.10 | 222.1 MB |
+| short-explanation | Qwen 3.8 Flash-Next 125B | 62 | 5.41s | 11.5 | 19.31s | 6.63 | 613.8 MB |
+| medium-review | Qwen 3.6 35B-A3B | 426 | 5.40s | 78.9 | 5.72s | 22.37 | 236.1 MB |
+| medium-review | Qwen 3.8 Flash-Next 125B | 426 | 12.61s | 33.8 | 21.75s | 5.88 | 677.3 MB |
+| long-synthesis | Qwen 3.6 35B-A3B | 2,940 | 41.18s | 71.4 | 6.27s | 20.41 | 243.6 MB |
+| long-synthesis | Qwen 3.8 Flash-Next 125B | 2,940 | 95.10s | 30.9 | 23.17s | 5.53 | 724.3 MB |
 
 Current engine, 16 GB M4 Mac mini, 2026-09-18, same protocol and columns:
 
@@ -261,24 +251,26 @@ Current engine, 16 GB M6 Mac mini, 2026-09-30, same protocol and columns:
 | long-synthesis | Qwen 3.6 35B-A3B | 2,940 | 49.57s | 59.3 | 16.53s | 7.74 | 242.9 MB |
 | long-synthesis | Qwen 3.8 Flash-Next 125B | 2,940 | 126.99s | 23.2 | 52.59s | 2.43 | 727.3 MB |
 
-Both M4 mini 3.8 prefill figures are roughly 25% better than the September M4 Pro
-table recorded for the same cases (16.5 and 14.8 tok/s), on a smaller machine —
-the batched projections and the quantized-PLE install, against a much slower
-host.
+On the current engine the M4 Pro now leads all three hosts on the 3.8 install's
+prefill (33.8 / 30.9 tok/s on medium / long against 20.7 / 18.9 on the M4 mini
+and 24.9 / 23.2 on the M6 mini). The earlier M4 Pro 3.8 rows (16.5 and 14.8)
+predated the quantized-PLE install and the batched int8 projections, so the
+comparison above — all three hosts on the same engine — is the first that lines
+them up fairly.
 
 Qwen 3.6 decodes about **3.0-3.3x faster** than Qwen 3.8 on the minis and
-**3.9-4.3x** on the M4 Pro, while Qwen 3.8 scores **+4.2 points** on HumanEval
+**3.6-3.8x** on the M4 Pro, while Qwen 3.8 scores **+4.2 points** on HumanEval
 base and **+4.3 points** on HumanEval+. The dominant runtime difference is
 routed-expert I/O: the 125B install reads roughly 602-727 MB of expert data per
 generated token across the three hosts, versus 215-248 MB/token for the 35B
 install.
 
-The M4 Pro decodes about **2.4-2.8x faster** than either mini on the 3.6
-install, and that is not routing or cache policy: its per-token expert hit and
-miss counts match the M6 mini's within about a point (short-explanation, 60.2%
-hits against 58.9%; the 3.8 install agrees likewise, 52.1% against 52.5%). What
-differs is how fast a miss is served, which the host's memory and storage path
-decide.
+The M4 Pro decodes about **2.6-2.9x faster** than the M6 mini and **2.3-2.6x
+faster** than the M4 mini on the 3.6 install, and that is not routing or cache
+policy: its per-token expert hit and miss counts match the M6 mini's within
+about a point (short-explanation, 58.8% hits against 58.9%; the 3.8 install
+agrees likewise, 51.5% against 52.4%). What differs is how fast a miss is
+served, which the host's memory and storage path decide.
 
 The M6 mini's edge over the M4 mini is prefill, which is compute-bound: 59.3
 tok/s against 42.0 on the 2,940-token 3.6 case, and 23.2 against 18.9 for 3.8.

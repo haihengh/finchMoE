@@ -1,0 +1,3 @@
+TurboFieldfare is a specialized inference engine for the Gemma 4 26B-A4B model, designed to operate within an extreme memory constraint of approximately 2 GB on Apple Silicon Macs. The central bottleneck is the model’s 14.3 GB footprint, which exceeds the available RAM on entry-level devices. To resolve this, the runtime employs a hybrid memory strategy: it keeps the shared expert weights and the FP16 KV cache resident in memory, while streaming the necessary routed expert weights from SSD on demand.
+
+The system distinguishes between two operational phases. During prefill, the engine processes input prompts

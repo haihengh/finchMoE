@@ -1,0 +1,26 @@
+started: Wed Sep 30 16:36:32 EDT 2026
+commit: 46ed9e3de1b0a0321321147c84fc2bb6ec05a3c3
+dirty:
+?? benchmark-results/m4pro-24gb-20260930-130933/
+?? benchmark-results/m4pro-24gb-20260930-150304/
+?? benchmark-results/m4pro-24gb-20260930-163632/
+?? scripts/
+swift-driver version: 1.168.6 Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)
+ProductName:		macOS
+ProductVersion:		26.7
+BuildVersion:		25G229
+      Model Name: MacBook Pro
+      Model Identifier: Mac16,7
+      Chip: Apple M4 Pro
+      Total Number of Cores: 14 (10 Performance and 4 Efficiency)
+      Memory: 24 GB
+prompt hashes:
+da9e6f9e0b06523f477baa942e339ebb0fe02311dacdc3de5cff98014d159f75  docs/benchmark-prompts/real-generation-v1/long-matched.json
+b12e4a71493ad151d7a85b91e878ba784b116ef65de9fcb1b1b1c05198b537b8  docs/benchmark-prompts/real-generation-v1/long-synthesis.json
+23add7976db2069c9927affd13c2f5120508702a1c4915ea88b7de565bdd4b33  docs/benchmark-prompts/real-generation-v1/medium-review.json
+c57da2677143657be55e03797c1aabe8e012d61c1a71bf9345acdd575117d1e1  docs/benchmark-prompts/real-generation-v1/short-explanation.json
+install sizes:
+ 19G	models/Qwen3.6-35B-A3B-4bit.finch
+ 97G	models/Qwen3.8-Flash-Next-125B-ple4bit.finch
+contending FinchMoE procs at start: none (user approved app closure for the clean run)
+prior runs this day: m4pro-24gb-20260930-130933 (app open, superseded), m4pro-24gb-20260930-150304 (partial, discarded)

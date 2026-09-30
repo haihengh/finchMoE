@@ -1,0 +1,5 @@
+### Critical Risks
+
+1.  **Data Corruption & Race Conditions**: The design is fundamentally unsafe. Multiple misses selecting the same slot concurrently will cause overlapping writes to the shared buffer. Even if timestamps differ, concurrent reads/writes to the same buffer without synchronization yield corrupted data. "Harmless" is incorrect; it is undefined behavior.
+2.  **Unbounded Memory**: Resizing buffers based on file headers without validation allows malicious or corrupt files to trigger massive allocations, causing OOM crashes.
+3.  **Stale/Corrupt Data Exposure**: Returning views into buffers being asynchronously overwritten violates immutability guarantees.

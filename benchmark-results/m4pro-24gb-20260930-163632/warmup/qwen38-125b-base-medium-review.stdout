@@ -1,0 +1,5 @@
+### Critical Risks
+
+1.  **Data Corruption & Race Conditions**: The design is fundamentally unsafe. Multiple misses selecting the same slot concurrently causes data races on the shared buffer. Concurrent writes corrupt the cache. Furthermore, returning a view into a mutable buffer while another thread might overwrite it violates immutability guarantees.
+2.  **Unbounded Memory**: "No upper bound on payload length" combined with reusable buffers creates an uncontrolled memory growth vector. A malicious or large file can force the buffer to resize indefinitely, causing OOM crashes.
+3.  **Stale/Corrupt Data Retention**: Failed reads leave the
