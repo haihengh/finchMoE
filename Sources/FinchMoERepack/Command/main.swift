@@ -5,6 +5,8 @@ private let usage = """
 Usage:
   FinchMoERepack --output <model.finch> [--overwrite] [--resume]
   FinchMoERepack --input-snapshot <dir> --output <model.finch> [--overwrite]
+  FinchMoERepack --download-finch <owner/name> --output <model.finch>
+                 [--revision <commit>] [--concurrency <n>]
   FinchMoERepack --discard-partial --output <model.finch>
   FinchMoERepack --verify-install --input-finch <model.finch>
   FinchMoERepack --help
@@ -21,6 +23,16 @@ or Qwen 3.8 Flash-Next safetensors snapshot (int4 affine, group 64) into the
 --resume, which reuses the output files the partial directory's journal
 records as complete and rewrites the rest; a partial whose journal is missing
 or describes a different source is refused rather than guessed at.
+
+With --download-finch, the installer fetches an already-repacked .finch
+directory published on Hugging Face, such as
+haihengh/Qwen3.6-35B-A3B-finchmoe-4bit-abliterated. This is not a repack: the
+remote manifest names every file with its size and digest, so the download is
+exactly the files it lists, each verified against the digest that named it, and
+the receipt is written locally for the path installed here. An interrupted
+download resumes automatically when the checkpoint still describes the same
+repo, commit and manifest; otherwise it is refused. Use --discard-partial to
+remove a partial download instead.
 """
 
 private struct Arguments {
@@ -31,6 +43,9 @@ private struct Arguments {
     var discardPartial = false
     var verifyInstall = false
     var inputFinch: String?
+    var downloadFinch: String?
+    var revision: String?
+    var concurrency: Int?
 
     static func parse(_ values: [String]) throws -> Arguments {
         var parsed = Arguments()
@@ -52,16 +67,24 @@ private struct Arguments {
             case "--verify-install":
                 parsed.verifyInstall = true
                 index += 1
-            case "--output", "--input-finch", "--input-snapshot":
+            case "--output", "--input-finch", "--input-snapshot",
+                 "--download-finch", "--revision", "--concurrency":
                 guard index + 1 < values.count else {
                     throw ParseError.missingValue(flag)
                 }
-                if flag == "--output" {
-                    parsed.output = values[index + 1]
-                } else if flag == "--input-snapshot" {
-                    parsed.inputSnapshot = values[index + 1]
-                } else {
-                    parsed.inputFinch = values[index + 1]
+                let value = values[index + 1]
+                switch flag {
+                case "--output":         parsed.output = value
+                case "--input-snapshot": parsed.inputSnapshot = value
+                case "--input-finch":    parsed.inputFinch = value
+                case "--download-finch": parsed.downloadFinch = value
+                case "--revision":       parsed.revision = value
+                default:
+                    guard let n = Int(value), n > 0 else {
+                        throw ParseError.invalidMode(
+                            "--concurrency wants a positive integer, got \(value)")
+                    }
+                    parsed.concurrency = n
                 }
                 index += 2
             default:
@@ -80,6 +103,10 @@ private struct Arguments {
                   parsed.inputSnapshot == nil else {
                 throw ParseError.invalidMode("--discard-partial only accepts --output")
             }
+            guard parsed.revision == nil, parsed.concurrency == nil else {
+                throw ParseError.invalidMode(
+                    "--discard-partial does not take --revision or --concurrency")
+            }
             return parsed
         }
         if parsed.verifyInstall {
@@ -87,7 +114,8 @@ private struct Arguments {
                 throw ParseError.missingRequired("--input-finch")
             }
             guard parsed.output == nil, !parsed.overwrite, !parsed.resume,
-                  parsed.inputSnapshot == nil else {
+                  parsed.inputSnapshot == nil, parsed.downloadFinch == nil,
+                  parsed.revision == nil, parsed.concurrency == nil else {
                 throw ParseError.invalidMode("verification accepts only --input-finch")
             }
         } else {
@@ -96,6 +124,22 @@ private struct Arguments {
             }
             guard parsed.inputFinch == nil else {
                 throw ParseError.invalidMode("--input-finch requires --verify-install")
+            }
+            guard !(parsed.downloadFinch != nil && parsed.inputSnapshot != nil) else {
+                throw ParseError.invalidMode(
+                    "--download-finch and --input-snapshot are different install routes")
+            }
+            guard parsed.downloadFinch != nil || (parsed.revision == nil && parsed.concurrency == nil) else {
+                throw ParseError.invalidMode(
+                    "--revision and --concurrency require --download-finch")
+            }
+            if let repo = parsed.downloadFinch {
+                let parts = repo.split(separator: "/")
+                guard parts.count == 2, parts.allSatisfy({ !$0.isEmpty }) else {
+                    throw ParseError.invalidMode(
+                        "--download-finch wants a Hugging Face repository id "
+                            + "of the form owner/name, got \(repo)")
+                }
             }
             if let snapshot = parsed.inputSnapshot {
                 guard try Posix.entryKind((snapshot as NSString)
@@ -130,6 +174,79 @@ private func printError(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
+/// Draws install progress as a single updating stderr line.
+///
+/// A class rather than file-scope state because `copyingPayload` arrives from
+/// every download worker at once: the lock serializes the writes, and the
+/// throttle keeps a fast link from spending more time formatting than
+/// transferring.
+private final class ProgressReporter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastDraw = Date.distantPast
+    private var lineIsOpen = false
+
+    func report(_ event: ModelInstallProgress) {
+        switch event {
+        case .downloadingMetadata:
+            write(note: "Fetching manifest…")
+        case .planning(let downloadBytes, _):
+            write(note: String(format: "Downloading %.2f GiB of files",
+                               Double(downloadBytes) / 1_073_741_824))
+        case .checkingDisk(let requirement):
+            write(note: String(format: "Checking disk: %.2f GiB free, %.2f GiB needed",
+                               Double(requirement.availableBytes) / 1_073_741_824,
+                               Double(requirement.requiredBytes) / 1_073_741_824))
+        case .copyingPayload(let reusedBytes, let downloadedThisRunBytes, let totalBytes):
+            write(progress: reusedBytes + downloadedThisRunBytes,
+                  of: totalBytes,
+                  prefix: reusedBytes > 0 ? "Downloading (resumed)" : "Downloading")
+        case .hashingOutput:
+            break   // 189 individual filenames would drown the line above
+        case .reservingOutput, .finalizing:
+            write(note: "Verifying and finalizing…")
+        }
+    }
+
+    /// Ends the updating line so following output starts clean.
+    func finish() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard lineIsOpen else { return }
+        lineIsOpen = false
+        FileHandle.standardError.write(Data("\n".utf8))
+    }
+
+    private func write(note: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        endLineLocked()
+        FileHandle.standardError.write(Data(("  " + note + "\n").utf8))
+    }
+
+    private func write(progress done: UInt64, of total: UInt64, prefix: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        let now = Date()
+        let complete = total > 0 && done >= total
+        guard complete || now.timeIntervalSince(lastDraw) >= 0.5 else { return }
+        lastDraw = now
+        let fraction = total > 0 ? Double(done) / Double(total) : 0
+        let line = String(format: "\r  %@ %.2f/%.2f GiB (%.1f%%)   ",
+                          prefix,
+                          Double(done) / 1_073_741_824,
+                          Double(total) / 1_073_741_824,
+                          fraction * 100)
+        FileHandle.standardError.write(Data(line.utf8))
+        lineIsOpen = true
+    }
+
+    private func endLineLocked() {
+        guard lineIsOpen else { return }
+        lineIsOpen = false
+        FileHandle.standardError.write(Data("\n".utf8))
+    }
+}
+
 private func run(_ values: [String]) async -> Int32 {
     let arguments: Arguments
     do {
@@ -144,7 +261,11 @@ private func run(_ values: [String]) async -> Int32 {
 
     if arguments.discardPartial, let output = arguments.output {
         do {
-            try RemoteStreamingRepacker.discardPartial(outputDirectory: output)
+            if arguments.downloadFinch != nil {
+                try FinchDistributionDownloader.discardPartial(outputDirectory: output)
+            } else {
+                try RemoteStreamingRepacker.discardPartial(outputDirectory: output)
+            }
             print("Discarded saved download for \(output)")
             return 0
         } catch {
@@ -167,6 +288,35 @@ private func run(_ values: [String]) async -> Int32 {
     }
 
     guard let output = arguments.output else { return 2 }
+
+    if let repo = arguments.downloadFinch {
+        let distribution = FinchDistribution(repoID: repo,
+                                             revision: arguments.revision ?? "main",
+                                             approximateDownloadBytes: 0,
+                                             installedBytes: 0)
+        let reporter = ProgressReporter()
+        do {
+            let result = try await FinchDistributionDownloader.run(
+                source: distribution,
+                outputDirectory: URL(fileURLWithPath: output).path,
+                token: ProcessInfo.processInfo.environment["HF_TOKEN"],
+                concurrency: arguments.concurrency ?? FinchDistributionDownloader.defaultConcurrency,
+                progress: { reporter.report($0) })
+            reporter.finish()
+            print("")
+            print("Downloaded \(result.fileCount) files (\(result.bytesVerified) bytes)")
+            print("Receipt: \(result.receiptPath)")
+            if !result.unexpectedEntries.isEmpty {
+                print("Unexpected entries: \(result.unexpectedEntries.joined(separator: ", "))")
+            }
+            print("Model: \(output)")
+            return 0
+        } catch {
+            reporter.finish()
+            printError("download failed: \(error)")
+            return 1
+        }
+    }
 
     if let snapshot = arguments.inputSnapshot {
         let options = LocalQwenRepackOptions(

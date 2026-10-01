@@ -129,6 +129,11 @@ import FinchMoERepackCore
   /// `model.safetensors.index.json`, which is what the manifest stores and
   /// what the probe matches on, so a typo silently makes the install
   /// unrecognisable rather than failing loudly.
+  ///
+  /// `repoID` and `finchDistribution.repoID` are deliberately different
+  /// repositories and must both stay: the first is the upstream checkpoint this
+  /// `.finch` was repacked from and is what the probe matches on, the second is
+  /// where the finished install is published and is what the download fetches.
   @MainActor
   @Test func qwen38InstallDescriptorMatchesPinnedAudit() {
     let descriptor = AppModelInstallDescriptor.qwen3_8
@@ -137,11 +142,20 @@ import FinchMoERepackCore
     #expect(descriptor.repoID == "Qwen/Qwen3.8-Flash-Next")
     #expect(descriptor.sourceIndexSHA256 == "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de")
     #expect(descriptor.weightsSHA256 == "c522877f166d128e0c30ce58bf93322d48e3ebbda55ccf9b2c8dae86efa82a06")
-    #expect(descriptor.approximateDownloadBytes == 0)
     #expect(descriptor.installedBytes == 103_925_807_384)
     #expect(descriptor.rangeStagingBytes == 0)
-    #expect(descriptor.reserveBytes == 0)
-    #expect(descriptor.requiredFreeBytes == 103_925_807_384)
+    #expect(descriptor.reserveBytes == 1_073_741_824)
+    #expect(descriptor.requiredFreeBytes == 104_999_549_208)
+
+    guard case .finchDistribution(let distribution) = descriptor.installRoute else {
+      Issue.record("Qwen 3.8 base should install from a published distribution")
+      return
+    }
+    #expect(distribution.repoID == "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple4bit")
+    #expect(distribution.revision == "ad8151a34a5b5fd40c581e16fa526577315ac5df")
+    #expect(distribution.approximateDownloadBytes == 104_002_771_089)
+    #expect(descriptor.approximateDownloadBytes == 104_002_771_089)
+    #expect(descriptor.supportsRemoteInstall)
   }
 
   /// The abliterated pair. Each shares its base counterpart's
@@ -160,12 +174,26 @@ import FinchMoERepackCore
     #expect(qwen36.weightsSHA256
               == "f6862341c9688e234c682cef186af5a92445be1dbcdd36d59637338634d311bd")
     #expect(qwen36.weightsSHA256 != AppModelInstallDescriptor.qwen3_6.weightsSHA256)
-    #expect(qwen36.approximateDownloadBytes == 0)
     #expect(qwen36.installedBytes == 20_059_538_761)
     #expect(qwen36.rangeStagingBytes == 0)
-    #expect(qwen36.reserveBytes == 0)
-    #expect(qwen36.requiredFreeBytes == 20_059_538_761)
+    #expect(qwen36.reserveBytes == 1_073_741_824)
+    #expect(qwen36.requiredFreeBytes == 21_133_280_585)
     #expect(qwen36.architecture == .qwen3_6_35B_A3B)
+
+    // The base 3.6 entry stays probe-only: no base `.finch` is published, so
+    // there is nothing to fetch and the Download button must stay disabled.
+    #expect(AppModelInstallDescriptor.qwen3_6.installRoute == .none)
+    #expect(!AppModelInstallDescriptor.qwen3_6.supportsRemoteInstall)
+
+    guard case .finchDistribution(let qwen36Distribution) = qwen36.installRoute else {
+      Issue.record("Qwen 3.6 abliterated should install from a published distribution")
+      return
+    }
+    #expect(qwen36Distribution.repoID
+              == "haihengh/Qwen3.6-35B-A3B-finchmoe-4bit-abliterated")
+    #expect(qwen36Distribution.revision
+              == "e1998dcbf984e2c3e8e38eab5eacd3b8ed0c93de")
+    #expect(qwen36Distribution.approximateDownloadBytes == 20_059_520_830)
 
     let qwen38 = AppModelInstallDescriptor.qwen3_8_abliterated
     #expect(qwen38.displayName == "Qwen 3.8 Flash-Next 125B (Abliterated)")
@@ -176,12 +204,21 @@ import FinchMoERepackCore
     #expect(qwen38.weightsSHA256
               == "6af82b557d8207e470f50c1fba5dbb14e7ff4b48139a5b0b2e4f8ac56d188acb")
     #expect(qwen38.weightsSHA256 != AppModelInstallDescriptor.qwen3_8.weightsSHA256)
-    #expect(qwen38.approximateDownloadBytes == 0)
     #expect(qwen38.installedBytes == 104_002_831_190)
     #expect(qwen38.rangeStagingBytes == 0)
-    #expect(qwen38.reserveBytes == 0)
-    #expect(qwen38.requiredFreeBytes == 104_002_831_190)
+    #expect(qwen38.reserveBytes == 1_073_741_824)
+    #expect(qwen38.requiredFreeBytes == 105_076_573_014)
     #expect(qwen38.architecture == .qwen3_8_flashNext_125B)
+
+    guard case .finchDistribution(let qwen38Distribution) = qwen38.installRoute else {
+      Issue.record("Qwen 3.8 abliterated should install from a published distribution")
+      return
+    }
+    #expect(qwen38Distribution.repoID
+              == "haihengh/Qwen3.8-Flash-Next-125B-finchmoe-4bit-ple4bit-abliterated")
+    #expect(qwen38Distribution.revision
+              == "d19beab26664be0e3becd66322d71631cec63ddb")
+    #expect(qwen38Distribution.approximateDownloadBytes == 104_002_771_089)
   }
 
   @MainActor

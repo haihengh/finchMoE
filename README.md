@@ -345,8 +345,17 @@ engine path is identical and the weights are the only variable.
 | --- | --- | --- |
 | Hugging Face | [finchmoe-4bit-abliterated](https://huggingface.co/haihengh/Qwen3.6-35B-A3B-finchmoe-4bit-abliterated) | [finchmoe-4bit-ple4bit-abliterated](https://huggingface.co/haihengh/Qwen3.8-Flash-Next-125B-finchmoe-4bit-ple4bit-abliterated) |
 | Install size | 18.7 GiB | 96.9 GiB |
+| Pinned revision | `e1998dcb` | `d19beab2` |
+| In-app download | yes | yes |
 | Upstream abliteration | [`huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated`](https://huggingface.co/huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated) | [`windowsxp811203/Qwen3.8-Flash-Next-Abliterated`](https://huggingface.co/windowsxp811203/Qwen3.8-Flash-Next-Abliterated) |
 | Licence | Apache-2.0 | Qwen Community License 1.0 |
+
+Both are published as finished `.finch` installs, so the app downloads them
+directly — pick the preset and choose **Download**. The Qwen 3.8 *base* install
+is published the same way at
+[`finchmoe-4bit-ple4bit`](https://huggingface.co/haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple4bit);
+the "Upstream abliteration" row names the checkpoint each was repacked *from*,
+which is provenance rather than a download source.
 
 The app's Preset picker lists all four Qwen entries, with each abliterated entry
 directly after the base entry it is a variant of. When a checkout holds an
@@ -469,15 +478,30 @@ first.
 #### Install the model
 
 On first launch with no install present, the app checks available storage and
-shows the download and installed sizes for the Gemma checkpoint. Choose
-**Download** to begin. (Qwen installs are made by `FinchMoERepack` and are
-only ever *loaded* by the app — in-app download is Gemma-only.)
+shows the download and installed sizes for the selected checkpoint. Choose
+**Download** to begin.
 
-The installer never materializes the full source checkpoint. It streams the
-required byte ranges from the pinned Hugging Face revision and repacks them
-directly into the `.finch` layout as they arrive, which avoids a second full
-checkpoint on disk and keeps scratch memory bounded. The completed
-installation is accepted only after its manifest and file hashes validate.
+There are two remote install routes, and the preset decides which one runs.
+
+- **Repack from an upstream checkpoint** — Gemma. The installer never
+  materializes the full source checkpoint: it streams the required byte ranges
+  from the pinned Hugging Face revision and repacks them directly into the
+  `.finch` layout as they arrive, which avoids a second full checkpoint on disk
+  and keeps scratch memory bounded.
+- **Fetch a published `.finch`** — Qwen 3.6 and 3.8, base and abliterated. Here
+  the layout already exists on the remote, so there is nothing to repack: the
+  download is exactly the files the remote `manifest.json` lists, each verified
+  against the digest that named it, and the receipt is written locally for the
+  path it was installed to. An interrupted download resumes when the checkpoint
+  still describes the same repository, commit and manifest, and is refused
+  rather than half-mixed when it does not.
+
+Qwen 3.6 base has no published `.finch` distribution, so it stays local-only:
+build it with `FinchMoERepack` and the app will load it, but its Download button
+remains disabled.
+
+The completed installation is accepted only after its manifest and every file
+hash validate.
 
 #### Load and generate
 
@@ -539,6 +563,24 @@ swift run -c release FinchMoERepack \
   --discard-partial \
   --output scratch/gemma4.finch
 ```
+
+Download a published `.finch` install — the base and abliterated Qwen models —
+without repacking anything:
+
+```bash
+swift run -c release FinchMoERepack \
+  --download-finch haihengh/Qwen3.6-35B-A3B-finchmoe-4bit-abliterated \
+  --output models/Qwen3.6-35B-A3B-abliterated-4bit.finch
+```
+
+`--revision <commit>` pins a revision other than `main` and `--concurrency <n>`
+sets how many files are fetched at once (default 6). The download set is exactly
+what the remote `manifest.json` declares, each file verified against its own
+digest, and the receipt is rewritten for the path installed here — the published
+receipt names the uploader's directory, so it is never reused verbatim. An
+interrupted download resumes automatically when the checkpoint still describes
+the same repository, commit and manifest; `--discard-partial` clears the state
+instead.
 
 Verify an existing installation without loading the model:
 

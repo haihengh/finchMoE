@@ -132,7 +132,7 @@ public final class AppModel {
         self.installationStatus = AppModelInstallationProbe.status(at: directory,
                                                                     descriptor: descriptor)
         self.client = client
-        self.installer = installer ?? RepackModelInstallerClient(descriptor: descriptor)
+        self.installer = installer ?? Self.makeInstaller(descriptor: descriptor)
         self.memorySampler = memorySampler
         self.settingsPersistenceEnabled = settingsPersistenceEnabled
         self.chatStore = chatStore
@@ -350,7 +350,7 @@ public final class AppModel {
         modelPathText = path
         selectedModelChoice = newChoice
         installer.cancel()
-        installer = RepackModelInstallerClient(descriptor: descriptor)
+        installer = Self.makeInstaller(descriptor: descriptor)
         applyPersistedSettings(
             forModelDirectory: URL(fileURLWithPath: path, isDirectory: true))
         loadGeneration &+= 1
@@ -1013,6 +1013,21 @@ public final class AppModel {
     private func clearUnloadTask(generation: UInt64) {
         guard generation == unloadGeneration else { return }
         unloadTask = nil
+    }
+
+    /// Picks the installer for a descriptor's route. There are two remote
+    /// routes and they are not interchangeable: a published `.finch` has
+    /// nothing to repack, and a safetensors checkpoint has no finished layout
+    /// to fetch. A descriptor with neither falls back to the repack client,
+    /// which is what the probe-only entries have always used and which reports
+    /// `supportsRemoteInstall == false` for them either way.
+    private static func makeInstaller(
+        descriptor: AppModelInstallDescriptor
+    ) -> any AppModelInstallerClient {
+        if let distribution = FinchDistributionInstallerClient(descriptor: descriptor) {
+            return distribution
+        }
+        return RepackModelInstallerClient(descriptor: descriptor)
     }
 
     private static func modelChoice(for directory: URL,

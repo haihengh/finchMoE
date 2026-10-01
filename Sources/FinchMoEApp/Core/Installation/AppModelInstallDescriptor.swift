@@ -2,6 +2,23 @@ import Foundation
 import FinchMoE
 import FinchMoERepackCore
 
+/// How a descriptor's bytes get onto disk.
+///
+/// This used to be implicit — `supportsRemoteInstall` was literally
+/// `approximateDownloadBytes > 0` — which worked while Gemma was the only
+/// downloadable model. It stopped working the moment a second *kind* of remote
+/// install appeared, because a published `.finch` distribution has nothing to
+/// repack and a repack source has no finished layout to fetch: they need
+/// different code, so the descriptor has to say which one it is.
+public enum AppModelInstallRoute: Equatable, Sendable {
+    /// Made out of band and only ever probed by the app.
+    case none
+    /// Stream an upstream safetensors checkpoint and repack it on the way down.
+    case repackUpstream
+    /// Fetch an already-repacked `.finch` directory, as published on Hugging Face.
+    case finchDistribution(FinchDistribution)
+}
+
 public struct AppModelInstallDescriptor: Equatable, Sendable {
     public let displayName: String
     public let repoID: String
@@ -34,6 +51,13 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     /// Short label for tight UI (status badge); falls back to `displayName`.
     public let shortDisplayName: String?
 
+    /// The published `.finch` distribution this checkpoint can be fetched from,
+    /// when one exists. `repoID`/`revision` above stay what they always were —
+    /// the *upstream* checkpoint this `.finch` was repacked from, and the
+    /// provenance the probe matches on — so this field is what actually answers
+    /// "where do the bytes come from".
+    public let finchDistribution: FinchDistribution?
+
     public init(displayName: String,
                 repoID: String,
                 revision: String,
@@ -44,7 +68,8 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
                 rangeStagingBytes: UInt64,
                 reserveBytes: UInt64,
                 architecture: ArchConfig,
-                shortDisplayName: String? = nil) {
+                shortDisplayName: String? = nil,
+                finchDistribution: FinchDistribution? = nil) {
         self.displayName = displayName
         self.repoID = repoID
         self.revision = revision
@@ -56,11 +81,18 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         self.reserveBytes = reserveBytes
         self.architecture = architecture
         self.shortDisplayName = shortDisplayName
+        self.finchDistribution = finchDistribution
     }
 
     public var shortName: String { shortDisplayName ?? displayName }
 
-    public var supportsRemoteInstall: Bool { approximateDownloadBytes > 0 }
+    public var installRoute: AppModelInstallRoute {
+        if let finchDistribution { return .finchDistribution(finchDistribution) }
+        if approximateDownloadBytes > 0 { return .repackUpstream }
+        return .none
+    }
+
+    public var supportsRemoteInstall: Bool { installRoute != .none }
 
     public var requiredFreeBytes: UInt64 {
         installedBytes + rangeStagingBytes + reserveBytes
@@ -95,10 +127,10 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         architecture: .qwen3_6_35B_A3B,
         shortDisplayName: "Qwen 3.6 35B-A3B")
 
-    /// Local Qwen 3.8 Flash-Next 125B install made by `FinchMoERepack`. Like
-    /// 3.6 it is probe-only — the range-streaming installer targets the mlx
-    /// Gemma layout, so repo/revision are informational and there is nothing to
-    /// download.
+    /// Qwen 3.8 Flash-Next 125B made by `FinchMoERepack`. Unlike 3.6 this one
+    /// has a published distribution, so it is downloadable even though its own
+    /// repack source is not — `repoID`/`revision` still identify the upstream
+    /// checkpoint, and `finchDistribution` carries the published install.
     ///
     /// `installedBytes` is measured from the install directory rather than
     /// estimated: 103 925 807 384 bytes for the int4-PLE install (`AppModelLocation`'s
@@ -116,38 +148,42 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         revision: "de4b8e4d43b917e7706784d8bb445c9af86a3540",
         sourceIndexSHA256: "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
         weightsSHA256: "c522877f166d128e0c30ce58bf93322d48e3ebbda55ccf9b2c8dae86efa82a06",
-        approximateDownloadBytes: 0,
+        approximateDownloadBytes: qwen38Distribution.approximateDownloadBytes,
         installedBytes: 103_925_807_384,
         rangeStagingBytes: 0,
-        reserveBytes: 0,
+        reserveBytes: distributionReserveBytes,
         architecture: .qwen3_8_flashNext_125B,
-        shortDisplayName: "Qwen 3.8 125B")
+        shortDisplayName: "Qwen 3.8 125B",
+        finchDistribution: qwen38Distribution)
 
     /// Abliterated (refusal-direction-removed) Qwen 3.6. Structurally identical
     /// to `.qwen3_6` — same architecture, same layout, **the same
-    /// `sourceIndexSHA256`** — and separable only by `weightsSHA256`. It is
-    /// probe-only like the base Qwen entries; there is nothing to download.
+    /// `sourceIndexSHA256`** — and separable only by `weightsSHA256`.
     ///
-    /// `installedBytes` is the sum of every regular file in
-    /// `models/Qwen3.6-35B-A3B-abliterated-4bit.finch`, measured 2026-09-27. It
-    /// is a little above `.qwen3_6`'s pinned figure because that one was taken
-    /// at repack time, before the receipt and tokenizer files landed.
+    /// `repoID` is the upstream abliteration this was repacked from;
+    /// `finchDistribution` is where the finished install is published, and it is
+    /// the one the Download button uses. `installedBytes` is the sum of every
+    /// regular file in `models/Qwen3.6-35B-A3B-abliterated-4bit.finch`, measured
+    /// 2026-09-27; the payload figure is within 18 KB of it, which is the
+    /// manifest, receipt and tokenizer sidecars.
     public static let qwen3_6_abliterated = AppModelInstallDescriptor(
         displayName: "Qwen 3.6 35B-A3B (Abliterated)",
         repoID: "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated",
         revision: "",
         sourceIndexSHA256: "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83",
         weightsSHA256: "f6862341c9688e234c682cef186af5a92445be1dbcdd36d59637338634d311bd",
-        approximateDownloadBytes: 0,
+        approximateDownloadBytes: qwen36AbliteratedDistribution.approximateDownloadBytes,
         installedBytes: 20_059_538_761,
         rangeStagingBytes: 0,
-        reserveBytes: 0,
+        reserveBytes: distributionReserveBytes,
         architecture: .qwen3_6_35B_A3B,
-        shortDisplayName: "Qwen 3.6 Abl.")
+        shortDisplayName: "Qwen 3.6 Abl.",
+        finchDistribution: qwen36AbliteratedDistribution)
 
     /// Abliterated Qwen 3.8 Flash-Next, the 3.8 counterpart of
     /// `.qwen3_6_abliterated`: same relationship, same reason it needs its own
-    /// `weightsSHA256`, probe-only and not downloadable.
+    /// `weightsSHA256`. As with 3.6, `repoID` is the upstream abliteration and
+    /// `finchDistribution` is the published install.
     ///
     /// `installedBytes` is the sum of every regular file in
     /// `models/Qwen3.8-Flash-Next-abliterated-ple4bit.finch`, measured
@@ -158,12 +194,13 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         revision: "",
         sourceIndexSHA256: "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
         weightsSHA256: "6af82b557d8207e470f50c1fba5dbb14e7ff4b48139a5b0b2e4f8ac56d188acb",
-        approximateDownloadBytes: 0,
+        approximateDownloadBytes: qwen38AbliteratedDistribution.approximateDownloadBytes,
         installedBytes: 104_002_831_190,
         rangeStagingBytes: 0,
-        reserveBytes: 0,
+        reserveBytes: distributionReserveBytes,
         architecture: .qwen3_8_flashNext_125B,
-        shortDisplayName: "Qwen 3.8 Abl.")
+        shortDisplayName: "Qwen 3.8 Abl.",
+        finchDistribution: qwen38AbliteratedDistribution)
 
     /// Every descriptor the app can identify a local directory as, in probe
     /// order. `matchingDescriptor` scans this rather than testing each hash
@@ -180,6 +217,44 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         .qwen3_6, .qwen3_6_abliterated, .qwen3_8, .qwen3_8_abliterated,
     ]
 }
+
+// MARK: - Published `.finch` distributions
+
+// Each payload figure is the sum of `manifest.files[].size` in its repository —
+// exactly what the download transfers, and what the Download button quotes.
+// They are declared once, here, so the number the UI shows and the number the
+// downloader is handed cannot drift apart.
+//
+// The commits are pinned rather than tracked at `main`: the install checkpoint
+// and the receipt both record the resolved commit, and a distribution that
+// moved under a resumed download would be refused rather than half-mixed.
+//
+// Qwen 3.6 has no base distribution — `haihengh/Qwen3.6-35B-A3B-finchmoe-3bit`
+// is the retired first-generation format, not `.finch` — so `.qwen3_6` stays
+// probe-only and its install is made out of band.
+
+private let qwen36AbliteratedDistribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.6-35B-A3B-finchmoe-4bit-abliterated",
+    revision: "e1998dcbf984e2c3e8e38eab5eacd3b8ed0c93de",
+    approximateDownloadBytes: 20_059_520_830,
+    installedBytes: 20_059_538_761)
+
+private let qwen38Distribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple4bit",
+    revision: "ad8151a34a5b5fd40c581e16fa526577315ac5df",
+    approximateDownloadBytes: 104_002_771_089,
+    installedBytes: 103_925_807_384)
+
+private let qwen38AbliteratedDistribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.8-Flash-Next-125B-finchmoe-4bit-ple4bit-abliterated",
+    revision: "d19beab26664be0e3becd66322d71631cec63ddb",
+    approximateDownloadBytes: 104_002_771_089,
+    installedBytes: 104_002_831_190)
+
+/// Held back on top of the payload so a finished install is not immediately
+/// under storage pressure. Mirrors
+/// `FinchDistributionDownloader.defaultReserveBytes`.
+private let distributionReserveBytes: UInt64 = 1 << 30
 
 public struct AppModelInstallRequirement: Equatable, Sendable {
     public let probePath: String

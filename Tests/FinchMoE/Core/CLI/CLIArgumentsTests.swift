@@ -92,7 +92,7 @@ import Testing
             "--model", "--prompt", "--messages-file", "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--quiet", "--counters", "--expert-cache-slots",
-            "--prefill-chunk-tokens", "--verify", "--help",
+            "--prefill-chunk-tokens", "--kv-int8", "--verify", "--help",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })

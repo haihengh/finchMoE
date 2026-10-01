@@ -25,8 +25,40 @@ public enum VerifiedInstallTool {
     // PackedExpertsLayoutReader.defaultMaxBytes.
     public static let layoutMaxBytes: UInt64 = 128 * 1024 * 1024
 
+    /// Verifies an install in place and refreshes its receipt. The
+    /// `sourceRevision` falls back to the manifest's own `sourceSnapshotHash`,
+    /// which is what the CLI has always recorded.
     public static func run(options: VerifyInstallOptions) throws -> VerifyInstallResult {
         let root = URL(fileURLWithPath: options.inputFinch).standardizedFileURL
+        return try verify(root: root,
+                          recordedOutputDirectory: root.path,
+                          sourceRepoID: nil,
+                          sourceRevision: nil,
+                          toolVersion: "FinchMoERepack verify-install")
+    }
+
+    /// The shared verification core, also used by the distribution downloader.
+    ///
+    /// `root` is the directory whose bytes are hashed, and the receipt is
+    /// written into it. `recordedOutputDirectory` is the path recorded *inside*
+    /// that receipt, and mid-install the two differ: the bytes are still in the
+    /// `.partial` directory, but the receipt must name the final location,
+    /// because `VerifiedInstallReceiptReader.validateManifestBinding` compares
+    /// `modelDirectoryPath` against the directory the install is later opened
+    /// from. The streaming repacker has always done this — it writes the receipt
+    /// into `.partial` while encoding the final output path — and a download
+    /// that recorded its own `.partial` path would fail binding the moment it
+    /// was promoted.
+    ///
+    /// When `sourceRevision` is nil the manifest's `sourceSnapshotHash` is
+    /// recorded instead, which is what the CLI has always written.
+    public static func verify(root: URL,
+                              recordedOutputDirectory: String,
+                              sourceRepoID: String?,
+                              sourceRevision: String?,
+                              toolVersion: String,
+                              onHashingFile: ((String) -> Void)? = nil)
+        throws -> VerifyInstallResult {
         let access = try FinchDirectoryAccess(rootPath: root.path)
         let manifestFD = try access.openFile("manifest.json")
         defer { close(manifestFD) }
@@ -66,6 +98,7 @@ public enum VerifiedInstallTool {
         var bytesVerified = manifestSize
         for relativePath in manifest.files.keys.sorted() {
             guard let entry = manifest.files[relativePath] else { continue }
+            onHashingFile?(relativePath)
             let actualSize: UInt64
             let actualSha: String
             if relativePath == layoutRelativePath {
@@ -90,12 +123,12 @@ public enum VerifiedInstallTool {
         let unexpectedEntries = try findUnexpectedEntries(access: access, manifest: manifest)
 
         let receiptData = try VerifiedInstallReceiptWriter.encode(
-            outputDir: root.path,
+            outputDir: recordedOutputDirectory,
             manifestSha256: manifestSha,
             manifestSize: manifestSize,
-            sourceRepoID: nil,
-            sourceRevision: manifest.sourceSnapshotHash,
-            toolVersion: "FinchMoERepack verify-install",
+            sourceRepoID: sourceRepoID,
+            sourceRevision: sourceRevision ?? manifest.sourceSnapshotHash,
+            toolVersion: toolVersion,
             files: files)
         let receiptPath = root.appendingPathComponent(VerifiedInstallReceiptWriter.fileName).path
         try access.atomicWrite(receiptData, to: VerifiedInstallReceiptWriter.fileName)
