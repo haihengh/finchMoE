@@ -1,5 +1,9 @@
-import AppKit
 import Foundation
+#if canImport(AppKit)
+import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
 
 @MainActor
 public struct ResponseMarkdownRenderer {
@@ -185,16 +189,16 @@ public struct ResponseMarkdownRenderer {
         values[.font] = font(for: block, inlineIntent: inlineIntent)
 
         if block == .quote {
-            values[.foregroundColor] = NSColor.secondaryLabelColor
+            values[.foregroundColor] = FinchPlatformAttributeColors.secondaryLabel
         }
         if block == .code || inlineIntent?.contains(.code) == true {
-            values[.backgroundColor] = NSColor.controlBackgroundColor
+            values[.backgroundColor] = FinchPlatformAttributeColors.controlBackground
         }
         if inlineIntent?.contains(.strikethrough) == true {
             values[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
         }
         if link != nil {
-            values[.foregroundColor] = NSColor.linkColor
+            values[.foregroundColor] = FinchPlatformAttributeColors.link
             values[.underlineStyle] = NSUnderlineStyle.single.rawValue
         }
         return values
@@ -202,8 +206,9 @@ public struct ResponseMarkdownRenderer {
 
     private func baseAttributes() -> [NSAttributedString.Key: Any] {
         [
-            .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
-            .foregroundColor: NSColor.labelColor,
+            .font: FinchPlatformFont.systemFont(ofSize: FinchPlatformFont.systemFontSize,
+                                               weight: .regular),
+            .foregroundColor: FinchPlatformAttributeColors.label,
             .paragraphStyle: paragraphStyle(for: .paragraph),
         ]
     }
@@ -211,32 +216,32 @@ public struct ResponseMarkdownRenderer {
     private func font(
         for block: BlockKind,
         inlineIntent: InlinePresentationIntent?
-    ) -> NSFont {
+    ) -> Any {
+        let systemFontSize = FinchPlatformFont.systemFontSize
         if block == .code || inlineIntent?.contains(.code) == true {
-            return NSFont.monospacedSystemFont(
-                ofSize: NSFont.systemFontSize - 0.5,
+            return FinchPlatformFont.monospacedSystemFont(
+                ofSize: systemFontSize - 0.5,
                 weight: .regular)
         }
 
         let size: CGFloat
-        let baseWeight: NSFont.Weight
+        let baseWeight: FinchFontWeight
         switch block {
         case .heading(let level):
-            size = max(NSFont.systemFontSize + 1, 22 - CGFloat(level - 1) * 2)
+            size = max(systemFontSize + 1, 22 - CGFloat(level - 1) * 2)
             baseWeight = .semibold
         default:
-            size = NSFont.systemFontSize
+            size = systemFontSize
             baseWeight = .regular
         }
 
         let stronglyEmphasized = inlineIntent?.contains(.stronglyEmphasized) == true
         let emphasized = inlineIntent?.contains(.emphasized) == true
-        var font = NSFont.systemFont(
+        var font = FinchPlatformFont.systemFont(
             ofSize: size,
             weight: stronglyEmphasized ? .semibold : baseWeight)
         if emphasized {
-            let descriptor = font.fontDescriptor.withSymbolicTraits(.italic)
-            font = NSFont(descriptor: descriptor, size: size) ?? font
+            font = FinchPlatformFont.italic(font, size: size)
         }
         return font
     }

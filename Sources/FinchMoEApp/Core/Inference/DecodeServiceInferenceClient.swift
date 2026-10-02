@@ -4,6 +4,12 @@ import Synchronization
 import FinchMoE
 import FinchMoEDecodeProtocol
 
+// The decode service is a sibling process the Mac app spawns so generation
+// runs off the UI process. Spawning a process is a macOS mechanism, so on iOS
+// the client does not exist at all; the iOS app runs inference in-process
+// through `RealInferenceClient` instead.
+#if canImport(AppKit)
+
 public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
     AppInferenceMemoryReporting, AppInferenceTranscriptReporting,
     AppModelIntegrityReporting, @unchecked Sendable {
@@ -359,3 +365,5 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             .appendingPathComponent("FinchMoEDecodeService")
     }
 }
+
+#endif

@@ -5,6 +5,10 @@ import SwiftUI
 struct ErrorBanner: View {
     @Bindable var model: AppModel
 
+    init(model: AppModel) {
+        self._model = Bindable(model)
+    }
+
     var body: some View {
         if let error = model.error,
            GenericErrorBannerPolicy.shouldShow(error: error, loadState: model.loadState) {
@@ -30,7 +34,7 @@ struct ErrorBanner: View {
             .padding(.vertical, 8)
             .background {
                 Capsule()
-                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .fill(FinchPlatformColors.controlBackground)
                     .overlay {
                         Capsule().stroke(.red.opacity(0.55), lineWidth: 1)
                     }

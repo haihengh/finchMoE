@@ -7,7 +7,17 @@ struct StatusHUDView: View {
     @Binding var showsSidebar: Bool
     /// False once the session list sits at the window's left edge under the
     /// traffic lights, so the strip does not leave room for them twice.
-    var clearsTrafficLights = true
+    var clearsTrafficLights: Bool
+
+    init(
+        model: AppModel,
+        showsSidebar: Binding<Bool>,
+        clearsTrafficLights: Bool = true
+    ) {
+        self.model = model
+        self._showsSidebar = showsSidebar
+        self.clearsTrafficLights = clearsTrafficLights
+    }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -55,12 +65,16 @@ struct StatusHUDView: View {
         .padding(.vertical, 10)
         .background {
             Capsule()
-                .fill(Color(nsColor: .controlBackgroundColor))
+                .fill(FinchPlatformColors.controlBackground)
                 .overlay {
                     Capsule().stroke(.separator.opacity(0.5), lineWidth: 0.5)
                 }
         }
+        #if canImport(AppKit)
+        // `WindowDragGesture` is macOS-only; the iOS shell does not use this
+        // view, and there is no window frame to drag there.
         .gesture(WindowDragGesture())
+        #endif
     }
 
     private var rateText: String {

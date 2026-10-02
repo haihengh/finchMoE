@@ -47,7 +47,7 @@ public struct ChatSessionFileStore: Sendable {
         let base = fileManager.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask).first
-            ?? fileManager.homeDirectoryForCurrentUser
+            ?? fileManager.finchHomeDirectory
                 .appendingPathComponent("Library/Application Support",
                                         isDirectory: true)
         return base

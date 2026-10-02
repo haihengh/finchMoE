@@ -20,7 +20,7 @@ enum AppModelLocation {
             for: .applicationSupportDirectory,
             in: .userDomainMask,
             appropriateFor: nil,
-            create: false)) ?? fileManager.homeDirectoryForCurrentUser
+            create: false)) ?? fileManager.finchHomeDirectory
         return resolve(
             explicitURL: nil,
             executableURL: Bundle.main.executableURL,
@@ -107,9 +107,13 @@ enum AppModelLocation {
         while true {
             let candidate = URL(fileURLWithPath: candidatePath, isDirectory: true)
             let package = candidate.appendingPathComponent("Package.swift").path
-            let appSources = candidate.appendingPathComponent(
+            // The app lives at `Apps/FinchMoEMac` in this monorepo; the older
+            // engine-repo layout kept it under `Sources/FinchMoEApp/Mac`.
+            let appMonorepo = candidate.appendingPathComponent(
+                "Apps/FinchMoEMac", isDirectory: true).path
+            let appEngineRepo = candidate.appendingPathComponent(
                 "Sources/FinchMoEApp/Mac", isDirectory: true).path
-            if fileExists(package), fileExists(appSources) {
+            if fileExists(package), fileExists(appMonorepo) || fileExists(appEngineRepo) {
                 return candidate
             }
             let parentPath = (candidatePath as NSString).deletingLastPathComponent

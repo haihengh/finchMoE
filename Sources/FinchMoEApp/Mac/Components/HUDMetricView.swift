@@ -1,9 +1,16 @@
+import FinchMoEMacPresentation
 import SwiftUI
 
 struct HUDMetricView: View {
     let value: String
     let label: String
-    var animated = true
+    var animated: Bool
+
+    init(value: String, label: String, animated: Bool = true) {
+        self.value = value
+        self.label = label
+        self.animated = animated
+    }
 
     var body: some View {
         VStack(spacing: 1) {

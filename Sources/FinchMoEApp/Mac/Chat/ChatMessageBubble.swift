@@ -17,8 +17,20 @@ struct ChatMessageBubble: View {
     let message: ChatMessage
     /// Non-nil only for the reply currently being written.
     var streamingText: String?
-    var canRegenerate = false
-    var onRegenerate: () -> Void = {}
+    var canRegenerate: Bool
+    var onRegenerate: () -> Void
+
+    init(
+        message: ChatMessage,
+        streamingText: String? = nil,
+        canRegenerate: Bool = false,
+        onRegenerate: @escaping () -> Void = {}
+    ) {
+        self.message = message
+        self.streamingText = streamingText
+        self.canRegenerate = canRegenerate
+        self.onRegenerate = onRegenerate
+    }
 
     @State private var isHovering = false
     @State private var copyFeedback = false
@@ -84,7 +96,7 @@ struct ChatMessageBubble: View {
                 .padding(.vertical, 14)
                 .background {
                     RoundedRectangle(cornerRadius: 16)
-                        .fill(Color(nsColor: .controlBackgroundColor))
+                        .fill(FinchPlatformColors.controlBackground)
                         .overlay {
                             RoundedRectangle(cornerRadius: 16)
                                 .stroke(.separator.opacity(0.7), lineWidth: 0.6)

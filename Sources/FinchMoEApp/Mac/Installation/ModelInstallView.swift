@@ -1,11 +1,21 @@
-import AppKit
 import FinchMoEAppCore
 import FinchMoEMacPresentation
 import SwiftUI
+import UniformTypeIdentifiers
+#if canImport(AppKit)
+import AppKit
+#endif
 
 struct ModelInstallView: View {
     let model: AppModel
+    #if !canImport(AppKit)
+    @State private var showsFolderImporter = false
+    #endif
     @State private var showingDiscardConfirmation = false
+
+    init(model: AppModel) {
+        self.model = model
+    }
 
     var body: some View {
         ScrollView {
@@ -32,6 +42,17 @@ struct ModelInstallView: View {
         } message: {
             Text("Downloaded ranges will be removed. The installed model, if any, is preserved.")
         }
+        #if !canImport(AppKit)
+        // iOS has no NSOpenPanel; the folder picker is SwiftUI's fileImporter.
+        .fileImporter(
+            isPresented: $showsFolderImporter,
+            allowedContentTypes: [.folder]
+        ) { result in
+            if case .success(let url) = result {
+                model.setModelURL(url)
+            }
+        }
+        #endif
     }
 
     private var identity: some View {
@@ -61,7 +82,7 @@ struct ModelInstallView: View {
             if let requirement = model.installRequirement {
                 StorageRow(label: "Space required",
                            value: MetricFormat.storage(requirement.requiredBytes))
-                StorageRow(label: "Available on this Mac",
+                StorageRow(label: "Available on this device",
                            value: MetricFormat.storage(requirement.availableBytes))
                 capacityStatus(requirement)
             } else if case .failed(let message) = model.installReadiness {
@@ -89,7 +110,7 @@ struct ModelInstallView: View {
         .padding(18)
         .background {
             RoundedRectangle(cornerRadius: 20)
-                .fill(Color(nsColor: .controlBackgroundColor))
+                .fill(FinchPlatformColors.controlBackground)
                 .overlay {
                     RoundedRectangle(cornerRadius: 20)
                         .stroke(.separator.opacity(0.5), lineWidth: 0.5)
@@ -219,6 +240,7 @@ struct ModelInstallView: View {
     }
 
     private func chooseLocalModelDirectory() {
+        #if canImport(AppKit)
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -227,6 +249,9 @@ struct ModelInstallView: View {
         if panel.runModal() == .OK, let url = panel.url {
             model.setModelURL(url)
         }
+        #else
+        showsFolderImporter = true
+        #endif
     }
 }
 

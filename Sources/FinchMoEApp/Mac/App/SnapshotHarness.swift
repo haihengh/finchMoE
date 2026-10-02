@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import FinchMoEAppCore
+import FinchMoEMacPresentation
 import SwiftUI
 
 /// Renders the whole window offscreen to a PNG.

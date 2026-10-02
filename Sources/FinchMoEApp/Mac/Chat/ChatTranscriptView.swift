@@ -11,6 +11,10 @@ import SwiftUI
 struct ChatTranscriptView: View {
     let model: AppModel
 
+    init(model: AppModel) {
+        self.model = model
+    }
+
     @State private var liveReplyText = ""
     @State private var isPinnedToBottom = true
 

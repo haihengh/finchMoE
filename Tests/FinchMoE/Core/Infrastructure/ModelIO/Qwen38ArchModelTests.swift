@@ -129,7 +129,7 @@ import Foundation
     // MARK: - Filesystem scan helpers
 
     private func repoRoot() throws -> URL? {
-        // Tests/FinchMoE/Core/Infrastructure/ModelIO/ -> walk up to Package.swift.
+        // Walk up from this file to the checkout root (the Package.swift dir).
         var dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         for _ in 0..<8 {
             if FileManager.default.fileExists(
@@ -142,8 +142,11 @@ import Foundation
     }
 
     private func literalComparisonLines(root: URL) throws -> [String] {
+        // The conversion pipeline lives under Sources/ in the engine repo and
+        // Pipelines/ in the app monorepo; naming both keeps the scan whole in
+        // either layout (a path that does not exist enumerates to nothing).
         let sources = ["Sources/FinchMoE", "Sources/FinchMoERepack",
-                       "Sources/FinchMoEFormat"]
+                       "Pipelines/FinchMoERepack", "Sources/FinchMoEFormat"]
         var violations: [String] = []
         for sub in sources {
             let base = root.appendingPathComponent(sub)
