@@ -1,0 +1,4 @@
+### Critical Risks
+
+**1. Data Race on Slot Reuse (Correctness)**
+The most severe flaw is the unprotected slot state. When two concurrent misses select the same "oldest" slot, they both initiate a read into the same buffer. Since the buffer is shared, the second read may overwrite data written by the first before the first caller retrieves the view. Furthermore, if the first read fails and leaves the key in the dictionary, the second caller might see the "hit" state but receive corrupted or stale data from the failed attempt, depending on timing. The assumption that "awaiting their own reads" is harmless

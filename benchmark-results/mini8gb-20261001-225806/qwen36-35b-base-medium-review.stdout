@@ -1,0 +1,6 @@
+### Critical Risks Analysis
+
+The proposed design contains fundamental flaws that violate the core goals of bounded memory, data integrity, and correct metrics.
+
+**1. Data Corruption via Buffer Sharing (Correctness)**
+The most severe issue is returning a view into a reusable slot buffer. Since the buffer is shared across multiple keys over time, and potentially across concurrent requests if the "oldest slot" logic fails to serialize access, the returned view becomes invalid as soon as the slot is reused. Even if the slot is currently "owned" by one key, the asynchronous nature means the buffer content is volatile. If the caller retains the view after

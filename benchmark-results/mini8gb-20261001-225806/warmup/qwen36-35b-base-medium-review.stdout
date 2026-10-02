@@ -1,0 +1,6 @@
+### Critical Risks Analysis
+
+The proposed design contains fundamental flaws that violate the core requirements of safety, correctness, and performance.
+
+**1. Data Corruption and Race Conditions (Critical Safety)**
+The most severe issue is the lack of synchronization on slot state. Allowing two concurrent misses to select the same "oldest" slot leads to **data corruption**. When the first async read completes, it overwrites the buffer. If the second read is still in progress or completes later, the buffer content becomes inconsistent with the dictionary entry. Furthermore, allowing a "hit" while a replacement read is in flight exposes callers to **partially written

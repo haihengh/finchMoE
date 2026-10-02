@@ -1,0 +1,33 @@
+started: Thu Oct  1 22:58:06 EDT 2026
+commit: d23305ac6c32098c5745cf28944d3671a0705c72
+dirty: (clean)
+release CLI: built 2026-10-01 15:38 EDT from the checkout at d23305a; the host
+  `swift --version` reports Apple Swift 5.4 (CLT toolchain, predates the
+  project's Swift 6.2 requirement) so the binary was built elsewhere and the
+  host was not rebuilt.
+ProductName:		macOS
+ProductVersion:		27.0.1
+BuildVersion:		26A434
+      Model Name: Mac mini
+      Model Identifier: Macmini9,1
+      Chip: Apple M1
+      Total Number of Cores: 8 (4 Performance and 4 Efficiency)
+      Memory: 8 GB
+prompt hashes:
+da9e6f9e0b06523f477baa942e339ebb0fe02311dacdc3de5cff98014d159f75  docs/benchmark-prompts/real-generation-v1/long-matched.json
+b12e4a71493ad151d7a85b91e878ba784b116ef65de9fcb1b1b1c05198b537b8  docs/benchmark-prompts/real-generation-v1/long-synthesis.json
+23add7976db2069c9927affd13c2f5120508702a1c4915ea88b7de565bdd4b33  docs/benchmark-prompts/real-generation-v1/medium-review.json
+c57da2677143657be55e03797c1aabe8e012d61c1a71bf9345acdd575117d1e1  docs/benchmark-prompts/real-generation-v1/short-explanation.json
+install sizes:
+ 19G	models/Qwen3.6-35B-A3B-4bit.finch
+ 19G	models/Qwen3.6-35B-A3B-abliterated-4bit.finch
+ 97G	models/Qwen3.8-Flash-Next-125B-ple4bit.finch
+ 97G	models/Qwen3.8-Flash-Next-abliterated-ple4bit.finch
+contending FinchMoE procs at start: none
+prior runs this day: none
+aborted: Qwen 3.8 phases (base + abliterated) started 23:19, killed 23:32 after
+  the short-explanation measured pass (decode 473.0 s, 0.271 tok/s). The 125B
+  install's resident core plus the ambient apps exceeds the 8 GB budget; free
+  memory sat at 3-7% with swapouts 1.1M -> 6.3M and the OS swapped the working
+  set between tokens. User decision: the swapped 3.8 numbers are meaningless
+  for the host comparison. This record covers the two 3.6 installs only.

@@ -1,0 +1,4 @@
+### Critical Risks
+
+**1. Data Race on Slot Reuse (Correctness)**
+The most severe flaw is the lack of synchronization on slot state. When two concurrent misses select the same "oldest" slot, they both initiate a read into the same buffer. If the first read completes and publishes the result, the second read may overwrite the buffer *after* the first caller has already retrieved the view but *before* they finish using it. Since the buffer is reused and not copied, the first caller sees corrupted data. Furthermore, if the second read fails, it may leave the slot in an inconsistent state, potentially causing

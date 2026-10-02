@@ -1,0 +1,3 @@
+TurboFieldfare is a specialized inference engine for Apple Silicon that enables running the Gemma 4 26B-A4B model on systems with only 2 GB of active RAM. The core architectural constraint is the strict separation of memory-resident data from disk-streamed data. The runtime keeps only the shared core weights (1.35 GB) and the FP16 KV cache in RAM. All other parameters, specifically the routed experts, remain on the SSD and are fetched on-demand.
+
+The runtime distinguishes between two distinct phases: prefill and decode. During prefill, the engine processes input prompts in chunks
