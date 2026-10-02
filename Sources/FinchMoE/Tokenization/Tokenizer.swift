@@ -370,10 +370,23 @@ public struct GFTokenizer: @unchecked Sendable {
 
     public func encodeTextContinuation(userContent: String) -> [Int32] {
         let content = userContent.trimmingCharacters(in: .whitespacesAndNewlines)
-        return [endOfTurnID] + encode(
-            "\n\(Self.turnOpen)user\n\(content)\(Self.turnClose)\n"
-                + "\(Self.turnOpen)model\n<|channel>thought\n<channel|>",
-            addBOS: false)
+        switch family {
+        case .gemma4:
+            return [endOfTurnID] + encode(
+                "\n\(Self.turnOpen)user\n\(content)\(Self.turnClose)\n"
+                    + "\(Self.turnOpen)model\n<|channel>thought\n<channel|>",
+                addBOS: false)
+        case .qwen3_6:
+            // The ChatML continuation of a completed assistant turn: the turn
+            // close, the new user turn, and the generation-prompt suffix the
+            // template appends inside the empty <think> block. Keep this in
+            // step with the `.qwen3_6` branch of `applyChatTemplate` — the two
+            // must describe the same template, one message at a time.
+            return [endOfTurnID] + encode(
+                "\n<|im_start|>user\n\(content)<|im_end|>\n"
+                    + "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                addBOS: false)
+        }
     }
 
     public func encodeToolResultContinuation(

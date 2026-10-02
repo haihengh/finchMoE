@@ -132,6 +132,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             kind: kind, generationID: generationID,
             tokenCount: diagnostics?.generatedTokens ?? 0,
             promptTokenCount: diagnostics?.promptTokenCount,
+            cachedPromptTokens: diagnostics?.cachedPromptTokens,
             prefillSeconds: diagnostics?.prefillSeconds,
             timeToFirstTokenSeconds: diagnostics?.timeToFirstTokenSeconds,
             decodeSeconds: diagnostics?.decodeSeconds ?? 0,

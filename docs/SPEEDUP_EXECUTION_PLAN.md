@@ -107,6 +107,20 @@ are legal but untested at that layer; the real coverage is
 
 ## 2. Prefix reuse in the Mac app  (plan A1 — ranked #1 there)
 
+> **Status (2026-10-02): implemented** in `RealInferenceClient`
+> (`SessionPromptCache`): the session retains the last turn's KV and resumes
+> by the strict token-prefix check or the server's structured continuation,
+> falling back to a reset on any doubt; `cachedPromptTokens` is reported on
+> `AppDiagnostics` and over the decode-service protocol. The continuation
+> needed a family-aware `GFTokenizer.encodeTextContinuation` — the
+> Gemma-shaped bridge was wrong for Qwen ChatML (and the server now gets the
+> Qwen-correct one too). Measured on the 16 GB M4 mini (Qwen 3.6, the
+> install-gated `PrefixReuseInstallTests`): a 493-token first turn prefills in
+> 10.7 s; the follow-up reuses 494 cached tokens and prefills in 2.3 s
+> against 10.7 s for the same conversation with reuse off, byte-identical
+> output. Still open from this item: the HUD surfacing and the trimming
+> stability proof at longer conversations.
+
 **The largest user-visible latency win available, and the mechanism already
 ships.** Today every chat turn sends the whole conversation and
 `RealInferenceClient.swift:365` calls `runner.reset()` immediately before prefill,
