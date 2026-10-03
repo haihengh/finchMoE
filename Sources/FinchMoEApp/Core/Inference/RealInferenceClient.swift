@@ -448,7 +448,8 @@ actor RealInferenceSession {
                         progress.decodeStart = Date()
                         progress.countersAtDecodeStart = RunnerCounterSnapshot(runner)
                     }
-                    continuation.yield(.prefillProgress(done: done, total: total))
+                    continuation.yield(.prefillProgress(done: done, total: total,
+                                                        cached: cachedPromptTokens))
                 case .token(let index, _, let delta):
                     if progress.firstTokenDate == nil { progress.firstTokenDate = Date() }
                     progress.generated = index + 1

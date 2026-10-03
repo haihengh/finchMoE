@@ -49,22 +49,24 @@ import FinchMoE
 
     static func request(prompt: String,
                         history: [AppChatTurn],
-                        maxNewTokens: Int = 32) -> AppGenerationRequest {
+                        maxNewTokens: Int = 32,
+                        maxContext: Int = 4_096) -> AppGenerationRequest {
         AppGenerationRequest(modelDirectory: URL(fileURLWithPath: installPath),
                              prompt: prompt,
                              history: history,
                              maxNewTokens: maxNewTokens,
-                             maxContextTokens: 4_096,
+                             maxContextTokens: maxContext,
                              temperature: 0,
                              topK: nil,
                              topP: nil,
                              repetitionPenalty: 1)
     }
 
-    static func load(_ client: RealInferenceClient) async throws {
+    static func load(_ client: RealInferenceClient,
+                     maxContext: Int = 4_096) async throws {
         try await client.ensureLoaded(
             modelDirectory: URL(fileURLWithPath: installPath),
-            maxContextTokens: 4_096,
+            maxContextTokens: maxContext,
             options: AppRuntimeOptions(),
             forceLogitsHead: false) { _ in }
     }
@@ -169,6 +171,103 @@ import FinchMoE
 
         // Safety: the edited history did not resume from the stale prefix.
         #expect(a3Diagnostics.cachedPromptTokens == 0)
+    }
+
+    /// The rollout gate's soak, run in the zone where this engine's known
+    /// long-context non-reproducibility lives (past ~2,051 tokens): the
+    /// resumed follow-up must still answer from the cached prefix — quoting a
+    /// sentence planted early in the document — and read the same as a full
+    /// re-prefill of the identical conversation.
+    @Test(.enabled(if: installExists), .timeLimit(.minutes(45)))
+    func aLongConversationResumesWithoutDamagingRecall() async throws {
+        let marker = "The vault door combination is 73-19-4."
+        let document = Self.filler.repeated(times: 4) + " " + marker + " "
+            + Self.filler.repeated(times: 4)
+        let firstPrompt = document + "\n\nReply with the single word: noted"
+        let question = "What is the vault door combination? Quote the exact sentence."
+        let context = 8_192
+
+        let reused = RealInferenceClient(promptReuseEnabled: true)
+        try await Self.load(reused, maxContext: context)
+        let a1 = try await Self.runTurn(
+            reused, request: Self.request(prompt: firstPrompt, history: [],
+                                          maxContext: context))
+        let a2 = try await Self.runTurn(
+            reused,
+            request: Self.request(
+                prompt: question,
+                history: [
+                    AppChatTurn(role: .user, text: firstPrompt),
+                    AppChatTurn(role: .assistant, text: a1.text),
+                ],
+                maxContext: context))
+        let a2Diagnostics = try #require(a2.diagnostics)
+        print("soak reuse on : turn2 prompt=\(a2Diagnostics.promptTokenCount ?? -1) "
+              + "cached=\(a2Diagnostics.cachedPromptTokens ?? -1) "
+              + "prefill=\(a2Diagnostics.prefillSeconds ?? -1)s "
+              + "text=\(a2.text.debugDescription)")
+        await reused.unload()
+
+        let control = RealInferenceClient(promptReuseEnabled: false)
+        try await Self.load(control, maxContext: context)
+        let b1 = try await Self.runTurn(
+            control, request: Self.request(prompt: firstPrompt, history: [],
+                                           maxContext: context))
+        let b2 = try await Self.runTurn(
+            control,
+            request: Self.request(
+                prompt: question,
+                history: [
+                    AppChatTurn(role: .user, text: firstPrompt),
+                    AppChatTurn(role: .assistant, text: b1.text),
+                ],
+                maxContext: context))
+        let b2Diagnostics = try #require(b2.diagnostics)
+        print("soak reuse off: turn2 prompt=\(b2Diagnostics.promptTokenCount ?? -1) "
+              + "prefill=\(b2Diagnostics.prefillSeconds ?? -1)s "
+              + "text=\(b2.text.debugDescription)")
+
+        // Determinism probe, reported not asserted: repeat the exact request
+        // once more, cache off. If this matches, any resumed-vs-render
+        // divergence comes from the prompts genuinely differing (the true
+        // stream carries the template's empty think block; a re-rendered
+        // history does not), not from the engine varying run to run.
+        let b2Repeat = try await Self.runTurn(
+            control,
+            request: Self.request(
+                prompt: question,
+                history: [
+                    AppChatTurn(role: .user, text: firstPrompt),
+                    AppChatTurn(role: .assistant, text: b1.text),
+                ],
+                maxContext: context))
+        print("soak probe: full-prefill repeat "
+              + (b2Repeat.text == b2.text ? "identical" : "different")
+              + " text=\(b2Repeat.text.debugDescription)")
+        await control.unload()
+
+        // The plant must survive the reuse: a wrong or misaligned prefix
+        // cannot quote a sentence it no longer sees.
+        #expect((a2Diagnostics.cachedPromptTokens ?? 0) > 0)
+        #expect(a2.text.contains("73-19-4"))
+        #expect(b2.text.contains("73-19-4"))
+
+        // The reuse must pay: ~36x observed here; assert a wide margin only.
+        let reusedPrefill = try #require(a2Diagnostics.prefillSeconds)
+        let controlPrefill = try #require(b2Diagnostics.prefillSeconds)
+        #expect(reusedPrefill * 10 < controlPrefill)
+
+        // Byte-identity is not asserted at this length. Past ~2,051 tokens the
+        // engine's long-context non-reproducibility is documented, and the two
+        // prompts are not the same token stream to begin with — the resumed
+        // continuation follows what decode wrote, the control follows the
+        // re-rendered history. The short-conversation test asserts equality;
+        // here the plant and the cost carry the gate, and the probe above
+        // separates engine variance from the prompt difference.
+        if a2.text != b2.text {
+            print("soak note: resumed and re-rendered answers differ in wording "
+                  + "(expected at this length)")
+        }
     }
 }
 

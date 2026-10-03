@@ -126,6 +126,22 @@ import Testing
         #expect(state.label == "Prefill (128/514)")
     }
 
+    @Test func prefillProgressNamesTheReusedPrefix() {
+        let ready = AppModelLoadState.ready(
+            modelDirectory: URL(fileURLWithPath: "/tmp/model.finch"),
+            loadSeconds: 1)
+        var snapshot = Self.installedSnapshot(loadState: ready)
+        snapshot.isRunning = true
+        snapshot.generationPhase = .prefill
+        snapshot.livePrefillDone = 37
+        snapshot.livePrefillTotal = 2_540
+        snapshot.livePrefillCached = 2_503
+
+        let state = AppPresentationState.resolve(snapshot)
+
+        #expect(state.label == "Prefill (37/2540, 2503 cached)")
+    }
+
     private static func installedSnapshot(loadState: AppModelLoadState) -> AppPresentationSnapshot {
         AppPresentationSnapshot(requiresInstallation: false,
                                 installState: .idle,

@@ -7,6 +7,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
     private struct PrefillProgress {
         var done: Int
         var total: Int
+        var cached: Int
     }
 
     private struct State {
@@ -32,8 +33,9 @@ final class DecodeServiceOutbox: @unchecked Sendable {
     func publish(_ event: AppInferenceEvent) {
         condition.lock()
         switch event {
-        case .prefillProgress(let done, let total):
-            state.latestPrefill = PrefillProgress(done: done, total: total)
+        case .prefillProgress(let done, let total, let cached):
+            state.latestPrefill = PrefillProgress(done: done, total: total,
+                                                  cached: cached)
             condition.signal()
         case .token(let token):
             state.pendingText += token.textDelta
@@ -102,6 +104,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                 let snapshot = DecodeServiceEvent(
                     kind: .prefill, generationID: generationID,
                     sequence: prefillSequence,
+                    cachedPromptTokens: prefill.cached,
                     prefillDone: prefill.done, prefillTotal: prefill.total)
                 try handle.write(contentsOf: DecodeFrameCodec.encode(snapshot))
             }

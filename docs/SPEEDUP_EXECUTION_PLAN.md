@@ -111,15 +111,29 @@ are legal but untested at that layer; the real coverage is
 > (`SessionPromptCache`): the session retains the last turn's KV and resumes
 > by the strict token-prefix check or the server's structured continuation,
 > falling back to a reset on any doubt; `cachedPromptTokens` is reported on
-> `AppDiagnostics` and over the decode-service protocol. The continuation
-> needed a family-aware `GFTokenizer.encodeTextContinuation` — the
-> Gemma-shaped bridge was wrong for Qwen ChatML (and the server now gets the
-> Qwen-correct one too). Measured on the 16 GB M4 mini (Qwen 3.6, the
-> install-gated `PrefixReuseInstallTests`): a 493-token first turn prefills in
-> 10.7 s; the follow-up reuses 494 cached tokens and prefills in 2.3 s
-> against 10.7 s for the same conversation with reuse off, byte-identical
-> output. Still open from this item: the HUD surfacing and the trimming
-> stability proof at longer conversations.
+> `AppDiagnostics`, over the decode-service protocol, and the HUD reads
+> `Prefill (37/2540, 2503 cached)`. The continuation needed a family-aware
+> `GFTokenizer.encodeTextContinuation` — the Gemma-shaped bridge was wrong
+> for Qwen ChatML (and the server now gets the Qwen-correct one too).
+> Measured on the 16 GB M4 mini (Qwen 3.6, the install-gated
+> `PrefixReuseInstallTests`):
+>
+> - 493-token first turn prefills in 10.7 s; the follow-up reuses 494 tokens
+>   and prefills in 2.3 s against 10.7 s with reuse off — same output.
+> - Soak at 3,840 tokens (past the ~2,051-token non-reproducibility zone):
+>   3,814 tokens reused, prefill 2.8 s against 100.1 s — **36×** — and both
+>   arms quote the planted sentence exactly.
+> - **Identity caveat, measured:** resumed and full-prefill answers are
+>   byte-identical in short conversations but can differ in wording at soak
+>   length ("…73-19-4." vs the same answer in quotes). A repeat of the full
+>   prefill was identical, so this is the prompts genuinely differing — the
+>   resumed stream continues what decode wrote (including the template's
+>   empty think block), while a re-rendered history does not — not cache
+>   error. Closing it entirely would mean rendering historical assistant
+>   turns the way the generation prompt is rendered.
+>
+> Still open from this item: the trimming stability proof (fixed-step trim
+> is in place; no long-conversation trim case has been exercised).
 
 **The largest user-visible latency win available, and the mechanism already
 ships.** Today every chat turn sends the whole conversation and

@@ -29,6 +29,7 @@ public struct AppPresentationSnapshot: Equatable, Sendable {
     public var generationPhase: AppGenerationPhase
     public var livePrefillDone: Int
     public var livePrefillTotal: Int
+    public var livePrefillCached: Int
     public var lastStopReason: AppStopReason?
 
     public init(requiresInstallation: Bool,
@@ -41,6 +42,7 @@ public struct AppPresentationSnapshot: Equatable, Sendable {
                 generationPhase: AppGenerationPhase,
                 livePrefillDone: Int = 0,
                 livePrefillTotal: Int = 0,
+                livePrefillCached: Int = 0,
                 lastStopReason: AppStopReason? = nil) {
         self.requiresInstallation = requiresInstallation
         self.installState = installState
@@ -52,6 +54,7 @@ public struct AppPresentationSnapshot: Equatable, Sendable {
         self.generationPhase = generationPhase
         self.livePrefillDone = livePrefillDone
         self.livePrefillTotal = livePrefillTotal
+        self.livePrefillCached = livePrefillCached
         self.lastStopReason = lastStopReason
     }
 }
@@ -156,7 +159,10 @@ public struct AppPresentationState: Equatable, Sendable {
             switch snapshot.generationPhase {
             case .prefill:
                 let label = snapshot.livePrefillTotal > 0
-                    ? "Prefill (\(snapshot.livePrefillDone)/\(snapshot.livePrefillTotal))"
+                    ? "Prefill (\(snapshot.livePrefillDone)/\(snapshot.livePrefillTotal)"
+                        + (snapshot.livePrefillCached > 0
+                            ? ", \(snapshot.livePrefillCached) cached)"
+                            : ")")
                     : "Prefill"
                 return Self(label: label, severity: .active)
             case .decode:

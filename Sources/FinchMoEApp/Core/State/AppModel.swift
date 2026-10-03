@@ -73,6 +73,7 @@ public final class AppModel {
     public private(set) var liveElapsedDecodeSeconds: Double = 0
     public private(set) var livePrefillDone: Int = 0
     public private(set) var livePrefillTotal: Int = 0
+    public private(set) var livePrefillCached: Int = 0
     public private(set) var liveMemoryBytes: UInt64?
     public private(set) var isCancellationPending: Bool = false
 
@@ -304,6 +305,7 @@ public final class AppModel {
             generationPhase: phase,
             livePrefillDone: livePrefillDone,
             livePrefillTotal: livePrefillTotal,
+            livePrefillCached: livePrefillCached,
             lastStopReason: diagnostics?.stopReason))
     }
 
@@ -883,6 +885,7 @@ public final class AppModel {
         liveElapsedDecodeSeconds = 0
         livePrefillDone = 0
         livePrefillTotal = 0
+        livePrefillCached = 0
         liveMemoryBytes = nil
         phase = .prefill
         runState = .running
@@ -932,10 +935,11 @@ public final class AppModel {
 
     func apply(_ event: AppInferenceEvent) {
         switch event {
-        case .prefillProgress(let done, let total):
+        case .prefillProgress(let done, let total, let cached):
             phase = .prefill
             livePrefillDone = done
             livePrefillTotal = total
+            livePrefillCached = cached
         case .token(let token):
             phase = .decode
             liveTokenCount = token.index + 1

@@ -104,7 +104,7 @@ final class FakeInferenceClient: AppModelLifecycleClient, Sendable {
             for step in 1...3 {
                 try await Task.sleep(for: eventDelay)
                 try Task.checkCancellation()
-                continuation.yield(.prefillProgress(done: step, total: 3))
+                continuation.yield(.prefillProgress(done: step, total: 3, cached: 0))
             }
             prefillEnd = Date()
 

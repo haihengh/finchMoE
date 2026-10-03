@@ -107,7 +107,8 @@ final class MockInferenceClient: AppInferenceClient, @unchecked Sendable {
                 return
             }
             try? await Task.sleep(nanoseconds: tokenDelayNanos)
-            continuation.yield(.prefillProgress(done: step + 1, total: prefillSteps))
+            continuation.yield(.prefillProgress(done: step + 1, total: prefillSteps,
+                                                cached: 0))
         }
         prefillEndDate = Date()
 

@@ -127,7 +127,9 @@ public struct AppTokenEvent: Equatable, Sendable {
 }
 
 public enum AppInferenceEvent: Equatable, Sendable {
-    case prefillProgress(done: Int, total: Int)
+    /// `cached` is how many prompt tokens came back from the retained KV
+    /// prefix and were never part of this turn's prefill work.
+    case prefillProgress(done: Int, total: Int, cached: Int)
     case token(AppTokenEvent)
     case finished(AppDiagnostics)
     case cancelled(AppDiagnostics)
