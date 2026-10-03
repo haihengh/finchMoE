@@ -6,10 +6,18 @@ import Testing
     @MainActor
     @Test func prefillProgressUpdatesPhaseAndCounts() {
         let model = AppModel()
-        model.apply(.prefillProgress(done: 12, total: 50))
+        model.apply(.prefillProgress(done: 12, total: 50, cached: 0))
         #expect(model.phase == .prefill)
         #expect(model.livePrefillDone == 12)
         #expect(model.livePrefillTotal == 50)
+        #expect(model.livePrefillCached == 0)
+    }
+
+    @MainActor
+    @Test func prefillProgressCarriesTheReusedPrefixCount() {
+        let model = AppModel()
+        model.apply(.prefillProgress(done: 12, total: 50, cached: 7))
+        #expect(model.livePrefillCached == 7)
     }
 
     @MainActor

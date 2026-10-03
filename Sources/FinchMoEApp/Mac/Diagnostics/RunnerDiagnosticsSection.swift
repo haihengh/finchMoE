@@ -19,6 +19,12 @@ struct RunnerDiagnosticsSection: View {
                 // that is exactly the case a user needs told.
                 DiagnosticRow("Verification", diagnostics.integrityOutcome ?? "unknown")
                 DiagnosticRow("Prompt tokens", diagnostics.promptTokenCount.map(String.init) ?? "unknown")
+                if let cached = diagnostics.cachedPromptTokens, cached > 0 {
+                    DiagnosticRow(
+                        "Cached prefix",
+                        "\(cached) of \(diagnostics.promptTokenCount ?? 0) tokens",
+                        help: "Prompt tokens served from the previous turn's retained KV instead of being computed again. The rest of the conversation keeps reusing it until an edit or a model change invalidates it.")
+                }
                 DiagnosticRow("Output tokens", "\(diagnostics.generatedTokens)")
                 DiagnosticRow("Stop", diagnostics.stopReason.rawValue)
 
@@ -28,7 +34,7 @@ struct RunnerDiagnosticsSection: View {
                     DiagnosticRow(
                         "Prefill rate",
                         "\(MetricFormat.rate(prefillRate)) tok/s",
-                        help: "Prompt tokens divided by prefill time. Compare runs with similar prompt lengths and settings; short prompts include proportionally more fixed overhead.")
+                        help: "Computed prompt tokens divided by prefill time; tokens reused from the retained KV prefix are excluded. Compare runs with similar prompt lengths and settings; short prompts include proportionally more fixed overhead.")
                 }
                 DiagnosticRow("First token wait", MetricFormat.seconds(diagnostics.timeToFirstTokenSeconds))
                 DiagnosticRow("Request TTFT", MetricFormat.seconds(diagnostics.requestStartTimeToFirstTokenSeconds))

@@ -62,9 +62,19 @@ public final class RealInferenceClient: AppModelLifecycleClient,
     private let generationTasks = GenerationTaskRegistry()
     private let integrity = Mutex<String?>(nil)
 
-    public init(memorySampler: AppMemorySampler = AppMemorySampler()) {
+    public init(memorySampler: AppMemorySampler = AppMemorySampler(),
+                promptReuseEnabled: Bool = RealInferenceClient.defaultPromptReuseEnabled) {
         self.memorySampler = memorySampler
-        self.session = RealInferenceSession()
+        self.session = RealInferenceSession(promptReuseEnabled: promptReuseEnabled)
+    }
+
+    /// Prompt reuse is on unless the process opts out with
+    /// `FQ_DISABLE_PROMPT_REUSE`. The environment variable is the A/B switch
+    /// for manual runs and the install-gated tests, in the same spirit as the
+    /// engine's `FQ_` counter variables; callers that need it per instance can
+    /// pass `promptReuseEnabled` directly.
+    public static var defaultPromptReuseEnabled: Bool {
+        ProcessInfo.processInfo.environment["FQ_DISABLE_PROMPT_REUSE"] == nil
     }
 
     public var modelIntegrityDescription: String? {
@@ -162,6 +172,8 @@ struct TokenizerDirectoryCache: Equatable, Sendable {
 /// here: a reload releases the loaded model, runner, and scratch before constructing
 /// replacements, so two models are never alive at once.
 actor RealInferenceSession {
+    private let promptReuseEnabled: Bool
+    private var promptCache = SessionPromptCache()
     private var loadedKey: SessionLoadKey?
     private var ctx: MetalContext?
     private var tokenizer: GFTokenizer?
@@ -173,10 +185,17 @@ actor RealInferenceSession {
     /// the diagnostics pane reports on the load that is still resident.
     private(set) var integrityDescription: String?
 
+    init(promptReuseEnabled: Bool) {
+        self.promptReuseEnabled = promptReuseEnabled
+    }
+
     func ensureLoaded(key: SessionLoadKey,
                       onState: @Sendable (AppModelLoadState) -> Void) async throws {
         if loadedKey == key, runner != nil { return }
 
+        // The runner about to be replaced is the only thing that can still
+        // make the retained prefix mean anything.
+        promptCache.invalidate()
         runner = nil
         scratch = nil
         loadedKey = nil
@@ -300,6 +319,7 @@ actor RealInferenceSession {
     }
 
     func unload() {
+        promptCache.invalidate()
         runner = nil
         scratch = nil
         tokenizer = nil
@@ -345,9 +365,51 @@ actor RealInferenceSession {
                     <= runner.maxContext
             }
             let history = Self.trimmedHistory(request.history, fits: fits)
-            let renderedPrompt = try tokenizer.applyChatTemplate(
-                Self.chatMessages(prompt: request.prompt, history: history))
-            let promptIds = tokenizer.encode(renderedPrompt, addBOS: false)
+            let messages = Self.chatMessages(prompt: request.prompt, history: history)
+            let renderedPrompt = try tokenizer.applyChatTemplate(messages)
+            let renderedPromptIDs = tokenizer.encode(renderedPrompt, addBOS: false)
+
+            // How this turn starts: on the retained prefix when it can be
+            // proven to match what decode wrote, otherwise from scratch. A
+            // miss also drops the entry — the reset below is what makes it
+            // unusable.
+            var resolved: (promptIDs: [Int32], start: RawCompletionStart, cached: Int)?
+            if promptReuseEnabled {
+                switch promptCache.match(sessionKey: loadedKey,
+                                         messages: messages,
+                                         renderedPromptIDs: renderedPromptIDs) {
+                case .prefixHit(let cached):
+                    resolved = (renderedPromptIDs, .resume(cachedPromptTokens: cached), cached)
+                case .continuation(let cached, let backed, let boundary, let reason, let content):
+                    var bridge = tokenizer.encodeTextContinuation(userContent: content)
+                    if reason == .maxTokens {
+                        bridge = [boundary] + bridge
+                    } else if bridge.first != boundary {
+                        // The re-rendered turn does not line up with what
+                        // decode sampled; do not resume from a guess.
+                        break
+                    }
+                    resolved = (backed + bridge,
+                                .resume(cachedPromptTokens: cached),
+                                cached)
+                case .miss:
+                    break
+                }
+            }
+            let promptIds: [Int32]
+            let start: RawCompletionStart
+            let cachedPromptTokens: Int
+            if let resolved {
+                promptIds = resolved.promptIDs
+                start = resolved.start
+                cachedPromptTokens = resolved.cached
+            } else {
+                promptCache.invalidate()
+                runner.reset()
+                promptIds = renderedPromptIDs
+                start = .reset
+                cachedPromptTokens = 0
+            }
             progress.promptTokenCount = promptIds.count
             guard promptIds.count < runner.maxContext else {
                 throw AppInferenceError.contextOverflow(prompt: promptIds.count,
@@ -362,35 +424,57 @@ actor RealInferenceSession {
                     requested: request.maxNewTokens,
                     promptTokenCount: promptIds.count,
                     maxContext: runner.maxContext))
-            runner.reset()
+            progress.cachedPromptTokens = cachedPromptTokens
             progress.prefillStart = Date()
+
+            var completed = false
+            defer {
+                if !completed {
+                    // Whatever ended the generation early left the KV in a
+                    // state nobody has vouched for; drop the entry rather
+                    // than resume from it.
+                    promptCache.invalidate()
+                    runner.reset()
+                }
+            }
 
             let result = try await runRawCompletion(
                 producer: runner, tokenizer: tokenizer, promptIds: promptIds,
                 config: config, context: ctx, scratch: scratch,
-                prefillConfig: prefillConfig) { event in
+                prefillConfig: prefillConfig, start: start) { event in
                 switch event {
                 case .prefill(let done, let total):
                     if done == total {
                         progress.decodeStart = Date()
                         progress.countersAtDecodeStart = RunnerCounterSnapshot(runner)
                     }
-                    continuation.yield(.prefillProgress(done: done, total: total))
+                    continuation.yield(.prefillProgress(done: done, total: total,
+                                                        cached: cachedPromptTokens))
                 case .token(let index, _, let delta):
                     if progress.firstTokenDate == nil { progress.firstTokenDate = Date() }
                     progress.generated = index + 1
+                    progress.text += delta
                     if index % 8 == 0 { _ = memorySampler.sample() }
                     continuation.yield(.token(AppTokenEvent(
                         index: index,
                         textDelta: delta,
                         elapsedDecodeSeconds: progress.elapsedDecodeSeconds)))
                 case .tail(let text):
+                    progress.text += text
                     continuation.yield(.token(AppTokenEvent(
                         index: max(progress.generated - 1, 0),
                         textDelta: text,
                         elapsedDecodeSeconds: progress.elapsedDecodeSeconds)))
                 }
             }
+
+            if promptReuseEnabled {
+                promptCache.publish(sessionKey: loadedKey,
+                                    messages: messages,
+                                    assistantText: progress.text,
+                                    result: result)
+            }
+            completed = true
 
             let diagnostics = makeDiagnostics(request: request,
                                               memorySampler: memorySampler,
@@ -474,6 +558,7 @@ actor RealInferenceSession {
             generatedTokens: generated,
             stopReason: stopReason,
             promptTokenCount: progress.promptTokenCount,
+            cachedPromptTokens: progress.cachedPromptTokens,
             prefillSeconds: prefillSeconds,
             timeToFirstTokenSeconds: ttft,
             decodeSeconds: decodeSeconds,
@@ -533,6 +618,11 @@ actor RealInferenceSession {
 private final class ProgressState: @unchecked Sendable {
     var generated = 0
     var promptTokenCount: Int?
+    var cachedPromptTokens: Int?
+    /// The visible assistant turn, accumulated from the same deltas the
+    /// caller receives. It is what the next request's history will carry, so
+    /// it is also what the prompt cache must remember for matching.
+    var text = ""
     var prefillStart: Date?
     var decodeStart: Date?
     var firstTokenDate: Date?

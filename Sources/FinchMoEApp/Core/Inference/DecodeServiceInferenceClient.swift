@@ -129,7 +129,9 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         if event.kind == .prefill,
                            let done = event.prefillDone,
                            let total = event.prefillTotal {
-                            continuation.yield(.prefillProgress(done: done, total: total))
+                            continuation.yield(.prefillProgress(
+                                done: done, total: total,
+                                cached: event.cachedPromptTokens ?? 0))
                             continue
                         }
                         if event.kind == .snapshot {
@@ -296,6 +298,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             generatedTokens: event.tokenCount,
             stopReason: stop,
             promptTokenCount: event.promptTokenCount,
+            cachedPromptTokens: event.cachedPromptTokens,
             prefillSeconds: event.prefillSeconds,
             timeToFirstTokenSeconds: event.timeToFirstTokenSeconds,
             decodeSeconds: event.decodeSeconds,

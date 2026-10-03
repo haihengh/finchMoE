@@ -14,7 +14,7 @@ import Testing
 
         for try await event in client.generate(request) {
             switch event {
-            case .prefillProgress(let done, let total):
+            case .prefillProgress(let done, let total, _):
                 prefillEvents.append((done, total))
             case .token(let token):
                 if prefillEvents.count < client.prefillSteps { sawTokenBeforePrefillEnded = true }

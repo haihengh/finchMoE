@@ -47,6 +47,10 @@ public struct AppDiagnostics: Equatable, Sendable {
     public var generatedTokens: Int
     public var stopReason: AppStopReason
     public var promptTokenCount: Int?
+    /// Prompt tokens served from the session's retained KV prefix instead of
+    /// being computed. `0` when the turn started from scratch; `nil` when the
+    /// client does not report it (older service, synthetic diagnostics).
+    public var cachedPromptTokens: Int?
     public var prefillSeconds: Double?
     public var timeToFirstTokenSeconds: Double?
     public var decodeSeconds: Double
@@ -67,21 +71,30 @@ public struct AppDiagnostics: Equatable, Sendable {
         return prefillSeconds + timeToFirstTokenSeconds
     }
 
+    /// Prompt tokens this turn actually had to compute, i.e. everything
+    /// except the reused prefix. Equal to `promptTokenCount` when nothing was
+    /// reused, and zero when the whole prompt was served from the cache.
+    public var computedPromptTokenCount: Int? {
+        guard let promptTokenCount else { return nil }
+        return max(promptTokenCount - (cachedPromptTokens ?? 0), 0)
+    }
+
     public var prefillTokensPerSecond: Double? {
-        guard let promptTokenCount,
-              promptTokenCount > 0,
+        guard let computedPromptTokenCount,
+              computedPromptTokenCount > 0,
               let prefillSeconds,
               prefillSeconds.isFinite,
               prefillSeconds > 0 else {
             return nil
         }
-        let rate = Double(promptTokenCount) / prefillSeconds
+        let rate = Double(computedPromptTokenCount) / prefillSeconds
         return rate.isFinite ? rate : nil
     }
 
     public init(generatedTokens: Int,
                 stopReason: AppStopReason,
                 promptTokenCount: Int? = nil,
+                cachedPromptTokens: Int? = nil,
                 prefillSeconds: Double? = nil,
                 timeToFirstTokenSeconds: Double?,
                 decodeSeconds: Double,
@@ -94,6 +107,7 @@ public struct AppDiagnostics: Equatable, Sendable {
         self.generatedTokens = generatedTokens
         self.stopReason = stopReason
         self.promptTokenCount = promptTokenCount
+        self.cachedPromptTokens = cachedPromptTokens
         self.prefillSeconds = prefillSeconds
         self.timeToFirstTokenSeconds = timeToFirstTokenSeconds
         self.decodeSeconds = decodeSeconds
@@ -113,7 +127,9 @@ public struct AppTokenEvent: Equatable, Sendable {
 }
 
 public enum AppInferenceEvent: Equatable, Sendable {
-    case prefillProgress(done: Int, total: Int)
+    /// `cached` is how many prompt tokens came back from the retained KV
+    /// prefix and were never part of this turn's prefill work.
+    case prefillProgress(done: Int, total: Int, cached: Int)
     case token(AppTokenEvent)
     case finished(AppDiagnostics)
     case cancelled(AppDiagnostics)
