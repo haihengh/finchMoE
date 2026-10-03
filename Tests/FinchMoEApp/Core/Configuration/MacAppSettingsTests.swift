@@ -26,6 +26,15 @@ import Testing
         #expect(decoded == MacAppSettings())
     }
 
+    @Test func cacheChoicesRoundTripThroughTheFile() throws {
+        let settings = MacAppSettings(prefillChunkTokens: 1024,
+                                      expertCachePolicy: .lru,
+                                      promptReuseEnabled: false)
+        let data = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(MacAppSettings.self, from: data)
+        #expect(decoded == settings)
+    }
+
     @Test func malformedFileIsReplacedWithDefaults() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -81,6 +90,11 @@ import Testing
         #expect(settings.topP == 0.8)
         #expect(!settings.prefillEnabled)
         #expect(settings.modelVerification == .automatic)
+        // Fields added after this file was written fall back to their
+        // shipping defaults rather than resetting anything.
+        #expect(settings.prefillChunkTokens == 512)
+        #expect(settings.expertCachePolicy == .lfu)
+        #expect(settings.promptReuseEnabled)
         // No migration marker: a file from the single-shot app is moved onto
         // the chat conventions.
         #expect(settings.newlineShortcut == .shiftReturn)

@@ -12,7 +12,15 @@ import Testing
         #expect(request.topK == 64)
         #expect(request.topP == 0.95)
         #expect(request.repetitionPenalty == 1)
+        #expect(request.promptReuseEnabled)
         #expect(!request.isPureGreedy)
+    }
+
+    @Test func promptReuseCanBeTurnedOffPerRequest() {
+        let request = AppGenerationRequest(modelDirectory: existingDirectory,
+                                           prompt: "hello",
+                                           promptReuseEnabled: false)
+        #expect(!request.promptReuseEnabled)
     }
 
     @Test func temperatureZeroRemainsPureGreedyWithTruncationDefaults() {

@@ -13,6 +13,11 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var topPEnabled: Bool = true
     var topP: Double = 0.95
     var prefillEnabled: Bool = true
+    var prefillChunkTokens: Int = 512
+    var expertCachePolicy: AppExpertCachePolicy = .lfu
+    /// Whether chat turns may resume from the previous turn's KV cache.
+    /// Live: unlike the runtime options above, flipping it needs no reload.
+    var promptReuseEnabled: Bool = true
     var modelVerification: AppModelVerification = .automatic
     // Chat-window conventions: Return sends, Shift-Return makes a new line,
     // and the box empties once the message is in the transcript. Files written
@@ -35,6 +40,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case topPEnabled
         case topP
         case prefillEnabled
+        case prefillChunkTokens
+        case expertCachePolicy
+        case promptReuseEnabled
         case modelVerification
         case newlineShortcut
         case sentPromptBehavior
@@ -51,6 +59,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          topPEnabled: Bool = true,
          topP: Double = 0.95,
          prefillEnabled: Bool = true,
+         prefillChunkTokens: Int = 512,
+         expertCachePolicy: AppExpertCachePolicy = .lfu,
+         promptReuseEnabled: Bool = true,
          modelVerification: AppModelVerification = .automatic,
          newlineShortcut: AppNewlineShortcut = .shiftReturn,
          sentPromptBehavior: AppSentPromptBehavior = .clear,
@@ -65,6 +76,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.topPEnabled = topPEnabled
         self.topP = topP
         self.prefillEnabled = prefillEnabled
+        self.prefillChunkTokens = prefillChunkTokens
+        self.expertCachePolicy = expertCachePolicy
+        self.promptReuseEnabled = promptReuseEnabled
         self.modelVerification = modelVerification
         self.newlineShortcut = newlineShortcut
         self.sentPromptBehavior = sentPromptBehavior
@@ -83,6 +97,15 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         topPEnabled = try container.decode(Bool.self, forKey: .topPEnabled)
         topP = try container.decode(Double.self, forKey: .topP)
         prefillEnabled = try container.decode(Bool.self, forKey: .prefillEnabled)
+        prefillChunkTokens = try container.decodeIfPresent(
+            Int.self, forKey: .prefillChunkTokens) ?? 512
+        // Raw-string decode for the same reason as `modelVerification`: an
+        // unrecognized value must fall back, not reset every other setting.
+        expertCachePolicy = (try container.decodeIfPresent(
+            String.self, forKey: .expertCachePolicy))
+            .flatMap(AppExpertCachePolicy.init(rawValue:)) ?? .lfu
+        promptReuseEnabled = try container.decodeIfPresent(
+            Bool.self, forKey: .promptReuseEnabled) ?? true
         // Decoded as a raw `String`, not through the enum: `decode` of a
         // RawRepresentable throws `dataCorrupted` on a value it does not know,
         // and `loadOrCreate` answers *any* throw by deleting the file -- so one
@@ -122,6 +145,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         version == Self.currentVersion
             && AppContextLengthOption.allCases.contains { $0.tokens == contextTokens }
             && AppRuntimeOptions.allowedSlotCounts.contains(expertCacheSlots)
+            && AppRuntimeOptions.allowedPrefillChunkTokens.contains(prefillChunkTokens)
             && temperature.isFinite && (0...2).contains(temperature)
             && (1...256).contains(topK)
             && topP.isFinite && (0.01...1).contains(topP)

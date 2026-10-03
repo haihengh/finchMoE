@@ -25,6 +25,10 @@ public struct AppGenerationRequest: Equatable, Sendable {
     public var topP: Float?
     public var repetitionPenalty: Float
     public var runtimeOptions: AppRuntimeOptions
+    /// Whether this turn may resume from the session's retained KV prefix.
+    /// Live, unlike `runtimeOptions`: flipping it takes effect on the next
+    /// message and does not force a model reload.
+    public var promptReuseEnabled: Bool
 
     public init(modelDirectory: URL,
                 prompt: String,
@@ -35,7 +39,8 @@ public struct AppGenerationRequest: Equatable, Sendable {
                 topK: Int? = 64,
                 topP: Float? = 0.95,
                 repetitionPenalty: Float = 1.0,
-                runtimeOptions: AppRuntimeOptions = AppRuntimeOptions()) {
+                runtimeOptions: AppRuntimeOptions = AppRuntimeOptions(),
+                promptReuseEnabled: Bool = true) {
         self.modelDirectory = modelDirectory
         self.prompt = prompt
         self.history = history
@@ -46,6 +51,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
         self.topP = topP
         self.repetitionPenalty = repetitionPenalty
         self.runtimeOptions = runtimeOptions
+        self.promptReuseEnabled = promptReuseEnabled
     }
 
     public var isPureGreedy: Bool {
