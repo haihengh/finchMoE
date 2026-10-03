@@ -1,0 +1,7 @@
+### Critical Risks
+
+**1. Data Corruption via Buffer Reuse (Correctness)**
+The most severe flaw is returning a view into a reusable slot buffer. Since the buffer is reused for subsequent keys, the memory backing the returned view is volatile. If the slot is evicted or overwritten by another async read before the caller finishes processing the view, the caller reads garbage data. This violates the immutability guarantee and leads to undefined behavior.
+
+**2. Race Conditions on Slot State (Correctness)**
+The design explicitly states that slot timestamps, in-flight state, and buffer contents are unprotected. This creates a classic Time-of

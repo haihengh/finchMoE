@@ -1,0 +1,5 @@
+### Critical Risks
+
+1. **Data Corruption & Race Conditions**: The design is fundamentally unsafe. Multiple misses selecting the same slot concurrently will cause simultaneous writes to the same buffer, corrupting data. Furthermore, returning a view into a mutable buffer while another thread might be resizing or overwriting it creates severe race conditions. "Immutable objects" do not protect against concurrent mutation of the underlying storage.
+2. **Unbounded Memory & DoS**: There is no upper bound on payload length. A malicious or corrupted file with a huge header length can cause an `OutOfMemoryError` or excessive allocation during buffer resizing.
+3. **
