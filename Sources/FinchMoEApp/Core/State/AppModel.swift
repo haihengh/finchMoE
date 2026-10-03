@@ -47,6 +47,9 @@ public final class AppModel {
     public var topK: Int = 64
     public var topPEnabled: Bool = true
     public var topP: Double = 0.95
+    /// Whether a chat turn may resume from the previous turn's retained KV
+    /// prefix. Live: applied per request, no model reload on change.
+    public var promptReuseEnabled: Bool = true
     public private(set) var newlineShortcut: AppNewlineShortcut = .return
     public private(set) var sentPromptBehavior: AppSentPromptBehavior = .clear
     /// Every conversation, newest first. Never empty: an empty list is
@@ -132,6 +135,7 @@ public final class AppModel {
         self.topP = settings.topP
         self.newlineShortcut = settings.newlineShortcut
         self.sentPromptBehavior = settings.sentPromptBehavior
+        self.promptReuseEnabled = settings.promptReuseEnabled
         self.installationStatus = AppModelInstallationProbe.status(at: directory,
                                                                     descriptor: descriptor)
         self.client = client
@@ -795,6 +799,7 @@ public final class AppModel {
         topP = settings.topP
         newlineShortcut = settings.newlineShortcut
         sentPromptBehavior = settings.sentPromptBehavior
+        promptReuseEnabled = settings.promptReuseEnabled
     }
 
     private func persistSettings() {
@@ -808,6 +813,9 @@ public final class AppModel {
             topPEnabled: topPEnabled,
             topP: topP,
             prefillEnabled: runtimeOptions.prefillEnabled,
+            prefillChunkTokens: runtimeOptions.prefillChunkTokens,
+            expertCachePolicy: runtimeOptions.expertCachePolicy,
+            promptReuseEnabled: promptReuseEnabled,
             modelVerification: runtimeOptions.modelVerification,
             newlineShortcut: newlineShortcut,
             sentPromptBehavior: sentPromptBehavior,
@@ -952,7 +960,8 @@ public final class AppModel {
             topK: topKEnabled ? topK : nil,
             topP: topKEnabled && topPEnabled ? Float(topP) : nil,
             repetitionPenalty: 1.0,
-            runtimeOptions: runtimeOptions)
+            runtimeOptions: runtimeOptions,
+            promptReuseEnabled: promptReuseEnabled)
         try request.validate(requireModelDirectory: true)
         return request
     }

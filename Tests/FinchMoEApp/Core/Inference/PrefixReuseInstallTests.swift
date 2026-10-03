@@ -50,7 +50,8 @@ import FinchMoE
     static func request(prompt: String,
                         history: [AppChatTurn],
                         maxNewTokens: Int = 32,
-                        maxContext: Int = 4_096) -> AppGenerationRequest {
+                        maxContext: Int = 4_096,
+                        promptReuseEnabled: Bool = true) -> AppGenerationRequest {
         AppGenerationRequest(modelDirectory: URL(fileURLWithPath: installPath),
                              prompt: prompt,
                              history: history,
@@ -59,7 +60,8 @@ import FinchMoE
                              temperature: 0,
                              topK: nil,
                              topP: nil,
-                             repetitionPenalty: 1)
+                             repetitionPenalty: 1,
+                             promptReuseEnabled: promptReuseEnabled)
     }
 
     static func load(_ client: RealInferenceClient,
@@ -94,6 +96,29 @@ import FinchMoE
               + "cached=\(a2Diagnostics.cachedPromptTokens ?? -1) "
               + "prefill=\(a2Diagnostics.prefillSeconds ?? -1)s "
               + "text=\(a2.text.prefix(40).debugDescription)")
+
+        // The live toggle: the request-level setting must turn reuse off for
+        // one turn (a full prefill, nothing cached) and back on for the next,
+        // without a reload in between.
+        let offPrompt = "Reply with the single word: off"
+        let offTurn = try await Self.runTurn(
+            reused,
+            request: Self.request(prompt: offPrompt, history: aHistory,
+                                  promptReuseEnabled: false))
+        let offDiagnostics = try #require(offTurn.diagnostics)
+        let backOn = try await Self.runTurn(
+            reused,
+            request: Self.request(
+                prompt: "Reply with the single word: back",
+                history: aHistory + [
+                    AppChatTurn(role: .user, text: offPrompt),
+                    AppChatTurn(role: .assistant, text: offTurn.text),
+                ]))
+        let backOnDiagnostics = try #require(backOn.diagnostics)
+        print("reuse on : toggle off cached=\(offDiagnostics.cachedPromptTokens ?? -1) "
+              + "| back on cached=\(backOnDiagnostics.cachedPromptTokens ?? -1)")
+        #expect(offDiagnostics.cachedPromptTokens == 0)
+        #expect((backOnDiagnostics.cachedPromptTokens ?? 0) > 0)
 
         // The maxTokens bridge: a turn cut by the cap continues by prepending
         // the sampled boundary token before the new user turn.
