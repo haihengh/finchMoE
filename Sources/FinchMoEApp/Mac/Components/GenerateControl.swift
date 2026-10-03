@@ -5,6 +5,10 @@ import SwiftUI
 struct GenerateControl: View {
     let model: AppModel
 
+    init(model: AppModel) {
+        self.model = model
+    }
+
     var body: some View {
         if model.isRunning {
             stopButton

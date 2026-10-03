@@ -35,6 +35,35 @@ import Testing
         #expect(result.path == "/repo/scratch/gemma4.finch")
     }
 
+    /// The app-release monorepo keeps the Mac app under `Apps/FinchMoEMac`
+    /// instead of `Sources/FinchMoEApp/Mac`, so a checkout is recognized by
+    /// either marker and the `models/` install convention keeps working.
+    @Test func monorepoLayoutIsAlsoRecognizedAsPackageRoot() {
+        let files: Set<String> = ["/repo/Package.swift", "/repo/Apps/FinchMoEMac"]
+        let result = AppModelLocation.resolve(
+            explicitURL: nil,
+            executableURL: URL(fileURLWithPath: "/repo/.build/debug/FinchMoEMac"),
+            currentDirectoryURL: URL(fileURLWithPath: "/elsewhere"),
+            applicationSupportURL: URL(fileURLWithPath: "/support"),
+            fileExists: files.contains)
+        #expect(result.path == "/repo/scratch/gemma4.finch")
+    }
+
+    @Test func qwenInstallInMonorepoPackageIsPreferredWhenPresent() {
+        let files: Set<String> = [
+            "/repo/Package.swift",
+            "/repo/Apps/FinchMoEMac",
+            "/repo/models/Qwen3.6-35B-A3B-4bit.finch/manifest.json",
+        ]
+        let result = AppModelLocation.resolve(
+            explicitURL: nil,
+            executableURL: URL(fileURLWithPath: "/repo/.build/debug/FinchMoEMac"),
+            currentDirectoryURL: URL(fileURLWithPath: "/elsewhere"),
+            applicationSupportURL: URL(fileURLWithPath: "/support"),
+            fileExists: files.contains)
+        #expect(result.path == "/repo/models/Qwen3.6-35B-A3B-4bit.finch")
+    }
+
     @Test func qwenInstallInPackageIsPreferredWhenPresent() {
         let qwenManifest = "/repo/models/Qwen3.6-35B-A3B-4bit.finch/manifest.json"
         let files: Set<String> = [

@@ -1,8 +1,13 @@
 import FinchMoEAppCore
+import FinchMoEMacPresentation
 import SwiftUI
 
 struct RunnerDiagnosticsSection: View {
     let diagnostics: AppDiagnostics?
+
+    init(diagnostics: AppDiagnostics?) {
+        self.diagnostics = diagnostics
+    }
 
     var body: some View {
         Section("Last run") {

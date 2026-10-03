@@ -10,6 +10,10 @@ import SwiftUI
 struct MarkdownBlockView: View {
     let document: MarkdownDocument
 
+    init(document: MarkdownDocument) {
+        self.document = document
+    }
+
     /// A table is drawn a little smaller than body text so that a four-column
     /// answer still fits the bubble; wider ones scroll.
     private static let tableFontSize: CGFloat = 12.5
@@ -91,7 +95,7 @@ struct MarkdownBlockView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background {
             RoundedRectangle(cornerRadius: 8)
-                .fill(Color(nsColor: .textBackgroundColor))
+                .fill(FinchPlatformColors.textBackground)
                 .overlay {
                     RoundedRectangle(cornerRadius: 8)
                         .stroke(.separator.opacity(0.5), lineWidth: 0.5)
@@ -134,7 +138,7 @@ struct MarkdownBlockView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background {
             RoundedRectangle(cornerRadius: 8)
-                .fill(Color(nsColor: .textBackgroundColor))
+                .fill(FinchPlatformColors.textBackground)
                 .overlay {
                     RoundedRectangle(cornerRadius: 8)
                         .stroke(.separator.opacity(0.5), lineWidth: 0.5)

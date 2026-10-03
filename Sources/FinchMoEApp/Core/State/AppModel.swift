@@ -81,7 +81,9 @@ public final class AppModel {
     private var runTask: Task<Void, Never>?
     private var loadTask: Task<Void, Never>?
     private var installTask: Task<Void, Never>?
+    #if canImport(AppKit)
     private var localServerProcess: Process?
+    #endif
     private var unloadTask: Task<Void, Never>?
     private var loadGeneration: UInt64 = 0
     private var unloadGeneration: UInt64 = 0
@@ -259,8 +261,20 @@ public final class AppModel {
 
     public var canCancel: Bool { isRunning && !isCancellationPending }
 
+    /// The local OpenAI-compatible server is a sibling process the app spawns,
+    /// which is a mechanism that exists on macOS only. Every platform can ask;
+    /// only macOS can start it.
+    public static var localServerIsSupported: Bool {
+        #if canImport(AppKit)
+        true
+        #else
+        false
+        #endif
+    }
+
     public var canStartLocalServer: Bool {
-        isModelInstalled && !isRunning && !loadState.isLoading && !localServerState.isActive
+        Self.localServerIsSupported
+            && isModelInstalled && !isRunning && !loadState.isLoading && !localServerState.isActive
             && (1...65_535).contains(localServerPort)
     }
 
@@ -498,6 +512,7 @@ public final class AppModel {
         localServerState = .starting
         localServerLog = "Starting server..."
 
+        #if canImport(AppKit)
         guard let executable = Self.localServerExecutableURL() else {
             localServerState = .failed("FinchMoEServer executable was not found. Build the FinchMoEServer product first.")
             return
@@ -546,9 +561,14 @@ public final class AppModel {
             outputPipe.fileHandleForReading.readabilityHandler = nil
             localServerState = .failed("Failed to start FinchMoEServer: \(error)")
         }
+        #else
+        localServerState = .failed(
+            "The local HTTP server runs as a sibling process, which is available in the Mac app only.")
+        #endif
     }
 
     public func stopLocalServer() {
+        #if canImport(AppKit)
         guard let process = localServerProcess else {
             localServerState = .stopped
             localServerLog = ""
@@ -557,6 +577,10 @@ public final class AppModel {
         process.terminate()
         localServerProcess = nil
         localServerState = .stopped
+        #else
+        localServerState = .stopped
+        localServerLog = ""
+        #endif
     }
 
     public func installModel() {
@@ -1039,6 +1063,9 @@ public final class AppModel {
         }
     }
 
+    #if canImport(AppKit)
+    /// The sibling `FinchMoEServer` binary, next to this executable or in the
+    /// checkout's build directory. macOS-only, like the server itself.
     private static func localServerExecutableURL() -> URL? {
         let fileManager = FileManager.default
         let executableName = "FinchMoEServer"
@@ -1053,4 +1080,5 @@ public final class AppModel {
         }
         return candidates.first { fileManager.isExecutableFile(atPath: $0.path) }
     }
+    #endif
 }

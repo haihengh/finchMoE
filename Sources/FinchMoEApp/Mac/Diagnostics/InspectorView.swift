@@ -1,11 +1,37 @@
-import AppKit
 import FinchMoEAppCore
+import FinchMoEMacPresentation
 import SwiftUI
+import UniformTypeIdentifiers
+#if canImport(AppKit)
+import AppKit
+#endif
 
 struct InspectorView: View {
     @Bindable var model: AppModel
+    #if !canImport(AppKit)
+    @State private var showsFolderImporter = false
+    #endif
+
+    init(model: AppModel) {
+        self._model = Bindable(model)
+    }
 
     var body: some View {
+        form
+        #if !canImport(AppKit)
+        // iOS has no NSOpenPanel; the folder picker is SwiftUI's fileImporter.
+        .fileImporter(
+            isPresented: $showsFolderImporter,
+            allowedContentTypes: [.folder]
+        ) { result in
+            if case .success(let url) = result {
+                model.setModelURL(url)
+            }
+        }
+        #endif
+    }
+
+    private var form: some View {
         Form {
             modelSection
             serverSection
@@ -16,7 +42,7 @@ struct InspectorView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(FinchPlatformColors.windowBackground)
     }
 
     private var modelSection: some View {
@@ -96,6 +122,11 @@ struct InspectorView: View {
 
     private var serverSection: some View {
         Section("Local server") {
+            if !AppModel.localServerIsSupported {
+                Text("The local HTTP server runs as a separate process, so it is available in the Mac app. This app talks to the engine in-process.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             LabeledContent("Port") {
                 Stepper(value: $model.localServerPort, in: 1...65_535, step: 1) {
                     Text("\(model.localServerPort)").monospacedDigit()
@@ -284,6 +315,7 @@ struct InspectorView: View {
     }
 
     private func chooseLocalModelDirectory() {
+        #if canImport(AppKit)
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -292,6 +324,9 @@ struct InspectorView: View {
         if panel.runModal() == .OK, let url = panel.url {
             model.setModelURL(url)
         }
+        #else
+        showsFolderImporter = true
+        #endif
     }
 
 }

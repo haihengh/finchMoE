@@ -1,8 +1,13 @@
 import FinchMoEAppCore
+import FinchMoEMacPresentation
 import SwiftUI
 
 struct ModelActionBanner: View {
     @Bindable var model: AppModel
+
+    init(model: AppModel) {
+        self._model = Bindable(model)
+    }
 
     var body: some View {
         if model.hasOutputTranscript,
@@ -25,7 +30,7 @@ struct ModelActionBanner: View {
             .padding(.vertical, 8)
             .background {
                 RoundedRectangle(cornerRadius: 14)
-                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .fill(FinchPlatformColors.controlBackground)
                     .overlay {
                         RoundedRectangle(cornerRadius: 14)
                             .stroke(iconColor(for: action).opacity(0.5), lineWidth: 1)

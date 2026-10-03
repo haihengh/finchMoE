@@ -6,6 +6,10 @@ import SwiftUI
 // Run as a regular foreground app even when launched as a bare SwiftPM
 // executable (no .app bundle): Dock icon, click-to-activate, full main menu
 // with Quit (Cmd+Q).
+// `@MainActor` because `NSApplicationDelegate` is main-actor isolated in the
+// current SDKs, and every call below (`NSApp`, `NSImage`, the dock tile) is
+// main-actor state.
+@MainActor
 private final class ForegroundAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)

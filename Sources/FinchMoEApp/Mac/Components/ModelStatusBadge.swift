@@ -1,8 +1,13 @@
 import FinchMoEAppCore
+import FinchMoEMacPresentation
 import SwiftUI
 
 struct ModelStatusBadge: View {
     let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+    }
 
     var body: some View {
         HStack(spacing: 6) {

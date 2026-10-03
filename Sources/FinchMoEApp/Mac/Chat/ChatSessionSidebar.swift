@@ -1,4 +1,3 @@
-import AppKit
 import FinchMoEAppCore
 import FinchMoEMacPresentation
 import SwiftUI
@@ -7,6 +6,10 @@ import SwiftUI
 /// the newest at the top, plus the actions that manage them.
 struct ChatSessionSidebar: View {
     let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+    }
 
     @State private var renameTarget: ChatSession?
     @State private var renameDraft = ""
@@ -24,7 +27,7 @@ struct ChatSessionSidebar: View {
             footer
         }
         .frame(width: rowWidth)
-        .background(Color(nsColor: .underPageBackgroundColor))
+        .background(FinchPlatformColors.underPageBackground)
         .alert("Rename Chat", isPresented: renameBinding) {
             TextField("Name", text: $renameDraft)
             Button("Cancel", role: .cancel) { renameTarget = nil }
@@ -50,11 +53,16 @@ struct ChatSessionSidebar: View {
 
     /// The traffic lights float over the top-left of the window, so the list
     /// starts below them and this strip keeps the window draggable.
+    ///
+    /// `WindowDragGesture` is macOS-only, so the strip is inert on iOS (the
+    /// sidebar is a sheet there, and there is no window frame to drag).
     private var titleBarDragArea: some View {
         Color.clear
             .frame(height: 38)
             .contentShape(Rectangle())
+            #if canImport(AppKit)
             .gesture(WindowDragGesture())
+            #endif
     }
 
     private var header: some View {

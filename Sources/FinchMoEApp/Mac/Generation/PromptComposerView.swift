@@ -1,4 +1,3 @@
-import AppKit
 import FinchMoEAppCore
 import FinchMoEMacPresentation
 import SwiftUI
@@ -6,6 +5,11 @@ import SwiftUI
 /// The message box at the bottom of the chat.
 struct PromptComposerView: View {
     @Bindable var model: AppModel
+
+    init(model: AppModel) {
+        self._model = Bindable(model)
+    }
+
     @FocusState private var promptFocused: Bool
     @State private var showingPromptTips = false
     /// Height the draft actually needs once it wraps, measured off a hidden
@@ -21,7 +25,7 @@ struct PromptComposerView: View {
         .padding(.vertical, 10)
         .background {
             RoundedRectangle(cornerRadius: 22)
-                .fill(Color(nsColor: .controlBackgroundColor))
+                .fill(FinchPlatformColors.controlBackground)
                 .overlay {
                     RoundedRectangle(cornerRadius: 22)
                         .stroke(.separator.opacity(0.5), lineWidth: 0.5)
@@ -92,7 +96,7 @@ struct PromptComposerView: View {
     }
 
     private var promptHasMarkedText: Bool {
-        (NSApp.keyWindow?.firstResponder as? NSTextView)?.hasMarkedText() == true
+        FinchPlatformInput.isComposingMarkedText
     }
 
     /// One comfortable line at rest, growing as the draft wraps up to about
