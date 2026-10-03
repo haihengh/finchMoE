@@ -1,0 +1,21 @@
+[BENCH model=3.6-35B-A3B]
+[BENCH short-explanation] cold pp: prompt=62tok prefill=3.59s (17.3 tok/s) | tg: new=128tok 8.5 tok/s decode=15.10s
+[BENCH short-explanation] hot(+426tok follow-up) pp: prompt=618tok cached=189 computed=429 prefill=9.13s (47.0 tok/s residual) | tg: new=128tok 7.6 tok/s decode=16.85s
+[BENCH medium-review] cold pp: prompt=426tok prefill=9.05s (47.1 tok/s) | tg: new=128tok 8.0 tok/s decode=15.92s
+[BENCH medium-review] hot(+426tok follow-up) pp: prompt=982tok cached=553 computed=429 prefill=9.68s (44.3 tok/s residual) | tg: new=128tok 6.5 tok/s decode=19.70s
+[BENCH long-synthesis] cold pp: prompt=2940tok prefill=71.39s (41.2 tok/s) | tg: new=128tok 6.7 tok/s decode=19.03s
+[BENCH long-synthesis] hot(+426tok follow-up) pp: prompt=3496tok cached=3067 computed=429 prefill=12.19s (35.2 tok/s residual) | tg: new=128tok 6.5 tok/s decode=19.58s
+[BENCH model=3.8-125B-ple4bit]
+[BENCH short-explanation] cold pp: prompt=62tok prefill=9.34s (6.6 tok/s) | tg: new=128tok 2.9 tok/s decode=43.66s
+[BENCH short-explanation] hot(+426tok follow-up) pp: prompt=618tok cached=189 computed=429 prefill=22.36s (19.2 tok/s residual) | tg: new=128tok 2.2 tok/s decode=59.00s
+[BENCH medium-review] cold pp: prompt=426tok prefill=167.58s (2.5 tok/s) | tg: new=128tok 2.5 tok/s decode=50.25s
+[BENCH medium-review] hot(+426tok follow-up) pp: prompt=982tok cached=553 computed=429 prefill=23.65s (18.1 tok/s residual) | tg: new=128tok 2.4 tok/s decode=53.05s
+[BENCH model=3.8-125B-ple4bit]
+[BENCH long-synthesis] cold pp: prompt=2940tok prefill=170.55s (17.2 tok/s) | tg: new=128tok 2.3 tok/s decode=56.85s
+[BENCH long-synthesis] hot(+426tok follow-up) pp: prompt=3496tok cached=3067 computed=429 prefill=24.71s (17.4 tok/s residual) | tg: new=128tok 0.1 tok/s decode=986.36s
+[BENCH model=3.8-125B-ple4bit]
+[BENCH medium-review] cold pp: prompt=426tok prefill=21.87s (19.5 tok/s) | tg: new=128tok 2.9 tok/s decode=44.59s
+[BENCH medium-review] hot(+426tok follow-up) pp: prompt=982tok cached=553 computed=429 prefill=23.63s (18.2 tok/s residual) | tg: new=128tok 2.2 tok/s decode=57.80s
+[BENCH model=3.8-125B-ple4bit]
+[BENCH long-synthesis] cold pp: prompt=2940tok prefill=166.60s (17.6 tok/s) | tg: new=128tok 2.7 tok/s decode=48.01s
+[BENCH long-synthesis] hot(+426tok follow-up) pp: prompt=3496tok cached=3067 computed=429 prefill=24.25s (17.7 tok/s residual) | tg: new=128tok 2.6 tok/s decode=49.62s
