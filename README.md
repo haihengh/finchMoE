@@ -305,6 +305,45 @@ against 39.9 s on the 16 GB M6 mini) before the run was aborted as meaningless,
 so the 8 GB host carries no 3.8 rows. On 8 GB the out-of-core claim covers the
 35B install; the 125B needs a 16 GB host.
 
+### M4 Pro rerun, 2026-10-03: what a failed receipt costs
+
+The 24 GB M4 Pro was re-run on 2026-10-03 on the same protocol, and those rows
+are **not** comparable to the 2026-09-30 ones above. All six cases carry
+`warning: verified-install.json is present but unusable (model directory
+mismatch); verified with full SHA-256 instead` on stderr, so `--verify auto`
+resolved to `.fullSha256`. Verification is lazy — a layer's `packed_experts`
+file and each PLE part are hashed the first time they are read — so the pass
+runs inside the prefill window and its cost lands in the prefill column:
+
+| Prompt-suite case | Model | Prompt tokens | Prefill | Prefill tok/s | Decode | Decode tok/s | Expert reads/token |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| short-explanation | Qwen 3.6 35B-A3B | 62 | 8.26s | 7.5 | 5.88s | 21.78 | 219.2 MB |
+| short-explanation | Qwen 3.8 Flash-Next 125B | 62 | 47.39s | 1.3 | 27.98s | 4.57 | 600.2 MB |
+| medium-review | Qwen 3.6 35B-A3B | 426 | 8.98s | 47.5 | 6.02s | 21.27 | 240.5 MB |
+| medium-review | Qwen 3.8 Flash-Next 125B | 426 | 50.07s | 8.5 | 23.60s | 5.42 | 676.0 MB |
+| long-synthesis | Qwen 3.6 35B-A3B | 2,940 | 45.81s | 64.2 | 7.34s | 17.43 | 247.1 MB |
+| long-synthesis | Qwen 3.8 Flash-Next 125B | 2,940 | 132.68s | 22.2 | 25.96s | 4.93 | 735.6 MB |
+
+The pass accounts for the whole prefill gap against the 2026-09-30 rows: +3.6
+to +6.2 s on the ~19 GB 3.6 install, +37.5 to +42.0 s on the 97 GB 3.8 one. The
+3.6 rate is the higher of the two because that install still fits the 24 GB
+page cache, so its hash reads back from RAM rather than the volume.
+
+Decode is not explained by any of this: the rerun lands below the 2026-09-30
+rows on all six cases, by 5% (21.27 against 22.37, 3.6 medium) to 31% (4.57
+against 6.63, 3.8 short). That run wrote no `system.txt`, so it carries no host
+state to attribute the decode gap to, and the 2026-09-30 rows stay the host's
+published ones.
+
+The receipt binds to the model directory's *physical* path, so a run that
+reaches an install through a different spelling than the receipt was recorded
+through falls back to hashing the whole install. Both installs here have
+receipts, and they record different spellings of the same symlinked location —
+`.../flash-qwen/models/...` for 3.6, `.../finchMoE/models/...` for 3.8, with
+`models/` a symlink from the latter into the former. Re-record with
+[`--verify-install`](#command-line-interface) from the path the harness will
+use, or pass `--verify full-sha256` deliberately and price the hash in.
+
 ### Prompt cache: cold vs hot
 
 The app's chat turns resume from the previous turn's KV cache (see
