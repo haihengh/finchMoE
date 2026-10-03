@@ -305,6 +305,51 @@ against 39.9 s on the 16 GB M6 mini) before the run was aborted as meaningless,
 so the 8 GB host carries no 3.8 rows. On 8 GB the out-of-core claim covers the
 35B install; the 125B needs a 16 GB host.
 
+### Prompt cache: cold vs hot
+
+The app's chat turns resume from the previous turn's KV cache (see
+[docs/SPEEDUP_EXECUTION_PLAN.md](docs/SPEEDUP_EXECUTION_PLAN.md) §2). Measured
+2026-10-03 on a 16 GB M4 Mac mini through the shipping app client with the
+same three frozen cases and sampling as the tables above. Per case: a
+discarded warmup cold run, a measured cold run, then a hot turn that resumes
+from that run's KV and appends the 426-token medium prompt — enough new
+tokens to price the resumed prefill, enough decode for a TG sample. Spotlight
+indexing was off on the model volume (with it on, this box had produced
+stalled rows up to 20× slow). These rows come from the debug test build of
+the same client the app uses; they land close to this host's published rows
+above — 3.6 medium/long within 2% (47.1 / 41.2 tok/s against 46.8 / 42.0) and
+3.8 within 7% (19.5 / 17.6 against 20.7 / 18.9) — while short-explanation,
+where fixed costs dominate, reads as noise (17.3 / 6.6 against 14.6 / 6.6).
+
+| Case | Model | Cold prefill | Hot: cached / computed | Hot prefill | Cold TG | Hot TG |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| short | Qwen 3.6 35B-A3B | 3.59s (17.3 tok/s) | 189 / 429 | 9.13s (47.0 tok/s) | 8.5 tok/s | 7.6 tok/s |
+| short | Qwen 3.8 125B | 9.34s (6.6 tok/s) | 189 / 429 | 22.4s (19.2 tok/s) | 2.9 tok/s | 2.2 tok/s |
+| medium | Qwen 3.6 35B-A3B | 9.05s (47.1 tok/s) | 553 / 429 | 9.68s (44.3 tok/s) | 8.0 tok/s | 6.5 tok/s |
+| medium | Qwen 3.8 125B | 21.9s (19.5 tok/s) | 553 / 429 | 23.6s (18.2 tok/s) | 2.9 tok/s | 2.2 tok/s |
+| long | Qwen 3.6 35B-A3B | 71.4s (41.2 tok/s) | 3,067 / 429 | 12.2s (35.2 tok/s) | 6.7 tok/s | 6.5 tok/s |
+| long | Qwen 3.8 125B | 166.6s (17.6 tok/s) | 3,067 / 429 | 24.3s (17.7 tok/s) | 2.7 tok/s | 2.6 tok/s |
+
+The per-token prefill rate is the same cold and hot: reuse removes tokens
+from prefill, it does not make the path faster. The wall-clock win therefore
+scales with the cached context and shrinks with the size of the new message —
+the long case's 426-token follow-up prefills in 12.2 s instead of re-reading
+3,496 tokens (~7× on 3.6, ~8× on 3.8), and a small follow-up on the same
+conversation resumes in seconds against ~85 s cold (a 3,840-token soak
+measured 2.8 s against 100.1 s). Decode is untouched by reuse: the cold/hot
+TG columns sit within sampling noise of each other on both installs.
+
+Reproduce with the install-gated benchmark (skipped on CI; installs are read
+from `<repo>/models` unless `FQ_BENCH_MODEL_DIR` says otherwise; rows append
+to `benchmark-results/prefix-cold-hot.log`, each block tagged with the host's
+`hw.model` so runs from different machines stay comparable):
+
+```bash
+swift test --no-parallel --filter PrefixReuseBenchmarkTests
+# or one case on one model:
+FQ_BENCH_CASES=long-synthesis swift test --no-parallel --filter qwen38ColdAndHot
+```
+
 ## The Qwen 3.8 Flash-Next 125B port
 
 Qwen 3.8 Flash-Next 125B (`qwen4_exp_text`, GGUF `qwen4exp`, Finch family

@@ -8,27 +8,43 @@ import FinchMoE
 /// Replays the frozen `real-generation-v1` cases — the same three the
 /// published host rows use — through the shipping client at the same sampling
 /// settings (app defaults, 128-token cap, 4K context). Per case: a discarded
-/// warmup cold run, a measured cold run, and hot follow-ups that resume from
-/// the measured run's KV. Install-gated; run explicitly:
+/// warmup cold run, a measured cold run, and a hot follow-up (the 426-token
+/// medium prompt) that resumes from the measured run's KV. Install-gated.
 ///
-///     swift test --filter PrefixReuseBenchmarkTests
+///     swift test --no-parallel --filter PrefixReuseBenchmarkTests
+///     # narrower chunks:
+///     FQ_BENCH_CASES=long-synthesis swift test --no-parallel --filter qwen36ColdAndHot
 ///
-/// Not part of the deterministic suite: it needs a real `.finch` install and
-/// minutes of wall time. Numbers print as `[BENCH …]` lines.
+/// Installs are looked up in `<repo>/models` unless `FQ_BENCH_MODEL_DIR`
+/// names another directory. `FQ_BENCH_NO_WARMUP=1` skips the discarded
+/// warmup (only with an already-warm page cache). Rows append to
+/// `benchmark-results/prefix-cold-hot.log` as they are produced, so a killed
+/// run keeps what it measured.
 @Suite struct PrefixReuseBenchmarkTests {
     struct Model {
         let label: String
-        let path: String
+        let file: String
+
+        /// `<repo>/models` unless `FQ_BENCH_MODEL_DIR` names another
+        /// directory, so the sweep runs on any host that has the installs.
+        /// (Qualified `repoRoot()`: `Self` here is `Model`, not the suite.)
+        var path: String {
+            let directory = ProcessInfo.processInfo.environment["FQ_BENCH_MODEL_DIR"]
+                ?? PrefixReuseBenchmarkTests.repoRoot()
+                    .appendingPathComponent("models").path
+            return URL(fileURLWithPath: directory)
+                .appendingPathComponent(file).path
+        }
+
         var installExists: Bool {
             FileManager.default.fileExists(atPath: path + "/manifest.json")
         }
     }
 
     static let models = [
-        Model(label: "3.6-35B-A3B",
-              path: "/Volumes/samsung 2t/code/finchMoE/models/Qwen3.6-35B-A3B-4bit.finch"),
+        Model(label: "3.6-35B-A3B", file: "Qwen3.6-35B-A3B-4bit.finch"),
         Model(label: "3.8-125B-ple4bit",
-              path: "/Volumes/samsung 2t/code/finchMoE/models/Qwen3.8-Flash-Next-125B-ple4bit.finch"),
+              file: "Qwen3.8-Flash-Next-125B-ple4bit.finch"),
     ]
     static let caseIDs = ["short-explanation", "medium-review", "long-synthesis"]
 
@@ -63,6 +79,25 @@ import FinchMoE
             dir = dir.deletingLastPathComponent()
         }
         return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    }
+
+    /// `hw.model` — the README's rows are keyed by it, so log lines from
+    /// different hosts stay comparable when pasted next to each other.
+    static func hardwareModel() -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/sysctl")
+        process.arguments = ["-n", "hw.model"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return "unknown"
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
     }
 
     static func casePrompt(_ id: String) throws -> String {
@@ -211,13 +246,13 @@ import FinchMoE
 
     @Test(.enabled(if: models[0].installExists), .timeLimit(.minutes(60)))
     func qwen36ColdAndHot() async throws {
-        Self.log("[BENCH model=\(Self.models[0].label)]")
+        Self.log("[BENCH model=\(Self.models[0].label) host=\(Self.hardwareModel())]")
         try await Self.sweep(Self.models[0])
     }
 
     @Test(.enabled(if: models[1].installExists), .timeLimit(.minutes(120)))
     func qwen38ColdAndHot() async throws {
-        Self.log("[BENCH model=\(Self.models[1].label)]")
+        Self.log("[BENCH model=\(Self.models[1].label) host=\(Self.hardwareModel())]")
         try await Self.sweep(Self.models[1])
     }
 }
