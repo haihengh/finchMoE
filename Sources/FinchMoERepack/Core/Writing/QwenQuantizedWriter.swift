@@ -147,8 +147,13 @@ enum QwenQuantizedWriter {
                                     biasOffset: UInt64,
                                     audit: RepackAudit) throws {
         let groups = cols / FinchQuantization.groupSize
-        // int4 packs two values per byte; int3 packs eight per 24-bit triplet.
-        let packedRowBytes = bits == 4 ? cols / 2 : cols * 3 / 8
+        // Packed weight bytes per row: cols*bits/8, exact for every width
+        // this writer emits (cols is a group-64 multiple): int4 → cols/2,
+        // int3 → eight values per 24-bit triplet, int8 → cols. (The old
+        // `cols / (8 / bits)` silently gave cols/2 for bits=3 — integer
+        // division — and a bits==4 ternary smuggled that bug in as a
+        // regression on the int8 GDN/router entries instead.)
+        let packedRowBytes = cols * bits / 8
         let auxRowBytes = groups * 2
 
         var floats = [Float](repeating: 0, count: cols)

@@ -71,7 +71,28 @@ import FinchMoEValidationSupport
     }
 
     @Test func routedPipelineInt3SiluMatchesReference() throws {
-        var rng = SeedTree(0x3A1).key("int3-routed-moe")
+        try Self.runInt3Pipeline(dimension: Self.dimension,
+                                 intermediate: Self.intermediate,
+                                 topK: Self.topK,
+                                 seed: 0x3A1)
+    }
+
+    /// Production-shaped rows: many groups per row, so the kernel's four-group
+    /// block path (and not just its single-group tail) actually executes.
+    /// The 2026-10-04 eval crash (garbage output on the real 3-bit install)
+    /// lived in exactly this gap — every small-dims test used one group.
+    @Test func routedPipelineInt3RealisticDimsMatchesReference() throws {
+        try Self.runInt3Pipeline(dimension: 2048,
+                                 intermediate: 512,
+                                 topK: 2,
+                                 seed: 0x3A2)
+    }
+
+    private static func runInt3Pipeline(dimension: Int,
+                                        intermediate: Int,
+                                        topK: Int,
+                                        seed: UInt64) throws {
+        var rng = SeedTree(seed).key("int3-routed-moe")
         func matrix(rows: Int, columns: Int) -> [[Float]] {
             (0..<rows).map { _ in
                 (0..<columns).map { _ in rng.uniform(-0.4, 0.4) }
@@ -81,35 +102,35 @@ import FinchMoEValidationSupport
         var gates = [[[Float]]]()
         var ups = [[[Float]]]()
         var downs = [[[Float]]]()
-        for _ in 0..<Self.topK {
-            gates.append(matrix(rows: Self.intermediate, columns: Self.dimension))
-            ups.append(matrix(rows: Self.intermediate, columns: Self.dimension))
-            downs.append(matrix(rows: Self.dimension, columns: Self.intermediate))
+        for _ in 0..<topK {
+            gates.append(matrix(rows: intermediate, columns: dimension))
+            ups.append(matrix(rows: intermediate, columns: dimension))
+            downs.append(matrix(rows: dimension, columns: intermediate))
         }
-        let x = (0..<Self.dimension).map { _ in
+        let x = (0..<dimension).map { _ in
             Float(Float16(rng.uniform(-0.5, 0.5)))
         }
-        let residual = (0..<Self.dimension).map { _ in
+        let residual = (0..<dimension).map { _ in
             Float(Float16(rng.uniform(-0.5, 0.5)))
         }
-        let routingWeights = (0..<Self.topK).map {
+        let routingWeights = (0..<topK).map {
             Float(Float16(0.04 + Float($0) * 0.015))
         }
 
         // Reference: the same int3 rows, dequantized, through a naive FP32 FFN.
         var expected = residual
-        for slot in 0..<Self.topK {
+        for slot in 0..<topK {
             let gateDeq = gates[slot].map {
                 Quantization.dequantizeInt3Affine(
-                    Quantization.quantizeInt3Affine($0), n: Self.dimension)
+                    Quantization.quantizeInt3Affine($0), n: dimension)
             }
             let upDeq = ups[slot].map {
                 Quantization.dequantizeInt3Affine(
-                    Quantization.quantizeInt3Affine($0), n: Self.dimension)
+                    Quantization.quantizeInt3Affine($0), n: dimension)
             }
             let downDeq = downs[slot].map {
                 Quantization.dequantizeInt3Affine(
-                    Quantization.quantizeInt3Affine($0), n: Self.intermediate)
+                    Quantization.quantizeInt3Affine($0), n: intermediate)
             }
             let gateOut = Self.denseGEMV(gateDeq, x)
             let upOut = Self.denseGEMV(upDeq, x)
@@ -120,7 +141,7 @@ import FinchMoEValidationSupport
             }
         }
 
-        let blobs = (0..<Self.topK).map {
+        let blobs = (0..<topK).map {
             Self.makeBlob(gate: gates[$0], up: ups[$0], down: downs[$0])
         }
 
@@ -131,16 +152,16 @@ import FinchMoEValidationSupport
                                       length: $0.bytes.count,
                                       options: .storageModeShared)
         }
-        guard routedBuffers.count == Self.topK,
+        guard routedBuffers.count == topK,
               let xBuffer = Fp16Buffer.make(context.device, values: x),
               let residualBuffer = Fp16Buffer.make(context.device, values: residual),
               let routingBuffer = Fp16Buffer.make(context.device, values: routingWeights),
               let acts = Fp16Buffer.make(
-                context.device, count: Self.topK * Self.intermediate),
-              let output = Fp16Buffer.make(context.device, count: Self.dimension),
+                context.device, count: topK * intermediate),
+              let output = Fp16Buffer.make(context.device, count: dimension),
               let argumentBuffer = kernel.makeRoutedArgumentBuffer(
                 routedBlobs: routedBuffers,
-                topK: UInt32(Self.topK)) else {
+                topK: UInt32(topK)) else {
             Issue.record("buffer allocation failed")
             return
         }
@@ -153,9 +174,9 @@ import FinchMoEValidationSupport
             routedOffsets: blobs[0].offsets,
             x: xBuffer,
             acts: acts,
-            d: UInt32(Self.dimension),
-            f: UInt32(Self.intermediate),
-            topK: UInt32(Self.topK),
+            d: UInt32(dimension),
+            f: UInt32(intermediate),
+            topK: UInt32(topK),
             activation: .silu,
             expertBits: 3)
         kernel.encodeRoutedPersistentPhase2Reduce(
@@ -167,16 +188,65 @@ import FinchMoEValidationSupport
             routingWeights: routingBuffer,
             residual: residualBuffer,
             y: output,
-            d: UInt32(Self.dimension),
-            f: UInt32(Self.intermediate),
-            topK: UInt32(Self.topK),
+            d: UInt32(dimension),
+            f: UInt32(intermediate),
+            topK: UInt32(topK),
             expertBits: 3)
+        // The hit-split arm runs the subset kernel for two halves of the
+        // slots; it must produce the same acts/output as the full kernel.
+        // (The real decode path uses this whenever the prefetch plan splits.)
+        let splitOutput = try #require(Fp16Buffer.make(context.device, count: dimension))
+        let splitActs = try #require(Fp16Buffer.make(context.device, count: topK * intermediate))
+        guard topK >= 2 else { return }
+        let half = topK / 2
+        let split = context.queue.makeCommandBuffer()!
+        for slots in [Array(UInt32(0)..<UInt32(half)),
+                      Array(UInt32(half)..<UInt32(topK))] {
+            let slotBuffer = try #require(context.device.makeBuffer(
+                bytes: slots,
+                length: slots.count * MemoryLayout<UInt32>.stride,
+                options: .storageModeShared))
+            kernel.encodeRoutedPersistentPhase1SubsetU16Load(
+                commandBuffer: split,
+                routedArgBuffer: argumentBuffer,
+                routedBlobs: routedBuffers,
+                routedOffsets: blobs[0].offsets,
+                x: xBuffer,
+                acts: splitActs,
+                activeSlots: slotBuffer,
+                activeSlotIndices: slots,
+                activeCount: UInt32(slots.count),
+                d: UInt32(dimension),
+                f: UInt32(intermediate),
+                topK: UInt32(topK),
+                activation: .silu,
+                expertBits: 3)
+        }
+        kernel.encodeRoutedPersistentPhase2Reduce(
+            commandBuffer: split,
+            routedArgBuffer: argumentBuffer,
+            routedBlobs: routedBuffers,
+            routedOffsets: blobs[0].offsets,
+            acts: splitActs,
+            routingWeights: routingBuffer,
+            residual: residualBuffer,
+            y: splitOutput,
+            d: UInt32(dimension),
+            f: UInt32(intermediate),
+            topK: UInt32(topK),
+            expertBits: 3)
+
         command.commit()
         command.waitUntilCompleted()
         #expect(command.error == nil)
+        split.commit()
+        split.waitUntilCompleted()
+        #expect(split.error == nil)
 
-        let actual = Fp16Buffer.read(output, count: Self.dimension)
+        let actual = Fp16Buffer.read(output, count: dimension)
         #expect(RelError.compute(actual: actual, reference: expected)
             < Tolerance.fp16ChainedReduction)
+        let splitActual = Fp16Buffer.read(splitOutput, count: dimension)
+        #expect(splitActual == actual)
     }
 }
