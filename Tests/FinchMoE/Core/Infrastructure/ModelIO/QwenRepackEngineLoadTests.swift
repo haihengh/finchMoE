@@ -297,4 +297,102 @@ import FinchMoEFormat
         #expect(gateScales.size
             == UInt64(Toy.moeIntermediate * (Toy.D / 64) * 2))
     }
+
+    /// The writer's reserved entries must be byte-exact for every width a
+    /// single install mixes: int4 (embeddings/attention/shared), int8 (GDN
+    /// projections, router). Size validation alone cannot see a row-stride
+    /// bug — an install with int8 entries written at the wrong stride still
+    /// loads and still passes `validateRuntimeSchema`, then computes NaN.
+    /// This regenerates the toy source (deterministic LCG) and compares the
+    /// resident bytes row by row against `Quantization.quantize*Affine`.
+    @Test func residentEntriesMatchWriterQuantizationByteForByte() async throws {
+        let base = NSTemporaryDirectory() + "qwen-engine-bytes-\(UUID().uuidString)"
+        let src = base + "-src"
+        let seed: UInt64 = 0x71EA
+        try Toy.writeSnapshot(into: src, seed: seed)
+        defer { try? FileManager.default.removeItem(atPath: src) }
+
+        let out = base + "-out"
+        _ = try await LocalQwenRepacker(
+            options: LocalQwenRepackOptions(snapshotDir: src, outputDir: out,
+                                            minFreeReserveBytes: 0)).run()
+        defer { try? FileManager.default.removeItem(atPath: out) }
+
+        let interesting: [String: (resident: String, bits: Int)] = [
+            "model.language_model.embed_tokens.weight":
+                ("language_model.model.embed_tokens.weight", 4),
+            // Layer 0 is a linear-attention layer in the toy's fullMask.
+            "model.language_model.layers.0.linear_attn.in_proj_qkv.weight":
+                ("language_model.model.layers.0.linear_attn.in_proj_qkv.weight", 8),
+        ]
+
+        // Replay the source stream exactly as Toy.writeSnapshot wrote it.
+        var state = seed
+        var sourceRows: [String: (rows: Int, cols: Int, values: [Float])] = [:]
+        for (name, shape) in Toy.tensorShapes() {
+            let elements = shape.reduce(1, *)
+            let keep = interesting[name] != nil
+            var values: [Float] = []
+            if keep { values.reserveCapacity(elements) }
+            for _ in 0..<elements {
+                state = state &* 6364136223846793005 &+ 1442695040888963407
+                if keep {
+                    let fraction = Float(state >> 40) / Float(UInt64(1) << 24)
+                    let bits = Quantization.bf16Bits(-2.0 + 4.0 * fraction)
+                    values.append(Quantization.bf16ToFloat(bits))
+                }
+            }
+            if keep { sourceRows[name] = (shape[0], shape[1], values) }
+        }
+
+        let ctx = try MetalContext()
+        let model = try Model.load(
+            directoryURL: URL(fileURLWithPath: out),
+            device: ctx.device,
+            expecting: Toy.arch)
+        let file = try Data(contentsOf: URL(fileURLWithPath: out + "/model_weights.bin"))
+
+        for (sourceName, spec) in interesting {
+            let source = try #require(sourceRows[sourceName])
+            let entry = try #require(model.residentIndex.entries[spec.resident])
+            let rows = source.rows
+            let cols = source.cols
+            let groups = cols / Quantization.groupSize
+            let rowBytes = cols * spec.bits / 8
+            #expect(entry.sizeBytes == UInt64(rows * rowBytes))
+            for r in 0..<rows {
+                let row = Array(source.values[r * cols..<(r + 1) * cols])
+                let packed: [UInt8]
+                let scales: [UInt16]
+                let biases: [UInt16]
+                if spec.bits == 8 {
+                    let q = Quantization.quantizeInt8Affine(row)
+                    packed = q.packed
+                    scales = q.scales
+                    biases = q.biases
+                } else {
+                    let q = Quantization.quantizeInt4Affine(row)
+                    packed = q.packed
+                    scales = q.scales
+                    biases = q.biases
+                }
+                let packedBase = Int(entry.fileOffset) + r * rowBytes
+                #expect(Array(file[packedBase..<(packedBase + rowBytes)]) == packed,
+                        "\(sourceName) row \(r) packed bytes")
+                for (base, values, label) in [
+                    (Int(entry.scaleOffset), scales, "scales"),
+                    (Int(entry.biasOffset), biases, "biases"),
+                ] {
+                    var expected = [UInt8]()
+                    for v in values {
+                        expected.append(UInt8(truncatingIfNeeded: v))
+                        expected.append(UInt8(truncatingIfNeeded: v >> 8))
+                    }
+                    let range = (base + r * groups * 2)..<(base + (r + 1) * groups * 2)
+                    #expect(Array(file[range]) == expected,
+                            "\(sourceName) row \(r) \(label) bytes")
+                }
+            }
+        }
+    }
 }
