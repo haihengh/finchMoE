@@ -142,6 +142,9 @@ struct QwenRepackPlan: Sendable {
     /// Empty for every non-qwen3_8 source.
     let pleParts: [QwenPLEPartFilePlan]
     let excludedTensorNames: [String]
+    /// 3 or 4 — the width every routed-expert weight slice was planned at.
+    /// The manifest writer records this as `routedExpert.weightBits`.
+    let routedExpertBits: Int
 }
 
 // MARK: - Planner
@@ -186,7 +189,12 @@ enum QwenRepackPlanner {
     static func plan(meta: QwenLocalSnapshot.SourceMetadata,
                      arch: ArchInfo,
                      shardHeaders: [Safetensors.Header],
-                     outputDir: String) throws -> QwenRepackPlan {
+                     outputDir: String,
+                     routedExpertBits: Int = 4) throws -> QwenRepackPlan {
+        guard routedExpertBits == 3 || routedExpertBits == 4 else {
+            throw RepackError.configurationInvalid(
+                detail: "routed expert bits must be 3 or 4, got \(routedExpertBits)")
+        }
         var registry: [String: SourceTensor] = [:]
         registry.reserveCapacity(meta.weightMap.count)
         for h in shardHeaders {
@@ -341,14 +349,16 @@ enum QwenRepackPlanner {
             layerPlans.append(try planLayerFile(path: path, layer: layer,
                                                 gateUpName: pair.gateUp,
                                                 downName: pair.down,
-                                                registry: registry, arch: arch))
+                                                registry: registry, arch: arch,
+                                                routedExpertBits: routedExpertBits))
         }
 
         return QwenRepackPlan(arch: planArch,
                               resident: resident,
                               layers: layerPlans,
                               pleParts: plePartPlans,
-                              excludedTensorNames: excluded)
+                              excludedTensorNames: excluded,
+                              routedExpertBits: routedExpertBits)
     }
 
     // MARK: - Resident planning
@@ -642,7 +652,8 @@ enum QwenRepackPlanner {
     private static func planLayerFile(path: String, layer: Int,
                                       gateUpName: String, downName: String,
                                       registry: [String: SourceTensor],
-                                      arch: ArchInfo) throws -> LayerFilePlan {
+                                      arch: ArchInfo,
+                                      routedExpertBits: Int) throws -> LayerFilePlan {
         let expertCount = arch.numExperts
         let f = arch.moeIntermediateSize      // per-expert intermediate
         let d = arch.hiddenSize
@@ -671,9 +682,13 @@ enum QwenRepackPlanner {
                 detail: "expected BF16 routed experts")
         }
 
-        let gateW = UInt64(f) * UInt64(d) / 2
+        // Packed weight bytes scale with the routed-expert bit width: int4 is
+        // one nibble per value (/2), int3 is eight values per 24-bit triplet
+        // (*3/8). f and d are group-64 multiples (checked above), so both
+        // divisions are exact.
+        let gateW = UInt64(f) * UInt64(d) * UInt64(routedExpertBits) / 8
         let gateAux = UInt64(f) * UInt64(d / 64) * 2
-        let downW = UInt64(d) * UInt64(f) / 2
+        let downW = UInt64(d) * UInt64(f) * UInt64(routedExpertBits) / 8
         let downAux = UInt64(d) * UInt64(f / 64) * 2
         let roleBytes = gateW + 2 * gateAux       // gate == up sizes
         let blobBytes = 2 * roleBytes + (downW + 2 * downAux)
@@ -693,7 +708,7 @@ enum QwenRepackPlanner {
             logicalShape: [UInt64(f), UInt64(d)],
             offsetInExpertBlob: 0, sizeInExpertBlob: gateW,
             sourceOffsetPerExpert: UInt64(2 * f * d * 2),
-            sourceTensor: gateUp, bitsForWeights: 4)
+            sourceTensor: gateUp, bitsForWeights: routedExpertBits)
         let gateSSlice = PerExpertTensorSlice(
             role: "gate", component: "scales",
             dtype: FinchFormatV1.DType.bf16.rawValue,
@@ -718,7 +733,7 @@ enum QwenRepackPlanner {
             offsetInExpertBlob: roleBytes, sizeInExpertBlob: gateW,
             sourceOffsetPerExpert: UInt64(2 * f * d * 2),
             sourceBaseOffset: UInt64(f * d * 2),
-            sourceTensor: gateUp, bitsForWeights: 4)
+            sourceTensor: gateUp, bitsForWeights: routedExpertBits)
         let upSSlice = PerExpertTensorSlice(
             role: "up", component: "scales",
             dtype: FinchFormatV1.DType.bf16.rawValue,
@@ -744,7 +759,7 @@ enum QwenRepackPlanner {
             logicalShape: [UInt64(d), UInt64(f)],
             offsetInExpertBlob: 2 * roleBytes, sizeInExpertBlob: downW,
             sourceOffsetPerExpert: UInt64(d * f * 2),
-            sourceTensor: down, bitsForWeights: 4)
+            sourceTensor: down, bitsForWeights: routedExpertBits)
         let downSSlice = PerExpertTensorSlice(
             role: "down", component: "scales",
             dtype: FinchFormatV1.DType.bf16.rawValue,

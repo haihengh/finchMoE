@@ -147,7 +147,8 @@ enum QwenQuantizedWriter {
                                     biasOffset: UInt64,
                                     audit: RepackAudit) throws {
         let groups = cols / FinchQuantization.groupSize
-        let packedRowBytes = cols / (8 / bits)
+        // int4 packs two values per byte; int3 packs eight per 24-bit triplet.
+        let packedRowBytes = bits == 4 ? cols / 2 : cols * 3 / 8
         let auxRowBytes = groups * 2
 
         var floats = [Float](repeating: 0, count: cols)
@@ -178,6 +179,28 @@ enum QwenQuantizedWriter {
                 if bits == 4 {
                     let q = floats.withUnsafeBufferPointer {
                         FinchQuantization.quantizeInt4Affine($0, count: cols)
+                    }
+                    q.packed.withUnsafeBytes { raw in
+                        packedBatch.withUnsafeMutableBytes { dst in
+                            memcpy(dst.baseAddress!.advanced(by: i * packedRowBytes),
+                                   raw.baseAddress!, raw.count)
+                        }
+                    }
+                    q.scales.withUnsafeBytes { raw in
+                        scalesBatch.withUnsafeMutableBytes { dst in
+                            memcpy(dst.baseAddress!.advanced(by: i * groups * 2),
+                                   raw.baseAddress!, raw.count)
+                        }
+                    }
+                    q.biases.withUnsafeBytes { raw in
+                        biasesBatch.withUnsafeMutableBytes { dst in
+                            memcpy(dst.baseAddress!.advanced(by: i * groups * 2),
+                                   raw.baseAddress!, raw.count)
+                        }
+                    }
+                } else if bits == 3 {
+                    let q = floats.withUnsafeBufferPointer {
+                        FinchQuantization.quantizeInt3Affine($0, count: cols)
                     }
                     q.packed.withUnsafeBytes { raw in
                         packedBatch.withUnsafeMutableBytes { dst in
@@ -372,7 +395,8 @@ enum QwenQuantizedWriter {
                     throw RepackError.configurationInvalid(
                         detail: "layer \(plan.layerIndex) role \(slice.role) missing scales/biases slices")
                 }
-                try writeAffine(rows: rows, cols: cols, bits: 4,
+                try writeAffine(rows: rows, cols: cols,
+                                bits: slice.bitsForWeights ?? 4,
                                 source: shard, srcBase: srcBase,
                                 fd: fd, path: plan.path,
                                 weightOffset: blobBase + slice.offsetInExpertBlob,

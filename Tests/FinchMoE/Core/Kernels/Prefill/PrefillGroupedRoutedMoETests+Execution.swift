@@ -7,7 +7,8 @@ import FinchMoEValidationSupport
 extension PrefillGroupedRoutedMoETests {
 
   private static func runStreamedBatched(
-    activation: SharedExpertActivation
+    activation: SharedExpertActivation,
+    expertBits: Int = 4
   ) throws -> Int {
     let d = 64
     let f = 64
@@ -26,7 +27,8 @@ extension PrefillGroupedRoutedMoETests {
       topK: topK,
       numExperts: 16,
       tileExpertCount: 16)
-    let pool = Self.makeSyntheticExpertPool(numExperts: 16, d: d, f: f)
+    let pool = Self.makeSyntheticExpertPool(numExperts: 16, d: d, f: f,
+                                            bits: expertBits)
     let hidden = (0..<(rows * d)).map { i in
       Float16(Float((i % 17) - 8) * 0.01)
     }
@@ -38,7 +40,8 @@ extension PrefillGroupedRoutedMoETests {
       topK: topK,
       d: d,
       f: f,
-      activation: activation)
+      activation: activation,
+      bits: expertBits)
 
     let ctx = try MetalContext()
     let grouped = try PrefillGroupedRoutedMoE(context: ctx)
@@ -92,7 +95,8 @@ extension PrefillGroupedRoutedMoETests {
       binding: binding,
       params: params,
       pairMicrobatchRows: 4,
-      activation: activation)
+      activation: activation,
+      expertBits: expertBits)
 
     commandBuffer.commit()
     commandBuffer.waitUntilCompleted()
@@ -116,6 +120,16 @@ extension PrefillGroupedRoutedMoETests {
     // The Qwen 3.6 routed-expert activation: the silu phase-1 variant built
     // with FC_PREFILL_MOE_ACT_SILU (index 77).
     _ = try Self.runStreamedBatched(activation: .silu)
+  }
+
+  @Test func int3BatchedMatchesReferenceAcrossPartialMicrobatch() throws {
+    _ = try Self.runStreamedBatched(activation: .gelu, expertBits: 3)
+  }
+
+  @Test func int3BatchedSiluMatchesReferenceAcrossPartialMicrobatch() throws {
+    // The Qwen 3.6 routed-expert activation on 3-bit weights (24-bit
+    // triplet packing, the experiment's shipping shape).
+    _ = try Self.runStreamedBatched(activation: .silu, expertBits: 3)
   }
 
 }

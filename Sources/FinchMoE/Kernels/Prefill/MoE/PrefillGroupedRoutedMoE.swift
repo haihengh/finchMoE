@@ -340,6 +340,10 @@ final class PrefillGroupedRoutedMoE {
     private let batchedPhase1PSO: MTLComputePipelineState
     private let batchedPhase1SiluPSO: MTLComputePipelineState
     private let batchedDownPSO: MTLComputePipelineState
+    // INT3 twins (3-bit routed-expert experiment).
+    private let batchedPhase1Int3PSO: MTLComputePipelineState
+    private let batchedPhase1Int3SiluPSO: MTLComputePipelineState
+    private let batchedDownInt3PSO: MTLComputePipelineState
     private let streamedArgEncoder: MTLArgumentEncoder
 
     func makeStreamedArgumentBuffer(device: MTLDevice,
@@ -365,6 +369,13 @@ final class PrefillGroupedRoutedMoE {
             "prefill_grouped_routed_moe_batched_phase1",
             constants: [MetalFunctionConstant(index: 77, value: .bool(true))])
         self.batchedDownPSO = try context.pipeline("prefill_grouped_routed_moe_batched_down")
+        self.batchedPhase1Int3PSO = try context.pipeline(
+            "prefill_grouped_routed_moe_batched_phase1_int3")
+        self.batchedPhase1Int3SiluPSO = try context.pipeline(
+            "prefill_grouped_routed_moe_batched_phase1_int3",
+            constants: [MetalFunctionConstant(index: 77, value: .bool(true))])
+        self.batchedDownInt3PSO = try context.pipeline(
+            "prefill_grouped_routed_moe_batched_down_int3")
         guard let streamedFn = context.library.makeFunction(name: "prefill_grouped_routed_moe_batched_phase1") else {
             throw MetalError.missingFunction("prefill_grouped_routed_moe_batched_phase1")
         }
@@ -403,11 +414,27 @@ final class PrefillGroupedRoutedMoE {
                                       binding: PrefillStreamedTileBinding,
                                       params: PrefillGroupedRoutedMoEStreamedParams,
                                       pairMicrobatchRows: Int = 32,
-                                      activation: SharedExpertActivation = .gelu) -> Int {
+                                      activation: SharedExpertActivation = .gelu,
+                                      expertBits: Int = 4) -> Int {
         guard params.pairCount > 0,
               params.liveExpertCount == UInt32(binding.views.count),
               pairMicrobatchRows > 0 else { return 0 }
-        let phase1PSO = activation == .silu ? batchedPhase1SiluPSO : batchedPhase1PSO
+        let phase1PSO: MTLComputePipelineState
+        let downPSO: MTLComputePipelineState
+        switch (activation, expertBits) {
+        case (.silu, 3):
+            phase1PSO = batchedPhase1Int3SiluPSO
+            downPSO = batchedDownInt3PSO
+        case (_, 3):
+            phase1PSO = batchedPhase1Int3PSO
+            downPSO = batchedDownInt3PSO
+        case (.silu, _):
+            phase1PSO = batchedPhase1SiluPSO
+            downPSO = batchedDownPSO
+        case (_, _):
+            phase1PSO = batchedPhase1PSO
+            downPSO = batchedDownPSO
+        }
         var consumed: UInt32 = 0
         var microbatchCount = 0
         while consumed < params.pairCount {
@@ -437,7 +464,7 @@ final class PrefillGroupedRoutedMoE {
             }
 
             if let enc = commandBuffer.makeComputeCommandEncoder() {
-                enc.setComputePipelineState(batchedDownPSO)
+                enc.setComputePipelineState(downPSO)
                 enc.setBuffer(sortedPairs, offset: sortedPairsOffset, index: PrefillGroupedRoutedMoEBufferIndex.sortedPairs)
                 enc.setBuffer(routePartials, offset: routePartialsOffset,
                               index: PrefillGroupedRoutedMoEBufferIndex.routePartials)

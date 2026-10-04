@@ -206,7 +206,7 @@ public enum ManifestReader {
             ("linearAttention", quant.linearAttention, [4, 8]),
             ("router", quant.router, [8]),
             ("sharedExpert", quant.sharedExpert, [4, 8]),
-            ("routedExpert", quant.routedExpert, [4]),
+            ("routedExpert", quant.routedExpert, [3, 4]),
         ]
         for (name, slot, allowedBits) in slots {
             guard allowedBits.contains(slot.weightBits),

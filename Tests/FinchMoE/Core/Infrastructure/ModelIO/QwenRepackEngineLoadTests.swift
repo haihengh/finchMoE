@@ -255,4 +255,46 @@ import FinchMoEFormat
         // open lazily via the streamer path.
         #expect(model.packedExpertsLayout.expertsPerLayer == Toy.experts)
     }
+
+    /// The 3-bit twin of `quantizedToyInstallLoadsAndValidates`: repack the
+    /// toy snapshot with `--routed-expert-bits 3`, then run the full runtime
+    /// load. This is the round-trip that matters for the experiment — the
+    /// manifest's `routedExpert.weightBits` and the layout's per-subtensor
+    /// sizes/bits must agree with the 24-bit-triplet blobs the writer emitted
+    /// (a mismatch here is how a 3-bit install would fail to load at all).
+    @Test func threeBitToyInstallLoadsAndValidates() async throws {
+        let base = NSTemporaryDirectory() + "qwen-engine-3bit-\(UUID().uuidString)"
+        let src = base + "-src"
+        try Toy.writeSnapshot(into: src, seed: 0x71EB)
+        defer { try? FileManager.default.removeItem(atPath: src) }
+
+        let out = base + "-out"
+        let options = LocalQwenRepackOptions(
+            snapshotDir: src, outputDir: out,
+            minFreeReserveBytes: 0, routedExpertBits: 3)
+        _ = try await LocalQwenRepacker(options: options).run()
+        defer { try? FileManager.default.removeItem(atPath: out) }
+
+        let ctx = try MetalContext()
+        let model = try Model.load(
+            directoryURL: URL(fileURLWithPath: out),
+            device: ctx.device,
+            expecting: Toy.arch)
+
+        #expect(model.routedExpertWeightBits == 3)
+        #expect(model.packedExpertsLayout.expertsPerLayer == Toy.experts)
+
+        let expert = model.packedExpertsLayout.expert(layer: 0, expert: 0)
+        let gate = try #require(expert.subTensors["gate"])
+        #expect(gate.bits == 3)
+        #expect(gate.dtype == "U32")
+        #expect(gate.size == UInt64(Toy.moeIntermediate * Toy.D * 3 / 8))
+        let down = try #require(expert.subTensors["down"])
+        #expect(down.bits == 3)
+        #expect(down.size == UInt64(Toy.D * Toy.moeIntermediate * 3 / 8))
+        // Aux scales/biases keep the int4 layout (BF16 per group of 64).
+        let gateScales = try #require(expert.subTensors["gate_scales"])
+        #expect(gateScales.size
+            == UInt64(Toy.moeIntermediate * (Toy.D / 64) * 2))
+    }
 }

@@ -60,7 +60,8 @@ import FinchMoEFormat
             sourceIndexSha256: loaded.metadata.indexSha256Hex,
             outputDirectory: URL(fileURLWithPath: output).path,
             modelFamily: loaded.arch.modelFamily,
-            numLayers: loaded.arch.numLayers)
+            numLayers: loaded.arch.numLayers,
+            routedExpertBits: 4)
     }
 
     /// Stages the state a run killed *after* finishing every file would leave:

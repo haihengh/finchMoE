@@ -2061,7 +2061,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             argumentBuffer: argumentBuffer,
                             binding: fetch.binding,
                             params: streamedParams,
-                            pairMicrobatchRows: scratch.layout.routedPairMicrobatchRows)
+                            pairMicrobatchRows: scratch.layout.routedPairMicrobatchRows,
+                            expertBits: model.routedExpertWeightBits)
                         tileCB.commit()
                         pendingTiles.append(PendingPrefillTile(tileIndex: tileIndex,
                                                                commandBuffer: tileCB,
@@ -3177,7 +3178,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 binding: fetch.binding,
                 params: streamedParams,
                 pairMicrobatchRows: scratch.layout.routedPairMicrobatchRows,
-                activation: .silu)
+                activation: .silu,
+                expertBits: model.routedExpertWeightBits)
             tileCB.commit()
             pendingTiles.append(PendingPrefillTile(tileIndex: tileIndex,
                                                    commandBuffer: tileCB,
@@ -3464,7 +3466,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                     d: D,
                                                     f: FmoE,
                                                     topK: topK,
-                                                    activation: activation)
+                                                    activation: activation,
+                                                    expertBits: model.routedExpertWeightBits)
         }
 
         func encodeRoutedPhase1Subset(
@@ -3488,7 +3491,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 d: D,
                 f: FmoE,
                 topK: topK,
-                activation: activation)
+                activation: activation,
+                expertBits: model.routedExpertWeightBits)
         }
 
         if let plan = plannedFetch,
@@ -3604,7 +3608,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                y: h2Buf,
                                                d: D,
                                                f: FmoE,
-                                               topK: topK)
+                                               topK: topK,
+                                               expertBits: model.routedExpertWeightBits)
         tailEncoder(routedCB)
         commitCounting(routedCB)
         precondition(pending == nil,
@@ -5286,7 +5291,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 binding: fetch.binding,
                 params: streamedParams,
                 pairMicrobatchRows: scratch.layout.routedPairMicrobatchRows,
-                activation: .silu)
+                activation: .silu,
+                expertBits: model.routedExpertWeightBits)
             commitCountingPrefill(tileCB)
             pendingTiles.append(PendingPrefillTile(tileIndex: tileIndex,
                                                    commandBuffer: tileCB,
