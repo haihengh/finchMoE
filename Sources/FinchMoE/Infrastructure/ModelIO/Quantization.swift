@@ -9,6 +9,7 @@ import FinchMoEFormat
 public enum Quantization {
 
     public typealias Int4AffineRow = FinchQuantization.Int4AffineRow
+    public typealias Int3AffineRow = FinchQuantization.Int3AffineRow
     public typealias Int8AffineRow = FinchQuantization.Int8AffineRow
     public typealias Int4AffinePLERow = FinchQuantization.Int4AffinePLERow
 
@@ -36,6 +37,16 @@ public enum Quantization {
 
     public static func dequantizeInt4Affine(_ r: Int4AffineRow, n: Int) -> [Float] {
         FinchQuantization.dequantizeInt4Affine(r, n: n)
+    }
+
+    // MARK: - INT3 affine (routed experts)
+
+    public static func quantizeInt3Affine(_ row: [Float]) -> Int3AffineRow {
+        FinchQuantization.quantizeInt3Affine(row)
+    }
+
+    public static func dequantizeInt3Affine(_ r: Int3AffineRow, n: Int) -> [Float] {
+        FinchQuantization.dequantizeInt3Affine(r, n: n)
     }
 
     // MARK: - INT4 affine (PLE table)

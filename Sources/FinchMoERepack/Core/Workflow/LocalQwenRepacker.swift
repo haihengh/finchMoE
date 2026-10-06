@@ -17,19 +17,26 @@ public struct LocalQwenRepackOptions: Sendable {
     public let resume: Bool
     public let copyAuditPath: String?
     public let minFreeReserveBytes: UInt64
+    /// Routed-expert weight width: 4 (shipping default) or 3 (experiment).
+    /// Both are affine group-64 with BF16 scale+bias; the byte layout differs
+    /// (nibbles vs 24-bit triplets) and so does the runtime kernel. Resuming
+    /// across a change of width is refused via the journal fingerprint.
+    public let routedExpertBits: Int
 
     public init(snapshotDir: String,
                 outputDir: String,
                 overwrite: Bool = false,
                 resume: Bool = false,
                 copyAuditPath: String? = nil,
-                minFreeReserveBytes: UInt64 = 1 * 1024 * 1024 * 1024) {
+                minFreeReserveBytes: UInt64 = 1 * 1024 * 1024 * 1024,
+                routedExpertBits: Int = 4) {
         self.snapshotDir = snapshotDir
         self.outputDir = outputDir
         self.overwrite = overwrite
         self.resume = resume
         self.copyAuditPath = copyAuditPath
         self.minFreeReserveBytes = minFreeReserveBytes
+        self.routedExpertBits = routedExpertBits
     }
 }
 
@@ -121,7 +128,8 @@ public final class LocalQwenRepacker {
             sourceIndexSha256: snapshot.metadata.indexSha256Hex,
             outputDirectory: URL(fileURLWithPath: options.outputDir).path,
             modelFamily: snapshot.arch.modelFamily,
-            numLayers: snapshot.arch.numLayers)
+            numLayers: snapshot.arch.numLayers,
+            routedExpertBits: options.routedExpertBits)
         if let resumeJournal, resumeJournal.fingerprint != fingerprint {
             // This is the property the old unconditional refusal protected: a
             // partial is never written into by a run that would produce
@@ -140,7 +148,8 @@ public final class LocalQwenRepacker {
         let plan = try QwenRepackPlanner.plan(meta: snapshot.metadata,
                                               arch: snapshot.arch,
                                               shardHeaders: snapshot.shardHeaders,
-                                              outputDir: paths.partialDirectory)
+                                              outputDir: paths.partialDirectory,
+                                              routedExpertBits: options.routedExpertBits)
         let pleBytes = plan.pleParts.reduce(UInt64(0)) {
             $0 + $1.quantizedByteCount
         }
@@ -422,7 +431,7 @@ public final class LocalQwenRepacker {
         // through the recurrent state and drowns the final logits.
         let bits = FinchJSON.QuantBitWidths(
             embedding: 4, attention: 4, linearAttention: 8, router: 8,
-            sharedExpert: 4, routedExpert: 4)
+            sharedExpert: 4, routedExpert: plan.routedExpertBits)
         let files = audit.outputFiles.map {
             ($0.relativePath, FinchJSON.FileEntry(size: $0.size, sha256: $0.sha256))
         }

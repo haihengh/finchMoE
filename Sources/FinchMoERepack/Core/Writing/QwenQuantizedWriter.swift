@@ -147,7 +147,13 @@ enum QwenQuantizedWriter {
                                     biasOffset: UInt64,
                                     audit: RepackAudit) throws {
         let groups = cols / FinchQuantization.groupSize
-        let packedRowBytes = cols / (8 / bits)
+        // Packed weight bytes per row: cols*bits/8, exact for every width
+        // this writer emits (cols is a group-64 multiple): int4 → cols/2,
+        // int3 → eight values per 24-bit triplet, int8 → cols. (The old
+        // `cols / (8 / bits)` silently gave cols/2 for bits=3 — integer
+        // division — and a bits==4 ternary smuggled that bug in as a
+        // regression on the int8 GDN/router entries instead.)
+        let packedRowBytes = cols * bits / 8
         let auxRowBytes = groups * 2
 
         var floats = [Float](repeating: 0, count: cols)
@@ -178,6 +184,28 @@ enum QwenQuantizedWriter {
                 if bits == 4 {
                     let q = floats.withUnsafeBufferPointer {
                         FinchQuantization.quantizeInt4Affine($0, count: cols)
+                    }
+                    q.packed.withUnsafeBytes { raw in
+                        packedBatch.withUnsafeMutableBytes { dst in
+                            memcpy(dst.baseAddress!.advanced(by: i * packedRowBytes),
+                                   raw.baseAddress!, raw.count)
+                        }
+                    }
+                    q.scales.withUnsafeBytes { raw in
+                        scalesBatch.withUnsafeMutableBytes { dst in
+                            memcpy(dst.baseAddress!.advanced(by: i * groups * 2),
+                                   raw.baseAddress!, raw.count)
+                        }
+                    }
+                    q.biases.withUnsafeBytes { raw in
+                        biasesBatch.withUnsafeMutableBytes { dst in
+                            memcpy(dst.baseAddress!.advanced(by: i * groups * 2),
+                                   raw.baseAddress!, raw.count)
+                        }
+                    }
+                } else if bits == 3 {
+                    let q = floats.withUnsafeBufferPointer {
+                        FinchQuantization.quantizeInt3Affine($0, count: cols)
                     }
                     q.packed.withUnsafeBytes { raw in
                         packedBatch.withUnsafeMutableBytes { dst in
@@ -372,7 +400,8 @@ enum QwenQuantizedWriter {
                     throw RepackError.configurationInvalid(
                         detail: "layer \(plan.layerIndex) role \(slice.role) missing scales/biases slices")
                 }
-                try writeAffine(rows: rows, cols: cols, bits: 4,
+                try writeAffine(rows: rows, cols: cols,
+                                bits: slice.bitsForWeights ?? 4,
                                 source: shard, srcBase: srcBase,
                                 fd: fd, path: plan.path,
                                 weightOffset: blobBase + slice.offsetInExpertBlob,

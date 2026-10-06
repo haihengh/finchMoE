@@ -147,6 +147,112 @@ public enum FinchQuantization {
         return out
     }
 
+    // MARK: - INT3 affine
+
+    /// Routed-expert 3-bit row: eight unsigned values packed per 24-bit
+    /// little-endian triplet (value j occupies bits 3j..3j+2), with BF16
+    /// scale + bias per group of 64. Byte-compatible with the archived
+    /// first-generation engine's `pack_3bit` (repack_experts.py) and with the
+    /// 2026-09 `3bit-experts` branch, so older 3-bit installs decode here.
+    public struct Int3AffineRow {
+        public let packed: [UInt8]   // N * 3 / 8 bytes
+        public let scales: [UInt16]  // N / 64 BF16 bits
+        public let biases: [UInt16]  // N / 64 BF16 bits
+
+        public init(packed: [UInt8], scales: [UInt16], biases: [UInt16]) {
+            self.packed = packed
+            self.scales = scales
+            self.biases = biases
+        }
+    }
+
+    /// Affine 3-bit quantize: `q ∈ [0..7]`, `w ≈ q * scale + bias`.
+    /// Identical conventions to `quantizeInt4Affine`: per-group min/max scale
+    /// and bias rounded through BF16 first, quantized against the rounded
+    /// values, subnormal-safe.
+    public static func quantizeInt3Affine(_ row: [Float]) -> Int3AffineRow {
+        row.withUnsafeBufferPointer { quantizeInt3Affine($0, count: row.count) }
+    }
+
+    /// Buffer form (see `quantizeInt4Affine(_:count:)`).
+    public static func quantizeInt3Affine(_ buffer: UnsafeBufferPointer<Float>,
+                                          count: Int) -> Int3AffineRow {
+        precondition(count % groupSize == 0,
+                     "row length \(count) is not a multiple of \(groupSize)")
+
+        let nGroups = count / groupSize
+        var packed = [UInt8](repeating: 0, count: count * 3 / 8)
+        var scales = [UInt16](repeating: 0, count: nGroups)
+        var biases = [UInt16](repeating: 0, count: nGroups)
+
+        for g in 0..<nGroups {
+            var wmin: Float =  .infinity
+            var wmax: Float = -.infinity
+            for k in 0..<groupSize {
+                let w = buffer[g * groupSize + k]
+                if w < wmin { wmin = w }
+                if w > wmax { wmax = w }
+            }
+            // Constant group: scale=1, bias=value preserves exact reconstruction.
+            let scaleF: Float
+            let biasF:  Float
+            if wmax == wmin {
+                scaleF = 1
+                biasF  = wmin
+            } else {
+                scaleF = (wmax - wmin) / 7.0
+                biasF  = wmin
+            }
+            // Round through BF16 first, then quantize against the rounded
+            // values so the runtime decode reproduces the same q stored here.
+            let sBits = bf16Bits(scaleF)
+            let bBits = bf16Bits(biasF)
+            scales[g] = sBits
+            biases[g] = bBits
+            let scale = bf16ToFloat(sBits)
+            let bias  = bf16ToFloat(bBits)
+            // Quantize against the BF16-rounded scale directly (a reciprocal
+            // would overflow FP32 to inf for a subnormal rounded scale).
+            let effectiveScale = scale == 0 ? Float(1) : scale
+
+            for k in 0..<groupSize {
+                let w = buffer[g * groupSize + k]
+                let qv = scale == 0 ? Float(0) : (w - bias) / effectiveScale
+                var q = Int(qv.rounded())
+                q = max(0, min(7, q))
+                // Triplet t holds values [8t..8t+7]; lane j sits at bit 3j of
+                // the 24-bit little-endian integer.
+                let i = g * groupSize + k
+                let byteBase = (i / 8) * 3
+                let value = UInt32(q) << UInt32(3 * (i % 8))
+                packed[byteBase + 0] |= UInt8(value & 0xFF)
+                packed[byteBase + 1] |= UInt8((value >> 8) & 0xFF)
+                packed[byteBase + 2] |= UInt8((value >> 16) & 0xFF)
+            }
+        }
+        return Int3AffineRow(packed: packed, scales: scales, biases: biases)
+    }
+
+    public static func dequantizeInt3Affine(_ r: Int3AffineRow, n: Int) -> [Float] {
+        precondition(n == r.packed.count * 8 / 3)
+        var out = [Float](repeating: 0, count: n)
+        let nGroups = n / groupSize
+        for g in 0..<nGroups {
+            let scale = bf16ToFloat(r.scales[g])
+            let bias  = bf16ToFloat(r.biases[g])
+            for k in 0..<groupSize {
+                let i = g * groupSize + k
+                let byteBase = (i / 8) * 3
+                let value = UInt32(r.packed[byteBase + 0])
+                    | UInt32(r.packed[byteBase + 1]) << 8
+                    | UInt32(r.packed[byteBase + 2]) << 16
+                let q = (value >> UInt32(3 * (i % 8))) & 0x7
+                out[i] = Float(q) * scale + bias
+            }
+        }
+        return out
+    }
+
     // MARK: - INT4 affine (PLE table)
 
     /// Group size for the PLE n-gram embedding table. Measured 2026-09-11

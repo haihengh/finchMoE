@@ -111,7 +111,8 @@ import FinchMoEValidationSupport
         let stride: Int
     }
 
-    static func makeSyntheticExpertPool(numExperts: Int, d: Int, f: Int) -> SyntheticExpertPool {
+    static func makeSyntheticExpertPool(numExperts: Int, d: Int, f: Int,
+                                        bits: Int = 4) -> SyntheticExpertPool {
         var allBytes: [UInt8] = []
         var offsets: MoEExpertOffsets?
         var stride = 0
@@ -120,41 +121,41 @@ import FinchMoEValidationSupport
             let gateWOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: f, cols: d, expert: expert, role: 0),
                                   to: &bytes,
-                                  component: .packed)
+                                  component: .packed, bits: bits)
             let gateSOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: f, cols: d, expert: expert, role: 0),
                                   to: &bytes,
-                                  component: .scales)
+                                  component: .scales, bits: bits)
             let gateBOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: f, cols: d, expert: expert, role: 0),
                                   to: &bytes,
-                                  component: .biases)
+                                  component: .biases, bits: bits)
 
             let upWOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: f, cols: d, expert: expert, role: 1),
                                   to: &bytes,
-                                  component: .packed)
+                                  component: .packed, bits: bits)
             let upSOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: f, cols: d, expert: expert, role: 1),
                                   to: &bytes,
-                                  component: .scales)
+                                  component: .scales, bits: bits)
             let upBOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: f, cols: d, expert: expert, role: 1),
                                   to: &bytes,
-                                  component: .biases)
+                                  component: .biases, bits: bits)
 
             let downWOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: d, cols: f, expert: expert, role: 2),
                                   to: &bytes,
-                                  component: .packed)
+                                  component: .packed, bits: bits)
             let downSOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: d, cols: f, expert: expert, role: 2),
                                   to: &bytes,
-                                  component: .scales)
+                                  component: .scales, bits: bits)
             let downBOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: d, cols: f, expert: expert, role: 2),
                                   to: &bytes,
-                                  component: .biases)
+                                  component: .biases, bits: bits)
 
             let currentOffsets = MoEExpertOffsets(gateWOff: gateWOff,
                                                   gateSOff: gateSOff,
@@ -186,20 +187,34 @@ import FinchMoEValidationSupport
 
     static func appendProjection(rows: [[Float]],
                                          to bytes: inout [UInt8],
-                                         component: ProjectionComponent) {
-        let quantized = rows.map { Quantization.quantizeInt4Affine($0) }
+                                         component: ProjectionComponent,
+                                         bits: Int = 4) {
+        let packed: [[UInt8]]
+        let scales: [[UInt16]]
+        let biases: [[UInt16]]
+        if bits == 3 {
+            let q = rows.map { Quantization.quantizeInt3Affine($0) }
+            packed = q.map(\.packed)
+            scales = q.map(\.scales)
+            biases = q.map(\.biases)
+        } else {
+            let q = rows.map { Quantization.quantizeInt4Affine($0) }
+            packed = q.map(\.packed)
+            scales = q.map(\.scales)
+            biases = q.map(\.biases)
+        }
         switch component {
         case .packed:
-            for row in quantized {
-                bytes.append(contentsOf: row.packed)
+            for row in packed {
+                bytes.append(contentsOf: row)
             }
         case .scales:
-            for row in quantized {
-                Self.appendU16(row.scales, to: &bytes)
+            for row in scales {
+                Self.appendU16(row, to: &bytes)
             }
         case .biases:
-            for row in quantized {
-                Self.appendU16(row.biases, to: &bytes)
+            for row in biases {
+                Self.appendU16(row, to: &bytes)
             }
         }
     }
@@ -233,7 +248,8 @@ import FinchMoEValidationSupport
                                                   topK: Int,
                                                   d: Int,
                                                   f: Int,
-                                                  activation: SharedExpertActivation = .gelu) -> [Float16] {
+                                                  activation: SharedExpertActivation = .gelu,
+                                                  bits: Int = 4) -> [Float16] {
         var out = [Float16](repeating: -99, count: routes.queryCount * topK * d)
         for pair in routes.sortedPairs {
             let expertBase = Int(pair.expert) * pool.stride
@@ -241,22 +257,24 @@ import FinchMoEValidationSupport
             let x = (0..<d).map { Float(hidden[xBase + $0]) }
             var act = [Float16](repeating: 0, count: f)
             for row in 0..<f {
-                let gate = Self.cpuInt4Dot(bytes: pool.bytes,
-                                           base: expertBase,
-                                           wOff: Int(pool.offsets.gateWOff),
-                                           sOff: Int(pool.offsets.gateSOff),
-                                           bOff: Int(pool.offsets.gateBOff),
-                                           row: row,
-                                           n: d,
-                                           x: x)
-                let up = Self.cpuInt4Dot(bytes: pool.bytes,
-                                         base: expertBase,
-                                         wOff: Int(pool.offsets.upWOff),
-                                         sOff: Int(pool.offsets.upSOff),
-                                         bOff: Int(pool.offsets.upBOff),
-                                         row: row,
-                                         n: d,
-                                         x: x)
+                let gate = Self.cpuDot(bytes: pool.bytes,
+                                       base: expertBase,
+                                       wOff: Int(pool.offsets.gateWOff),
+                                       sOff: Int(pool.offsets.gateSOff),
+                                       bOff: Int(pool.offsets.gateBOff),
+                                       row: row,
+                                       n: d,
+                                       x: x,
+                                       bits: bits)
+                let up = Self.cpuDot(bytes: pool.bytes,
+                                     base: expertBase,
+                                     wOff: Int(pool.offsets.upWOff),
+                                     sOff: Int(pool.offsets.upSOff),
+                                     bOff: Int(pool.offsets.upBOff),
+                                     row: row,
+                                     n: d,
+                                     x: x,
+                                     bits: bits)
                 let acted = activation == .silu
                     ? MoeRef.silu([gate])[0]
                     : MoeRef.geluTanh([gate])[0]
@@ -265,18 +283,61 @@ import FinchMoEValidationSupport
             let actFloat = act.map { Float($0) }
             let outBase = (Int(pair.token) * topK + Int(pair.rank)) * d
             for row in 0..<d {
-                let value = Self.cpuInt4Dot(bytes: pool.bytes,
-                                            base: expertBase,
-                                            wOff: Int(pool.offsets.downWOff),
-                                            sOff: Int(pool.offsets.downSOff),
-                                            bOff: Int(pool.offsets.downBOff),
-                                            row: row,
-                                            n: f,
-                                            x: actFloat)
+                let value = Self.cpuDot(bytes: pool.bytes,
+                                        base: expertBase,
+                                        wOff: Int(pool.offsets.downWOff),
+                                        sOff: Int(pool.offsets.downSOff),
+                                        bOff: Int(pool.offsets.downBOff),
+                                        row: row,
+                                        n: f,
+                                        x: actFloat,
+                                        bits: bits)
                 out[outBase + row] = Float16(value)
             }
         }
         return out
+    }
+
+    static func cpuDot(bytes: [UInt8], base: Int, wOff: Int, sOff: Int,
+                       bOff: Int, row: Int, n: Int, x: [Float],
+                       bits: Int = 4) -> Float {
+        bits == 3
+            ? Self.cpuInt3Dot(bytes: bytes, base: base, wOff: wOff,
+                              sOff: sOff, bOff: bOff, row: row, n: n, x: x)
+            : Self.cpuInt4Dot(bytes: bytes, base: base, wOff: wOff,
+                              sOff: sOff, bOff: bOff, row: row, n: n, x: x)
+    }
+
+    /// INT3 twin of `cpuInt4Dot`: 24-bit little-endian triplets, eight values
+    /// per three bytes.
+    static func cpuInt3Dot(bytes: [UInt8],
+                                   base: Int,
+                                   wOff: Int,
+                                   sOff: Int,
+                                   bOff: Int,
+                                   row: Int,
+                                   n: Int,
+                                   x: [Float]) -> Float {
+        let groups = n / Quantization.groupSize
+        let rowBytes = n * 3 / 8
+        let wRow = base + wOff + row * rowBytes
+        let sRow = base + sOff + row * groups * MemoryLayout<UInt16>.stride
+        let bRow = base + bOff + row * groups * MemoryLayout<UInt16>.stride
+        var acc: Float = 0
+        for group in 0..<groups {
+            let scale = Quantization.bf16ToFloat(Self.readU16(bytes, sRow + group * 2))
+            let bias = Quantization.bf16ToFloat(Self.readU16(bytes, bRow + group * 2))
+            for k in 0..<Quantization.groupSize {
+                let col = group * Quantization.groupSize + k
+                let triplet = wRow + (col / 8) * 3
+                let u24 = UInt32(bytes[triplet])
+                    | UInt32(bytes[triplet + 1]) << 8
+                    | UInt32(bytes[triplet + 2]) << 16
+                let q = Float((u24 >> UInt32(3 * (col % 8))) & 7)
+                acc += (q * scale + bias) * x[col]
+            }
+        }
+        return acc
     }
 
     static func cpuInt4Dot(bytes: [UInt8],

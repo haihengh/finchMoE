@@ -151,6 +151,42 @@ import FinchMoEFormat
         }
     }
 
+    @Test func expertLayersThreeBitPackingSizes() throws {
+        let dir = try Self.makeSnapshot()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let snapshot = try QwenLocalSnapshot.load(snapshotDir: dir)
+        let plan = try QwenRepackPlanner.plan(meta: snapshot.metadata,
+                                              arch: snapshot.arch,
+                                              shardHeaders: snapshot.shardHeaders,
+                                              outputDir: dir + "/out",
+                                              routedExpertBits: 3)
+        #expect(plan.routedExpertBits == 3)
+
+        let D = SyntheticQwenSnapshot.Toy.D
+        let f = SyntheticQwenSnapshot.Toy.moeIntermediate
+        for layer in plan.layers {
+            let gateW = layer.subTensors[0]
+            let upW = layer.subTensors[3]
+            let downW = layer.subTensors[6]
+            #expect(gateW.bitsForWeights == 3)
+            #expect(downW.bitsForWeights == 3)
+            // Eight values per 24-bit triplet: f*d*3/8 bytes, not f*d/2.
+            #expect(gateW.sizeInExpertBlob == UInt64(f * D * 3 / 8))
+            #expect(downW.sizeInExpertBlob == UInt64(D * f * 3 / 8))
+            // The up half still starts right after gate's weights+aux, and
+            // down after up's; only the weight sizes changed.
+            #expect(upW.offsetInExpertBlob
+                == gateW.offsetInExpertBlob + gateW.sizeInExpertBlob
+                    + layer.subTensors[1].sizeInExpertBlob
+                    + layer.subTensors[2].sizeInExpertBlob)
+            let expectedBlob = 2 * (UInt64(f * D * 3 / 8) + 2 * UInt64(f * (D / 64) * 2))
+                + UInt64(D * f * 3 / 8) + 2 * UInt64(D * (f / 64) * 2)
+            #expect(layer.expertStride % 16_384 == 0)
+            #expect(layer.expertStride >= expectedBlob)
+            #expect(layer.expertStride < expectedBlob + 16_384)
+        }
+    }
+
     @Test func nonLanguageTensorsAreExcludedNotRejected() throws {
         let dir = try Self.makeSnapshot()
         defer { try? FileManager.default.removeItem(atPath: dir) }

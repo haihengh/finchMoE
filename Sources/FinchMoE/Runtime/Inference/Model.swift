@@ -46,6 +46,9 @@ public struct Model {
     /// `out_proj`). 8 on the production build; raw/bf16 installs have no quant
     /// manifest and never consult this (default 4 is inert there).
     public var linearAttentionWeightBits: Int { manifest.quant?.linearAttention.weightBits ?? 4 }
+    /// Routed-expert weight width (4 shipping, 3 experimental). Selects the
+    /// int4/int3 expert kernels; raw/bf16 installs never consult it.
+    public var routedExpertWeightBits: Int { manifest.quant?.routedExpert.weightBits ?? 4 }
 
     let residentBuffer: ResidentBuffer
     let residentIndex: ResidentIndex
@@ -1074,7 +1077,7 @@ extension Model {
                          slot: ManifestQuantSlot,
                          field: String) throws -> (shape: (UInt32, UInt32), weight: UInt64, aux: UInt64) {
             let shape = try dimensions(rows, columns, field: field)
-            guard slot.weightBits == 4 || slot.weightBits == 8,
+            guard slot.weightBits == 3 || slot.weightBits == 4 || slot.weightBits == 8,
                   slot.groupSize > 0,
                   columns % slot.groupSize == 0 else {
                 throw ModelError.indexCorrupt(detail: "\(field) has unsupported affine quantization")

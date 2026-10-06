@@ -54,6 +54,22 @@ final class ResidentBuffer {
 
         _ = posix_madvise(base, mappedLen, POSIX_MADV_RANDOM)
 
+        // Opt-in wire-down of the resident mapping. With
+        // `FINCHMOE_MLOCK_RESIDENT` set, the mapping is pinned so the OS
+        // cannot evict it. Unpinned, a memory-pressured box (16 GB with
+        // browser/game/IDE memory) evicts these clean file pages and the GPU
+        // then pays a page-in fault for every evicted page it touches — the
+        // 2026-10-05 ~900 s stall: all engine threads idle in the completion
+        // semaphore, nothing in the IO counters (mmap faults are not preads),
+        // and the very next run instantly fast again. Failure is a warning,
+        // never an error: the pin is a performance measure, not correctness.
+        if ProcessInfo.processInfo.environment["FINCHMOE_MLOCK_RESIDENT"] != nil,
+           mlock(base, mappedLen) != 0 {
+            FileHandle.standardError.write(Data(
+                ("warning: mlock of resident mapping failed (errno \(errno)); "
+                 + "continuing unpinned\n").utf8))
+        }
+
         let sliceStart = base.advanced(by: sliceShift)
 
         // Capture pointer + length for the deallocator. Do NOT capture self

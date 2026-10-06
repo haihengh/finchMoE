@@ -56,6 +56,74 @@ import FinchMoEFormat
         }
     }
 
+    // MARK: - INT3 affine (routed experts)
+
+    @Test func int3SubnormalResidueRowQuantizesWithoutTrap() {
+        let row = Self.subnormalResidueRow()
+        let q = row.withUnsafeBufferPointer {
+            FinchQuantization.quantizeInt3Affine($0, count: row.count)
+        }
+        let decoded = FinchQuantization.dequantizeInt3Affine(q, n: row.count)
+        for (a, b) in zip(decoded, row) {
+            #expect(abs(a - b) < 1e-36)
+        }
+    }
+
+    @Test func int3RoundTripsIntegerRowExactly() {
+        // A group whose min/max are exactly 0 and 7 gives scale 1, bias 0, so
+        // integer inputs are reconstructed bit-exactly — this pins both the
+        // quantizer and the unpacking.
+        let row = (0..<FinchQuantization.groupSize).map { Float($0 % 8) }
+        let q = row.withUnsafeBufferPointer {
+            FinchQuantization.quantizeInt3Affine($0, count: row.count)
+        }
+        let decoded = FinchQuantization.dequantizeInt3Affine(q, n: row.count)
+        for (a, b) in zip(decoded, row) {
+            #expect(a == b)
+        }
+    }
+
+    @Test func int3PackingIsEightValuesPerLittleEndianTriplet() {
+        // Values 0..7 in order → triplet bits: j at 3j → 0x88, 0xC6, 0xFA
+        // (little-endian bytes of 0xFAC688). Eight identical triplets per
+        // group-64 row. This is the archived first-generation byte format.
+        let row = (0..<FinchQuantization.groupSize).map { Float($0 % 8) }
+        let q = row.withUnsafeBufferPointer {
+            FinchQuantization.quantizeInt3Affine($0, count: row.count)
+        }
+        #expect(q.packed.count == row.count * 3 / 8)
+        for t in 0..<8 {
+            #expect(q.packed[3 * t + 0] == 0x88)
+            #expect(q.packed[3 * t + 1] == 0xC6)
+            #expect(q.packed[3 * t + 2] == 0xFA)
+        }
+    }
+
+    @Test func int3OrdinaryRangeRoundTripsWithinAffineError() {
+        // ±1 row: step 2/7, half-step error bound, with headroom.
+        let row = (0..<FinchQuantization.groupSize).map {
+            Float($0 % 3) - 1.0   // -1, 0, 1, -1, ...
+        }
+        let q = row.withUnsafeBufferPointer {
+            FinchQuantization.quantizeInt3Affine($0, count: row.count)
+        }
+        let decoded = FinchQuantization.dequantizeInt3Affine(q, n: row.count)
+        for (a, b) in zip(decoded, row) {
+            #expect(abs(a - b) < 0.15)
+        }
+    }
+
+    @Test func int3ConstantGroupReconstructsExactly() {
+        let row = [Float](repeating: 0.25, count: FinchQuantization.groupSize)
+        let q = row.withUnsafeBufferPointer {
+            FinchQuantization.quantizeInt3Affine($0, count: row.count)
+        }
+        let decoded = FinchQuantization.dequantizeInt3Affine(q, n: row.count)
+        for a in decoded {
+            #expect(a == 0.25)
+        }
+    }
+
     // MARK: - PLE table (160-wide, group 32, per-row fixed stride)
 
     /// A 160-wide row in the PLE value profile: small, roughly zero-mean,

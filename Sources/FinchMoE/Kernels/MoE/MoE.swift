@@ -73,6 +73,18 @@ final class MoE {
     private let phase1SubsetU16SiluSpecializedPSO: MTLComputePipelineState
     private let phase2ReduceK8PSO: MTLComputePipelineState
     private let phase2ReduceK8SpecializedPSO: MTLComputePipelineState
+    // INT3 twins (3-bit routed-expert experiment). Same layouts and dispatch
+    // shape; only the weight unpacking differs (24-bit triplets).
+    private let phase1Int3PSO: MTLComputePipelineState
+    private let phase1Int3SpecializedPSO: MTLComputePipelineState
+    private let phase1Int3SiluPSO: MTLComputePipelineState
+    private let phase1Int3SiluSpecializedPSO: MTLComputePipelineState
+    private let phase1SubsetInt3PSO: MTLComputePipelineState
+    private let phase1SubsetInt3SpecializedPSO: MTLComputePipelineState
+    private let phase1SubsetInt3SiluPSO: MTLComputePipelineState
+    private let phase1SubsetInt3SiluSpecializedPSO: MTLComputePipelineState
+    private let phase2ReduceK8Int3PSO: MTLComputePipelineState
+    private let phase2ReduceK8Int3SpecializedPSO: MTLComputePipelineState
     private let routedArgEncoder: MTLArgumentEncoder
     private let reusableRoutedArgBuffer: MTLBuffer
 
@@ -113,6 +125,31 @@ final class MoE {
         self.phase2ReduceK8PSO = try context.pipeline("moe_phase2_down_reduce_k8")
         self.phase2ReduceK8SpecializedPSO = try context.pipeline(
             "moe_phase2_down_reduce_k8",
+            constants: Self.realDecodeMoEConstants)
+
+        self.phase1Int3PSO = try context.pipeline("moe_phase1_gate_up_act_int3")
+        self.phase1Int3SpecializedPSO = try context.pipeline(
+            "moe_phase1_gate_up_act_int3",
+            constants: Self.realDecodeMoEConstants)
+        self.phase1Int3SiluPSO = try context.pipeline(
+            "moe_phase1_gate_up_act_int3",
+            constants: Self.siluActivationConstants)
+        self.phase1Int3SiluSpecializedPSO = try context.pipeline(
+            "moe_phase1_gate_up_act_int3",
+            constants: Self.realDecodeMoESiluConstants)
+        self.phase1SubsetInt3PSO = try context.pipeline("moe_phase1_gate_up_act_subset_int3")
+        self.phase1SubsetInt3SpecializedPSO = try context.pipeline(
+            "moe_phase1_gate_up_act_subset_int3",
+            constants: Self.realDecodeMoEConstants)
+        self.phase1SubsetInt3SiluPSO = try context.pipeline(
+            "moe_phase1_gate_up_act_subset_int3",
+            constants: Self.siluActivationConstants)
+        self.phase1SubsetInt3SiluSpecializedPSO = try context.pipeline(
+            "moe_phase1_gate_up_act_subset_int3",
+            constants: Self.realDecodeMoESiluConstants)
+        self.phase2ReduceK8Int3PSO = try context.pipeline("moe_phase2_down_reduce_k8_int3")
+        self.phase2ReduceK8Int3SpecializedPSO = try context.pipeline(
+            "moe_phase2_down_reduce_k8_int3",
             constants: Self.realDecodeMoEConstants)
 
         // One fp32 logit per expert; 512 = the largest expert count in the
@@ -218,7 +255,8 @@ final class MoE {
         d: UInt32,
         f: UInt32,
         topK: UInt32,
-        activation: SharedExpertActivation = .gelu
+        activation: SharedExpertActivation = .gelu,
+        expertBits: Int = 4
     ) {
         validate(routedBlobs: routedBlobs, topK: topK)
         var dimension = d
@@ -226,12 +264,20 @@ final class MoE {
         var expertCount = topK
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         let pso: MTLComputePipelineState
-        switch activation {
-        case .gelu:
+        switch (activation, expertBits) {
+        case (.gelu, 3):
+            pso = useRealDecodeConstants(d: d, f: f)
+                ? phase1Int3SpecializedPSO
+                : phase1Int3PSO
+        case (.silu, 3):
+            pso = useRealDecodeConstants(d: d, f: f)
+                ? phase1Int3SiluSpecializedPSO
+                : phase1Int3SiluPSO
+        case (.gelu, _):
             pso = useRealDecodeConstants(d: d, f: f)
                 ? phase1U16SpecializedPSO
                 : phase1U16PSO
-        case .silu:
+        case (.silu, _):
             pso = useRealDecodeConstants(d: d, f: f)
                 ? phase1U16SiluSpecializedPSO
                 : phase1U16SiluPSO
@@ -265,7 +311,8 @@ final class MoE {
         d: UInt32,
         f: UInt32,
         topK: UInt32,
-        activation: SharedExpertActivation = .gelu
+        activation: SharedExpertActivation = .gelu,
+        expertBits: Int = 4
     ) {
         guard activeCount > 0 else { return }
         validate(routedBlobs: routedBlobs, topK: topK)
@@ -276,12 +323,20 @@ final class MoE {
         var active = activeCount
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         let pso: MTLComputePipelineState
-        switch activation {
-        case .gelu:
+        switch (activation, expertBits) {
+        case (.gelu, 3):
+            pso = useRealDecodeConstants(d: d, f: f)
+                ? phase1SubsetInt3SpecializedPSO
+                : phase1SubsetInt3PSO
+        case (.silu, 3):
+            pso = useRealDecodeConstants(d: d, f: f)
+                ? phase1SubsetInt3SiluSpecializedPSO
+                : phase1SubsetInt3SiluPSO
+        case (.gelu, _):
             pso = useRealDecodeConstants(d: d, f: f)
                 ? phase1SubsetU16SpecializedPSO
                 : phase1SubsetU16PSO
-        case .silu:
+        case (.silu, _):
             pso = useRealDecodeConstants(d: d, f: f)
                 ? phase1SubsetU16SiluSpecializedPSO
                 : phase1SubsetU16SiluPSO
@@ -317,7 +372,8 @@ final class MoE {
         y: MTLBuffer,
         d: UInt32,
         f: UInt32,
-        topK: UInt32
+        topK: UInt32,
+        expertBits: Int = 4
     ) {
         validate(routedBlobs: routedBlobs, topK: topK)
         var dimension = d
@@ -326,8 +382,10 @@ final class MoE {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(
             useRealDecodeConstants(d: d, f: f)
-                ? phase2ReduceK8SpecializedPSO
-                : phase2ReduceK8PSO)
+                ? (expertBits == 3 ? phase2ReduceK8Int3SpecializedPSO
+                                   : phase2ReduceK8SpecializedPSO)
+                : (expertBits == 3 ? phase2ReduceK8Int3PSO
+                                   : phase2ReduceK8PSO))
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
         for buffer in routedBlobs { encoder.useResource(buffer, usage: .read) }
         var offsets = routedOffsets

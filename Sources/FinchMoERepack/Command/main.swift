@@ -5,6 +5,7 @@ private let usage = """
 Usage:
   FinchMoERepack --output <model.finch> [--overwrite] [--resume]
   FinchMoERepack --input-snapshot <dir> --output <model.finch> [--overwrite]
+                 [--routed-expert-bits 3|4]
   FinchMoERepack --download-finch <owner/name> --output <model.finch>
                  [--revision <commit>] [--concurrency <n>]
   FinchMoERepack --discard-partial --output <model.finch>
@@ -18,8 +19,10 @@ authentication. A cancelled or interrupted download can be continued with
 --resume or removed with --discard-partial.
 
 With --input-snapshot, the installer quantizes a LOCAL bf16 Qwen 3.6 35B-A3B
-or Qwen 3.8 Flash-Next safetensors snapshot (int4 affine, group 64) into the
-.finch format. An interrupted run of either kind can be continued with
+or Qwen 3.8 Flash-Next safetensors snapshot (affine, group 64) into the
+.finch format. --routed-expert-bits selects the routed-expert width: 4
+(default) or 3 (24-bit triplets, ~25% smaller expert blobs; the runtime
+decodes both, and the manifest records which). An interrupted run of either kind can be continued with
 --resume, which reuses the output files the partial directory's journal
 records as complete and rewrites the rest; a partial whose journal is missing
 or describes a different source is refused rather than guessed at.
@@ -46,6 +49,7 @@ private struct Arguments {
     var downloadFinch: String?
     var revision: String?
     var concurrency: Int?
+    var routedExpertBits: Int?
 
     static func parse(_ values: [String]) throws -> Arguments {
         var parsed = Arguments()
@@ -68,7 +72,8 @@ private struct Arguments {
                 parsed.verifyInstall = true
                 index += 1
             case "--output", "--input-finch", "--input-snapshot",
-                 "--download-finch", "--revision", "--concurrency":
+                 "--download-finch", "--revision", "--concurrency",
+                 "--routed-expert-bits":
                 guard index + 1 < values.count else {
                     throw ParseError.missingValue(flag)
                 }
@@ -79,6 +84,12 @@ private struct Arguments {
                 case "--input-finch":    parsed.inputFinch = value
                 case "--download-finch": parsed.downloadFinch = value
                 case "--revision":       parsed.revision = value
+                case "--routed-expert-bits":
+                    guard value == "3" || value == "4" else {
+                        throw ParseError.invalidMode(
+                            "--routed-expert-bits wants 3 or 4, got \(value)")
+                    }
+                    parsed.routedExpertBits = Int(value)
                 default:
                     guard let n = Int(value), n > 0 else {
                         throw ParseError.invalidMode(
@@ -146,6 +157,10 @@ private struct Arguments {
                         .appendingPathComponent("model.safetensors.index.json")) == .regular else {
                     throw ParseError.invalidMode("snapshot directory has no model.safetensors.index.json")
                 }
+            }
+            guard parsed.routedExpertBits == nil || parsed.inputSnapshot != nil else {
+                throw ParseError.invalidMode(
+                    "--routed-expert-bits requires --input-snapshot")
             }
         }
         return parsed
@@ -323,7 +338,8 @@ private func run(_ values: [String]) async -> Int32 {
             snapshotDir: snapshot,
             outputDir: URL(fileURLWithPath: output).path,
             overwrite: arguments.overwrite,
-            resume: arguments.resume)
+            resume: arguments.resume,
+            routedExpertBits: arguments.routedExpertBits ?? 4)
         do {
             let result = try await LocalQwenRepacker(options: options).run()
             print("Repacked bf16 snapshot (\(snapshot))")

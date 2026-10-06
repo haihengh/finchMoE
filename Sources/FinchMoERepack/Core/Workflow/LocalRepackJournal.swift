@@ -26,8 +26,9 @@ struct LocalRepackJournal: Codable {
     static let fileName = ".repack-journal.json"
 
     /// Bumped when the on-disk shape changes; an older journal is refused
-    /// rather than misread.
-    static let currentVersion = 1
+    /// rather than misread. Version 2 added the routed-expert bit width to
+    /// the fingerprint, so a 3-bit partial and a 4-bit run cannot be mixed.
+    static let currentVersion = 2
 
     /// A real Qwen 3.8 install journals 179 entries — 1 resident, 48 expert
     /// layers, 128 PLE parts, `layout.json`, and the tokenizer sidecars. The
@@ -49,6 +50,12 @@ struct LocalRepackJournal: Codable {
         /// string, which a real family could never be.
         let modelFamily: String?
         let numLayers: Int
+        /// 3 or 4: the routed-expert weight width changes every expert
+        /// blob's bytes, so the expert layer files of one width must never
+        /// be resumed into a run of the other. Optional so a version-1
+        /// journal still decodes and gets the version refusal rather than a
+        /// decode error.
+        let routedExpertBits: Int?
     }
 
     /// One finished output file. `sha256` is the digest the writer computed
