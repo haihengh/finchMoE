@@ -340,6 +340,10 @@ final class PrefillGroupedRoutedMoE {
     private let batchedPhase1PSO: MTLComputePipelineState
     private let batchedPhase1SiluPSO: MTLComputePipelineState
     private let batchedDownPSO: MTLComputePipelineState
+    // INT2 twins (2-bit routed-expert experiment).
+    private let batchedPhase1Int2PSO: MTLComputePipelineState
+    private let batchedPhase1Int2SiluPSO: MTLComputePipelineState
+    private let batchedDownInt2PSO: MTLComputePipelineState
     // INT3 twins (3-bit routed-expert experiment).
     private let batchedPhase1Int3PSO: MTLComputePipelineState
     private let batchedPhase1Int3SiluPSO: MTLComputePipelineState
@@ -369,6 +373,13 @@ final class PrefillGroupedRoutedMoE {
             "prefill_grouped_routed_moe_batched_phase1",
             constants: [MetalFunctionConstant(index: 77, value: .bool(true))])
         self.batchedDownPSO = try context.pipeline("prefill_grouped_routed_moe_batched_down")
+        self.batchedPhase1Int2PSO = try context.pipeline(
+            "prefill_grouped_routed_moe_batched_phase1_int2")
+        self.batchedPhase1Int2SiluPSO = try context.pipeline(
+            "prefill_grouped_routed_moe_batched_phase1_int2",
+            constants: [MetalFunctionConstant(index: 77, value: .bool(true))])
+        self.batchedDownInt2PSO = try context.pipeline(
+            "prefill_grouped_routed_moe_batched_down_int2")
         self.batchedPhase1Int3PSO = try context.pipeline(
             "prefill_grouped_routed_moe_batched_phase1_int3")
         self.batchedPhase1Int3SiluPSO = try context.pipeline(
@@ -422,6 +433,12 @@ final class PrefillGroupedRoutedMoE {
         let phase1PSO: MTLComputePipelineState
         let downPSO: MTLComputePipelineState
         switch (activation, expertBits) {
+        case (.silu, 2):
+            phase1PSO = batchedPhase1Int2SiluPSO
+            downPSO = batchedDownInt2PSO
+        case (_, 2):
+            phase1PSO = batchedPhase1Int2PSO
+            downPSO = batchedDownInt2PSO
         case (.silu, 3):
             phase1PSO = batchedPhase1Int3SiluPSO
             downPSO = batchedDownInt3PSO

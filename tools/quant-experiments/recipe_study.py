@@ -62,17 +62,53 @@ def bf16_round(x):
     return ((u + 0x7FFF + lsb) & 0xFFFF0000).view(np.float32)
 
 
-def quantize(w, bits, group=64, clip_pct=None, mse=False, weight=None):
+def quantize(w, bits, group=64, clip_pct=None, mse=False, weight=None,
+             symmetric=False):
     """Return (reconstruction, effective bits per weight).
 
     mse=True searches candidate scales (x0.55..1.3) and keeps the per-group
     minimum of the (optionally weighted) squared error. weight='abs' or
     'sq' reweights the error by |w| or w^2 — a heuristic stand-in for an
     activation-importance matrix (no calibration data exists yet).
+    symmetric=True drops the bias: levels are ±(2k+1)·s for the 2^(bits-1)
+    magnitudes, i.e. a 2-bit symmetric code holds {±s, ±3s} in four codes.
+    Half the side info (no bias bytes) and no min/max skew on zero-mean
+    distributions — the structure the IQ2 family approximates with a
+    lattice codebook.
     """
     n, C = w.shape
     g = w.reshape(n, C // group, group).astype(np.float32)
     qmax = (1 << bits) - 1
+
+    if symmetric:
+        # 2^(bits-1) symmetric magnitudes; scale from the group's max |w|,
+        # then LS-optimal if mse — no bias term at all.
+        top = (1 << bits) - 1  # largest magnitude multiplier (odd)
+        mx = np.abs(g).max(-1, keepdims=True)
+        base = bf16_round(np.where(mx > 0, mx / top, 1.0))
+        mags = np.arange(1, top + 1, 2, dtype=np.float32)  # 1, 3, ...
+
+        def rec_sym(scale):
+            eff = np.where(scale == 0, 1.0, scale)
+            idx = np.clip(np.round((np.abs(g) / eff - 1.0) / 2.0),
+                          0, len(mags) - 1)
+            mag = mags[idx.astype(np.int64)]
+            return np.sign(g) * mag * eff
+
+        best_err = None
+        best_rec = None
+        mults = np.linspace(0.6, 1.4, 33) if mse else np.array([1.0])
+        for mult in mults:
+            rec = rec_sym(bf16_round(base * mult))
+            err = ((g - rec) ** 2).sum(-1, keepdims=True)
+            if best_err is None:
+                best_err, best_rec = err, rec
+            else:
+                m = err < best_err
+                best_err = np.where(m, err, best_err)
+                best_rec = np.where(m, rec, best_rec)
+        bits_eff = bits + 16.0 / group  # one BF16 scale per group
+        return best_rec.reshape(n, C), bits_eff
 
     if clip_pct:
         lo = np.percentile(g, clip_pct, axis=-1, keepdims=True)
@@ -135,16 +171,15 @@ def main():
         w = load_experts(name, range(args.experts), args.rows)
         print(f"{short}: {w.shape[0]} rows x {w.shape[1]} cols, "
               f"mean|w| {np.abs(w).mean():.4f} max|w| {np.abs(w).max():.4f}")
-        for bits in (3, 4):
+        for bits in (2, 3, 4):
             for tag, kw in [
                 ("rtn", dict()),
                 ("mse", dict(mse=True)),
                 ("mse|w|", dict(mse=True, weight="abs")),
-                ("mse w2", dict(mse=True, weight="sq")),
-                ("clip0.5%", dict(clip_pct=0.5)),
-                ("clip0.5+mse", dict(clip_pct=0.5, mse=True)),
-                ("mse|w|+clip", dict(mse=True, weight="abs", clip_pct=0.5)),
-                ("g32+mse|w|", dict(group=32, mse=True, weight="abs")),
+                ("sym", dict(symmetric=True)),
+                ("sym+mse|w|", dict(symmetric=True, mse=True, weight="abs")),
+                ("sym g32", dict(symmetric=True, mse=True, weight="abs",
+                                 group=32)),
             ]:
                 rec, eff = quantize(w, bits, **kw)
                 report(f"{bits}bit {tag}", w, rec, eff)

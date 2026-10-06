@@ -203,6 +203,28 @@ enum QwenQuantizedWriter {
                                    raw.baseAddress!, raw.count)
                         }
                     }
+                } else if bits == 2 {
+                    let q = floats.withUnsafeBufferPointer {
+                        FinchQuantization.quantizeInt2Affine($0, count: cols)
+                    }
+                    q.packed.withUnsafeBytes { raw in
+                        packedBatch.withUnsafeMutableBytes { dst in
+                            memcpy(dst.baseAddress!.advanced(by: i * packedRowBytes),
+                                   raw.baseAddress!, raw.count)
+                        }
+                    }
+                    q.scales.withUnsafeBytes { raw in
+                        scalesBatch.withUnsafeMutableBytes { dst in
+                            memcpy(dst.baseAddress!.advanced(by: i * groups * 2),
+                                   raw.baseAddress!, raw.count)
+                        }
+                    }
+                    q.biases.withUnsafeBytes { raw in
+                        biasesBatch.withUnsafeMutableBytes { dst in
+                            memcpy(dst.baseAddress!.advanced(by: i * groups * 2),
+                                   raw.baseAddress!, raw.count)
+                        }
+                    }
                 } else if bits == 3 {
                     let q = floats.withUnsafeBufferPointer {
                         FinchQuantization.quantizeInt3Affine($0, count: cols)

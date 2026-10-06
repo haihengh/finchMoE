@@ -298,6 +298,91 @@ import FinchMoEFormat
             == UInt64(Toy.moeIntermediate * (Toy.D / 64) * 2))
     }
 
+    /// 2-bit twin of `threeBitToyInstallLoadsAndValidates`, plus a
+    /// byte-exact check of a written expert blob: the packed int2 bytes,
+    /// scales and biases of expert 0's gate must equal
+    /// `Quantization.quantizeInt2Affine` applied to the toy source rows.
+    /// This is the writer-side stride guard for the 2-bit width (the same
+    /// class of bug as the int8 row-stride regression, which loads fine and
+    /// computes garbage).
+    @Test func twoBitToyInstallLoadsAndBlobBytesMatchQuantizer() async throws {
+        let base = NSTemporaryDirectory() + "qwen-engine-2bit-\(UUID().uuidString)"
+        let src = base + "-src"
+        let seed: UInt64 = 0x71EC
+        try Toy.writeSnapshot(into: src, seed: seed)
+        defer { try? FileManager.default.removeItem(atPath: src) }
+
+        let out = base + "-out"
+        _ = try await LocalQwenRepacker(
+            options: LocalQwenRepackOptions(snapshotDir: src, outputDir: out,
+                                            minFreeReserveBytes: 0,
+                                            routedExpertBits: 2)).run()
+        defer { try? FileManager.default.removeItem(atPath: out) }
+
+        let ctx = try MetalContext()
+        let model = try Model.load(
+            directoryURL: URL(fileURLWithPath: out),
+            device: ctx.device,
+            expecting: Toy.arch)
+        #expect(model.routedExpertWeightBits == 2)
+
+        // Regenerate the toy source stream for the layer-0 expert tensor.
+        var state = seed
+        var expertValues: [Float] = []
+        let wantName = "model.language_model.layers.0.mlp.experts.gate_up_proj"
+        for (name, shape) in Toy.tensorShapes() {
+            let elements = shape.reduce(1, *)
+            let keep = name == wantName
+            for _ in 0..<elements {
+                state = state &* 6364136223846793005 &+ 1442695040888963407
+                if keep {
+                    let fraction = Float(state >> 40) / Float(UInt64(1) << 24)
+                    let bits = Quantization.bf16Bits(-2.0 + 4.0 * fraction)
+                    expertValues.append(Quantization.bf16ToFloat(bits))
+                }
+            }
+        }
+        #expect(expertValues.count == Toy.experts * 2 * Toy.moeIntermediate * Toy.D)
+
+        let layer0 = model.packedExpertsLayout.layers[0]
+        let expert0 = layer0.experts[0]
+        let gate = try #require(expert0.subTensors["gate"])
+        let gateScales = try #require(expert0.subTensors["gate_scales"])
+        let gateBiases = try #require(expert0.subTensors["gate_biases"])
+        let rows = Toy.moeIntermediate
+        let cols = Toy.D
+        #expect(gate.bits == 2)
+        #expect(gate.size == UInt64(rows * cols / 4))
+
+        let blob = try Data(contentsOf: URL(fileURLWithPath:
+            out + "/packed_experts/\(layer0.file)"))
+        let blobBase = Int(expert0.offset)
+        for r in 0..<rows {
+            let row = Array(expertValues[r * cols..<(r + 1) * cols])
+            let expected = Quantization.quantizeInt2Affine(row)
+            let packedBase = blobBase + Int(gate.offset) + r * (cols / 4)
+            #expect(Array(blob[packedBase..<(packedBase + cols / 4)])
+                == expected.packed, "gate row \(r) packed")
+            let groups = cols / 64
+            var scaleBytes = [UInt8]()
+            for v in expected.scales {
+                scaleBytes.append(UInt8(truncatingIfNeeded: v))
+                scaleBytes.append(UInt8(truncatingIfNeeded: v >> 8))
+            }
+            let sBase = blobBase + Int(gateScales.offset) + r * groups * 2
+            #expect(Array(blob[sBase..<(sBase + groups * 2)]) == scaleBytes,
+                    "gate row \(r) scales")
+            var biasBytes = [UInt8]()
+            for v in expected.biases {
+                biasBytes.append(UInt8(truncatingIfNeeded: v))
+                biasBytes.append(UInt8(truncatingIfNeeded: v >> 8))
+            }
+            let bBase = blobBase + Int(gateBiases.offset) + r * groups * 2
+            #expect(Array(blob[bBase..<(bBase + groups * 2)]) == biasBytes,
+                    "gate row \(r) biases")
+        }
+    }
+
     /// The writer's reserved entries must be byte-exact for every width a
     /// single install mixes: int4 (embeddings/attention/shared), int8 (GDN
     /// projections, router). Size validation alone cannot see a row-stride

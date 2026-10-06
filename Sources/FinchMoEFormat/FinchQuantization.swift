@@ -39,6 +39,97 @@ public enum FinchQuantization {
         Float(bitPattern: UInt32(bits) << 16)
     }
 
+    // MARK: - INT2 affine
+
+    /// Routed-expert 2-bit row: four unsigned values per byte (value j at
+    /// bit 2j of the byte), BF16 scale + bias per group of 64 — the smallest
+    /// member of the affine family, same conventions as int4/int3. 16 bytes
+    /// per group; the four levels are q ∈ {0,1,2,3} → w ≈ q·scale + bias.
+    public struct Int2AffineRow {
+        public let packed: [UInt8]   // N / 4 bytes
+        public let scales: [UInt16]  // N / 64 BF16 bits
+        public let biases: [UInt16]  // N / 64 BF16 bits
+
+        public init(packed: [UInt8], scales: [UInt16], biases: [UInt16]) {
+            self.packed = packed
+            self.scales = scales
+            self.biases = biases
+        }
+    }
+
+    /// Affine 2-bit quantize: `q ∈ [0..3]`, `w ≈ q * scale + bias`.
+    /// Identical conventions to `quantizeInt4Affine` (per-group min/max
+    /// rounded through BF16, quantized against the rounded values,
+    /// subnormal-safe).
+    public static func quantizeInt2Affine(_ row: [Float]) -> Int2AffineRow {
+        row.withUnsafeBufferPointer { quantizeInt2Affine($0, count: row.count) }
+    }
+
+    /// Buffer form (see `quantizeInt4Affine(_:count:)`).
+    public static func quantizeInt2Affine(_ buffer: UnsafeBufferPointer<Float>,
+                                          count: Int) -> Int2AffineRow {
+        precondition(count % groupSize == 0,
+                     "row length \(count) is not a multiple of \(groupSize)")
+
+        let nGroups = count / groupSize
+        var packed = [UInt8](repeating: 0, count: count / 4)
+        var scales = [UInt16](repeating: 0, count: nGroups)
+        var biases = [UInt16](repeating: 0, count: nGroups)
+
+        for g in 0..<nGroups {
+            var wmin: Float =  .infinity
+            var wmax: Float = -.infinity
+            for k in 0..<groupSize {
+                let w = buffer[g * groupSize + k]
+                if w < wmin { wmin = w }
+                if w > wmax { wmax = w }
+            }
+            let scaleF: Float
+            let biasF:  Float
+            if wmax == wmin {
+                scaleF = 1
+                biasF  = wmin
+            } else {
+                scaleF = (wmax - wmin) / 3.0
+                biasF  = wmin
+            }
+            let sBits = bf16Bits(scaleF)
+            let bBits = bf16Bits(biasF)
+            scales[g] = sBits
+            biases[g] = bBits
+            let scale = bf16ToFloat(sBits)
+            let bias  = bf16ToFloat(bBits)
+            let effectiveScale = scale == 0 ? Float(1) : scale
+
+            for k in 0..<groupSize {
+                let w = buffer[g * groupSize + k]
+                let qv = scale == 0 ? Float(0) : (w - bias) / effectiveScale
+                var q = Int(qv.rounded())
+                q = max(0, min(3, q))
+                // Four values per byte: value i sits at bit 2*(i%4).
+                let i = g * groupSize + k
+                packed[i / 4] |= UInt8(q) << UInt8(2 * (i % 4))
+            }
+        }
+        return Int2AffineRow(packed: packed, scales: scales, biases: biases)
+    }
+
+    public static func dequantizeInt2Affine(_ r: Int2AffineRow, n: Int) -> [Float] {
+        precondition(n == r.packed.count * 4)
+        var out = [Float](repeating: 0, count: n)
+        let nGroups = n / groupSize
+        for g in 0..<nGroups {
+            let scale = bf16ToFloat(r.scales[g])
+            let bias  = bf16ToFloat(r.biases[g])
+            for k in 0..<groupSize {
+                let i = g * groupSize + k
+                let q = (r.packed[i / 4] >> UInt8(2 * (i % 4))) & 0x3
+                out[i] = Float(q) * scale + bias
+            }
+        }
+        return out
+    }
+
     // MARK: - INT4 affine
 
     /// MLX `affine` 4-bit row. Packed unsigned nibbles, BF16 scale + bias per

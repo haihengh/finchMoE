@@ -5,7 +5,7 @@ private let usage = """
 Usage:
   FinchMoERepack --output <model.finch> [--overwrite] [--resume]
   FinchMoERepack --input-snapshot <dir> --output <model.finch> [--overwrite]
-                 [--routed-expert-bits 3|4]
+                 [--routed-expert-bits 2|3|4]
   FinchMoERepack --download-finch <owner/name> --output <model.finch>
                  [--revision <commit>] [--concurrency <n>]
   FinchMoERepack --discard-partial --output <model.finch>
@@ -85,9 +85,9 @@ private struct Arguments {
                 case "--download-finch": parsed.downloadFinch = value
                 case "--revision":       parsed.revision = value
                 case "--routed-expert-bits":
-                    guard value == "3" || value == "4" else {
+                    guard value == "2" || value == "3" || value == "4" else {
                         throw ParseError.invalidMode(
-                            "--routed-expert-bits wants 3 or 4, got \(value)")
+                            "--routed-expert-bits wants 2, 3 or 4, got \(value)")
                     }
                     parsed.routedExpertBits = Int(value)
                 default:

@@ -1077,7 +1077,7 @@ extension Model {
                          slot: ManifestQuantSlot,
                          field: String) throws -> (shape: (UInt32, UInt32), weight: UInt64, aux: UInt64) {
             let shape = try dimensions(rows, columns, field: field)
-            guard slot.weightBits == 3 || slot.weightBits == 4 || slot.weightBits == 8,
+            guard slot.weightBits == 2 || slot.weightBits == 3 || slot.weightBits == 4 || slot.weightBits == 8,
                   slot.groupSize > 0,
                   columns % slot.groupSize == 0 else {
                 throw ModelError.indexCorrupt(detail: "\(field) has unsupported affine quantization")

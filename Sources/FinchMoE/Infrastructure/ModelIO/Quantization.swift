@@ -10,6 +10,7 @@ public enum Quantization {
 
     public typealias Int4AffineRow = FinchQuantization.Int4AffineRow
     public typealias Int3AffineRow = FinchQuantization.Int3AffineRow
+    public typealias Int2AffineRow = FinchQuantization.Int2AffineRow
     public typealias Int8AffineRow = FinchQuantization.Int8AffineRow
     public typealias Int4AffinePLERow = FinchQuantization.Int4AffinePLERow
 
@@ -37,6 +38,16 @@ public enum Quantization {
 
     public static func dequantizeInt4Affine(_ r: Int4AffineRow, n: Int) -> [Float] {
         FinchQuantization.dequantizeInt4Affine(r, n: n)
+    }
+
+    // MARK: - INT2 affine (routed experts)
+
+    public static func quantizeInt2Affine(_ row: [Float]) -> Int2AffineRow {
+        FinchQuantization.quantizeInt2Affine(row)
+    }
+
+    public static func dequantizeInt2Affine(_ r: Int2AffineRow, n: Int) -> [Float] {
+        FinchQuantization.dequantizeInt2Affine(r, n: n)
     }
 
     // MARK: - INT3 affine (routed experts)

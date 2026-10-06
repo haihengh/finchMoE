@@ -34,13 +34,21 @@ import FinchMoEValidationSupport
 
     private static func makeBlob(gate: [[Float]],
                                  up: [[Float]],
-                                 down: [[Float]]) -> RoutedBlob {
+                                 down: [[Float]],
+                                 bits: Int = 3) -> RoutedBlob {
         func packed(_ rows: [[Float]])
             -> (weights: [UInt8], scales: [UInt16], biases: [UInt16]) {
-            let quantized = rows.map { Quantization.quantizeInt3Affine($0) }
-            return (quantized.flatMap(\.packed),
-                    quantized.flatMap(\.scales),
-                    quantized.flatMap(\.biases))
+            let packed: [[UInt8]]
+            let scales: [[UInt16]]
+            let biases: [[UInt16]]
+            if bits == 2 {
+                let q = rows.map { Quantization.quantizeInt2Affine($0) }
+                packed = q.map(\.packed); scales = q.map(\.scales); biases = q.map(\.biases)
+            } else {
+                let q = rows.map { Quantization.quantizeInt3Affine($0) }
+                packed = q.map(\.packed); scales = q.map(\.scales); biases = q.map(\.biases)
+            }
+            return (packed.flatMap { $0 }, scales.flatMap { $0 }, biases.flatMap { $0 })
         }
         var bytes = [UInt8]()
         func append(_ values: [UInt8]) { bytes.append(contentsOf: values) }
@@ -88,10 +96,25 @@ import FinchMoEValidationSupport
                                  seed: 0x3A2)
     }
 
+    @Test func routedPipelineInt2SiluMatchesReference() throws {
+        try Self.runInt3Pipeline(dimension: Self.dimension,
+                                 intermediate: Self.intermediate,
+                                 topK: Self.topK,
+                                 seed: 0x2B1, bits: 2)
+    }
+
+    @Test func routedPipelineInt2RealisticDimsMatchesReference() throws {
+        try Self.runInt3Pipeline(dimension: 2048,
+                                 intermediate: 512,
+                                 topK: 2,
+                                 seed: 0x2B2, bits: 2)
+    }
+
     private static func runInt3Pipeline(dimension: Int,
                                         intermediate: Int,
                                         topK: Int,
-                                        seed: UInt64) throws {
+                                        seed: UInt64,
+                                        bits: Int = 3) throws {
         var rng = SeedTree(seed).key("int3-routed-moe")
         func matrix(rows: Int, columns: Int) -> [[Float]] {
             (0..<rows).map { _ in
@@ -118,20 +141,19 @@ import FinchMoEValidationSupport
         }
 
         // Reference: the same int3 rows, dequantized, through a naive FP32 FFN.
+        func quantizeRow(_ row: [Float]) -> [Float] {
+            if bits == 2 {
+                return Quantization.dequantizeInt2Affine(
+                    Quantization.quantizeInt2Affine(row), n: row.count)
+            }
+            return Quantization.dequantizeInt3Affine(
+                Quantization.quantizeInt3Affine(row), n: row.count)
+        }
         var expected = residual
         for slot in 0..<topK {
-            let gateDeq = gates[slot].map {
-                Quantization.dequantizeInt3Affine(
-                    Quantization.quantizeInt3Affine($0), n: dimension)
-            }
-            let upDeq = ups[slot].map {
-                Quantization.dequantizeInt3Affine(
-                    Quantization.quantizeInt3Affine($0), n: dimension)
-            }
-            let downDeq = downs[slot].map {
-                Quantization.dequantizeInt3Affine(
-                    Quantization.quantizeInt3Affine($0), n: intermediate)
-            }
+            let gateDeq = gates[slot].map { quantizeRow($0) }
+            let upDeq = ups[slot].map { quantizeRow($0) }
+            let downDeq = downs[slot].map { quantizeRow($0) }
             let gateOut = Self.denseGEMV(gateDeq, x)
             let upOut = Self.denseGEMV(upDeq, x)
             let act = zip(gateOut, upOut).map { Self.silu($0) * $1 }
@@ -142,7 +164,8 @@ import FinchMoEValidationSupport
         }
 
         let blobs = (0..<topK).map {
-            Self.makeBlob(gate: gates[$0], up: ups[$0], down: downs[$0])
+            Self.makeBlob(gate: gates[$0], up: ups[$0], down: downs[$0],
+                          bits: bits)
         }
 
         let context = try MetalContext()
@@ -178,7 +201,7 @@ import FinchMoEValidationSupport
             f: UInt32(intermediate),
             topK: UInt32(topK),
             activation: .silu,
-            expertBits: 3)
+            expertBits: bits)
         kernel.encodeRoutedPersistentPhase2Reduce(
             commandBuffer: command,
             routedArgBuffer: argumentBuffer,
@@ -191,7 +214,7 @@ import FinchMoEValidationSupport
             d: UInt32(dimension),
             f: UInt32(intermediate),
             topK: UInt32(topK),
-            expertBits: 3)
+            expertBits: bits)
         // The hit-split arm runs the subset kernel for two halves of the
         // slots; it must produce the same acts/output as the full kernel.
         // (The real decode path uses this whenever the prefetch plan splits.)
@@ -220,7 +243,7 @@ import FinchMoEValidationSupport
                 f: UInt32(intermediate),
                 topK: UInt32(topK),
                 activation: .silu,
-                expertBits: 3)
+                expertBits: bits)
         }
         kernel.encodeRoutedPersistentPhase2Reduce(
             commandBuffer: split,
@@ -234,7 +257,7 @@ import FinchMoEValidationSupport
             d: UInt32(dimension),
             f: UInt32(intermediate),
             topK: UInt32(topK),
-            expertBits: 3)
+            expertBits: bits)
 
         command.commit()
         command.waitUntilCompleted()

@@ -134,6 +134,15 @@ extension PrefillGroupedRoutedMoETests {
     _ = try Self.runStreamedBatched(activation: .silu, expertBits: 3)
   }
 
+  @Test func int2BatchedSiluMatchesReferenceAcrossPartialMicrobatch() throws {
+    _ = try Self.runStreamedBatched(activation: .silu, expertBits: 2)
+  }
+
+  @Test func int2BatchedRealisticDimsMatchesReference() throws {
+    _ = try Self.runStreamedBatched(activation: .silu, expertBits: 2,
+                                    dimension: 512, intermediate: 512)
+  }
+
   @Test func int3BatchedRealisticDimsMatchesReference() throws {
     // Multi-group rows (8 groups of 64): the small-dims int3 tests used one
     // group per row, which is how a group-striding bug escapes them.

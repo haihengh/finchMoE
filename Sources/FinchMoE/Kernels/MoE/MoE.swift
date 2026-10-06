@@ -75,6 +75,17 @@ final class MoE {
     private let phase2ReduceK8SpecializedPSO: MTLComputePipelineState
     // INT3 twins (3-bit routed-expert experiment). Same layouts and dispatch
     // shape; only the weight unpacking differs (24-bit triplets).
+    // INT2 twins (2-bit routed-expert experiment).
+    private let phase1Int2PSO: MTLComputePipelineState
+    private let phase1Int2SpecializedPSO: MTLComputePipelineState
+    private let phase1Int2SiluPSO: MTLComputePipelineState
+    private let phase1Int2SiluSpecializedPSO: MTLComputePipelineState
+    private let phase1SubsetInt2PSO: MTLComputePipelineState
+    private let phase1SubsetInt2SpecializedPSO: MTLComputePipelineState
+    private let phase1SubsetInt2SiluPSO: MTLComputePipelineState
+    private let phase1SubsetInt2SiluSpecializedPSO: MTLComputePipelineState
+    private let phase2ReduceK8Int2PSO: MTLComputePipelineState
+    private let phase2ReduceK8Int2SpecializedPSO: MTLComputePipelineState
     private let phase1Int3PSO: MTLComputePipelineState
     private let phase1Int3SpecializedPSO: MTLComputePipelineState
     private let phase1Int3SiluPSO: MTLComputePipelineState
@@ -125,6 +136,31 @@ final class MoE {
         self.phase2ReduceK8PSO = try context.pipeline("moe_phase2_down_reduce_k8")
         self.phase2ReduceK8SpecializedPSO = try context.pipeline(
             "moe_phase2_down_reduce_k8",
+            constants: Self.realDecodeMoEConstants)
+
+        self.phase1Int2PSO = try context.pipeline("moe_phase1_gate_up_act_int2")
+        self.phase1Int2SpecializedPSO = try context.pipeline(
+            "moe_phase1_gate_up_act_int2",
+            constants: Self.realDecodeMoEConstants)
+        self.phase1Int2SiluPSO = try context.pipeline(
+            "moe_phase1_gate_up_act_int2",
+            constants: Self.siluActivationConstants)
+        self.phase1Int2SiluSpecializedPSO = try context.pipeline(
+            "moe_phase1_gate_up_act_int2",
+            constants: Self.realDecodeMoESiluConstants)
+        self.phase1SubsetInt2PSO = try context.pipeline("moe_phase1_gate_up_act_subset_int2")
+        self.phase1SubsetInt2SpecializedPSO = try context.pipeline(
+            "moe_phase1_gate_up_act_subset_int2",
+            constants: Self.realDecodeMoEConstants)
+        self.phase1SubsetInt2SiluPSO = try context.pipeline(
+            "moe_phase1_gate_up_act_subset_int2",
+            constants: Self.siluActivationConstants)
+        self.phase1SubsetInt2SiluSpecializedPSO = try context.pipeline(
+            "moe_phase1_gate_up_act_subset_int2",
+            constants: Self.realDecodeMoESiluConstants)
+        self.phase2ReduceK8Int2PSO = try context.pipeline("moe_phase2_down_reduce_k8_int2")
+        self.phase2ReduceK8Int2SpecializedPSO = try context.pipeline(
+            "moe_phase2_down_reduce_k8_int2",
             constants: Self.realDecodeMoEConstants)
 
         self.phase1Int3PSO = try context.pipeline("moe_phase1_gate_up_act_int3")
@@ -265,6 +301,14 @@ final class MoE {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         let pso: MTLComputePipelineState
         switch (activation, expertBits) {
+        case (.gelu, 2):
+            pso = useRealDecodeConstants(d: d, f: f)
+                ? phase1Int2SpecializedPSO
+                : phase1Int2PSO
+        case (.silu, 2):
+            pso = useRealDecodeConstants(d: d, f: f)
+                ? phase1Int2SiluSpecializedPSO
+                : phase1Int2SiluPSO
         case (.gelu, 3):
             pso = useRealDecodeConstants(d: d, f: f)
                 ? phase1Int3SpecializedPSO
@@ -324,6 +368,14 @@ final class MoE {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         let pso: MTLComputePipelineState
         switch (activation, expertBits) {
+        case (.gelu, 2):
+            pso = useRealDecodeConstants(d: d, f: f)
+                ? phase1SubsetInt2SpecializedPSO
+                : phase1SubsetInt2PSO
+        case (.silu, 2):
+            pso = useRealDecodeConstants(d: d, f: f)
+                ? phase1SubsetInt2SiluSpecializedPSO
+                : phase1SubsetInt2SiluPSO
         case (.gelu, 3):
             pso = useRealDecodeConstants(d: d, f: f)
                 ? phase1SubsetInt3SpecializedPSO
@@ -382,10 +434,12 @@ final class MoE {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(
             useRealDecodeConstants(d: d, f: f)
-                ? (expertBits == 3 ? phase2ReduceK8Int3SpecializedPSO
-                                   : phase2ReduceK8SpecializedPSO)
-                : (expertBits == 3 ? phase2ReduceK8Int3PSO
-                                   : phase2ReduceK8PSO))
+                ? (expertBits == 2 ? phase2ReduceK8Int2SpecializedPSO
+                   : expertBits == 3 ? phase2ReduceK8Int3SpecializedPSO
+                                     : phase2ReduceK8SpecializedPSO)
+                : (expertBits == 2 ? phase2ReduceK8Int2PSO
+                   : expertBits == 3 ? phase2ReduceK8Int3PSO
+                                     : phase2ReduceK8PSO))
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
         for buffer in routedBlobs { encoder.useResource(buffer, usage: .read) }
         var offsets = routedOffsets

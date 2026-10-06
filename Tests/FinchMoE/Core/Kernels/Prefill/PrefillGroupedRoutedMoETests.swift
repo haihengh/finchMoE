@@ -192,7 +192,12 @@ import FinchMoEValidationSupport
         let packed: [[UInt8]]
         let scales: [[UInt16]]
         let biases: [[UInt16]]
-        if bits == 3 {
+        if bits == 2 {
+            let q = rows.map { Quantization.quantizeInt2Affine($0) }
+            packed = q.map(\.packed)
+            scales = q.map(\.scales)
+            biases = q.map(\.biases)
+        } else if bits == 3 {
             let q = rows.map { Quantization.quantizeInt3Affine($0) }
             packed = q.map(\.packed)
             scales = q.map(\.scales)
@@ -301,11 +306,43 @@ import FinchMoEValidationSupport
     static func cpuDot(bytes: [UInt8], base: Int, wOff: Int, sOff: Int,
                        bOff: Int, row: Int, n: Int, x: [Float],
                        bits: Int = 4) -> Float {
-        bits == 3
+        if bits == 2 {
+            return Self.cpuInt2Dot(bytes: bytes, base: base, wOff: wOff,
+                                   sOff: sOff, bOff: bOff, row: row, n: n, x: x)
+        }
+        return bits == 3
             ? Self.cpuInt3Dot(bytes: bytes, base: base, wOff: wOff,
                               sOff: sOff, bOff: bOff, row: row, n: n, x: x)
             : Self.cpuInt4Dot(bytes: bytes, base: base, wOff: wOff,
                               sOff: sOff, bOff: bOff, row: row, n: n, x: x)
+    }
+
+    /// INT2 twin of `cpuInt4Dot`: four values per byte.
+    static func cpuInt2Dot(bytes: [UInt8],
+                                   base: Int,
+                                   wOff: Int,
+                                   sOff: Int,
+                                   bOff: Int,
+                                   row: Int,
+                                   n: Int,
+                                   x: [Float]) -> Float {
+        let groups = n / Quantization.groupSize
+        let rowBytes = n / 4
+        let wRow = base + wOff + row * rowBytes
+        let sRow = base + sOff + row * groups * MemoryLayout<UInt16>.stride
+        let bRow = base + bOff + row * groups * MemoryLayout<UInt16>.stride
+        var acc: Float = 0
+        for group in 0..<groups {
+            let scale = Quantization.bf16ToFloat(Self.readU16(bytes, sRow + group * 2))
+            let bias = Quantization.bf16ToFloat(Self.readU16(bytes, bRow + group * 2))
+            for k in 0..<Quantization.groupSize {
+                let col = group * Quantization.groupSize + k
+                let byte = bytes[wRow + col / 4]
+                let q = Float((byte >> UInt8(2 * (col % 4))) & 0x3)
+                acc += (q * scale + bias) * x[col]
+            }
+        }
+        return acc
     }
 
     /// INT3 twin of `cpuInt4Dot`: 24-bit little-endian triplets, eight values

@@ -56,6 +56,48 @@ import FinchMoEFormat
         }
     }
 
+    // MARK: - INT2 affine (routed experts)
+
+    @Test func int2SubnormalResidueRowQuantizesWithoutTrap() {
+        let row = Self.subnormalResidueRow()
+        let q = row.withUnsafeBufferPointer {
+            FinchQuantization.quantizeInt2Affine($0, count: row.count)
+        }
+        let decoded = FinchQuantization.dequantizeInt2Affine(q, n: row.count)
+        for (a, b) in zip(decoded, row) {
+            #expect(abs(a - b) < 1e-36)
+        }
+    }
+
+    @Test func int2PackingIsFourValuesPerByte() {
+        // Values 0..3 cycling: byte = 0 | 1<<2 | 2<<4 | 3<<6 = 0xE4, repeated
+        // 16 times per group-64 row.
+        let row = (0..<FinchQuantization.groupSize).map { Float($0 % 4) }
+        let q = row.withUnsafeBufferPointer {
+            FinchQuantization.quantizeInt2Affine($0, count: row.count)
+        }
+        #expect(q.packed.count == row.count / 4)
+        for byte in q.packed {
+            #expect(byte == 0xE4)
+        }
+        // And the round trip is exact for integer inputs on min/max 0..3.
+        let decoded = FinchQuantization.dequantizeInt2Affine(q, n: row.count)
+        for (a, b) in zip(decoded, row) {
+            #expect(a == b)
+        }
+    }
+
+    @Test func int2ConstantGroupReconstructsExactly() {
+        let row = [Float](repeating: -0.125, count: FinchQuantization.groupSize)
+        let q = row.withUnsafeBufferPointer {
+            FinchQuantization.quantizeInt2Affine($0, count: row.count)
+        }
+        let decoded = FinchQuantization.dequantizeInt2Affine(q, n: row.count)
+        for a in decoded {
+            #expect(a == -0.125)
+        }
+    }
+
     // MARK: - INT3 affine (routed experts)
 
     @Test func int3SubnormalResidueRowQuantizesWithoutTrap() {

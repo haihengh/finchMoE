@@ -191,9 +191,9 @@ enum QwenRepackPlanner {
                      shardHeaders: [Safetensors.Header],
                      outputDir: String,
                      routedExpertBits: Int = 4) throws -> QwenRepackPlan {
-        guard routedExpertBits == 3 || routedExpertBits == 4 else {
+        guard routedExpertBits == 2 || routedExpertBits == 3 || routedExpertBits == 4 else {
             throw RepackError.configurationInvalid(
-                detail: "routed expert bits must be 3 or 4, got \(routedExpertBits)")
+                detail: "routed expert bits must be 2, 3 or 4, got \(routedExpertBits)")
         }
         var registry: [String: SourceTensor] = [:]
         registry.reserveCapacity(meta.weightMap.count)
