@@ -186,3 +186,48 @@ If all-3-bit loses too much quality, test mixed precision:
 That requires per-role bit metadata; the current manifest has one routed-expert bit width for all three roles, so this is a format extension rather than a small follow-up.
 
 A separate archived idea, 4-bit GDN projections, is already supported by the current decoder but was previously rejected for production because recurrent-state error increased substantially. It should remain behind the 3-bit expert experiment in priority.
+
+## Revisit (2026-10-05, branch `3bit-experiments`): the verdict was a kernel bug
+
+The archived `3bit-experts` branch was deleted and gc'd before this session,
+so the int3 path was re-implemented from this document's spec (byte-compatible:
+eight 3-bit values per 24-bit little-endian triplet, group-64 affine, BF16
+scale+bias; first-generation `pack_3bit` recovered from history as reference).
+
+**Result on the same model, protocol, and box as the original gate:**
+
+| | HumanEval pass@1 | HumanEval+ pass@1 |
+|---|---:|---:|
+| 4-bit (2026-09-08) | 149/164 (90.9%) | 144/164 (87.8%) |
+| 3-bit (2026-09-23, archived branch) | 28/164 (17.1%) | 27/164 (16.5%) |
+| **3-bit (2026-10-05, this branch)** | **149/164 (90.9%)** | **142/164 (86.6%)** |
+
+Install size 14.93 GiB vs 18.68 GiB (‑20.1%); same-prompt greedy CLI A/B
+decoded 9.8-20 tok/s (3-bit) against 7.5 tok/s (4-bit) on this box.
+
+**The September collapse was almost certainly the runtime, not the format.**
+The evidence: the old gate's own checks verified the *bytes* (Python dequant
+of the real install: 20.8% per-element error — expected for 3 bits) and the
+"kernel agreement" on small cases; a Metal unpacking bug at production row
+widths (multi-group rows) is invisible to both and produces exactly the
+recorded signature — fluent text with noisy expert activations, 121 tasks
+lost. This session's first re-implementation reproduced that class of risk:
+its int3 kernel tests all ran at 1-group rows, and the four-group block path
+plus the hit-split subset kernel needed real-dims tests (2048x512) before the
+model would run correctly.
+
+**What is actually required for a shippable 3-bit tier:**
+- int3 decode: full + subset kernels verified at production shapes (done:
+  `MoEInt3Tests`), grouped-prefill phase1/down verified at 512x512 (done:
+  `PrefillGroupedRoutedMoETests.int3BatchedRealisticDimsMatchesReference`).
+- a byte-exact writer test for mixed widths (done:
+  `QwenRepackEngineLoadTests.residentEntriesMatchWriterQuantizationByteForByte`)
+  — a wrong row stride loads fine and computes NaN.
+- the manifest's `routedExpert.weightBits: 3` plumbs through repack, journal
+  (v2 pins the width) and the runtime whitelist (this branch).
+
+Caveats: one greedy run per cell (the published protocol); HumanEval+ is two
+problems behind 4-bit; the 4-bit baseline predates this branch. A 2-bit tier
+is the natural follow-up: uniform affine at 2 bits measured 46-57% RMS error
+(tools/quant-experiments), so 2 bits likely needs the sign-magnitude /
+codebook structure rather than another affine step down.
