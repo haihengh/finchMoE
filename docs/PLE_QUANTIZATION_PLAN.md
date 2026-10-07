@@ -806,3 +806,26 @@ regardless.
 - Does not change the Metal-side gate/conv/plane-add kernels in
   `ple.metal` — the dequantized row still lands as `Float16` in the same
   buffer shape those kernels already consume.
+
+## Speed A/B: full-precision vs int4 n-gram (2026-10-06)
+
+Measured on the shipped 3.8 ple4bit install against the bf16-PLE install
+(`Qwen3.8-Flash-Next-125B.finch`, 162.4 GiB), same prompt and sampling,
+`--counters`, M4 mini 16 GB, mlock pin on:
+
+| | ple4bit (int4 g32) | bf16-PLE |
+|---|---:|---:|
+| PLE bytes/token | 1,600 | 5,120 |
+| ple_wall/step | 3.37 ms | 3.77 ms |
+| decode | 128 tok in 52.63 s (2.432 tok/s) | 128 tok in 52.81 s (2.424 tok/s) |
+| prefill (50-tok prompt) | 7.79 s | 7.85 s |
+| expert io/step | 755.1 MB | 753.0 MB |
+| install | 96.9 GiB | 162.4 GiB |
+
+Conclusion: keeping the n-gram at full precision costs ~0.4 ms of a
+~414 ms decode step (≈0.1%) and no prefill time — its access pattern is
+hash-random over an uncached table, so footprint does not enter the hot
+path. The int4 decision therefore stands on the quality/disk trade only:
+base HumanEval unchanged (0.945), HumanEval+ −2 problems (0.921→0.909)
+for −65 GiB. A full-precision PLE build is a legitimate archival option
+at zero speed cost.
