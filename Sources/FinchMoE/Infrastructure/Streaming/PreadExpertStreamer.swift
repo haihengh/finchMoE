@@ -323,6 +323,14 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 throw StreamerError.allocFailed(errno: result)
             }
             pointers.append(pointer)
+            // Same opt-in pin as ResidentBuffer: these shared buffers are the
+            // bytes the GPU touches on every routed step, and evicting them
+            // under memory pressure turns into a GPU page-fault storm (the
+            // 2026-10-05 ~900 s stall). Failure is ignored — the pin is a
+            // performance measure, not correctness.
+            if ProcessInfo.processInfo.environment["FINCHMOE_MLOCK_RESIDENT"] != nil {
+                _ = mlock(pointer, allocationSize)
+            }
             nonisolated(unsafe) let capturedPointer = pointer
             guard let buffer = device.makeBuffer(
                 bytesNoCopy: pointer,
