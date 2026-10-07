@@ -389,6 +389,41 @@ swift test --no-parallel --filter PrefixReuseBenchmarkTests
 FQ_BENCH_CASES=long-synthesis swift test --no-parallel --filter qwen38ColdAndHot
 ```
 
+### Routed-expert width: 4-bit vs 3-bit vs 2-bit
+
+Routed experts ship at 4-bit by default; `FinchMoERepack
+--routed-expert-bits 3|2` converts the same bf16 snapshot to narrower
+experts in the same affine group-64 family (int3 packs eight values per
+24-bit little-endian triplet, int2 four values per byte; scales/biases stay
+BF16 per group). All rows: Qwen 3.6 35B-A3B, 16 GB M4 mini, the frozen
+`real-generation-v1` cases at the published sampling, one measured run per
+cell after a discarded warmup — prompt processing (PP) over the
+50/414/2,928-token prompts, decode (TG) over 128 generated tokens; scores
+from the EvalPlus harness (`quality/humaneval/`). 3-bit and 2-bit are
+experimental; 4-bit remains the default.
+
+| | 4-bit | 3-bit | 2-bit |
+| --- | ---: | ---: | ---: |
+| Install | 18.68 GiB | 14.93 GiB | 11.18 GiB |
+| HumanEval pass@1 | 90.9% (149/164) | 90.9% (149/164) | 76.8% (126/164) |
+| HumanEval+ pass@1 | 87.8% (144/164) | 86.6% (142/164) | 70.7% (116/164) |
+| Prompt processing (short/medium/long) | 17.0 / 49.9 / 42.2 tok/s | 21.4 / 54.6 / 46.9 tok/s | 27.9 / 58.2 / 50.3 tok/s |
+| Decode (short/medium/long) | 8.5 / 8.3 / 7.2 tok/s | 10.0 / 10.8 / 12.1 tok/s | 17.8 / 17.2 / 12.0 tok/s |
+
+3-bit is the sweet spot: quality parity (base identical, HumanEval+ two
+problems behind) for 20% less disk and 1.4-1.7x the decode rate. 2-bit buys
+another 25% of disk and up to 2.4x short-context decode for ~14-17 points —
+a usable tier, not a near-parity one. Prompt processing gains less (+11% /
++19% on the long case) because prefill is compute-bound; decode gains track
+the per-token expert bytes.
+
+An earlier 3-bit experiment (2026-09-23) scored 28/164 and parked the
+format. The re-run above attributes that to the archived runtime's int3
+kernels reading the blobs incorrectly at production row widths — a failure
+small-case checks cannot see — not to the 3-bit format itself;
+`docs/SESSION_HANDOFF_3BIT_EXPERTS.md` carries the corrected verdict and
+the kernel/writer verification that guards it now.
+
 ## The Qwen 3.8 Flash-Next 125B port
 
 Qwen 3.8 Flash-Next 125B (`qwen4_exp_text`, GGUF `qwen4exp`, Finch family
