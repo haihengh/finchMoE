@@ -270,8 +270,8 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
 
     /// Abliterated Qwen 3.6 at 3-bit routed experts, repacked 2026-10-16 from
     /// `models/Qwen3.6-35B-A3B-abliterated-bf16`. Payload is byte-identical to
-    /// the base 3-bit build (the twin property); `installedBytes` carries the
-    /// base's measurement until the abliterated install's own sum is taken.
+    /// the base 3-bit build (verified on disk 2026-10-16); `installedBytes` is
+    /// this install's own measured sum.
     public static let qwen3_6_abliterated_3bit = AppModelInstallDescriptor(
         displayName: "Qwen 3.6 35B-A3B 3-bit (Abliterated)",
         repoID: "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated",
@@ -280,7 +280,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         weightsSHA256: "f6862341c9688e234c682cef186af5a92445be1dbcdd36d59637338634d311bd",
         routedExpertBits: 3,
         approximateDownloadBytes: qwen36ThreeBitAbliteratedDistribution.approximateDownloadBytes,
-        installedBytes: 16_032_975_496,
+        installedBytes: 16_032_975_481,
         rangeStagingBytes: 0,
         reserveBytes: distributionReserveBytes,
         architecture: .qwen3_6_35B_A3B,

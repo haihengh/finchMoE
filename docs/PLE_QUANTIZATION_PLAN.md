@@ -55,6 +55,13 @@ short / medium / long prompts, bench-mini protocol, 2026-10-15). **3-bit
 remains the quality-neutral step down; 2-bit is a size/speed trade with a real
 quality cost.**
 
+The abliterated twins at these widths were repacked on 2026-10-16
+(`--routed-expert-bits 3|2` from `models/Qwen3.8-Flash-Next-abliterated-bf16`,
+payloads byte-identical to the base builds' — 89,104,597,905 / 73,803,724,449)
+and are published beside the base installs; they are not separately scored.
+The 3.6 abliterated 3-bit build followed the same path from
+`models/Qwen3.6-35B-A3B-abliterated-bf16`.
+
 ## 0. Problem statement, measured
 
 The install is 162 GiB, split three ways:
