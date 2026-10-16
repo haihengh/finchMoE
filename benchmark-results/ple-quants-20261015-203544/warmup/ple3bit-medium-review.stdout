@@ -1,0 +1,5 @@
+### Critical Risks
+
+1.  **Data Corruption & Race Conditions (Critical):** The design assumes concurrent writes to the same slot are harmless because callers await their own futures. This is false. If two misses select the same slot, both tasks write to the same buffer concurrently, corrupting data. Furthermore, a hit returning a view into a slot currently being overwritten by a replacement read yields inconsistent data.
+2.  **Unbounded Memory & DoS (Critical):** There is no upper bound on payload length. A malicious or large file can resize the reusable buffer to consume all heap memory, causing OOM crashes.
+3.

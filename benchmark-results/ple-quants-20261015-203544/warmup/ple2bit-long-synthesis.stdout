@@ -1,0 +1,5 @@
+**Technical Assessment: TurboFieldfare**
+
+TurboFieldfare is a specialized inference runtime for the Gemma 4 26B-A4B model on Apple Silicon, designed to fit within an 8 GB RAM constraint. The central resource bottleneck is memory bandwidth and capacity; the system cannot hold the full 14.3 GB model in RAM. Instead, it maintains a ~2 GB footprint by keeping the shared core and KV cache resident while streaming expert weights from SSD on demand.
+
+The architecture divides data into two tiers. Resident data includes the shared expert weights and the KV cache, which remain in Metal-visible memory.

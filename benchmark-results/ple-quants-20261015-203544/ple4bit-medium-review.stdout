@@ -1,0 +1,4 @@
+### Critical Risks
+
+1.  **Data Corruption & Race Conditions**: The design is fundamentally unsafe. Multiple misses selecting the same slot concurrently cause simultaneous writes to the same buffer, corrupting data. Furthermore, returning a view into a shared buffer while another thread might be resizing or overwriting it violates memory safety. "Harmless" assumptions ignore that concurrent writes to the same memory location are undefined behavior.
+2.  **Unbounded Memory & OOM**: Resizing buffers based on arbitrary file headers without validation allows malicious or corrupted files to trigger massive allocations, causing Out-of-Memory crashes. There is no backpressure or size

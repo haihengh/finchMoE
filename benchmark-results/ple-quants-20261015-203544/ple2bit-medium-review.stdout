@@ -1,0 +1,7 @@
+# Review: Asynchronous File-Backed Cache
+
+## Critical Correctness Risks
+
+1. **Race on Slot Reuse**: Two misses selecting the same oldest slot creates a data race. The second read may overwrite the first caller’s in-flight buffer, corrupting data. The assumption that “both callers await their own reads” is false: the first caller’s view into the slot buffer becomes invalid mid-read.
+
+2. **Unbounded Buffer Growth**: No upper bound on payload length means a malicious or corrupted file can trigger an out-of-memory crash. The fixed header’s integer length field is unvalidated before resizing the reusable buffer

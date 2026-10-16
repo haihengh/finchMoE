@@ -19,3 +19,17 @@
 [BENCH model=3.8-125B-ple4bit host=Mac16,10]
 [BENCH long-synthesis] cold pp: prompt=2940tok prefill=166.60s (17.6 tok/s) | tg: new=128tok 2.7 tok/s decode=48.01s
 [BENCH long-synthesis] hot(+426tok follow-up) pp: prompt=3496tok cached=3067 computed=429 prefill=24.25s (17.7 tok/s residual) | tg: new=128tok 2.6 tok/s decode=49.62s
+[BENCH model=3.6-35B-A3B host=Mac16,10]
+,10]
+[BENCH short-explanation] cold pp: prompt=62tok prefill=9.61s (6.5 tok/s) | tg: new=128tok 2.0 tok/s decode=64.93s
+[BENCH short-explanation] hot(+426tok follow-up) pp: prompt=618tok cached=189 computed=429 prefill=22.05s (19.5 tok/s residual) | tg: new=128tok 2.3 tok/s decode=55.24s
+[BENCH short-explanation] cold pp: prompt=62tok prefill=16.54s (3.7 tok/s) | tg: new=128tok 1.4 tok/s decode=91.88s
+[BENCH medium-review] cold pp: prompt=426tok prefill=21.33s (20.0 tok/s) | tg: new=128tok 1.9 tok/s decode=66.70s
+[BENCH short-explanation] hot(+426tok follow-up) pp: prompt=618tok cached=189 computed=429 prefill=40.32s (10.6 tok/s residual) | tg: new=128tok 1.2 tok/s decode=109.11s
+[BENCH medium-review] hot(+426tok follow-up) pp: prompt=982tok cached=553 computed=429 prefill=22.31s (19.2 tok/s residual) | tg: new=128tok 1.8 tok/s decode=70.93s
+[BENCH medium-review] cold pp: prompt=426tok prefill=44.03s (9.7 tok/s) | tg: new=128tok 1.4 tok/s decode=91.68s
+[BENCH long-synthesis] cold pp: prompt=2940tok prefill=117.56s (25.0 tok/s) | tg: new=128tok 2.5 tok/s decode=51.19s
+[BENCH medium-review] hot(+426tok follow-up) pp: prompt=982tok cached=553 computed=429 prefill=37.21s (11.5 tok/s residual) | tg: new=128tok 1.6 tok/s decode=82.10s
+[BENCH long-synthesis] hot(+426tok follow-up) pp: prompt=3496tok cached=3067 computed=429 prefill=17.66s (24.3 tok/s residual) | tg: new=128tok 3.0 tok/s decode=42.24s
+[BENCH long-synthesis] cold pp: prompt=2940tok prefill=1511.07s (1.9 tok/s) | tg: new=128tok 0.1 tok/s decode=948.75s
+[BENCH long-synthesis] hot(+426tok follow-up) pp: prompt=3496tok cached=3067 computed=429 prefill=925.25s (0.5 tok/s residual) | tg: new=128tok 0.1 tok/s decode=1025.81s

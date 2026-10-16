@@ -1,0 +1,19 @@
+started: Thu Oct 15 20:35:44 EDT 2026
+commit: a6b0604f847f1d19ecd38b0142a7f0157d9e5ecc
+ProductName:		macOS
+ProductVersion:		27.0.1
+BuildVersion:		26A434
+      Model Name: Mac mini
+      Model Identifier: Mac16,10
+      Chip: Apple M4
+      Total Number of Cores: 10 (4 Performance and 6 Efficiency)
+      Memory: 16 GB
+prompt hashes:
+da9e6f9e0b06523f477baa942e339ebb0fe02311dacdc3de5cff98014d159f75  docs/benchmark-prompts/real-generation-v1/long-matched.json
+b12e4a71493ad151d7a85b91e878ba784b116ef65de9fcb1b1b1c05198b537b8  docs/benchmark-prompts/real-generation-v1/long-synthesis.json
+23add7976db2069c9927affd13c2f5120508702a1c4915ea88b7de565bdd4b33  docs/benchmark-prompts/real-generation-v1/medium-review.json
+c57da2677143657be55e03797c1aabe8e012d61c1a71bf9345acdd575117d1e1  docs/benchmark-prompts/real-generation-v1/short-explanation.json
+install sizes:
+ 97G	models/Qwen3.8-Flash-Next-125B-ple4bit.finch
+ 83G	models/Qwen3.8-Flash-Next-125B-ple3bit.finch
+ 69G	models/Qwen3.8-Flash-Next-125B-ple2bit.finch
