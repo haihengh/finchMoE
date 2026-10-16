@@ -125,29 +125,37 @@ import FinchMoE
     /// scan — an entry that exists but is not in `installable` is dead code
     /// that reads as "unknown checkpoint" at runtime.
     ///
-    /// Uniqueness is asserted on `weightsSHA256`, **not** `sourceIndexSHA256`.
-    /// That used to be the right field and no longer is: a base install and its
-    /// abliterated twin genuinely share a source snapshot hash, because that
-    /// hash covers the tensor index and abliteration does not change any name,
-    /// shape or offset. Two entries colliding there is the expected state, not
-    /// the failure it would be for the weights digest — which is exactly why
-    /// `matchingDescriptor` consults the weights digest first. The invariant the
-    /// original assertion protected ("the scan can tell them apart") is
-    /// preserved here, on the field that can actually carry it.
+    /// Uniqueness is asserted on the **(weights digest, expert width) pair**,
+    /// not on either field alone. `sourceIndexSHA256` cannot carry it because a
+    /// base install and its abliterated twin genuinely share a source snapshot
+    /// hash (it covers the tensor index, which abliteration does not change).
+    /// `weightsSHA256` cannot carry it either, now that widths exist: the 2-,
+    /// 3- and 4-bit builds of one checkpoint differ only under
+    /// `packed_experts/`, so they share the resident digest too. What the scan
+    /// actually needs to be able to separate two entries is that pair — which
+    /// is exactly what `matchingDescriptor` reads.
     @Test func everyDescriptorResolvesFromItsOwnHash() {
         for descriptor in AppModelInstallDescriptor.installable {
             #expect(!descriptor.sourceIndexSHA256.isEmpty,
                     "\(descriptor.displayName) has no source hash to match on")
             #expect(descriptor.weightsSHA256?.isEmpty == false,
                     "\(descriptor.displayName) pins no weights digest; the scan cannot tell it apart from an architecture twin")
+            #expect(descriptor.routedExpertBits != nil,
+                    "\(descriptor.displayName) pins no expert width; the scan cannot tell it apart from a width twin")
         }
-        #expect(Set(AppModelInstallDescriptor.installable.compactMap(\.weightsSHA256)).count
-                    == AppModelInstallDescriptor.installable.count,
-                "two descriptors share a weights digest; the scan cannot tell them apart")
-        #expect(AppModelInstallDescriptor.installable.contains(.qwen3_6))
-        #expect(AppModelInstallDescriptor.installable.contains(.qwen3_6_abliterated))
-        #expect(AppModelInstallDescriptor.installable.contains(.qwen3_8))
-        #expect(AppModelInstallDescriptor.installable.contains(.qwen3_8_abliterated))
+        let identities = AppModelInstallDescriptor.installable.map {
+            "\($0.weightsSHA256 ?? "none")|\($0.routedExpertBits.map(String.init) ?? "any")"
+        }
+        #expect(Set(identities).count == identities.count,
+                "two descriptors share a weights digest and width; the scan cannot tell them apart")
+        for expected: AppModelInstallDescriptor in [
+            .qwen3_6, .qwen3_6_3bit, .qwen3_6_abliterated, .qwen3_6_abliterated_3bit,
+            .qwen3_8, .qwen3_8_3bit, .qwen3_8_2bit,
+            .qwen3_8_abliterated, .qwen3_8_abliterated_3bit, .qwen3_8_abliterated_2bit,
+        ] {
+            #expect(AppModelInstallDescriptor.installable.contains(expected),
+                    "\(expected.displayName) is not in `installable`; the scan cannot find it")
+        }
     }
 
     /// The regression guard for the abliterated entries. The two installs below
@@ -180,6 +188,82 @@ import FinchMoE
         #expect(AppModelInstallationProbe.matchingDescriptor(at: abliterated) == .qwen3_6_abliterated)
         #expect(AppModelInstallationProbe.matchingDescriptor(at: base)
                     != AppModelInstallationProbe.matchingDescriptor(at: abliterated))
+    }
+
+    /// The width axis, the exact analogue of `baseAndAbliteratedTwinsResolveApart`:
+    /// three 3.8 installs whose descriptors agree on source hash, weights digest
+    /// and architecture — differing only in the declared routed-expert width —
+    /// must each resolve to their own entry.
+    @Test func widthsThatShareWeightsDigestResolveApart() throws {
+        #expect(AppModelInstallDescriptor.qwen3_8.weightsSHA256
+                    == AppModelInstallDescriptor.qwen3_8_3bit.weightsSHA256
+                && AppModelInstallDescriptor.qwen3_8.weightsSHA256
+                    == AppModelInstallDescriptor.qwen3_8_2bit.weightsSHA256,
+                "premise of this test: the width twins share a weights digest")
+
+        for (descriptor, tag) in [(AppModelInstallDescriptor.qwen3_8, "width-4"),
+                                  (.qwen3_8_3bit, "width-3"),
+                                  (.qwen3_8_2bit, "width-2")] {
+            let install = try makeCompleteModelInstall(
+                tag,
+                arch: ArchConfig.qwen3_8_flashNext_125B,
+                modelID: "local/Qwen3.8-Flash-Next-125B",
+                descriptor: descriptor)
+            defer { try? FileManager.default.removeItem(at: install) }
+            #expect(AppModelInstallationProbe.matchingDescriptor(at: install) == descriptor,
+                    "\(tag) resolved to the wrong width entry")
+        }
+    }
+
+    /// Guard for the first-match-wins hazard the width filter closes: before it,
+    /// `.qwen3_8` — first in the family — would claim every PLE width.
+    @Test func fourBitEntryDoesNotClaimAThreeBitDirectory() throws {
+        let install = try makeCompleteModelInstall(
+            "width-claim-guard",
+            arch: ArchConfig.qwen3_8_flashNext_125B,
+            modelID: "local/Qwen3.8-Flash-Next-125B",
+            descriptor: .qwen3_8,
+            routedExpertBits: 3)
+        defer { try? FileManager.default.removeItem(at: install) }
+        #expect(AppModelInstallationProbe.matchingDescriptor(at: install) == .qwen3_8_3bit)
+        #expect(AppModelInstallationProbe.matchingDescriptor(at: install) != .qwen3_8)
+    }
+
+    /// `?? 4` is what keeps a manifest that declares no quant block resolving
+    /// exactly as it did before widths existed; the runtime applies the same
+    /// default (`Model.routedExpertWeightBits`), so probe and loader agree.
+    @Test func manifestWithoutQuantKeepsTheFourBitAnswer() throws {
+        let install = try makeCompleteModelInstall(
+            "no-quant",
+            arch: ArchConfig.qwen3_8_flashNext_125B,
+            modelID: "local/Qwen3.8-Flash-Next-125B",
+            descriptor: .qwen3_8)
+        defer { try? FileManager.default.removeItem(at: install) }
+        let manifestURL = install.appendingPathComponent("manifest.json")
+        var manifest = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: manifestURL)) as? [String: Any] ?? [:]
+        manifest.removeValue(forKey: "quant")
+        try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
+            .write(to: manifestURL)
+        #expect(AppModelInstallationProbe.matchingDescriptor(at: install) == .qwen3_8)
+    }
+
+    /// The completion check reads the width too: a 3-bit directory must not
+    /// report `.complete` under the 4-bit row, or a finished install can never
+    /// notice that the bytes that landed are not the row's build.
+    @Test func statusRejectsAWidthMismatch() throws {
+        let install = try makeCompleteModelInstall(
+            "status-width",
+            arch: ArchConfig.qwen3_8_flashNext_125B,
+            modelID: "local/Qwen3.8-Flash-Next-125B",
+            descriptor: .qwen3_8,
+            routedExpertBits: 3)
+        defer { try? FileManager.default.removeItem(at: install) }
+        #expect(AppModelInstallationProbe.status(at: install, descriptor: .qwen3_8_3bit) == .complete)
+        guard case .partial = AppModelInstallationProbe.status(at: install, descriptor: .qwen3_8) else {
+            Issue.record("a 3-bit install must not complete under the 4-bit descriptor")
+            return
+        }
     }
 
     /// The weights digest is consulted first, but it must not become a hard

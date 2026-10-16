@@ -97,6 +97,83 @@ import Testing
         #expect(result.path == "/repo/models/Qwen3.8-Flash-Next-125B.finch")
     }
 
+    /// A checkout holding only the 3-bit build — what the app's own download
+    /// produces — resolves to it rather than falling through to Gemma. With
+    /// both 3.6 installs present the 4-bit one keeps winning, so an existing
+    /// checkout does not change which install it starts on.
+    @Test func qwen36ThreeBitInstallIsFoundWhenItIsTheOnlyOneAndYieldsToTheFourBit() {
+        let threeBitOnly: Set<String> = [
+            "/repo/Package.swift",
+            "/repo/Sources/FinchMoEApp/Mac",
+            "/repo/models/Qwen3.6-35B-A3B-3bit.finch/manifest.json",
+        ]
+        #expect(resolve(inPackage: threeBitOnly).path
+                    == "/repo/models/Qwen3.6-35B-A3B-3bit.finch")
+
+        let both: Set<String> = [
+            "/repo/Package.swift",
+            "/repo/Sources/FinchMoEApp/Mac",
+            "/repo/models/Qwen3.6-35B-A3B-4bit.finch/manifest.json",
+            "/repo/models/Qwen3.6-35B-A3B-3bit.finch/manifest.json",
+        ]
+        #expect(resolve(inPackage: both).path
+                    == "/repo/models/Qwen3.6-35B-A3B-4bit.finch")
+    }
+
+    @Test func qwen36AbliteratedThreeBitIsFoundBehindItsFourBitTwin() {
+        let threeBitOnly: Set<String> = [
+            "/repo/Package.swift",
+            "/repo/Sources/FinchMoEApp/Mac",
+            "/repo/models/Qwen3.6-35B-A3B-abliterated-3bit.finch/manifest.json",
+        ]
+        #expect(resolve(inPackage: threeBitOnly).path
+                    == "/repo/models/Qwen3.6-35B-A3B-abliterated-3bit.finch")
+
+        let both: Set<String> = [
+            "/repo/Package.swift",
+            "/repo/Sources/FinchMoEApp/Mac",
+            "/repo/models/Qwen3.6-35B-A3B-abliterated-4bit.finch/manifest.json",
+            "/repo/models/Qwen3.6-35B-A3B-abliterated-3bit.finch/manifest.json",
+        ]
+        #expect(resolve(inPackage: both).path
+                    == "/repo/models/Qwen3.6-35B-A3B-abliterated-4bit.finch")
+    }
+
+    /// The 3.8 width rows. Each new width sits behind the sibling that used to
+    /// win, so a checkout holding more than one keeps starting on what it
+    /// started on before, and a checkout holding only a new width finds it
+    /// rather than falling through to Gemma.
+    @Test func qwen38WidthInstallsAreFoundBehindTheirFourBitSiblings() {
+        let twoBitOnly: Set<String> = [
+            "/repo/Package.swift",
+            "/repo/Sources/FinchMoEApp/Mac",
+            "/repo/models/Qwen3.8-Flash-Next-125B-ple2bit.finch/manifest.json",
+        ]
+        #expect(resolve(inPackage: twoBitOnly).path
+                    == "/repo/models/Qwen3.8-Flash-Next-125B-ple2bit.finch")
+
+        let fourAndTwo: Set<String> = [
+            "/repo/Package.swift",
+            "/repo/Sources/FinchMoEApp/Mac",
+            "/repo/models/Qwen3.8-Flash-Next-125B-ple4bit.finch/manifest.json",
+            "/repo/models/Qwen3.8-Flash-Next-125B-ple2bit.finch/manifest.json",
+        ]
+        #expect(resolve(inPackage: fourAndTwo).path
+                    == "/repo/models/Qwen3.8-Flash-Next-125B-ple4bit.finch")
+
+        // An abliterated width still beats a base install (the family rule
+        // the abliterated entries established), and the raw-BF16-PLE
+        // fallback stays last.
+        let abliteratedThreeBitAndBaseFourBit: Set<String> = [
+            "/repo/Package.swift",
+            "/repo/Sources/FinchMoEApp/Mac",
+            "/repo/models/Qwen3.8-Flash-Next-abliterated-ple3bit.finch/manifest.json",
+            "/repo/models/Qwen3.8-Flash-Next-125B-ple4bit.finch/manifest.json",
+        ]
+        #expect(resolve(inPackage: abliteratedThreeBitAndBaseFourBit).path
+                    == "/repo/models/Qwen3.8-Flash-Next-abliterated-ple3bit.finch")
+    }
+
     /// With both installed, 3.6 stays the default: 3.8 is a 174 GB model that
     /// needs far more memory to run, so it must not become the app's implicit
     /// choice for a checkout that happens to hold it.

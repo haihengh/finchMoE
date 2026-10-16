@@ -6,7 +6,8 @@ import FinchMoE
 func makeCompleteModelInstall(_ tag: String,
                               arch: ArchConfig = .gemma4_26B_A4B,
                               modelID: String = "test/gemma-4-26b-a4b",
-                              descriptor: AppModelInstallDescriptor = .default) throws -> URL {
+                              descriptor: AppModelInstallDescriptor = .default,
+                              routedExpertBits: Int? = nil) throws -> URL {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("finchmoe-complete-\(tag)-\(UUID().uuidString).finch")
     let experts = directory.appendingPathComponent("packed_experts", isDirectory: true)
@@ -88,13 +89,17 @@ func makeCompleteModelInstall(_ tag: String,
         "flags": ["streamingPresent": true],
         "modelID": modelID,
         "sourceSnapshotHash": "sha256:" + descriptor.sourceIndexSHA256,
+        // The routed-expert width is the second identity axis (the widths of a
+        // checkpoint share their weights digest). Defaulting off the descriptor
+        // makes a fixture for a width-pinned entry self-consistent, so callers
+        // only pass `routedExpertBits` when they mean to contradict it.
         "quant": [
             "embedding": quantSlot(4),
             "attention": quantSlot(4),
             "linearAttention": quantSlot(8),
             "router": quantSlot(8),
             "sharedExpert": quantSlot(4),
-            "routedExpert": quantSlot(4),
+            "routedExpert": quantSlot(routedExpertBits ?? descriptor.routedExpertBits ?? 4),
         ],
         "arch": archFields,
         "files": files,

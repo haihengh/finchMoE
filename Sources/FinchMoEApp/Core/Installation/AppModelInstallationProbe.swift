@@ -22,6 +22,14 @@ public enum AppModelInstallationProbe {
     /// family missing from that list is not a loud failure: the directory
     /// resolves to the Gemma default and the UI offers to download a model that
     /// is already there.
+    ///
+    /// Two axes separate entries that share a `sourceSnapshotHash`: the
+    /// resident-weights digest (base vs abliterated) and the routed-expert
+    /// width (2/3/4-bit builds of one checkpoint, which differ only under
+    /// `packed_experts/`). The width comes from the manifest's
+    /// `quant.routedExpert.weightBits` with the same `?? 4` default the runtime
+    /// applies (`Model.routedExpertWeightBits`), so the probe and the loader
+    /// agree on a manifest that declares nothing.
     public static func matchingDescriptor(at directory: URL) -> AppModelInstallDescriptor {
         let directory = directory.standardizedFileURL
         let manifestURL = directory.appendingPathComponent("manifest.json")
@@ -32,15 +40,18 @@ public enum AppModelInstallationProbe {
             let manifest = try ManifestReader.load(
                 directoryURL: directory,
                 expecting: try ManifestReader.detectPreset(directoryURL: directory))
+            let declaredBits = manifest.quant?.routedExpert.weightBits ?? 4
             // Weights first. A base install and its abliterated twin carry the
             // *same* source snapshot hash — it covers the tensor index, which
             // abliteration does not change — so the snapshot scan alone cannot
             // separate them and would hand both directories the entry that
             // happens to come first. The resident-weights digest is what
-            // actually differs.
+            // actually differs; the width filter is what keeps a 4-bit entry
+            // from claiming a 3-bit directory, since the widths of one
+            // checkpoint share even the weights digest.
             if let weights = manifest.files["model_weights.bin"]?.sha256,
                let match = AppModelInstallDescriptor.installable.first(where: {
-                   $0.weightsSHA256 == weights
+                   $0.weightsSHA256 == weights && $0.accepts(routedExpertBits: declaredBits)
                }) {
                 return match
             }
@@ -48,8 +59,13 @@ public enum AppModelInstallationProbe {
             // weights digest is missing or unrecognised (an older repack, a
             // future layout that renames the resident file, a descriptor that
             // declines to pin weights) still resolves exactly as it did before
-            // this existed, rather than falling through to Gemma.
+            // this existed, rather than falling through to Gemma. It too
+            // prefers a width-consistent entry, and only when no entry's width
+            // matches either does it reproduce the pre-width answer verbatim.
             return AppModelInstallDescriptor.installable.first {
+                manifest.sourceSnapshotHash == "sha256:" + $0.sourceIndexSHA256
+                    && $0.accepts(routedExpertBits: declaredBits)
+            } ?? AppModelInstallDescriptor.installable.first {
                 manifest.sourceSnapshotHash == "sha256:" + $0.sourceIndexSHA256
             } ?? .default
         } catch {
@@ -71,6 +87,15 @@ public enum AppModelInstallationProbe {
             let manifest = try ManifestReader.load(directoryURL: directory, expecting: try ManifestReader.detectPreset(directoryURL: directory))
             let expectedSource = "sha256:" + descriptor.sourceIndexSHA256
             guard manifest.sourceSnapshotHash == expectedSource else {
+                return .partial("installed checkpoint does not match \(descriptor.displayName)")
+            }
+            // The source hash cannot see the expert width (the widths of one
+            // checkpoint share it), so the completion check reads the manifest
+            // too: without this, a 3-bit directory completes under the 4-bit
+            // descriptor and the install path has no way to notice that the
+            // bytes that landed are not the row's build.
+            let declaredBits = manifest.quant?.routedExpert.weightBits ?? 4
+            guard descriptor.accepts(routedExpertBits: declaredBits) else {
                 return .partial("installed checkpoint does not match \(descriptor.displayName)")
             }
             let layout = directory.appendingPathComponent("packed_experts/layout.json")

@@ -90,9 +90,15 @@ import FinchMoE
     @Test func installableDescriptorsCarryTheirOwnArchitecture() {
         let expected: [(AppModelInstallDescriptor, ArchConfig)] = [
             (.qwen3_6, .qwen3_6_35B_A3B),
+            (.qwen3_6_3bit, .qwen3_6_35B_A3B),
             (.qwen3_6_abliterated, .qwen3_6_35B_A3B),
+            (.qwen3_6_abliterated_3bit, .qwen3_6_35B_A3B),
             (.qwen3_8, .qwen3_8_flashNext_125B),
+            (.qwen3_8_3bit, .qwen3_8_flashNext_125B),
+            (.qwen3_8_2bit, .qwen3_8_flashNext_125B),
             (.qwen3_8_abliterated, .qwen3_8_flashNext_125B),
+            (.qwen3_8_abliterated_3bit, .qwen3_8_flashNext_125B),
+            (.qwen3_8_abliterated_2bit, .qwen3_8_flashNext_125B),
         ]
         // Compared order-insensitively: reordering `installable` is legitimate
         // (it only steers the fallback scan), but dropping or adding an entry

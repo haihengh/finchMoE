@@ -39,6 +39,18 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     /// `nil` means the descriptor does not pin weights, which keeps the older
     /// snapshot-only matching for such an entry (`.default` relies on this).
     public let weightsSHA256: String?
+    /// Routed-expert width this entry describes (2, 3 or 4), or `nil` to accept
+    /// any width.
+    ///
+    /// `weightsSHA256` cannot separate the widths of one checkpoint: the
+    /// resident weights are byte-identical across the 2-, 3- and 4-bit builds
+    /// and only `packed_experts/` differs (verified on disk 2026-10-15 — all
+    /// three 3.8 PLE widths share `c522877f…`, both 3.6 base widths share
+    /// `9644b61a…`), so the width has to come from the manifest's
+    /// `quant.routedExpert.weightBits`. Every width-bearing entry pins it —
+    /// including the 4-bit ones — or the coarser entry would claim the finer
+    /// directory by coming first in the scan.
+    public let routedExpertBits: Int?
     public let approximateDownloadBytes: UInt64
     public let installedBytes: UInt64
     public let rangeStagingBytes: UInt64
@@ -63,6 +75,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
                 revision: String,
                 sourceIndexSHA256: String,
                 weightsSHA256: String? = nil,
+                routedExpertBits: Int? = nil,
                 approximateDownloadBytes: UInt64,
                 installedBytes: UInt64,
                 rangeStagingBytes: UInt64,
@@ -75,6 +88,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         self.revision = revision
         self.sourceIndexSHA256 = sourceIndexSHA256
         self.weightsSHA256 = weightsSHA256
+        self.routedExpertBits = routedExpertBits
         self.approximateDownloadBytes = approximateDownloadBytes
         self.installedBytes = installedBytes
         self.rangeStagingBytes = rangeStagingBytes
@@ -98,11 +112,22 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         installedBytes + rangeStagingBytes + reserveBytes
     }
 
+    /// Whether this entry may describe an install whose manifest declares the
+    /// given routed-expert width. Tolerant in one direction only: a descriptor
+    /// that pins nothing accepts every width, while a pinned descriptor that
+    /// disagrees rejects the match.
+    func accepts(routedExpertBits declared: Int) -> Bool {
+        routedExpertBits == nil || routedExpertBits == declared
+    }
+
+    /// Gemma has one build, so it pins no expert width (`nil` accepts any);
+    /// it is a fallback, never scanned by the probe.
     public static let `default` = AppModelInstallDescriptor(
         displayName: "Gemma 4 26B-A4B IT 4-bit",
         repoID: "mlx-community/gemma-4-26b-a4b-it-4bit",
         revision: "0d77464eeb233a2da68ebf9d7dc4edaac7db956d",
         sourceIndexSHA256: "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13",
+        routedExpertBits: nil,
         approximateDownloadBytes: 14_620_479_420,
         installedBytes: 14_291_921_884,
         rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
@@ -110,22 +135,47 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         architecture: .gemma4_26B_A4B,
         shortDisplayName: "Gemma 4 26B")
 
-    /// Local Qwen 3.6 install made by `FinchMoERepack`. The app only ever
-    /// *probes* this checkpoint — in-app remote install is not supported for
-    /// it (the range-streaming installer targets the mlx 4-bit Gemma layout),
-    /// so repo/revision are informational and download sizing is zero.
+    /// Qwen 3.6 35B-A3B, the 4-bit routed-expert build. Same checkpoint as
+    /// `.qwen3_6_3bit` — resident weights byte-identical, only
+    /// `packed_experts/` differs — so the two are separate entries pinning
+    /// different `routedExpertBits` rather than one entry covering both: each
+    /// picker row downloads to, and starts from, its own build. This entry has
+    /// no distribution (the published base 3.6 is the 3-bit build), so it is
+    /// probe-only; a local 4-bit directory resolves here.
+    ///
+    /// `installedBytes` is the sum of every regular file in
+    /// `models/Qwen3.6-35B-A3B-4bit.finch`, measured 2026-09-27.
     public static let qwen3_6 = AppModelInstallDescriptor(
-        displayName: "Qwen 3.6 35B-A3B",
+        displayName: "Qwen 3.6 35B-A3B 4-bit",
         repoID: "Qwen/Qwen3.6-35B-A3B",
         revision: "",
         sourceIndexSHA256: "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83",
         weightsSHA256: "9644b61a7369787c4397f2f8272e9e95f3eaaf11d6d7be40164a6ec288a8228d",
+        routedExpertBits: 4,
         approximateDownloadBytes: 0,
         installedBytes: 20_014_114_816,
         rangeStagingBytes: 0,
         reserveBytes: 0,
         architecture: .qwen3_6_35B_A3B,
-        shortDisplayName: "Qwen 3.6 35B-A3B")
+        shortDisplayName: "Qwen 3.6 4-bit")
+
+    /// Qwen 3.6 35B-A3B at 3-bit routed experts — the base 3.6 the app
+    /// installs. Carries the published distribution (`qwen36ThreeBitDistribution`);
+    /// a fresh download lands in `models/Qwen3.6-35B-A3B-3bit.finch`.
+    public static let qwen3_6_3bit = AppModelInstallDescriptor(
+        displayName: "Qwen 3.6 35B-A3B 3-bit",
+        repoID: "Qwen/Qwen3.6-35B-A3B",
+        revision: "",
+        sourceIndexSHA256: "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83",
+        weightsSHA256: "9644b61a7369787c4397f2f8272e9e95f3eaaf11d6d7be40164a6ec288a8228d",
+        routedExpertBits: 3,
+        approximateDownloadBytes: qwen36ThreeBitDistribution.approximateDownloadBytes,
+        installedBytes: 16_032_975_496,
+        rangeStagingBytes: 0,
+        reserveBytes: distributionReserveBytes,
+        architecture: .qwen3_6_35B_A3B,
+        shortDisplayName: "Qwen 3.6 3-bit",
+        finchDistribution: qwen36ThreeBitDistribution)
 
     /// Qwen 3.8 Flash-Next 125B made by `FinchMoERepack`. Unlike 3.6 this one
     /// has a published distribution, so it is downloadable even though its own
@@ -143,18 +193,55 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     /// checkpoint this `.finch` was repacked from, not the `.finch` distribution
     /// repo itself.
     public static let qwen3_8 = AppModelInstallDescriptor(
-        displayName: "Qwen 3.8 Flash-Next 125B",
+        displayName: "Qwen 3.8 Flash-Next 125B 4-bit",
         repoID: "Qwen/Qwen3.8-Flash-Next",
         revision: "de4b8e4d43b917e7706784d8bb445c9af86a3540",
         sourceIndexSHA256: "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
         weightsSHA256: "c522877f166d128e0c30ce58bf93322d48e3ebbda55ccf9b2c8dae86efa82a06",
+        routedExpertBits: 4,
         approximateDownloadBytes: qwen38Distribution.approximateDownloadBytes,
         installedBytes: 103_925_807_384,
         rangeStagingBytes: 0,
         reserveBytes: distributionReserveBytes,
         architecture: .qwen3_8_flashNext_125B,
-        shortDisplayName: "Qwen 3.8 125B",
+        shortDisplayName: "Qwen 3.8 125B 4-bit",
         finchDistribution: qwen38Distribution)
+
+    /// Qwen 3.8 Flash-Next 125B at 3-bit routed experts — the quality-neutral
+    /// step down (HumanEval+ matches the 4-bit build exactly). `installedBytes`
+    /// measured 2026-10-15 from `models/Qwen3.8-Flash-Next-125B-ple3bit.finch`.
+    public static let qwen3_8_3bit = AppModelInstallDescriptor(
+        displayName: "Qwen 3.8 Flash-Next 125B 3-bit",
+        repoID: "Qwen/Qwen3.8-Flash-Next",
+        revision: "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+        sourceIndexSHA256: "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
+        weightsSHA256: "c522877f166d128e0c30ce58bf93322d48e3ebbda55ccf9b2c8dae86efa82a06",
+        routedExpertBits: 3,
+        approximateDownloadBytes: qwen38ThreeBitDistribution.approximateDownloadBytes,
+        installedBytes: 89_104_658_029,
+        rangeStagingBytes: 0,
+        reserveBytes: distributionReserveBytes,
+        architecture: .qwen3_8_flashNext_125B,
+        shortDisplayName: "Qwen 3.8 125B 3-bit",
+        finchDistribution: qwen38ThreeBitDistribution)
+
+    /// Qwen 3.8 Flash-Next 125B at 2-bit routed experts — the fastest decode of
+    /// the family, ~10 pp of quality below 3-bit. `installedBytes` measured
+    /// 2026-10-15 from `models/Qwen3.8-Flash-Next-125B-ple2bit.finch`.
+    public static let qwen3_8_2bit = AppModelInstallDescriptor(
+        displayName: "Qwen 3.8 Flash-Next 125B 2-bit",
+        repoID: "Qwen/Qwen3.8-Flash-Next",
+        revision: "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+        sourceIndexSHA256: "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
+        weightsSHA256: "c522877f166d128e0c30ce58bf93322d48e3ebbda55ccf9b2c8dae86efa82a06",
+        routedExpertBits: 2,
+        approximateDownloadBytes: qwen38TwoBitDistribution.approximateDownloadBytes,
+        installedBytes: 73_803_784_477,
+        rangeStagingBytes: 0,
+        reserveBytes: distributionReserveBytes,
+        architecture: .qwen3_8_flashNext_125B,
+        shortDisplayName: "Qwen 3.8 125B 2-bit",
+        finchDistribution: qwen38TwoBitDistribution)
 
     /// Abliterated (refusal-direction-removed) Qwen 3.6. Structurally identical
     /// to `.qwen3_6` — same architecture, same layout, **the same
@@ -167,18 +254,38 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     /// 2026-09-27; the payload figure is within 18 KB of it, which is the
     /// manifest, receipt and tokenizer sidecars.
     public static let qwen3_6_abliterated = AppModelInstallDescriptor(
-        displayName: "Qwen 3.6 35B-A3B (Abliterated)",
+        displayName: "Qwen 3.6 35B-A3B 4-bit (Abliterated)",
         repoID: "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated",
         revision: "",
         sourceIndexSHA256: "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83",
         weightsSHA256: "f6862341c9688e234c682cef186af5a92445be1dbcdd36d59637338634d311bd",
+        routedExpertBits: 4,
         approximateDownloadBytes: qwen36AbliteratedDistribution.approximateDownloadBytes,
         installedBytes: 20_059_538_761,
         rangeStagingBytes: 0,
         reserveBytes: distributionReserveBytes,
         architecture: .qwen3_6_35B_A3B,
-        shortDisplayName: "Qwen 3.6 Abl.",
+        shortDisplayName: "Qwen 3.6 Abl. 4-bit",
         finchDistribution: qwen36AbliteratedDistribution)
+
+    /// Abliterated Qwen 3.6 at 3-bit routed experts, repacked 2026-10-16 from
+    /// `models/Qwen3.6-35B-A3B-abliterated-bf16`. Payload is byte-identical to
+    /// the base 3-bit build (the twin property); `installedBytes` carries the
+    /// base's measurement until the abliterated install's own sum is taken.
+    public static let qwen3_6_abliterated_3bit = AppModelInstallDescriptor(
+        displayName: "Qwen 3.6 35B-A3B 3-bit (Abliterated)",
+        repoID: "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated",
+        revision: "",
+        sourceIndexSHA256: "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83",
+        weightsSHA256: "f6862341c9688e234c682cef186af5a92445be1dbcdd36d59637338634d311bd",
+        routedExpertBits: 3,
+        approximateDownloadBytes: qwen36ThreeBitAbliteratedDistribution.approximateDownloadBytes,
+        installedBytes: 16_032_975_496,
+        rangeStagingBytes: 0,
+        reserveBytes: distributionReserveBytes,
+        architecture: .qwen3_6_35B_A3B,
+        shortDisplayName: "Qwen 3.6 Abl. 3-bit",
+        finchDistribution: qwen36ThreeBitAbliteratedDistribution)
 
     /// Abliterated Qwen 3.8 Flash-Next, the 3.8 counterpart of
     /// `.qwen3_6_abliterated`: same relationship, same reason it needs its own
@@ -189,18 +296,56 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     /// `models/Qwen3.8-Flash-Next-abliterated-ple4bit.finch`, measured
     /// 2026-09-27.
     public static let qwen3_8_abliterated = AppModelInstallDescriptor(
-        displayName: "Qwen 3.8 Flash-Next 125B (Abliterated)",
+        displayName: "Qwen 3.8 Flash-Next 125B 4-bit (Abliterated)",
         repoID: "windowsxp811203/Qwen3.8-Flash-Next-Abliterated",
         revision: "",
         sourceIndexSHA256: "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
         weightsSHA256: "6af82b557d8207e470f50c1fba5dbb14e7ff4b48139a5b0b2e4f8ac56d188acb",
+        routedExpertBits: 4,
         approximateDownloadBytes: qwen38AbliteratedDistribution.approximateDownloadBytes,
         installedBytes: 104_002_831_190,
         rangeStagingBytes: 0,
         reserveBytes: distributionReserveBytes,
         architecture: .qwen3_8_flashNext_125B,
-        shortDisplayName: "Qwen 3.8 Abl.",
+        shortDisplayName: "Qwen 3.8 Abl. 4-bit",
         finchDistribution: qwen38AbliteratedDistribution)
+
+    /// Abliterated Qwen 3.8 at 3-bit routed experts, repacked 2026-10-16 from
+    /// `models/Qwen3.8-Flash-Next-abliterated-bf16`. Payload is byte-identical
+    /// to the base 3-bit build (verified on disk 2026-10-16); `installedBytes`
+    /// is this install's own measured sum.
+    public static let qwen3_8_abliterated_3bit = AppModelInstallDescriptor(
+        displayName: "Qwen 3.8 Flash-Next 125B 3-bit (Abliterated)",
+        repoID: "windowsxp811203/Qwen3.8-Flash-Next-Abliterated",
+        revision: "",
+        sourceIndexSHA256: "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
+        weightsSHA256: "6af82b557d8207e470f50c1fba5dbb14e7ff4b48139a5b0b2e4f8ac56d188acb",
+        routedExpertBits: 3,
+        approximateDownloadBytes: qwen38ThreeBitAbliteratedDistribution.approximateDownloadBytes,
+        installedBytes: 89_104_658_006,
+        rangeStagingBytes: 0,
+        reserveBytes: distributionReserveBytes,
+        architecture: .qwen3_8_flashNext_125B,
+        shortDisplayName: "Qwen 3.8 Abl. 3-bit",
+        finchDistribution: qwen38ThreeBitAbliteratedDistribution)
+
+    /// Abliterated Qwen 3.8 at 2-bit routed experts, repacked 2026-10-16.
+    /// Payload identical to the base 2-bit build (verified on disk
+    /// 2026-10-16); `installedBytes` is this install's own measured sum.
+    public static let qwen3_8_abliterated_2bit = AppModelInstallDescriptor(
+        displayName: "Qwen 3.8 Flash-Next 125B 2-bit (Abliterated)",
+        repoID: "windowsxp811203/Qwen3.8-Flash-Next-Abliterated",
+        revision: "",
+        sourceIndexSHA256: "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
+        weightsSHA256: "6af82b557d8207e470f50c1fba5dbb14e7ff4b48139a5b0b2e4f8ac56d188acb",
+        routedExpertBits: 2,
+        approximateDownloadBytes: qwen38TwoBitAbliteratedDistribution.approximateDownloadBytes,
+        installedBytes: 73_803_784_454,
+        rangeStagingBytes: 0,
+        reserveBytes: distributionReserveBytes,
+        architecture: .qwen3_8_flashNext_125B,
+        shortDisplayName: "Qwen 3.8 Abl. 2-bit",
+        finchDistribution: qwen38TwoBitAbliteratedDistribution)
 
     /// Every descriptor the app can identify a local directory as, in probe
     /// order. `matchingDescriptor` scans this rather than testing each hash
@@ -211,10 +356,19 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     /// A base install and its abliterated twin deliberately appear as **two
     /// entries sharing one `sourceIndexSHA256`** — that is a real property of
     /// the checkpoints, not an oversight, and it is why `weightsSHA256` exists
-    /// and why `matchingDescriptor` consults it first. Order still matters for
-    /// the fallback scan, which is first-match-wins.
+    /// and why `matchingDescriptor` consults it first. The expert widths of one
+    /// checkpoint do the same with `weightsSHA256` itself, which is what
+    /// `routedExpertBits` separates.
+    ///
+    /// Every width-bearing entry pins its width, so order no longer decides
+    /// which width claims a directory — it only orders the *fallback* scan for
+    /// a directory whose weights digest no entry recognises, which stays
+    /// first-match-wins. Each family therefore keeps its 4-bit entry first, so
+    /// that fallback answers exactly as it did before widths existed.
     public static let installable: [AppModelInstallDescriptor] = [
-        .qwen3_6, .qwen3_6_abliterated, .qwen3_8, .qwen3_8_abliterated,
+        .qwen3_6, .qwen3_6_3bit, .qwen3_6_abliterated, .qwen3_6_abliterated_3bit,
+        .qwen3_8, .qwen3_8_3bit, .qwen3_8_2bit,
+        .qwen3_8_abliterated, .qwen3_8_abliterated_3bit, .qwen3_8_abliterated_2bit,
     ]
 }
 
@@ -229,9 +383,50 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
 // and the receipt both record the resolved commit, and a distribution that
 // moved under a resumed download would be refused rather than half-mixed.
 //
-// Qwen 3.6 has no base distribution — `haihengh/Qwen3.6-35B-A3B-finchmoe-3bit`
-// is the retired first-generation format, not `.finch` — so `.qwen3_6` stays
-// probe-only and its install is made out of band.
+// One distribution per published width, hung off the row that downloads it.
+// Abliterated twins share their base sibling's payload figure byte-for-byte
+// (verified for both 4-bit pairs), which is what lets their entries pin a
+// download size before their uploads exist. Each `revision` starts as
+// `PENDING-UPLOAD-REPLACE-ME` and is replaced with the resolved commit as the
+// matching upload lands — until then the row is visible but its download will
+// fail, which is deliberate (the alternative is a dead endpoint that looks
+// live).
+
+private let qwen36ThreeBitDistribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.6-35B-A3B-finch-3bit",
+    revision: "PENDING-UPLOAD-REPLACE-ME",
+    approximateDownloadBytes: 16_032_957_550,
+    installedBytes: 16_032_975_496)
+
+private let qwen36ThreeBitAbliteratedDistribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.6-35B-A3B-finch-3bit-abliterated",
+    revision: "PENDING-UPLOAD-REPLACE-ME",
+    approximateDownloadBytes: 16_032_957_550,
+    installedBytes: 16_032_975_496)
+
+private let qwen38ThreeBitDistribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple3bit",
+    revision: "PENDING-UPLOAD-REPLACE-ME",
+    approximateDownloadBytes: 89_104_597_905,
+    installedBytes: 89_104_658_029)
+
+private let qwen38TwoBitDistribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple2bit",
+    revision: "PENDING-UPLOAD-REPLACE-ME",
+    approximateDownloadBytes: 73_803_724_449,
+    installedBytes: 73_803_784_477)
+
+private let qwen38ThreeBitAbliteratedDistribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple3bit-abliterated",
+    revision: "PENDING-UPLOAD-REPLACE-ME",
+    approximateDownloadBytes: 89_104_597_905,
+    installedBytes: 89_104_658_029)
+
+private let qwen38TwoBitAbliteratedDistribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple2bit-abliterated",
+    revision: "PENDING-UPLOAD-REPLACE-ME",
+    approximateDownloadBytes: 73_803_724_449,
+    installedBytes: 73_803_784_477)
 
 private let qwen36AbliteratedDistribution = FinchDistribution(
     repoID: "haihengh/Qwen3.6-35B-A3B-finchmoe-4bit-abliterated",

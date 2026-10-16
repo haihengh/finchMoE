@@ -70,6 +70,14 @@ enum AppModelLocation {
     /// repacked one means to run it. A checkout holding only the base keeps
     /// starting on the base, so no existing install changes behaviour.
     ///
+    /// Newer widths sit directly behind the sibling that used to win, so no
+    /// checkout that existed before them changes which model it starts on: the
+    /// 3-bit 3.6 behind its 4-bit twin, and on 3.8 the 3-bit and 2-bit twins
+    /// behind their own family's 4-bit install (abliterated widths behind the
+    /// abliterated 4-bit). A checkout holding only a new width is found —
+    /// rather than falling through to Gemma — and a narrower width never
+    /// displaces a wider one that was already being started on.
+    ///
     /// Within the 3.8 pair the quantized-PLE install comes first and the
     /// original is kept directly behind it as the fallback: they are the same
     /// weights with the n-gram table at int4 instead of BF16 (97 GiB against
@@ -79,9 +87,15 @@ enum AppModelLocation {
                                             fileExists: (String) -> Bool) -> URL {
         let installed = [
             "models/Qwen3.6-35B-A3B-abliterated-4bit.finch",
+            "models/Qwen3.6-35B-A3B-abliterated-3bit.finch",
             "models/Qwen3.6-35B-A3B-4bit.finch",
+            "models/Qwen3.6-35B-A3B-3bit.finch",
             "models/Qwen3.8-Flash-Next-abliterated-ple4bit.finch",
+            "models/Qwen3.8-Flash-Next-abliterated-ple3bit.finch",
+            "models/Qwen3.8-Flash-Next-abliterated-ple2bit.finch",
             "models/Qwen3.8-Flash-Next-125B-ple4bit.finch",   // 97 GiB, int4 PLE
+            "models/Qwen3.8-Flash-Next-125B-ple3bit.finch",   // 83 GiB, int3 PLE
+            "models/Qwen3.8-Flash-Next-125B-ple2bit.finch",   // 69 GiB, int2 PLE
             "models/Qwen3.8-Flash-Next-125B.finch",           // 162 GiB, raw BF16 PLE (fallback)
         ]
         for relative in installed {

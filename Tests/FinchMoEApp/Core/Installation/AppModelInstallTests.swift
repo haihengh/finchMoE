@@ -109,19 +109,54 @@ import FinchMoERepackCore
     #expect(model.modelPathText == directory.standardizedFileURL.path)
   }
 
+  /// The 3.6 4-bit row. It is probe-only — no base 4-bit `.finch` is
+  /// published, so there is nothing to fetch and the Download button must stay
+  /// disabled; the downloadable base 3.6 is the 3-bit row below.
   @MainActor
   @Test func qwenInstallDescriptorMatchesPinnedAudit() {
     let descriptor = AppModelInstallDescriptor.qwen3_6
-    #expect(descriptor.displayName == "Qwen 3.6 35B-A3B")
-    #expect(descriptor.shortName == "Qwen 3.6 35B-A3B")
+    #expect(descriptor.displayName == "Qwen 3.6 35B-A3B 4-bit")
+    #expect(descriptor.shortName == "Qwen 3.6 4-bit")
     #expect(descriptor.repoID == "Qwen/Qwen3.6-35B-A3B")
     #expect(descriptor.sourceIndexSHA256 == "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83")
     #expect(descriptor.weightsSHA256 == "9644b61a7369787c4397f2f8272e9e95f3eaaf11d6d7be40164a6ec288a8228d")
+    #expect(descriptor.routedExpertBits == 4)
     #expect(descriptor.approximateDownloadBytes == 0)
     #expect(descriptor.installedBytes == 20_014_114_816)
     #expect(descriptor.rangeStagingBytes == 0)
     #expect(descriptor.reserveBytes == 0)
     #expect(descriptor.requiredFreeBytes == 20_014_114_816)
+    #expect(descriptor.installRoute == .none)
+    #expect(!descriptor.supportsRemoteInstall)
+  }
+
+  /// The 3.6 3-bit row, which carries the published base distribution. Its
+  /// distribution revision is a placeholder until the upload commits.
+  @MainActor
+  @Test func qwen36ThreeBitDescriptorMatchesPinnedAudit() {
+    let descriptor = AppModelInstallDescriptor.qwen3_6_3bit
+    #expect(descriptor.displayName == "Qwen 3.6 35B-A3B 3-bit")
+    #expect(descriptor.shortName == "Qwen 3.6 3-bit")
+    #expect(descriptor.repoID == "Qwen/Qwen3.6-35B-A3B")
+    #expect(descriptor.sourceIndexSHA256
+              == AppModelInstallDescriptor.qwen3_6.sourceIndexSHA256)
+    #expect(descriptor.weightsSHA256
+              == AppModelInstallDescriptor.qwen3_6.weightsSHA256)
+    #expect(descriptor.routedExpertBits == 3)
+    #expect(descriptor.installedBytes == 16_032_975_496)
+    #expect(descriptor.rangeStagingBytes == 0)
+    #expect(descriptor.reserveBytes == 1_073_741_824)
+    #expect(descriptor.requiredFreeBytes == 17_106_717_320)
+    #expect(descriptor.architecture == .qwen3_6_35B_A3B)
+
+    guard case .finchDistribution(let distribution) = descriptor.installRoute else {
+      Issue.record("Qwen 3.6 3-bit should install from a published distribution")
+      return
+    }
+    #expect(distribution.repoID == "haihengh/Qwen3.6-35B-A3B-finch-3bit")
+    #expect(distribution.revision == "PENDING-UPLOAD-REPLACE-ME")
+    #expect(distribution.approximateDownloadBytes == 16_032_957_550)
+    #expect(descriptor.approximateDownloadBytes == 16_032_957_550)
   }
 
   /// The 3.8 counterpart. The hash is the one thing here that cannot be
@@ -137,11 +172,12 @@ import FinchMoERepackCore
   @MainActor
   @Test func qwen38InstallDescriptorMatchesPinnedAudit() {
     let descriptor = AppModelInstallDescriptor.qwen3_8
-    #expect(descriptor.displayName == "Qwen 3.8 Flash-Next 125B")
-    #expect(descriptor.shortName == "Qwen 3.8 125B")
+    #expect(descriptor.displayName == "Qwen 3.8 Flash-Next 125B 4-bit")
+    #expect(descriptor.shortName == "Qwen 3.8 125B 4-bit")
     #expect(descriptor.repoID == "Qwen/Qwen3.8-Flash-Next")
     #expect(descriptor.sourceIndexSHA256 == "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de")
     #expect(descriptor.weightsSHA256 == "c522877f166d128e0c30ce58bf93322d48e3ebbda55ccf9b2c8dae86efa82a06")
+    #expect(descriptor.routedExpertBits == 4)
     #expect(descriptor.installedBytes == 103_925_807_384)
     #expect(descriptor.rangeStagingBytes == 0)
     #expect(descriptor.reserveBytes == 1_073_741_824)
@@ -166,24 +202,20 @@ import FinchMoERepackCore
   @MainActor
   @Test func qwenAbliteratedInstallDescriptorsMatchPinnedAudit() {
     let qwen36 = AppModelInstallDescriptor.qwen3_6_abliterated
-    #expect(qwen36.displayName == "Qwen 3.6 35B-A3B (Abliterated)")
-    #expect(qwen36.shortName == "Qwen 3.6 Abl.")
+    #expect(qwen36.displayName == "Qwen 3.6 35B-A3B 4-bit (Abliterated)")
+    #expect(qwen36.shortName == "Qwen 3.6 Abl. 4-bit")
     #expect(qwen36.repoID == "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated")
     #expect(qwen36.sourceIndexSHA256
               == AppModelInstallDescriptor.qwen3_6.sourceIndexSHA256)
     #expect(qwen36.weightsSHA256
               == "f6862341c9688e234c682cef186af5a92445be1dbcdd36d59637338634d311bd")
     #expect(qwen36.weightsSHA256 != AppModelInstallDescriptor.qwen3_6.weightsSHA256)
+    #expect(qwen36.routedExpertBits == 4)
     #expect(qwen36.installedBytes == 20_059_538_761)
     #expect(qwen36.rangeStagingBytes == 0)
     #expect(qwen36.reserveBytes == 1_073_741_824)
     #expect(qwen36.requiredFreeBytes == 21_133_280_585)
     #expect(qwen36.architecture == .qwen3_6_35B_A3B)
-
-    // The base 3.6 entry stays probe-only: no base `.finch` is published, so
-    // there is nothing to fetch and the Download button must stay disabled.
-    #expect(AppModelInstallDescriptor.qwen3_6.installRoute == .none)
-    #expect(!AppModelInstallDescriptor.qwen3_6.supportsRemoteInstall)
 
     guard case .finchDistribution(let qwen36Distribution) = qwen36.installRoute else {
       Issue.record("Qwen 3.6 abliterated should install from a published distribution")
@@ -195,15 +227,38 @@ import FinchMoERepackCore
               == "e1998dcbf984e2c3e8e38eab5eacd3b8ed0c93de")
     #expect(qwen36Distribution.approximateDownloadBytes == 20_059_520_830)
 
+    // The abliterated 3-bit twin: same source index as its base counterpart
+    // (asserted as this block's premise), same weights digest as its own 4-bit
+    // sibling, separated from both by the width.
+    let qwen36ThreeBit = AppModelInstallDescriptor.qwen3_6_abliterated_3bit
+    #expect(qwen36ThreeBit.displayName == "Qwen 3.6 35B-A3B 3-bit (Abliterated)")
+    #expect(qwen36ThreeBit.shortName == "Qwen 3.6 Abl. 3-bit")
+    #expect(qwen36ThreeBit.sourceIndexSHA256
+              == AppModelInstallDescriptor.qwen3_6_3bit.sourceIndexSHA256,
+            "premise: base and abliterated 3.6 share the source index hash")
+    #expect(qwen36ThreeBit.weightsSHA256 == qwen36.weightsSHA256)
+    #expect(qwen36ThreeBit.routedExpertBits == 3)
+    #expect(qwen36ThreeBit.architecture == .qwen3_6_35B_A3B)
+
+    guard case .finchDistribution(let qwen36ThreeBitDistribution) = qwen36ThreeBit.installRoute else {
+      Issue.record("Qwen 3.6 abliterated 3-bit should install from a published distribution")
+      return
+    }
+    #expect(qwen36ThreeBitDistribution.repoID
+              == "haihengh/Qwen3.6-35B-A3B-finch-3bit-abliterated")
+    #expect(qwen36ThreeBitDistribution.revision == "PENDING-UPLOAD-REPLACE-ME")
+    #expect(qwen36ThreeBitDistribution.approximateDownloadBytes == 16_032_957_550)
+
     let qwen38 = AppModelInstallDescriptor.qwen3_8_abliterated
-    #expect(qwen38.displayName == "Qwen 3.8 Flash-Next 125B (Abliterated)")
-    #expect(qwen38.shortName == "Qwen 3.8 Abl.")
+    #expect(qwen38.displayName == "Qwen 3.8 Flash-Next 125B 4-bit (Abliterated)")
+    #expect(qwen38.shortName == "Qwen 3.8 Abl. 4-bit")
     #expect(qwen38.repoID == "windowsxp811203/Qwen3.8-Flash-Next-Abliterated")
     #expect(qwen38.sourceIndexSHA256
               == AppModelInstallDescriptor.qwen3_8.sourceIndexSHA256)
     #expect(qwen38.weightsSHA256
               == "6af82b557d8207e470f50c1fba5dbb14e7ff4b48139a5b0b2e4f8ac56d188acb")
     #expect(qwen38.weightsSHA256 != AppModelInstallDescriptor.qwen3_8.weightsSHA256)
+    #expect(qwen38.routedExpertBits == 4)
     #expect(qwen38.installedBytes == 104_002_831_190)
     #expect(qwen38.rangeStagingBytes == 0)
     #expect(qwen38.reserveBytes == 1_073_741_824)
@@ -219,6 +274,97 @@ import FinchMoERepackCore
     #expect(qwen38Distribution.revision
               == "d19beab26664be0e3becd66322d71631cec63ddb")
     #expect(qwen38Distribution.approximateDownloadBytes == 104_002_771_089)
+  }
+
+  /// The four new 3.8 width rows: 3-bit and 2-bit, base and abliterated. The
+  /// payloads are the measured `manifest.files` sums (abliterated twins share
+  /// their base sibling's payload byte-for-byte, which is why the abliterated
+  /// rows can pin a size before their uploads exist); revisions are
+  /// placeholders until each upload commits.
+  @MainActor
+  @Test func qwen38PerWidthDescriptorsMatchPinnedAudit() {
+    let qwen38ThreeBit = AppModelInstallDescriptor.qwen3_8_3bit
+    #expect(qwen38ThreeBit.displayName == "Qwen 3.8 Flash-Next 125B 3-bit")
+    #expect(qwen38ThreeBit.shortName == "Qwen 3.8 125B 3-bit")
+    #expect(qwen38ThreeBit.weightsSHA256
+              == AppModelInstallDescriptor.qwen3_8.weightsSHA256)
+    #expect(qwen38ThreeBit.routedExpertBits == 3)
+    #expect(qwen38ThreeBit.installedBytes == 89_104_658_029)
+    #expect(qwen38ThreeBit.requiredFreeBytes == 90_178_399_853)
+    #expect(qwen38ThreeBit.architecture == .qwen3_8_flashNext_125B)
+    guard case .finchDistribution(let threeBitDistribution) = qwen38ThreeBit.installRoute else {
+      Issue.record("Qwen 3.8 3-bit should install from a published distribution")
+      return
+    }
+    #expect(threeBitDistribution.repoID
+              == "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple3bit")
+    #expect(threeBitDistribution.revision == "PENDING-UPLOAD-REPLACE-ME")
+    #expect(threeBitDistribution.approximateDownloadBytes == 89_104_597_905)
+
+    let qwen38TwoBit = AppModelInstallDescriptor.qwen3_8_2bit
+    #expect(qwen38TwoBit.displayName == "Qwen 3.8 Flash-Next 125B 2-bit")
+    #expect(qwen38TwoBit.shortName == "Qwen 3.8 125B 2-bit")
+    #expect(qwen38TwoBit.weightsSHA256
+              == AppModelInstallDescriptor.qwen3_8.weightsSHA256)
+    #expect(qwen38TwoBit.routedExpertBits == 2)
+    #expect(qwen38TwoBit.installedBytes == 73_803_784_477)
+    #expect(qwen38TwoBit.requiredFreeBytes == 74_877_526_301)
+    guard case .finchDistribution(let twoBitDistribution) = qwen38TwoBit.installRoute else {
+      Issue.record("Qwen 3.8 2-bit should install from a published distribution")
+      return
+    }
+    #expect(twoBitDistribution.repoID
+              == "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple2bit")
+    #expect(twoBitDistribution.approximateDownloadBytes == 73_803_724_449)
+
+    let qwen38AbliteratedThreeBit = AppModelInstallDescriptor.qwen3_8_abliterated_3bit
+    #expect(qwen38AbliteratedThreeBit.displayName
+              == "Qwen 3.8 Flash-Next 125B 3-bit (Abliterated)")
+    #expect(qwen38AbliteratedThreeBit.weightsSHA256
+              == AppModelInstallDescriptor.qwen3_8_abliterated.weightsSHA256)
+    #expect(qwen38AbliteratedThreeBit.routedExpertBits == 3)
+    guard case .finchDistribution(let ablThreeBitDistribution) = qwen38AbliteratedThreeBit.installRoute else {
+      Issue.record("Qwen 3.8 abliterated 3-bit should install from a published distribution")
+      return
+    }
+    #expect(ablThreeBitDistribution.repoID
+              == "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple3bit-abliterated")
+    #expect(ablThreeBitDistribution.approximateDownloadBytes == 89_104_597_905)
+
+    let qwen38AbliteratedTwoBit = AppModelInstallDescriptor.qwen3_8_abliterated_2bit
+    #expect(qwen38AbliteratedTwoBit.displayName
+              == "Qwen 3.8 Flash-Next 125B 2-bit (Abliterated)")
+    #expect(qwen38AbliteratedTwoBit.weightsSHA256
+              == AppModelInstallDescriptor.qwen3_8_abliterated.weightsSHA256)
+    #expect(qwen38AbliteratedTwoBit.routedExpertBits == 2)
+    guard case .finchDistribution(let ablTwoBitDistribution) = qwen38AbliteratedTwoBit.installRoute else {
+      Issue.record("Qwen 3.8 abliterated 2-bit should install from a published distribution")
+      return
+    }
+    #expect(ablTwoBitDistribution.repoID
+              == "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple2bit-abliterated")
+    #expect(ablTwoBitDistribution.approximateDownloadBytes == 73_803_724_449)
+  }
+
+  /// Cross-check across the whole list, so a copy-paste between the width rows
+  /// cannot slip through the per-entry audits: a row that carries a
+  /// distribution must quote the same payload the distribution does and must
+  /// hold back the reserve; a row without one must do neither.
+  @MainActor
+  @Test func everyDescriptorReserveMatchesItsRoute() {
+    for descriptor in AppModelInstallDescriptor.installable {
+      if let distribution = descriptor.finchDistribution {
+        #expect(descriptor.approximateDownloadBytes == distribution.approximateDownloadBytes,
+                "\(descriptor.displayName) quotes a payload its distribution does not")
+        #expect(descriptor.reserveBytes == 1_073_741_824,
+                "\(descriptor.displayName) downloads but holds back no reserve")
+      } else {
+        #expect(descriptor.approximateDownloadBytes == 0,
+                "\(descriptor.displayName) has no distribution but quotes a download size")
+        #expect(descriptor.reserveBytes == 0,
+                "\(descriptor.displayName) has no distribution but holds back a reserve")
+      }
+    }
   }
 
   @MainActor
