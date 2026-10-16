@@ -231,3 +231,12 @@ problems behind 4-bit; the 4-bit baseline predates this branch. A 2-bit tier
 is the natural follow-up: uniform affine at 2 bits measured 46-57% RMS error
 (tools/quant-experiments), so 2 bits likely needs the sign-magnitude /
 codebook structure rather than another affine step down.
+
+**Resolved 2026-10-15:** the affine int2 tier shipped anyway (commit
+`839c60a`, group-64 affine like int3) and the question was settled by
+measurement rather than RMS: 3.6 at 2 bits scores 0.768 / 0.707 against
+3-bit's 0.909 / 0.866, and 3.8 at 2 bits scores 0.835 / 0.799 against 3-bit's
+0.933 / 0.909. The structure worry was right in spirit — 2 bits costs ~10 pp
+— but the affine path was good enough to measure it; see
+`docs/PLE_QUANTIZATION_PLAN.md` (routed-expert width section) and
+`docs/PLE2BIT_SWEEP_IO_FINDINGS.md`.

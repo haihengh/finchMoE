@@ -389,13 +389,13 @@ swift test --no-parallel --filter PrefixReuseBenchmarkTests
 FQ_BENCH_CASES=long-synthesis swift test --no-parallel --filter qwen38ColdAndHot
 ```
 
-### Routed-expert width: 4-bit vs 3-bit vs 2-bit
+### Routed-expert width: 4-bit vs 3-bit vs 2-bit (Qwen 3.6 35B-A3B)
 
 Routed experts ship at 4-bit by default; `FinchMoERepack
 --routed-expert-bits 3|2` converts the same bf16 snapshot to narrower
 experts in the same affine group-64 family (int3 packs eight values per
 24-bit little-endian triplet, int2 four values per byte; scales/biases stay
-BF16 per group). All rows: Qwen 3.6 35B-A3B, 16 GB M4 mini, the frozen
+BF16 per group). All rows below: Qwen 3.6 35B-A3B, 16 GB M4 mini, the frozen
 `real-generation-v1` cases at the published sampling, one measured run per
 cell after a discarded warmup — prompt processing (PP) over the
 50/414/2,928-token prompts, decode (TG) over 128 generated tokens; scores
@@ -413,9 +413,10 @@ experimental; 4-bit remains the default.
 3-bit is the sweet spot: quality parity (base identical, HumanEval+ two
 problems behind) for 20% less disk and 1.4-1.7x the decode rate. 2-bit buys
 another 25% of disk and up to 2.4x short-context decode for ~14-17 points —
-a usable tier, not a near-parity one. Prompt processing gains less (+11% /
-+19% on the long case) because prefill is compute-bound; decode gains track
-the per-token expert bytes.
+a measurable tier, not a near-parity one, and the app's model picker does not
+offer it for 3.6. Prompt processing gains less (+11% / +19% on the long case)
+because prefill is compute-bound; decode gains track the per-token expert
+bytes.
 
 An earlier 3-bit experiment (2026-09-23) scored 28/164 and parked the
 format. The re-run above attributes that to the archived runtime's int3
@@ -423,6 +424,33 @@ kernels reading the blobs incorrectly at production row widths — a failure
 small-case checks cannot see — not to the 3-bit format itself;
 `docs/SESSION_HANDOFF_3BIT_EXPERTS.md` carries the corrected verdict and
 the kernel/writer verification that guards it now.
+
+### Routed-expert width: 4-bit vs 3-bit vs 2-bit (Qwen 3.8 Flash-Next 125B)
+
+The same three widths on the 125B install — same protocol, all three run off
+the external SSD on 2026-10-15, PP over the 62/426/2,940-token prompts:
+
+| | 4-bit | 3-bit | 2-bit |
+| --- | ---: | ---: | ---: |
+| Install | 96.86 GiB | 82.99 GiB | 68.74 GiB |
+| HumanEval pass@1 | 94.5% (155/164) | 93.3% (153/164) | 83.5% (137/164) |
+| HumanEval+ pass@1 | 90.9% (149/164) | 90.9% (149/164) | 79.9% (131/164) |
+| Prompt processing (short/medium/long) | 6.8 / 20.7 / 18.5 tok/s | 8.1 / 23.1 / 20.6 tok/s ᵂ | 9.9 / 25.3 / 22.8 tok/s |
+| Decode (short/medium/long) | 3.01 / 2.63 / 2.30 tok/s | 3.11 / 2.98 / 2.73 tok/s ᵂ | 4.47 / 3.94 / 3.51 tok/s |
+
+ᵂ warmup-pass figure: the measured pass of that cell landed in the box's slow
+regime (see [the sweep findings](docs/PLE2BIT_SWEEP_IO_FINDINGS.md)); healthy
+warmup and measured passes agree within a few percent.
+
+3-bit is again the quality-neutral step: 14 GiB off the install and 8-19%
+more decode speed for one problem of base pass@1 and no HumanEval+ change.
+2-bit is a genuine trade here — another 14 GiB and the fastest decode of the
+three (+44% over 3-bit on the short case) for ~10 points on both metrics, the
+same penalty it charged on 3.6. Absolute decode is far below the 3.6's
+because the 125B's expert set is far larger, so much less of each token's
+0.74-1.33 GB read comes from cache; the leftmost column of
+[the sweep findings](docs/PLE2BIT_SWEEP_IO_FINDINGS.md) documents what that
+costs over a full run.
 
 ## The Qwen 3.8 Flash-Next 125B port
 
@@ -893,6 +921,7 @@ Useful entry points:
 - [Benchmarks](docs/BENCHMARKS.md)
 - [The experiments that shaped the engine](docs/OPTIMIZATION_JOURNEY.md)
 - [Experiment inventory and summaries](docs/experiments/EXPERIMENT_INVENTORY.md)
+- [Why the ple2bit sweep crawls — I/O findings and the era regression](docs/PLE2BIT_SWEEP_IO_FINDINGS.md)
 - [Implementation references](docs/IMPLEMENTATION_REFERENCES.md)
 
 ## License and model terms

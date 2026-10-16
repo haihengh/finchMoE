@@ -26,6 +26,35 @@ bit-reproducible regime (Phase 5.3). Decode-time PLE traffic fell 5120 -> 1600 B
 per token, measured on both installs (Phase 6.3). The later batched int8
 projection kernel re-measured the same install at 0.951 / 0.921.
 
+## Routed-expert width: the 3-bit and 2-bit results (2026-10-09; 2-bit 2026-10-15)
+
+The shipping install was re-repacked with **3-bit routed experts**
+(`FinchMoERepack --routed-expert-bits 3`,
+`models/Qwen3.8-Flash-Next-125B-ple3bit.finch`, 83 GiB), then with **2-bit**
+(`-ple2bit.finch`, 69 GiB), and both were run through the identical EvalPlus
+harness (greedy, T=0, one sample, 768-token cap):
+
+| Install | HumanEval | HumanEval+ | Size |
+| --- | ---: | ---: | ---: |
+| Raw-BF16 PLE | 0.945 (155/164) | 0.921 (151/164) | 162 GiB |
+| int4 PLE (shipping) | 0.945 (155/164) | 0.909 (149/164) | 97 GiB |
+| int4 PLE + 3-bit experts | 0.933 (153/164) | 0.909 (149/164) | 83 GiB |
+| int4 PLE + 2-bit experts | **0.835 (137/164)** | **0.799 (131/164)** | 69 GiB |
+
+3-bit routed experts cost two problems against the bf16-PLE upper bound and
+nothing at all against the shipping int4-PLE install on HumanEval+ — the same
+magnitude the 3.6 3-bit build showed — for another 14 GiB off the install.
+
+**2-bit, measured over the full 164 on 2026-10-15, does not hold that line:**
+0.835 / 0.799, ~10 pp down on both metrics — the same penalty 2-bit charged on
+the 3.6 family (0.768 / 0.707 against 3-bit's 0.909 / 0.866). The 66-problem
+partial that first came in (0.955 / 0.894) was optimistic and should not be
+cited. What 2-bit buys: another 14 GiB and the fastest decode of the three
+(TG 4.47 / 3.94 / 3.51 tok/s vs 3.11 / 2.98 / 2.73 and 3.01 / 2.63 / 2.30 for
+short / medium / long prompts, bench-mini protocol, 2026-10-15). **3-bit
+remains the quality-neutral step down; 2-bit is a size/speed trade with a real
+quality cost.**
+
 ## 0. Problem statement, measured
 
 The install is 162 GiB, split three ways:
@@ -800,7 +829,9 @@ regardless.
   codebase's int4/int8 floor.
 - Does not attempt sub-4-bit PLE quantization (e.g. int2/int3) — the group
   size problem in §2 is hard enough at int4; going lower is a follow-up to
-  consider only after this lands and is measured.
+  consider only after this lands and is measured. (This is the PLE *n-gram
+  table*; the **routed experts** are a separate axis and have since gone to
+  int3 and int2 — see the width section above.)
 - Does not change the hash/n-gram routing logic (`PLEHost` position/token
   hashing) — only how a selected row's bytes are stored and decoded.
 - Does not change the Metal-side gate/conv/plane-add kernels in
