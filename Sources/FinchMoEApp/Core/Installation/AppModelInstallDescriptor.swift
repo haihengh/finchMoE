@@ -418,7 +418,7 @@ private let qwen38TwoBitDistribution = FinchDistribution(
 
 private let qwen38ThreeBitAbliteratedDistribution = FinchDistribution(
     repoID: "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple3bit-abliterated",
-    revision: "PENDING-UPLOAD-REPLACE-ME",
+    revision: "bd44261f4daff0652bda83fcd023c4485b4a258d",
     approximateDownloadBytes: 89_104_597_905,
     installedBytes: 89_104_658_029)
 
