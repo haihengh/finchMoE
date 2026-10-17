@@ -154,7 +154,7 @@ import FinchMoERepackCore
       return
     }
     #expect(distribution.repoID == "haihengh/Qwen3.6-35B-A3B-finch-3bit")
-    #expect(distribution.revision == "PENDING-UPLOAD-REPLACE-ME")
+    #expect(distribution.revision == "8a6734f672742102dcb42ec8c106f10f3a83182d")
     #expect(distribution.approximateDownloadBytes == 16_032_957_550)
     #expect(descriptor.approximateDownloadBytes == 16_032_957_550)
   }
