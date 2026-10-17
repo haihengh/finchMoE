@@ -202,11 +202,14 @@ Supporting tools (all in `scratch/`):
   2026-10-14:** the internal-storage A/B (§5) ran the same install off a
   55%-full NVMe and produced identical slow-regime numbers, so fill level buys
   nothing measurable for reads.
-- **The era regression's root cause** (§10). The decisive control — the current
-  engine running the *int4* ple4bit install, ~10 HumanEval problems against its
-  Sep 15 baseline of 147 s/request — had not been run when this was written.
-  Fast today would implicate the int3-era engine commits; slow would point at
-  the OS/engine-wide change.
+- **The era regression's root cause** (§10). **Half-answered 2026-10-17:** the
+  control ran — the current engine on the *int4* ple4bit install did ten
+  problems at a mean 92.9 s (60-121 s, zero stalls) under the same OS and
+  engine build that produce 550-2062 s means on int3/int2, so the regression is
+  specific to the int3/int2 expert path, not the OS or the machine. What
+  remains is the *mechanism*: whether the int3/int2 path issues different or
+  larger reads per token. That is the first bullet, now aimed at a
+  codec-versus-codec comparison.
 - **Product exposure.** The app runs the same engine on the same class of
   machine; a request that takes 80 minutes to answer is a hang from the user's
   point of view — and the sweep's worst was 125 minutes (7,529 s). If 3.8
@@ -284,17 +287,22 @@ codecs read *fewer* bytes per token (0.74 / 1.04 GB against 1.33); and the fast
 mode still reaches 2.2-2.7 tok/s under the new codecs, so the decode kernels
 are not slow. What changed is the cache/IO *regime*, not compute.
 
-**The OS change is the sharper suspect**, because the engine's speed is
-measurably a page-cache phenomenon — F_NOCACHE *loses* 12% tok/s (§3), the
-streamer's reads are 41.7% repeats with a median reuse distance of ~4 GiB — and
-because the regression is device-independent: a 55%-full internal NVMe is
-exactly as slow as the 93%-full external one (§5). A VM or readahead policy
-change would look precisely like this. Ruled out: drive fill (§5), Time Machine
-(off, no local snapshots), Spotlight (disabled on the model volume), swap (0),
-background processes (nothing above 0.5%).
+**The control has now been run (2026-10-17), and it settles it: the regression
+belongs to the int3/int2 expert path, not to the OS or the machine.** The
+current engine on the *int4* ple4bit install — same box, same external SSD,
+same OS, same engine build that produced 550-2062 s means on int3/int2 — ran
+ten HumanEval problems at 60-121 s each, **mean 92.9 s, zero stalls**. That is
+*faster* than its own Sep 15 baseline (147 s; the 2026-09-17 batched-int8
+prefill work accounts for the gain), measured after macOS 27.0.1 had been in
+place for two weeks. A macOS or VM change would have slowed this control too;
+it did not.
 
-The decisive control has not been run: the current engine on the *int4* ple4bit
-install, ~10 problems against its Sep 15 baseline (147 s/request). Fast today
-would implicate the int3-era engine commits; slow would point at the
-OS/engine-wide change. It is the first entry in §8 and it gates any claim about
-the cause.
+So the earlier "OS is the sharper suspect" reading is retired. What the codec
+era changed that turns the same reads (routing is identical; int2/int3 even
+read *fewer* bytes per token) into a 4-20x wall-clock difference is still
+unknown, and it is the mechanism behind §4's 13x amplification: the int3/int2
+path must be issuing different or larger reads than the int4 path. The next
+measurement is the §8 pread/advise count, now aimed at int4-versus-int3
+sideness rather than at the box. Ruled out along the way: drive fill (§5),
+the OS update (this control), Time Machine (off), Spotlight (disabled on the
+model volume), swap (0), background processes (nothing above 0.5%).
