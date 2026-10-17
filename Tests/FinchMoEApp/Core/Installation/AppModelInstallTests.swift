@@ -298,7 +298,7 @@ import FinchMoERepackCore
     }
     #expect(threeBitDistribution.repoID
               == "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple3bit")
-    #expect(threeBitDistribution.revision == "PENDING-UPLOAD-REPLACE-ME")
+    #expect(threeBitDistribution.revision == "80a63e6294655af8a9424ce1307478d294d9e463")
     #expect(threeBitDistribution.approximateDownloadBytes == 89_104_597_905)
 
     let qwen38TwoBit = AppModelInstallDescriptor.qwen3_8_2bit
