@@ -246,7 +246,7 @@ import FinchMoERepackCore
     }
     #expect(qwen36ThreeBitDistribution.repoID
               == "haihengh/Qwen3.6-35B-A3B-finch-3bit-abliterated")
-    #expect(qwen36ThreeBitDistribution.revision == "PENDING-UPLOAD-REPLACE-ME")
+    #expect(qwen36ThreeBitDistribution.revision == "0c9e9701c0f609df2ae65fa232ab9b615401b8d5")
     #expect(qwen36ThreeBitDistribution.approximateDownloadBytes == 16_032_957_550)
 
     let qwen38 = AppModelInstallDescriptor.qwen3_8_abliterated
