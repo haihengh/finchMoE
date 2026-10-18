@@ -81,6 +81,19 @@ import FinchMoE
         return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
     }
 
+    /// The sweep reads the frozen prompts from `docs/benchmark-prompts/`, which
+    /// the engine repo carries but the app repo does not — the sync policy maps
+    /// code, not `docs/`. Gate the run on the fixtures exactly as it is gated
+    /// on the install below: a checkout without them is "not this checkout",
+    /// not a failure. This is what keeps the mirrored copy of this file green
+    /// in the app repo's test job.
+    static let promptsExist: Bool = {
+        let fixtures = repoRoot()
+            .appendingPathComponent("docs/benchmark-prompts/real-generation-v1")
+        return FileManager.default.fileExists(
+            atPath: fixtures.appendingPathComponent("short-explanation.json").path)
+    }()
+
     /// `hw.model` — the README's rows are keyed by it, so log lines from
     /// different hosts stay comparable when pasted next to each other.
     static func hardwareModel() -> String {
@@ -244,13 +257,13 @@ import FinchMoE
         await client.unload()
     }
 
-    @Test(.enabled(if: models[0].installExists), .timeLimit(.minutes(60)))
+    @Test(.enabled(if: models[0].installExists && promptsExist), .timeLimit(.minutes(60)))
     func qwen36ColdAndHot() async throws {
         Self.log("[BENCH model=\(Self.models[0].label) host=\(Self.hardwareModel())]")
         try await Self.sweep(Self.models[0])
     }
 
-    @Test(.enabled(if: models[1].installExists), .timeLimit(.minutes(120)))
+    @Test(.enabled(if: models[1].installExists && promptsExist), .timeLimit(.minutes(120)))
     func qwen38ColdAndHot() async throws {
         Self.log("[BENCH model=\(Self.models[1].label) host=\(Self.hardwareModel())]")
         try await Self.sweep(Self.models[1])
