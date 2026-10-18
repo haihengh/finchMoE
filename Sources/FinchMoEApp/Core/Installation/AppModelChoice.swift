@@ -41,35 +41,29 @@ public enum AppModelChoice: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    public func defaultURL(packageRoot: URL) -> URL {
+    /// Basename of the row's install directory. The single source of truth for
+    /// `defaultURL(packageRoot:)` in a checkout and for the app-owned
+    /// destination the picker uses outside one, so the two cannot drift.
+    var installName: String {
         switch self {
-        case .gemma4:
-            return packageRoot.appendingPathComponent("scratch/gemma4.finch", isDirectory: true)
-        case .qwen3_6:
-            return packageRoot.appendingPathComponent("models/Qwen3.6-35B-A3B-4bit.finch", isDirectory: true)
-        case .qwen3_6_3bit:
-            return packageRoot.appendingPathComponent("models/Qwen3.6-35B-A3B-3bit.finch", isDirectory: true)
-        case .qwen3_6_abliterated:
-            return packageRoot.appendingPathComponent("models/Qwen3.6-35B-A3B-abliterated-4bit.finch",
-                                                      isDirectory: true)
-        case .qwen3_6_abliterated_3bit:
-            return packageRoot.appendingPathComponent("models/Qwen3.6-35B-A3B-abliterated-3bit.finch",
-                                                      isDirectory: true)
-        case .qwen3_8:
-            return packageRoot.appendingPathComponent("models/Qwen3.8-Flash-Next-125B-ple4bit.finch", isDirectory: true)
-        case .qwen3_8_3bit:
-            return packageRoot.appendingPathComponent("models/Qwen3.8-Flash-Next-125B-ple3bit.finch", isDirectory: true)
-        case .qwen3_8_2bit:
-            return packageRoot.appendingPathComponent("models/Qwen3.8-Flash-Next-125B-ple2bit.finch", isDirectory: true)
-        case .qwen3_8_abliterated:
-            return packageRoot.appendingPathComponent("models/Qwen3.8-Flash-Next-abliterated-ple4bit.finch",
-                                                      isDirectory: true)
-        case .qwen3_8_abliterated_3bit:
-            return packageRoot.appendingPathComponent("models/Qwen3.8-Flash-Next-abliterated-ple3bit.finch",
-                                                      isDirectory: true)
-        case .qwen3_8_abliterated_2bit:
-            return packageRoot.appendingPathComponent("models/Qwen3.8-Flash-Next-abliterated-ple2bit.finch",
-                                                      isDirectory: true)
+        case .gemma4: return "gemma4.finch"
+        case .qwen3_6: return "Qwen3.6-35B-A3B-4bit.finch"
+        case .qwen3_6_3bit: return "Qwen3.6-35B-A3B-3bit.finch"
+        case .qwen3_6_abliterated: return "Qwen3.6-35B-A3B-abliterated-4bit.finch"
+        case .qwen3_6_abliterated_3bit: return "Qwen3.6-35B-A3B-abliterated-3bit.finch"
+        case .qwen3_8: return "Qwen3.8-Flash-Next-125B-ple4bit.finch"
+        case .qwen3_8_3bit: return "Qwen3.8-Flash-Next-125B-ple3bit.finch"
+        case .qwen3_8_2bit: return "Qwen3.8-Flash-Next-125B-ple2bit.finch"
+        case .qwen3_8_abliterated: return "Qwen3.8-Flash-Next-abliterated-ple4bit.finch"
+        case .qwen3_8_abliterated_3bit: return "Qwen3.8-Flash-Next-abliterated-ple3bit.finch"
+        case .qwen3_8_abliterated_2bit: return "Qwen3.8-Flash-Next-abliterated-ple2bit.finch"
         }
+    }
+
+    public func defaultURL(packageRoot: URL) -> URL {
+        let folder = self == .gemma4 ? "scratch" : "models"
+        return packageRoot
+            .appendingPathComponent(folder, isDirectory: true)
+            .appendingPathComponent(installName, isDirectory: true)
     }
 }

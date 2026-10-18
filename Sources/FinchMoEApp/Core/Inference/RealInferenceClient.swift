@@ -372,9 +372,10 @@ actor RealInferenceSession {
             // How this turn starts: on the retained prefix when it can be
             // proven to match what decode wrote, otherwise from scratch. A
             // miss also drops the entry — the reset below is what makes it
-            // unusable.
+            // unusable. The request flag is the user's setting (live, per
+            // turn); the stored one is the process-level override.
             var resolved: (promptIDs: [Int32], start: RawCompletionStart, cached: Int)?
-            if promptReuseEnabled {
+            if promptReuseEnabled, request.promptReuseEnabled {
                 switch promptCache.match(sessionKey: loadedKey,
                                          messages: messages,
                                          renderedPromptIDs: renderedPromptIDs) {

@@ -47,6 +47,9 @@ public final class AppModel {
     public var topK: Int = 64
     public var topPEnabled: Bool = true
     public var topP: Double = 0.95
+    /// Whether a chat turn may resume from the previous turn's retained KV
+    /// prefix. Live: applied per request, no model reload on change.
+    public var promptReuseEnabled: Bool = true
     public private(set) var newlineShortcut: AppNewlineShortcut = .return
     public private(set) var sentPromptBehavior: AppSentPromptBehavior = .clear
     /// Every conversation, newest first. Never empty: an empty list is
@@ -132,6 +135,7 @@ public final class AppModel {
         self.topP = settings.topP
         self.newlineShortcut = settings.newlineShortcut
         self.sentPromptBehavior = settings.sentPromptBehavior
+        self.promptReuseEnabled = settings.promptReuseEnabled
         self.installationStatus = AppModelInstallationProbe.status(at: directory,
                                                                     descriptor: descriptor)
         self.client = client
@@ -348,8 +352,13 @@ public final class AppModel {
     }
 
     public func setModelChoice(_ choice: AppModelChoice) {
-        guard let packageRootURL else { return }
-        setModelURL(choice.defaultURL(packageRoot: packageRootURL), descriptor: choice.descriptor)
+        // A checkout resolves rows against `models/`; an app bundle (iOS) has
+        // no checkout, so the row resolves to the app-owned Models directory.
+        // Gating on `packageRootURL` here is what made every iOS selection a
+        // silent no-op.
+        setModelURL(
+            AppModelLocation.installURL(for: choice, packageRoot: packageRootURL),
+            descriptor: choice.descriptor)
     }
 
     public func setModelURL(_ url: URL) {
@@ -726,6 +735,13 @@ public final class AppModel {
             installState = .installed(modelDirectory: directory)
             installTask = nil
             modelPathText = directory.path
+            // The installer promotes into a `realpath`-resolved directory,
+            // which can differ from the row's logical path (the checkout's
+            // `models/` is a symlink; on iOS `/var` is). `modelChoice`
+            // canonicalizes both sides, so this cannot clear a correct
+            // highlight.
+            selectedModelChoice = Self.modelChoice(for: directory,
+                                                   descriptor: installer.descriptor)
             loadState = .notLoaded
         }
     }
@@ -795,6 +811,7 @@ public final class AppModel {
         topP = settings.topP
         newlineShortcut = settings.newlineShortcut
         sentPromptBehavior = settings.sentPromptBehavior
+        promptReuseEnabled = settings.promptReuseEnabled
     }
 
     private func persistSettings() {
@@ -808,6 +825,9 @@ public final class AppModel {
             topPEnabled: topPEnabled,
             topP: topP,
             prefillEnabled: runtimeOptions.prefillEnabled,
+            prefillChunkTokens: runtimeOptions.prefillChunkTokens,
+            expertCachePolicy: runtimeOptions.expertCachePolicy,
+            promptReuseEnabled: promptReuseEnabled,
             modelVerification: runtimeOptions.modelVerification,
             newlineShortcut: newlineShortcut,
             sentPromptBehavior: sentPromptBehavior,
@@ -952,7 +972,8 @@ public final class AppModel {
             topK: topKEnabled ? topK : nil,
             topP: topKEnabled && topPEnabled ? Float(topP) : nil,
             repetitionPenalty: 1.0,
-            runtimeOptions: runtimeOptions)
+            runtimeOptions: runtimeOptions,
+            promptReuseEnabled: promptReuseEnabled)
         try request.validate(requireModelDirectory: true)
         return request
     }
@@ -1058,13 +1079,30 @@ public final class AppModel {
         return RepackModelInstallerClient(descriptor: descriptor)
     }
 
+    /// A row's destination is checkout-relative on the Mac and app-owned inside
+    /// a bundle; both sides are canonicalized before comparing, because
+    /// installers hand back `realpath`-resolved directories (the checkout's
+    /// `models/` is a symlink here, and `/var` is one on iOS) while the row
+    /// path is the logical one.
     private static func modelChoice(for directory: URL,
                                     descriptor: AppModelInstallDescriptor) -> AppModelChoice? {
-        guard let root = AppModelLocation.packageRootURL() else { return nil }
-        return AppModelChoice.allCases.first {
-            $0.descriptor == descriptor
-                && $0.defaultURL(packageRoot: root).standardizedFileURL == directory.standardizedFileURL
+        let directory = canonicalURL(directory)
+        let candidates = AppModelChoice.allCases.filter { $0.descriptor == descriptor }
+        if let root = AppModelLocation.packageRootURL() {
+            return candidates.first {
+                canonicalURL($0.defaultURL(packageRoot: root)) == directory
+            }
         }
+        let support = AppModelLocation.applicationSupportURL()
+        return candidates.first {
+            canonicalURL(AppModelLocation.appInstallURL(for: $0,
+                                                        applicationSupportURL: support))
+                == directory
+        }
+    }
+
+    private static func canonicalURL(_ url: URL) -> URL {
+        url.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL
     }
 
     #if canImport(AppKit)

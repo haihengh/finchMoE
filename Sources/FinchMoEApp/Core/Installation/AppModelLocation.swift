@@ -14,20 +14,64 @@ enum AppModelLocation {
                            fileExists: fileManager.fileExists(atPath:))
     }
 
-    static func defaultURL() -> URL {
+    /// `<Application Support>` (not created), with the same home-directory
+    /// fallback this code has always used.
+    static func applicationSupportURL() -> URL {
         let fileManager = FileManager.default
-        let applicationSupport = (try? fileManager.url(
+        return (try? fileManager.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,
             appropriateFor: nil,
             create: false)) ?? fileManager.finchHomeDirectory
+    }
+
+    static func defaultURL() -> URL {
+        let fileManager = FileManager.default
         return resolve(
             explicitURL: nil,
             executableURL: Bundle.main.executableURL,
             currentDirectoryURL: URL(fileURLWithPath: fileManager.currentDirectoryPath,
                                      isDirectory: true),
-            applicationSupportURL: applicationSupport,
+            applicationSupportURL: applicationSupportURL(),
             fileExists: fileManager.fileExists(atPath:))
+    }
+
+    /// The app-owned models directory, used when no package checkout exists
+    /// (an `.app` bundle — notably iOS). Nothing is created here; the
+    /// installers create their destination's parents on demand.
+    static func appModelsRootURL(
+        applicationSupportURL: URL = AppModelLocation.applicationSupportURL()
+    ) -> URL {
+        applicationSupportURL
+            .appendingPathComponent("FinchMoE", isDirectory: true)
+            .appendingPathComponent("Models", isDirectory: true)
+    }
+
+    /// Where a row installs and starts from when there is no checkout. Gemma
+    /// keeps its existing legacy path so downloads made before the app-owned
+    /// rows existed are not moved; every Qwen row lives under `Models/`.
+    static func appInstallURL(
+        for choice: AppModelChoice,
+        applicationSupportURL: URL = AppModelLocation.applicationSupportURL()
+    ) -> URL {
+        let base = choice == .gemma4
+            ? applicationSupportURL.appendingPathComponent("FinchMoE", isDirectory: true)
+            : appModelsRootURL(applicationSupportURL: applicationSupportURL)
+        return base.appendingPathComponent(choice.installName, isDirectory: true)
+            .standardizedFileURL
+    }
+
+    /// One resolver for both worlds: a checkout keeps the historical row paths,
+    /// an app bundle gets the app-owned destination.
+    static func installURL(
+        for choice: AppModelChoice,
+        packageRoot: URL?,
+        applicationSupportURL: URL = AppModelLocation.applicationSupportURL()
+    ) -> URL {
+        if let packageRoot {
+            return choice.defaultURL(packageRoot: packageRoot)
+        }
+        return appInstallURL(for: choice, applicationSupportURL: applicationSupportURL)
     }
 
     static func resolve(explicitURL: URL?,
@@ -46,10 +90,8 @@ enum AppModelLocation {
         if let root = packageRoot(startingAt: currentDirectoryURL, fileExists: fileExists) {
             return preferredInstallURL(inPackageRoot: root, fileExists: fileExists)
         }
-        return applicationSupportURL
-            .appendingPathComponent("FinchMoE", isDirectory: true)
-            .appendingPathComponent("gemma4.finch", isDirectory: true)
-            .standardizedFileURL
+        return preferredAppInstallURL(applicationSupportURL: applicationSupportURL,
+                                      fileExists: fileExists)
     }
 
     /// The app's default model inside a package checkout: a repack-made Qwen
@@ -85,27 +127,52 @@ enum AppModelLocation {
     /// working rather than fall through to Gemma.
     private static func preferredInstallURL(inPackageRoot root: URL,
                                             fileExists: (String) -> Bool) -> URL {
-        let installed = [
-            "models/Qwen3.6-35B-A3B-abliterated-4bit.finch",
-            "models/Qwen3.6-35B-A3B-abliterated-3bit.finch",
-            "models/Qwen3.6-35B-A3B-4bit.finch",
-            "models/Qwen3.6-35B-A3B-3bit.finch",
-            "models/Qwen3.8-Flash-Next-abliterated-ple4bit.finch",
-            "models/Qwen3.8-Flash-Next-abliterated-ple3bit.finch",
-            "models/Qwen3.8-Flash-Next-abliterated-ple2bit.finch",
-            "models/Qwen3.8-Flash-Next-125B-ple4bit.finch",   // 97 GiB, int4 PLE
-            "models/Qwen3.8-Flash-Next-125B-ple3bit.finch",   // 83 GiB, int3 PLE
-            "models/Qwen3.8-Flash-Next-125B-ple2bit.finch",   // 69 GiB, int2 PLE
-            "models/Qwen3.8-Flash-Next-125B.finch",           // 162 GiB, raw BF16 PLE (fallback)
-        ]
-        for relative in installed {
-            let candidate = root.appendingPathComponent(relative, isDirectory: true)
+        let models = root.appendingPathComponent("models", isDirectory: true)
+        for name in preferredInstallNames {
+            let candidate = models.appendingPathComponent(name, isDirectory: true)
             if fileExists(candidate.appendingPathComponent("manifest.json").path) {
                 return candidate.standardizedFileURL
             }
         }
         return root.appendingPathComponent("scratch/gemma4.finch", isDirectory: true)
             .standardizedFileURL
+    }
+
+    /// The launch preference order — 3.6 family before 3.8, abliterated before
+    /// base within a family, narrower widths behind their 4-bit sibling, the
+    /// quantized-PLE installs before the raw-BF16 fallback. Shared by the
+    /// checkout scan above and the app-owned scan below so the two cannot
+    /// disagree about which installed model wins at launch.
+    ///
+    /// These are the ten picker rows' install names, in that order.
+    private static let preferredChoices: [AppModelChoice] = [
+        .qwen3_6_abliterated, .qwen3_6_abliterated_3bit,
+        .qwen3_6, .qwen3_6_3bit,
+        .qwen3_8_abliterated, .qwen3_8_abliterated_3bit, .qwen3_8_abliterated_2bit,
+        .qwen3_8, .qwen3_8_3bit, .qwen3_8_2bit,
+    ]
+
+    /// Rowless raw-BF16-PLE 3.8 install (162 GiB): the last Qwen entry in the
+    /// checkout scan, kept in the app scan for parity. It has no picker row.
+    private static let rawQwen38InstallName = "Qwen3.8-Flash-Next-125B.finch"
+
+    private static let preferredInstallNames: [String] =
+        preferredChoices.map(\.installName) + [rawQwen38InstallName]
+
+    /// The app-owned equivalent of `preferredInstallURL`: outside a checkout,
+    /// launch preference is re-derived by scanning the app's Models directory
+    /// in the same order. Nothing installed returns the Gemma fallback path
+    /// (installed or not), exactly like the checkout scan.
+    private static func preferredAppInstallURL(applicationSupportURL: URL,
+                                               fileExists: (String) -> Bool) -> URL {
+        let modelsRoot = appModelsRootURL(applicationSupportURL: applicationSupportURL)
+        for name in preferredInstallNames {
+            let candidate = modelsRoot.appendingPathComponent(name, isDirectory: true)
+            if fileExists(candidate.appendingPathComponent("manifest.json").path) {
+                return candidate.standardizedFileURL
+            }
+        }
+        return appInstallURL(for: .gemma4, applicationSupportURL: applicationSupportURL)
     }
 
     private static func absoluteURL(_ url: URL, relativeTo base: URL) -> URL {

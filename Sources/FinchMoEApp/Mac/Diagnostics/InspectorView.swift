@@ -34,7 +34,12 @@ struct InspectorView: View {
     private var form: some View {
         Form {
             modelSection
+            #if canImport(AppKit)
+            // The local HTTP server is a sibling process, a mechanism that only
+            // exists on macOS. The iOS app talks to the engine in-process, so
+            // there is nothing to host — the section is not shown at all there.
             serverSection
+            #endif
             memorySection
             generationSection
             runtimeSection
@@ -74,6 +79,7 @@ struct InspectorView: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
+                .accessibilityIdentifier("model-preset-picker")
             }
             HStack {
                 Button {
@@ -120,13 +126,9 @@ struct InspectorView: View {
         .disabled(model.isRunning || model.isInstallingModel)
     }
 
+    #if canImport(AppKit)
     private var serverSection: some View {
         Section("Local server") {
-            if !AppModel.localServerIsSupported {
-                Text("The local HTTP server runs as a separate process, so it is available in the Mac app. This app talks to the engine in-process.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
             LabeledContent("Port") {
                 Stepper(value: $model.localServerPort, in: 1...65_535, step: 1) {
                     Text("\(model.localServerPort)").monospacedDigit()
@@ -169,6 +171,7 @@ struct InspectorView: View {
         }
         .disabled(model.isRunning || model.loadState.isLoading)
     }
+    #endif
 
     private var memorySection: some View {
         Section("Memory") {
@@ -206,6 +209,15 @@ struct InspectorView: View {
                 Picker("Slots", selection: $model.runtimeOptions.expertCacheSlots) {
                     ForEach(AppRuntimeOptions.allowedSlotCounts, id: \.self) { slots in
                         Text(AppRuntimeOptions.slotsLabel(for: slots)).tag(slots)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+            }
+            LabeledContent("Eviction") {
+                Picker("Eviction", selection: $model.runtimeOptions.expertCachePolicy) {
+                    ForEach(AppExpertCachePolicy.allCases) { policy in
+                        Text(policy == .lfu ? "LFU (default)" : policy.label).tag(policy)
                     }
                 }
                 .pickerStyle(.menu)
@@ -260,6 +272,22 @@ struct InspectorView: View {
     private var runtimeSection: some View {
         Section("Runtime") {
             Toggle("Prefill", isOn: $model.runtimeOptions.prefillEnabled)
+            if model.runtimeOptions.prefillEnabled {
+                LabeledContent("Prefill chunk") {
+                    Picker("Prefill chunk", selection: $model.runtimeOptions.prefillChunkTokens) {
+                        ForEach(AppRuntimeOptions.allowedPrefillChunkTokens, id: \.self) { tokens in
+                            Text(tokens == 512 ? "\(tokens) (default)" : "\(tokens)")
+                                .tag(tokens)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                }
+            }
+            Toggle("Reuse prompt cache", isOn: $model.promptReuseEnabled)
+            Text("Keeps the previous turn's cache and continues from it, so a follow-up only prefills what is new instead of re-processing the whole conversation. Applies from the next message; no reload needed.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             LabeledContent("RDADVISE") {
                 Picker("RDADVISE", selection: $model.runtimeOptions.rdadvisePolicy) {
                     ForEach(AppRDAdvicePolicy.allCases) { policy in

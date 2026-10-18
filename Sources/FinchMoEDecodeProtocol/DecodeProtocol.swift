@@ -69,12 +69,16 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     public var temperature: Float
     public var repetitionPenalty: Float
     public var runtimeOptions: DecodeRuntimeOptions
+    /// Per-turn override of the prefix-reuse setting. Absent on the wire
+    /// (or from an older app) means the service's default: reuse on.
+    public var promptReuseEnabled: Bool?
     public var generationID: UUID
 
     public init(prompt: String, history: [DecodeChatTurn] = [],
                 maxNewTokens: Int, maxContextTokens: Int,
                 temperature: Float, repetitionPenalty: Float = 1,
                 runtimeOptions: DecodeRuntimeOptions = DecodeRuntimeOptions(),
+                promptReuseEnabled: Bool? = nil,
                 generationID: UUID = UUID()) {
         self.prompt = prompt
         self.history = history
@@ -83,12 +87,14 @@ public struct DecodeGenerationRequest: Codable, Sendable {
         self.temperature = temperature
         self.repetitionPenalty = repetitionPenalty
         self.runtimeOptions = runtimeOptions
+        self.promptReuseEnabled = promptReuseEnabled
         self.generationID = generationID
     }
 
     private enum CodingKeys: String, CodingKey {
         case prompt, history, maxNewTokens, maxContextTokens
-        case temperature, repetitionPenalty, runtimeOptions, generationID
+        case temperature, repetitionPenalty, runtimeOptions
+        case promptReuseEnabled, generationID
     }
 
     public init(from decoder: Decoder) throws {
@@ -102,6 +108,8 @@ public struct DecodeGenerationRequest: Codable, Sendable {
         repetitionPenalty = try container.decode(Float.self, forKey: .repetitionPenalty)
         runtimeOptions = try container.decode(
             DecodeRuntimeOptions.self, forKey: .runtimeOptions)
+        promptReuseEnabled = try container.decodeIfPresent(
+            Bool.self, forKey: .promptReuseEnabled)
         generationID = try container.decode(UUID.self, forKey: .generationID)
     }
 }

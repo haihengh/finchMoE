@@ -106,6 +106,7 @@ struct ModelInstallView: View {
                 .lineLimit(2)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("model-path")
         }
         .padding(18)
         .background {
