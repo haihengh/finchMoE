@@ -211,6 +211,15 @@ struct InspectorView: View {
                 .pickerStyle(.menu)
                 .labelsHidden()
             }
+            LabeledContent("Eviction") {
+                Picker("Eviction", selection: $model.runtimeOptions.expertCachePolicy) {
+                    ForEach(AppExpertCachePolicy.allCases) { policy in
+                        Text(policy == .lfu ? "LFU (default)" : policy.label).tag(policy)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+            }
             Text("More slots can improve decode speed by keeping more experts in memory, but they also use more RAM. Changes are compared with 4K context and 16 slots and apply after reloading the model.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -260,6 +269,22 @@ struct InspectorView: View {
     private var runtimeSection: some View {
         Section("Runtime") {
             Toggle("Prefill", isOn: $model.runtimeOptions.prefillEnabled)
+            if model.runtimeOptions.prefillEnabled {
+                LabeledContent("Prefill chunk") {
+                    Picker("Prefill chunk", selection: $model.runtimeOptions.prefillChunkTokens) {
+                        ForEach(AppRuntimeOptions.allowedPrefillChunkTokens, id: \.self) { tokens in
+                            Text(tokens == 512 ? "\(tokens) (default)" : "\(tokens)")
+                                .tag(tokens)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                }
+            }
+            Toggle("Reuse prompt cache", isOn: $model.promptReuseEnabled)
+            Text("Keeps the previous turn's cache and continues from it, so a follow-up only prefills what is new instead of re-processing the whole conversation. Applies from the next message; no reload needed.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             LabeledContent("RDADVISE") {
                 Picker("RDADVISE", selection: $model.runtimeOptions.rdadvisePolicy) {
                     ForEach(AppRDAdvicePolicy.allCases) { policy in

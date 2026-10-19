@@ -109,7 +109,14 @@ import Testing
     }
 
     @MainActor
-    @Test func requestTimePrefillChangeDoesNotMarkReadySessionStale() {
+    @Test func requestTimePrefillChangeMarksReadySessionStale() {
+        // The engine builds chunked-prefill scratch from the chunk size when
+        // the runner is loaded and its session guard rejects any runtime
+        // option change afterwards (`RealInferenceClient`'s
+        // `loadedKey == requestKey`), so a prefill change on a ready session
+        // cannot be served without a reload. Tracking it here is what makes
+        // the Inspector show "Reload required" instead of letting the next
+        // generation fail late with `reloadRequired`.
         let model = AppModel(client: MockLifecycleInferenceClient())
         let directory = FileManager.default.temporaryDirectory
         model.modelPathText = directory.path
@@ -117,7 +124,7 @@ import Testing
 
         model.runtimeOptions.prefillEnabled = false
 
-        #expect(!model.hasStaleLoadedRuntime)
+        #expect(model.hasStaleLoadedRuntime)
     }
 
     @MainActor

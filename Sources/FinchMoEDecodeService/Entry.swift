@@ -109,7 +109,8 @@ import FinchMoEDecodeProtocol
                         maxContextTokens: request.maxContextTokens,
                         temperature: request.temperature,
                         repetitionPenalty: request.repetitionPenalty,
-                        runtimeOptions: options)
+                        runtimeOptions: options,
+                        promptReuseEnabled: request.promptReuseEnabled ?? true)
                     for try await event in client.generate(generation) {
                         outbox.publish(event)
                     }

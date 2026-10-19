@@ -107,6 +107,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         temperature: request.temperature,
                         repetitionPenalty: request.repetitionPenalty,
                         runtimeOptions: Self.decodeRuntimeOptions(request.runtimeOptions),
+                        promptReuseEnabled: request.promptReuseEnabled,
                         generationID: generationID)
                     try handles.input.write(contentsOf: DecodeFrameCodec.encode(
                         DecodeServiceCommand.generate(command)))

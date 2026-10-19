@@ -1,7 +1,7 @@
 import Foundation
 import FinchMoE
 
-public enum AppExpertCachePolicy: String, CaseIterable, Sendable, Identifiable {
+public enum AppExpertCachePolicy: String, CaseIterable, Codable, Sendable, Identifiable {
     case lfu
     case lru
 
@@ -88,6 +88,15 @@ public enum AppKVCacheMode: String, CaseIterable, Codable, Sendable, Identifiabl
     /// it, so it stays disabled rather than pretending to load.
     public var isAvailable: Bool { self == .fp16 || self == .int8 }
 
+    /// Compact form for the settings summary line.
+    public var shortLabel: String {
+        switch self {
+        case .fp16: return "FP16 KV"
+        case .int8: return "int8 KV"
+        case .turbo4bit: return "4-bit KV"
+        }
+    }
+
     public var kvStorageMode: KVStorageMode {
         switch self {
         case .int8: return .int8
@@ -133,7 +142,9 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     /// setting survived changing models but not relaunching the app.
     init(persisted settings: MacAppSettings) {
         self.init(expertCacheSlots: settings.expertCacheSlots,
+                  expertCachePolicy: settings.expertCachePolicy,
                   prefillEnabled: settings.prefillEnabled,
+                  prefillChunkTokens: settings.prefillChunkTokens,
                   modelVerification: settings.modelVerification,
                   kvCacheMode: settings.kvCacheMode)
     }
@@ -167,7 +178,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         case .fullSha256: verification = "full SHA-256"
         case .trustedInstall: verification = "trusted receipt"
         }
-        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), FP16 KV, RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
+        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), \(kvCacheMode.shortLabel), RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
     }
 
     public static func slotsLabel(for slots: Int) -> String {
@@ -201,6 +212,11 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
     public var rdadvisePolicy: AppRDAdvicePolicy
     public var modelVerification: AppModelVerification
     public var kvCacheMode: AppKVCacheMode
+    /// The engine builds its prefill path from these, so a session loaded
+    /// with one chunk size cannot serve a request built for another — the
+    /// regenerate must be flagged here or the next run fails late instead.
+    public var prefillEnabled: Bool
+    public var prefillChunkTokens: Int
     public var forceLogitsHead: Bool
 
     public init(modelDirectory: URL,
@@ -214,6 +230,8 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
         self.rdadvisePolicy = options.rdadvisePolicy
         self.modelVerification = options.modelVerification
         self.kvCacheMode = options.kvCacheMode
+        self.prefillEnabled = options.prefillEnabled
+        self.prefillChunkTokens = options.prefillChunkTokens
         self.forceLogitsHead = forceLogitsHead
     }
 }
