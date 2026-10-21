@@ -69,6 +69,51 @@ struct QwenTokenizerTests {
         #expect(decoded.contains("Hi"))
     }
 
+    /// Byte-level BPE (Qwen) has no `<0xXX>` byte-fallback tokens, so a
+    /// multi-byte character can be split across ordinary tokens. Decoding the
+    /// prefix after the first half yields U+FFFD; the old detokenizer emitted
+    /// that replacement character and then dropped the completing token, which
+    /// is the diamond-with-question-mark seen in Chinese output. U+4E02 is such
+    /// a character in this vocabulary: E4 B8, then 82.
+    @Test("Streaming detokenizer assembles a character split across tokens",
+          .enabled(if: installExists),
+          arguments: ["丂", "丄", "丅", "丆", "丌", "丏", "丒", "丕", "丗", "丠"])
+    func streamingSplitCharacter(_ character: String) async throws {
+        let tok = try await GFTokenizer.load(forModelDirectory:
+            URL(fileURLWithPath: Self.installPath))
+        let ids = tok.encode(character, addBOS: false)
+        #expect(ids.count > 1, "\(character) is expected to span several tokens")
+
+        var detok = GFDetokenizer(tokenizer: tok)
+        var assembled = ""
+        for id in ids {
+            let delta = detok.push(id)
+            #expect(!delta.unicodeScalars.contains("\u{FFFD}"),
+                    "stream emitted a replacement character for token \(id)")
+            assembled += delta
+        }
+        assembled += detok.flush()
+        #expect(assembled == character)
+    }
+
+    /// The byte-level detokenizer's two primitives: the GPT-2 alphabet inverse
+    /// and the incomplete-scalar suffix counter that decides what to hold back.
+    @Test("Byte-level detokenizer primitives")
+    func byteLevelPrimitives() {
+        #expect(GFDetokenizer.byteLevelBytes("ä¸") == [0xE4, 0xB8])
+        #expect(GFDetokenizer.byteLevelBytes("Ĥ") == [0x82])
+        // A scalar outside the byte alphabet is not a byte-level token.
+        #expect(GFDetokenizer.byteLevelBytes("中") == nil)
+
+        #expect(GFDetokenizer.incompleteUTF8SuffixCount([]) == 0)
+        #expect(GFDetokenizer.incompleteUTF8SuffixCount([0x41]) == 0)
+        #expect(GFDetokenizer.incompleteUTF8SuffixCount([0xE4]) == 1)
+        #expect(GFDetokenizer.incompleteUTF8SuffixCount([0xE4, 0xB8]) == 2)
+        #expect(GFDetokenizer.incompleteUTF8SuffixCount([0xE4, 0xB8, 0x82]) == 0)
+        #expect(GFDetokenizer.incompleteUTF8SuffixCount([0xF0, 0x9F, 0xA6]) == 3)
+        #expect(GFDetokenizer.incompleteUTF8SuffixCount([0xFF]) == 0)
+    }
+
     @Test("Special-token IDs are distinct, in-vocab, and match the checkpoint",
           .enabled(if: installExists))
     func specialTokenIDs() async throws {
