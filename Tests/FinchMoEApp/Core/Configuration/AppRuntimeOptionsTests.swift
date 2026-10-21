@@ -36,6 +36,22 @@ import FinchMoE
         #expect(AppRuntimeOptions().resultSummary.contains("FP16 KV"))
     }
 
+    /// Int8 KV has kernels only on the Qwen 3.6 body. Offering it on a 3.8
+    /// install used to reach the runner's precondition and crash the app on
+    /// Load; the picker and the saved-setting clamp both consult this.
+    @Test func int8KVIsQwen36Only() {
+        #expect(AppKVCacheMode.fp16.isAvailable(for: .gemma4_26B_A4B))
+        #expect(AppKVCacheMode.fp16.isAvailable(for: .qwen3_8_flashNext_125B))
+        #expect(AppKVCacheMode.int8.isAvailable(for: .qwen3_6_35B_A3B))
+        #expect(!AppKVCacheMode.int8.isAvailable(for: .qwen3_8_flashNext_125B))
+        #expect(!AppKVCacheMode.int8.isAvailable(for: .gemma4_26B_A4B))
+        for architecture in [ArchConfig.gemma4_26B_A4B,
+                             .qwen3_6_35B_A3B,
+                             .qwen3_8_flashNext_125B] {
+            #expect(!AppKVCacheMode.turbo4bit.isAvailable(for: architecture))
+        }
+    }
+
     @Test func verificationModesAreDistinctlyLabelled() {
         // The picker renders `label` and the diagnostics pane renders
         // `resultSummary`. Three modes that summarised alike would leave that
@@ -63,7 +79,13 @@ import FinchMoE
             let runtime = try AppRuntimeOptions(expertCacheSlots: slots)
                 .resolvedRuntimeConfiguration(forceLogitsHead: false)
             #expect(runtime.expertCacheSlots == slots)
+            // Every offered slot count must be usable with prefill: the
+            // engine rejects a tile plan that needs more slots than exist,
+            // so the low-memory 8-slot choice has to shrink the tile.
+            #expect(runtime.prefillTilesFitSlots(slots))
         }
+        #expect(AppRuntimeOptions.prefillTileExperts(forSlots: 8) == 4)
+        #expect(AppRuntimeOptions.prefillTileExperts(forSlots: 16) == 8)
         for chunk in AppRuntimeOptions.allowedPrefillChunkTokens {
             let runtime = try AppRuntimeOptions(prefillChunkTokens: chunk)
                 .resolvedRuntimeConfiguration(forceLogitsHead: false)

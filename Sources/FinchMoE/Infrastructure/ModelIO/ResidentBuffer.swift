@@ -16,7 +16,8 @@ final class ResidentBuffer {
                 fileOffset: UInt64,
                 residentSize: UInt64,
                 device: MTLDevice,
-                fileDescriptor: Int32? = nil) throws {
+                fileDescriptor: Int32? = nil,
+                wirePages: Bool = true) throws {
         let pageSize = Int(getpagesize())
 
         let fd = fileDescriptor.map { fcntl($0, F_DUPFD_CLOEXEC, 0) }
@@ -63,7 +64,11 @@ final class ResidentBuffer {
         // semaphore, nothing in the IO counters (mmap faults are not preads),
         // and the very next run instantly fast again. Failure is a warning,
         // never an error: the pin is a performance measure, not correctness.
-        if ProcessInfo.processInfo.environment["FINCHMOE_MLOCK_RESIDENT"] != nil,
+        // The vision payload passes `wirePages: false`: it is another ~0.9 GB
+        // on a device whose resident budget is already the binding constraint,
+        // and pinning it would turn a clean, evictable mapping into pressure.
+        if wirePages,
+           ProcessInfo.processInfo.environment["FINCHMOE_MLOCK_RESIDENT"] != nil,
            mlock(base, mappedLen) != 0 {
             FileHandle.standardError.write(Data(
                 ("warning: mlock of resident mapping failed (errno \(errno)); "

@@ -56,9 +56,13 @@ final class GenerationTaskRegistry: Sendable {
 /// template) behind the `AppInferenceClient` event stream, with an explicit
 /// load lifecycle so the resident weights stay warm across generations.
 public final class RealInferenceClient: AppModelLifecycleClient,
-    AppModelIntegrityReporting, @unchecked Sendable {
+    AppModelIntegrityReporting, AppInferenceMemoryReporting, @unchecked Sendable {
     private let session: RealInferenceSession
     private let memorySampler: AppMemorySampler
+    /// The device the loaded model allocated its buffers on. Held outside the
+    /// actor so `currentInferenceMemoryBytes` can answer synchronously from
+    /// the main actor (the header samples it once a second).
+    private let deviceBox = Mutex<MTLDevice?>(nil)
     private let generationTasks = GenerationTaskRegistry()
     private let integrity = Mutex<String?>(nil)
 
@@ -97,6 +101,40 @@ public final class RealInferenceClient: AppModelLifecycleClient,
         // *current* load decided, not what a previous one did.
         let description = await session.integrityDescription
         integrity.withLock { $0 = description }
+        if let device = await session.metalDevice() {
+            deviceBox.withLock { $0 = device }
+        }
+    }
+
+    /// The engine's live memory as the app should show it.
+    ///
+    /// The model's `model_weights.bin` is `mmap`ed read-only and wrapped in a
+    /// Metal buffer. Those are *clean* file-backed pages: `phys_footprint`
+    /// excludes them deliberately, and on a memory-pressured iOS device
+    /// `resident_size` can be small too even though the engine's working set
+    /// is the whole mapping. `MTLDevice.currentAllocatedSize` counts the
+    /// buffers themselves — the resident mapping plus every expert-cache
+    /// slot, KV cache and scratch buffer — which is the number a user means
+    /// by "how much RAM is the model using".
+    ///
+    /// `max` rather than a sum: the same bytes can appear in both the
+    /// process's resident accounting and the device's allocation ledger, and
+    /// adding them would double-count the dirty buffers.
+    public var currentInferenceMemoryBytes: UInt64? {
+        let measured = memorySampler.sample()
+        let allocated = deviceBox.withLock { $0 }.map {
+            UInt64(max(0, $0.currentAllocatedSize))
+        }
+        switch (measured, allocated) {
+        case let (measured?, allocated?):
+            return max(measured, allocated)
+        case let (measured?, nil):
+            return measured
+        case let (nil, allocated?):
+            return allocated > 0 ? allocated : nil
+        case (nil, nil):
+            return nil
+        }
     }
 
     public func unload() async {
@@ -326,6 +364,14 @@ actor RealInferenceSession {
         tokenizerDirectoryCache.clear()
         loadedKey = nil
         integrityDescription = nil
+    }
+
+    /// The device the loaded model allocated its buffers on. The client's
+    /// memory readout samples its `currentAllocatedSize`, which includes the
+    /// mmap-backed resident weights that process footprint accounting can
+    /// leave out.
+    func metalDevice() -> MTLDevice? {
+        ctx?.device
     }
 
     func run(request: AppGenerationRequest,

@@ -33,8 +33,8 @@ constant constexpr uint kAttnThreads      = 256;
 // kAttnMaxSimdGroups must cover kAttnThreads / 32 = 8.
 constant constexpr uint kAttnMaxSimdGroups = 8;
 constant constexpr uint kAttnMaxQPerKV     = 2;
-constant constexpr uint kAttnMaxFullQPerKV = 8;
-constant constexpr uint kAttnFullQPerThreadgroup = 2;
+constant constexpr uint kAttnMaxFullQPerKV __attribute__((unused)) = 8;
+constant constexpr uint kAttnFullQPerThreadgroup __attribute__((unused)) = 2;
 // Largest head_dim we run with (full-attention layers). SWA uses 256 — the
 // kernel still allocates the 512-slot scratch but only touches the live half.
 constant constexpr uint kAttnMaxHeadDim   = 512;
@@ -559,7 +559,7 @@ void attention_decode_combine(
 // block on a range the data does not use.
 // ============================================================================
 
-constant constexpr uint kKVQuantBlockElements = 64;
+constant constexpr uint kKVQuantBlockElements __attribute__((unused)) = 64;
 constant constexpr uint kKVQuantThreads       = 256;
 
 [[kernel, max_total_threads_per_threadgroup(kKVQuantThreads)]]

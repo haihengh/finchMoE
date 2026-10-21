@@ -84,9 +84,18 @@ public enum AppKVCacheMode: String, CaseIterable, Codable, Sendable, Identifiabl
         }
     }
 
-    /// int8 ships; turbo-4bit is still a planned format with no kernel behind
-    /// it, so it stays disabled rather than pretending to load.
-    public var isAvailable: Bool { self == .fp16 || self == .int8 }
+    /// int8 ships for the Qwen 3.6 body only: only its prefill and decode
+    /// bodies quantize on write and bind the int8 timelines on read, and the
+    /// runner refuses a Qwen 3.8 install rather than read a timeline nobody
+    /// writes. turbo-4bit is still a planned format with no kernel behind it,
+    /// so both are disabled where they cannot load rather than crashing later.
+    public func isAvailable(for architecture: ArchConfig) -> Bool {
+        switch self {
+        case .fp16: return true
+        case .int8: return architecture.isQwen3_6
+        case .turbo4bit: return false
+        }
+    }
 
     /// Compact form for the settings summary line.
     public var shortLabel: String {
@@ -191,6 +200,16 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         }
     }
 
+    /// The prefill pipeline keeps `(depth + 1)` tiles in flight, and the
+    /// engine refuses a tile plan that does not fit the slot pool. The app
+    /// exposes the slot count but not the tile geometry, so derive the tile
+    /// width from the budget: the low-memory 8-slot setting must use 4
+    /// experts per tile at the default depth 1, or the engine rejects the
+    /// first prefill after the user picked that setting to save memory.
+    static func prefillTileExperts(forSlots slots: Int) -> Int {
+        max(1, min(8, slots / 2))
+    }
+
     public func resolvedRuntimeConfiguration(forceLogitsHead: Bool) throws -> RuntimeConfiguration {
         try validate()
         return RuntimeConfiguration(
@@ -200,6 +219,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
             prefillEnabled: prefillEnabled,
             prefillChunkTokens: prefillChunkTokens,
             forceLogitsHead: forceLogitsHead,
+            prefillTileExperts: Self.prefillTileExperts(forSlots: expertCacheSlots),
             kvStorageMode: kvCacheMode.kvStorageMode)
     }
 }

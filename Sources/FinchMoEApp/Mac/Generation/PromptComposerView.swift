@@ -32,7 +32,17 @@ struct PromptComposerView: View {
                 }
         }
         .animation(.easeOut(duration: 0.12), value: editorHeight)
+        #if canImport(AppKit)
         .onAppear { promptFocused = true }
+        #endif
+        // The iOS shell pins the interface orientation while the keyboard is
+        // up: UIKit 27 crashes in the candidate bar when the interface rotates
+        // under it. Not raising the keyboard on launch (iOS) keeps rotation
+        // available until the user actually starts typing.
+        .onChange(of: promptFocused) { _, focused in
+            FinchPlatformInput.setTextInputFocused(focused)
+        }
+        .onDisappear { FinchPlatformInput.setTextInputFocused(false) }
     }
 
     private var editor: some View {

@@ -8,6 +8,7 @@ struct StatusHUDView: View {
     /// False once the session list sits at the window's left edge under the
     /// traffic lights, so the strip does not leave room for them twice.
     var clearsTrafficLights: Bool
+    @Environment(\.finchAccentColor) private var accentColor
 
     init(
         model: AppModel,
@@ -35,7 +36,7 @@ struct StatusHUDView: View {
         } label: {
             Image(systemName: "sidebar.left")
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(showsSidebar ? FinchMoEMacTheme.accentColor : .secondary)
+                .foregroundStyle(showsSidebar ? accentColor : .secondary)
                 .frame(width: 28, height: 28)
                 .contentShape(Circle())
                 .background(.regularMaterial, in: Circle())
@@ -100,6 +101,7 @@ struct StatusHUDView: View {
 
 private struct PhaseLabel: View {
     let model: AppModel
+    @Environment(\.finchAccentColor) private var accentColor
 
     var body: some View {
         HStack(spacing: 6) {
@@ -113,7 +115,7 @@ private struct PhaseLabel: View {
                     .monospacedDigit()
                     .contentTransition(.numericText())
             case .steady(let label):
-                Circle().fill(FinchMoEMacTheme.accentColor).frame(width: 7, height: 7)
+                Circle().fill(accentColor).frame(width: 7, height: 7)
                 Text(label).contentTransition(.opacity)
             case .quiet(let label):
                 Text(label)
@@ -145,9 +147,11 @@ private struct PhaseLabel: View {
 }
 
 private struct PulsingDot: View {
+    @Environment(\.finchAccentColor) private var accentColor
+
     var body: some View {
         Circle()
-            .fill(FinchMoEMacTheme.accentColor)
+            .fill(accentColor)
             .frame(width: 7, height: 7)
             .phaseAnimator([0.4, 1.0]) { dot, opacity in
                 dot.opacity(opacity)

@@ -101,7 +101,45 @@ import FinchMoEFormat
             ]
         }
 
-        static func tensorShapes() -> [(name: String, shape: [Int])] {
+        /// The same toy `model.visual.*` tower the repack fixture writes:
+        /// patch embed, position table, 12 tensors per block, merger. Only
+        /// used by the vision-install load test; a text-only fixture keeps
+        /// its original tensor stream byte for byte.
+        static func visionTensorShapes() -> [(name: String, shape: [Int])] {
+            let hidden = 32
+            let layers = 2
+            let mlp = 64
+            var out: [(String, [Int])] = [
+                ("model.visual.patch_embed.proj.weight", [hidden, 3, 2, 2, 2]),
+                ("model.visual.patch_embed.proj.bias", [hidden]),
+                ("model.visual.pos_embed.weight", [4, hidden]),
+            ]
+            for block in 0..<layers {
+                let p = "model.visual.blocks.\(block)"
+                out.append((p + ".norm1.weight", [hidden]))
+                out.append((p + ".norm1.bias", [hidden]))
+                out.append((p + ".norm2.weight", [hidden]))
+                out.append((p + ".norm2.bias", [hidden]))
+                out.append((p + ".attn.qkv.weight", [3 * hidden, hidden]))
+                out.append((p + ".attn.qkv.bias", [3 * hidden]))
+                out.append((p + ".attn.proj.weight", [hidden, hidden]))
+                out.append((p + ".attn.proj.bias", [hidden]))
+                out.append((p + ".mlp.linear_fc1.weight", [mlp, hidden]))
+                out.append((p + ".mlp.linear_fc1.bias", [mlp]))
+                out.append((p + ".mlp.linear_fc2.weight", [hidden, mlp]))
+                out.append((p + ".mlp.linear_fc2.bias", [hidden]))
+            }
+            out.append(("model.visual.merger.norm.weight", [hidden]))
+            out.append(("model.visual.merger.norm.bias", [hidden]))
+            out.append(("model.visual.merger.linear_fc1.weight", [2 * hidden, 2 * hidden]))
+            out.append(("model.visual.merger.linear_fc1.bias", [2 * hidden]))
+            out.append(("model.visual.merger.linear_fc2.weight", [D, 2 * hidden]))
+            out.append(("model.visual.merger.linear_fc2.bias", [D]))
+            return out
+        }
+
+        static func tensorShapes(includeVision: Bool = false)
+            -> [(name: String, shape: [Int])] {
             var out: [(String, [Int])] = [
                 ("model.language_model.embed_tokens.weight", [vocab, D]),
                 ("model.language_model.norm.weight", [D]),
@@ -137,10 +175,14 @@ import FinchMoEFormat
                 out.append((p + ".mlp.experts.gate_up_proj", [experts, 2 * moeIntermediate, D]))
                 out.append((p + ".mlp.experts.down_proj", [experts, D, moeIntermediate]))
             }
+            if includeVision {
+                out.append(contentsOf: visionTensorShapes())
+            }
             return out
         }
 
-        static func writeSnapshot(into dir: String, seed: UInt64) throws {
+        static func writeSnapshot(into dir: String, seed: UInt64,
+                                  includeVision: Bool = false) throws {
             try FileManager.default.createDirectory(
                 at: URL(fileURLWithPath: dir), withIntermediateDirectories: true)
             let configData = try JSONSerialization.data(
@@ -153,7 +195,7 @@ import FinchMoEFormat
             var payload = Data()
             var cursor = 0
             var state = seed
-            for (name, shape) in tensorShapes() {
+            for (name, shape) in tensorShapes(includeVision: includeVision) {
                 let elements = shape.reduce(1, *)
                 var bytes = Data(capacity: elements * 2)
                 for _ in 0..<elements {
@@ -190,6 +232,11 @@ import FinchMoEFormat
             for tokenizer in ["tokenizer.json", "tokenizer_config.json"] {
                 try Data("{}".utf8).write(
                     to: URL(fileURLWithPath: dir).appendingPathComponent(tokenizer))
+            }
+            if includeVision {
+                try Data(#"{"patch_size":2,"temporal_patch_size":2,"merge_size":2}"#.utf8)
+                    .write(to: URL(fileURLWithPath: dir)
+                        .appendingPathComponent("preprocessor_config.json"))
             }
         }
     }
@@ -253,6 +300,67 @@ import FinchMoEFormat
 
         // Routed experts: layout.json metadata validated at load; the blobs
         // open lazily via the streamer path.
+        #expect(model.packedExpertsLayout.expertsPerLayer == Toy.experts)
+    }
+
+    /// A vision-bearing install is still a valid text install: the extra
+    /// `vision/` files are declared in the manifest and verified, but the
+    /// loader opens only the text file set, and every text byte is identical
+    /// to the text-only repack of the same snapshot. This is the compatibility
+    /// claim the published `-vision` artifacts rest on until the runtime
+    /// consumes the tower.
+    @Test func visionToyInstallLoadsTextOnly() async throws {
+        let base = NSTemporaryDirectory() + "qwen-engine-vision-\(UUID().uuidString)"
+        let src = base + "-src"
+        try Toy.writeSnapshot(into: src, seed: 0x71ED, includeVision: true)
+        defer { try? FileManager.default.removeItem(atPath: src) }
+
+        let textOut = base + "-text"
+        _ = try await LocalQwenRepacker(
+            options: LocalQwenRepackOptions(snapshotDir: src, outputDir: textOut,
+                                            minFreeReserveBytes: 0)).run()
+        defer { try? FileManager.default.removeItem(atPath: textOut) }
+
+        let visionOut = base + "-vision"
+        _ = try await LocalQwenRepacker(
+            options: LocalQwenRepackOptions(snapshotDir: src, outputDir: visionOut,
+                                            minFreeReserveBytes: 0,
+                                            includeVision: true)).run()
+        defer { try? FileManager.default.removeItem(atPath: visionOut) }
+
+        let fm = FileManager.default
+        #expect(fm.fileExists(atPath: visionOut + "/vision/vision.safetensors"))
+        #expect(fm.fileExists(atPath: visionOut + "/vision/model_config.json"))
+        #expect(fm.fileExists(atPath: visionOut + "/vision/preprocessor_config.json"))
+        #expect(!fm.fileExists(atPath: textOut + "/vision"))
+
+        // The text payloads are the same bytes: including the tower changes
+        // no engine-visible file.
+        for relative in ["model_weights.bin", "packed_experts/layer_00.bin"] {
+            let text = try Data(contentsOf: URL(fileURLWithPath: textOut + "/" + relative))
+            let vision = try Data(contentsOf: URL(fileURLWithPath: visionOut + "/" + relative))
+            #expect(text == vision, "\(relative) differs when vision is included")
+        }
+
+        // Manifest + receipt cover the extras, and the verifier accepts them.
+        let manifestData = try Data(contentsOf: URL(
+            fileURLWithPath: visionOut + "/manifest.json"))
+        let manifest = try FinchManifestCodec.decode(manifestData)
+        #expect(manifest.files["vision/vision.safetensors"] != nil)
+        #expect(manifest.files["vision/model_config.json"] != nil)
+        #expect(manifest.files["vision/preprocessor_config.json"] != nil)
+        let verify = try VerifiedInstallTool.run(
+            options: VerifyInstallOptions(inputFinch: visionOut))
+        #expect(verify.unexpectedEntries.isEmpty)
+
+        // The real runtime load ignores the extras and resolves the text
+        // entries exactly as it does for the text-only install.
+        let ctx = try MetalContext()
+        let model = try Model.load(
+            directoryURL: URL(fileURLWithPath: visionOut),
+            device: ctx.device,
+            expecting: Toy.arch)
+        #expect(model.embedding.shape == (UInt32(Toy.vocab), UInt32(Toy.D), 0, 0))
         #expect(model.packedExpertsLayout.expertsPerLayer == Toy.experts)
     }
 

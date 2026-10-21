@@ -27,6 +27,32 @@ import Metal
         FileManager.default.fileExists(atPath: installPath + "/manifest.json")
     }
 
+    private static let visionInstallPath =
+        "/Volumes/samsung 2t/code/finchmoe/models/Qwen3.8-Flash-Next-abliterated-ple2bit-vision.finch"
+
+    private static var visionInstallExists: Bool {
+        FileManager.default.fileExists(atPath: visionInstallPath + "/manifest.json")
+    }
+
+    /// The abliterated 2-bit build with the vision payload loads text-only;
+    /// the `vision/` files are manifest entries the loader never opens.
+    @Test(.enabled(if: visionInstallExists))
+    func visionInstall38LoadsTextOnly() throws {
+        let ctx = try MetalContext()
+        let model = try Model.load(
+            directoryURL: URL(fileURLWithPath: Self.visionInstallPath),
+            device: ctx.device,
+            expecting: .qwen3_8_flashNext_125B)
+        #expect(model.routedExpertWeightBits == 2)
+        #expect(model.config.numLayers == 48)
+        #expect(model.embedding.shape == (248_320, 2_560, 0, 0))
+        #expect(model.packedExpertsLayout.expertsPerLayer == 512)
+        #expect(model.finalNorm == nil)
+        // See the 3.6 counterpart: this ledger is what the app's RAM readout
+        // reports, and it includes the mmap-backed resident weights.
+        #expect(ctx.device.currentAllocatedSize >= 3_877_265_688)
+    }
+
     /// Frozen literals: hidden 2560, 24 Q heads, 2 KV heads, full head_dim
     /// 256, GDN 16 key / 48 value heads of 128, conv kernel 4, 512 experts,
     /// shared-expert width 640, vocab 248320.

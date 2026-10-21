@@ -159,6 +159,61 @@ import FinchMoERepackCore
     #expect(descriptor.approximateDownloadBytes == 16_032_957_550)
   }
 
+  /// The two vision rows. They are deliberately the same checkpoint, width and
+  /// resident digest as their text siblings; `requiresVision` and the
+  /// distribution are the only differences, and both must be pinned so a
+  /// later edit cannot silently make the picker download text-only bytes under
+  /// a vision label.
+  @MainActor
+  @Test func visionDescriptorsMatchPinnedAudit() {
+    let q36 = AppModelInstallDescriptor.qwen3_6_3bit_vision
+    #expect(q36.displayName == "Qwen 3.6 35B-A3B 3-bit (Vision)")
+    #expect(q36.shortName == "Qwen 3.6 3-bit Vision")
+    #expect(q36.repoID == "Qwen/Qwen3.6-35B-A3B")
+    #expect(q36.sourceIndexSHA256
+              == AppModelInstallDescriptor.qwen3_6_3bit.sourceIndexSHA256)
+    #expect(q36.weightsSHA256
+              == AppModelInstallDescriptor.qwen3_6_3bit.weightsSHA256)
+    #expect(q36.routedExpertBits == 3)
+    #expect(q36.requiresVision)
+    #expect(q36.architecture == .qwen3_6_35B_A3B)
+    #expect(q36.installedBytes == 16_926_159_989)
+    #expect(q36.requiredFreeBytes == 17_999_901_813)
+    guard case .finchDistribution(let q36Distribution) = q36.installRoute else {
+      Issue.record("the 3.6 vision row must download its vision distribution")
+      return
+    }
+    #expect(q36Distribution.repoID
+              == "haihengh/Qwen3.6-35B-A3B-finch-3bit-vision")
+    #expect(q36Distribution.revision
+              == "5208d13622f30566bb8b12183d161e8cecdb81e5")
+    #expect(q36Distribution.approximateDownloadBytes == 16_926_141_154)
+
+    let q38 = AppModelInstallDescriptor.qwen3_8_abliterated_2bit_vision
+    #expect(q38.displayName
+              == "Qwen 3.8 Flash-Next 125B 2-bit (Abliterated, Vision)")
+    #expect(q38.shortName == "Qwen 3.8 Abl. 2-bit Vision")
+    #expect(q38.repoID == "windowsxp811203/Qwen3.8-Flash-Next-Abliterated")
+    #expect(q38.sourceIndexSHA256
+              == AppModelInstallDescriptor.qwen3_8_abliterated_2bit.sourceIndexSHA256)
+    #expect(q38.weightsSHA256
+              == AppModelInstallDescriptor.qwen3_8_abliterated_2bit.weightsSHA256)
+    #expect(q38.routedExpertBits == 2)
+    #expect(q38.requiresVision)
+    #expect(q38.architecture == .qwen3_8_flashNext_125B)
+    #expect(q38.installedBytes == 74_701_690_351)
+    #expect(q38.requiredFreeBytes == 75_775_432_175)
+    guard case .finchDistribution(let q38Distribution) = q38.installRoute else {
+      Issue.record("the 3.8 vision row must download its vision distribution")
+      return
+    }
+    #expect(q38Distribution.repoID
+              == "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple2bit-abliterated-vision")
+    #expect(q38Distribution.revision
+              == "e27a5361544c5902f3e46c2220d961c16164ef96")
+    #expect(q38Distribution.approximateDownloadBytes == 74_701_629_113)
+  }
+
   /// The 3.8 counterpart. The hash is the one thing here that cannot be
   /// re-derived from the repo — it is the sha256 of the source snapshot's
   /// `model.safetensors.index.json`, which is what the manifest stores and

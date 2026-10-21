@@ -880,7 +880,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                            layerCount: cfg.numLayers)
                 self.rowHashLayout = layout
                 self.rowHash = try PrefillRowHash(context: ctx)
-                self.rowHashBuffer = try ctx.device.makeBuffer(
+                self.rowHashBuffer = ctx.device.makeBuffer(
                     length: layout.totalBytes, options: .storageModeShared)
                 if let buf = rowHashBuffer {
                     // Shared storage, so the dump is a host read of bytes the
@@ -925,7 +925,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let pleQuantSimulation = ProcessInfo.processInfo
                 .environment["FQ_PLE_QUANT_SIM"].flatMap(Int.init)
             if let c = pleConstants,
-               let host = try PLEHost(config: cfg,
+               let host = PLEHost(config: cfg,
                                       multipliers: c.multipliers,
                                       headOffsets: c.headOffsets,
                                       headVocabSizes: c.headVocabSizes,
@@ -1638,7 +1638,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 // this wide, but a short read would be silent garbage.
                 precondition(gathered.count >= width,
                              "PLE gather returned \(gathered.count) elements, need \(width)")
-                gathered.withUnsafeBytes { src in
+                _ = gathered.withUnsafeBytes { src in
                     memcpy(scratch.qwen38PleGathered.contents().advanced(by: row * bytes),
                            src.baseAddress!,
                            bytes)
@@ -5348,8 +5348,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         if let error = tailCB.error {
             throw error
-        totalGpuRoutedNanos &+= recordGpuTime(tailCB)
         }
+        totalGpuRoutedNanos &+= recordGpuTime(tailCB)
         drainSnapshots()
 
         if L + 1 < cfg.numLayers {
@@ -6260,7 +6260,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             totalPleRowBytes &+= pleHost.totalRowBytesRead &- pleBytesBefore
             totalPleGatherNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- tPle
             totalPleGathers &+= 1
-            gathered.withUnsafeBytes { src in
+            _ = gathered.withUnsafeBytes { src in
                 memcpy(pleGathered.contents(), src.baseAddress!, src.count)
             }
         }

@@ -320,7 +320,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             let result = posix_memalign(&raw, Self.scratchAlignment, allocationSize)
             guard result == 0, let pointer = raw else {
                 unwind()
-                throw StreamerError.allocFailed(errno: result)
+                throw StreamerError.allocFailed(
+                    errno: result, bytes: allocationSize, slots: slotCount)
             }
             pointers.append(pointer)
             // Same opt-in pin as ResidentBuffer: these shared buffers are the

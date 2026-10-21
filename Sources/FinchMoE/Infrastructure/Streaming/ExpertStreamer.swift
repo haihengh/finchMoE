@@ -7,7 +7,7 @@ enum StreamerError: Error, CustomStringConvertible {
     case bufferWrapFailed
     case preadFailed(errno: Int32)
     case invalidRowRange(part: Int, lower: Int, upper: Int, rows: Int)
-    case allocFailed(errno: Int32)
+    case allocFailed(errno: Int32, bytes: Int, slots: Int)
     case slotOutOfRange(Int)
     case invalidIOSplitConfiguration(String)
 
@@ -25,8 +25,16 @@ enum StreamerError: Error, CustomStringConvertible {
             return "pread failed: errno \(error)"
         case .invalidRowRange(let part, let lower, let upper, let rows):
             return "PLE part \(part) row range \(lower..<upper) is outside 0..<\(rows)"
-        case .allocFailed(let error):
-            return "posix_memalign failed: errno \(error)"
+        case .allocFailed(let error, let bytes, let slots):
+            // ENOMEM is the common case on iOS: the app is at its jetsam
+            // limit, and the expert cache is where the next allocation lands.
+            // Say so rather than leaving a bare errno for the user to decode.
+            let detail = error == ENOMEM
+                ? "out of memory (ENOMEM) for \(slots) expert cache slots of "
+                    + "\(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .memory)) each"
+                : "errno \(error)"
+            return "expert cache allocation failed: \(detail); "
+                + "lower the expert cache slots or use a smaller model"
         case .slotOutOfRange(let slot):
             return "expert cache slot \(slot) is out of range"
         case .invalidIOSplitConfiguration(let detail):

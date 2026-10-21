@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 #if canImport(AppKit)
 import AppKit
@@ -120,13 +121,20 @@ public enum FinchPlatformFont {
         // iOS spells the trait `traitItalic` and returns nil when the
         // descriptor cannot take it; fall back to the upright font.
         if let descriptor = concrete.fontDescriptor.withSymbolicTraits(.traitItalic) {
-            return UIFont(descriptor: descriptor, size: size) ?? concrete
+            return UIFont(descriptor: descriptor, size: size)
         }
         return concrete
         #else
         font
         #endif
     }
+}
+
+public extension Notification.Name {
+    /// Posted when the composer's text input gains or loses focus. The iOS
+    /// shell listens to pin the interface orientation while the system
+    /// keyboard (and its candidate bar) is on screen.
+    static let finchTextInputFocusChanged = Notification.Name("FinchTextInputFocusChanged")
 }
 
 /// Input-state helpers with no cross-platform spelling.
@@ -143,6 +151,17 @@ public enum FinchPlatformInput {
         false
         #else
         false
+        #endif
+    }
+
+    /// Reports text-input focus to the platform shell. macOS has no rotation,
+    /// so this is a no-op there.
+    public static func setTextInputFocused(_ focused: Bool) {
+        #if canImport(UIKit)
+        NotificationCenter.default.post(
+            name: .finchTextInputFocusChanged,
+            object: nil,
+            userInfo: ["focused": focused])
         #endif
     }
 }

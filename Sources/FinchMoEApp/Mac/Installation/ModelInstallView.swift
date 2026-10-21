@@ -12,6 +12,7 @@ struct ModelInstallView: View {
     @State private var showsFolderImporter = false
     #endif
     @State private var showingDiscardConfirmation = false
+    @Environment(\.finchAccentColor) private var accentColor
 
     init(model: AppModel) {
         self.model = model
@@ -48,8 +49,14 @@ struct ModelInstallView: View {
             isPresented: $showsFolderImporter,
             allowedContentTypes: [.folder]
         ) { result in
-            if case .success(let url) = result {
+            switch result {
+            case .success(let url):
+                // A folder chosen from another provider (iCloud Drive, another
+                // app's container) needs the security scope for the session.
+                _ = url.startAccessingSecurityScopedResource()
                 model.setModelURL(url)
+            case .failure(let error):
+                model.reportModelSelectionError(error.localizedDescription)
             }
         }
         #endif
@@ -59,12 +66,12 @@ struct ModelInstallView: View {
         VStack(spacing: 10) {
             Image(systemName: "externaldrive.badge.plus")
                 .font(.system(.largeTitle, design: .rounded))
-                .foregroundStyle(FinchMoEMacTheme.accentColor)
+                .foregroundStyle(accentColor)
                 .accessibilityHidden(true)
             Text("Model required")
                 .font(.title.bold())
                 .accessibilityHeading(.h1)
-            Text("FinchMoE needs \(model.installDescriptor.displayName) before it can generate text.")
+            Text("FinchMoE needs \(model.installDescriptor.displayName) before it can generate.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -135,6 +142,21 @@ struct ModelInstallView: View {
 
     @ViewBuilder
     private var progressArea: some View {
+        if let message = model.modelSelectionError {
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .multilineTextAlignment(.center)
+        } else if !model.isInstallingModel,
+                  case .partial(let message) = model.installationStatus {
+            // The probe knows why a directory is not usable (a file missing,
+            // a checkpoint mismatch); without this line the screen only shows
+            // a disabled Download and no reason for it.
+            Label(message, systemImage: "exclamationmark.triangle")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .multilineTextAlignment(.center)
+        }
         if model.isInstallingModel {
             VStack(alignment: .leading, spacing: 8) {
                 if let fraction = model.installProgressFraction,
@@ -248,6 +270,7 @@ struct ModelInstallView: View {
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose"
         if panel.runModal() == .OK, let url = panel.url {
+            _ = url.startAccessingSecurityScopedResource()
             model.setModelURL(url)
         }
         #else

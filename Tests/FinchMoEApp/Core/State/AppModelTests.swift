@@ -324,7 +324,11 @@ import Testing
             client: MockInferenceClient(),
             installer: MockModelInstallerClient())
         let oldURL = FileManager.default.temporaryDirectory.appendingPathComponent("old.finch")
-        let newURL = FileManager.default.temporaryDirectory.appendingPathComponent("new.finch")
+        let newURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "new-\(UUID().uuidString).finch", isDirectory: true)
+        try? FileManager.default.createDirectory(at: newURL, withIntermediateDirectories: true)
+        try? Data("{}".utf8).write(to: newURL.appendingPathComponent("manifest.json"))
+        defer { try? FileManager.default.removeItem(at: newURL) }
         model.modelPathText = oldURL.path
         model.loadState = .ready(modelDirectory: oldURL, loadSeconds: 1)
         model.diagnostics = AppDiagnostics(
@@ -346,6 +350,51 @@ import Testing
         #expect(model.error == nil)
         #expect(model.presentation.label == "Model required")
         #expect(!model.canRun)
+    }
+
+    /// The user-facing form of the stale-receipt bug: a model directory
+    /// copied or migrated to a new path must become loadable when selected,
+    /// instead of showing the install screen with Download disabled and no
+    /// Load button.
+    @MainActor
+    @Test func selectingAMovedInstallOffersLoad() throws {
+        let url = try makeCompleteModelInstall("moved-selection")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let receiptURL = url.appendingPathComponent("verified-install.json")
+        var receipt = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: receiptURL)) as! [String: Any]
+        receipt["modelDirectoryPath"] = "/somewhere/else/model.finch"
+        try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
+            .write(to: receiptURL)
+
+        let model = AppModel(
+            client: MockInferenceClient(),
+            installer: MockModelInstallerClient())
+        model.setModelURL(url)
+
+        #expect(model.installationStatus == .complete)
+        #expect(model.canLoadModel)
+        #expect(model.modelSelectionError == nil)
+    }
+
+    /// A folder that is not a model must not be treated as one. Before this
+    /// guard, picking the wrong folder resolved to the default (Gemma)
+    /// descriptor, so the install screen silently offered a Gemma download.
+    @MainActor
+    @Test func selectingAFolderWithoutAManifestKeepsTheCurrentSelection() throws {
+        let model = AppModel(
+            client: MockInferenceClient(),
+            installer: MockModelInstallerClient())
+        let originalPath = model.modelPathText
+        let bogus = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "not-a-model-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: bogus, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: bogus) }
+
+        model.setModelURL(bogus)
+
+        #expect(model.modelPathText == originalPath)
+        #expect(model.modelSelectionError?.contains("manifest.json") == true)
     }
 
     /// Every picker row must land on its checkout's `models/<install-name>`
@@ -372,6 +421,30 @@ import Testing
         #expect(model.installDescriptor == choice.descriptor)
         #expect(model.loadState == .notLoaded)
         #expect(model.installState == .idle)
+    }
+
+    /// A saved int8 choice must not survive into a Qwen 3.8 load: the runner
+    /// refuses that combination, and an app-side crash is not a valid way to
+    /// report it. Launching the install clamps the option to FP16.
+    @MainActor
+    @Test func persistedInt8KVFallsBackToFP16OnQwen38() throws {
+        let directory = try makeCompleteModelInstall(
+            "kv-int8-qwen38",
+            arch: .qwen3_8_flashNext_125B,
+            descriptor: .qwen3_8_2bit,
+            routedExpertBits: 2)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try MacAppSettingsFileStore.save(
+            MacAppSettings(kvCacheMode: .int8),
+            forModelDirectory: directory)
+
+        let model = AppModel(modelDirectory: directory,
+                             settingsPersistenceEnabled: true)
+
+        #expect(model.installDescriptor.architecture.isQwen3_8)
+        #expect(model.runtimeOptions.kvCacheMode == .fp16)
+        model.promptText = "go"
+        #expect(try model.makeRequest().runtimeOptions.kvCacheMode == .fp16)
     }
 
     @MainActor

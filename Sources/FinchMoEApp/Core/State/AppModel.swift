@@ -68,6 +68,10 @@ public final class AppModel {
     public private(set) var installETAText: String?
     public private(set) var installReadiness: AppModelInstallReadiness = .checking
     public private(set) var installationStatus: AppModelInstallationStatus
+    /// Why the last local-folder selection was refused, if it was. Kept apart
+    /// from `error` (a generation error) so the install screen can explain a
+    /// bad picker choice without looking like a failed run.
+    public private(set) var modelSelectionError: String?
 
     public var loadState: AppModelLoadState = .notLoaded
     public private(set) var loadedRuntimeKey: AppLoadedRuntimeKey?
@@ -114,19 +118,36 @@ public final class AppModel {
                 memorySampler: AppMemorySampler = AppMemorySampler(),
                 settingsPersistenceEnabled: Bool = false,
                 chatStore: ChatSessionFileStore? = nil) {
+        #if canImport(UIKit)
+        // iOS keeps app-owned models in Documents so the Files app can see
+        // them; move installs made before that change before resolving paths.
+        AppModelLocation.prepareAppModelStorage()
+        #endif
         let directory = (modelDirectory ?? AppModelLocation.defaultURL()).standardizedFileURL
         // The descriptor must key off the directory's checkpoint (Qwen or
         // Gemma), because it drives the probe, the install UI, and the
-        // installer; nil means "build the default remote installer for the
-        // matched descriptor".
-        let descriptor = AppModelInstallationProbe.matchingDescriptor(at: directory)
+        // installer. A fresh app-owned destination has no manifest yet, so it
+        // takes the app's default row (Qwen 3.6 3-bit) instead of Gemma; every
+        // other destination keeps the probe's own fallback.
+        let descriptor = AppModelInstallationProbe.matchingDescriptor(
+            at: directory,
+            missingManifestFallback: AppModelLocation.defaultDescriptor(for: directory)
+                ?? .default)
         let installETAClock = SuspendingClock()
         let settings = settingsPersistenceEnabled
             ? MacAppSettingsFileStore.loadOrCreate(forModelDirectory: directory)
             : MacAppSettings()
         self.modelPathText = directory.path
         self.selectedModelChoice = Self.modelChoice(for: directory, descriptor: descriptor)
-        self.runtimeOptions = AppRuntimeOptions(persisted: settings)
+        // A setting saved before int8 KV became model-gated (or copied from a
+        // 3.6 install) must not reach the runner on a model that cannot serve
+        // it: the runner traps on int8 + Qwen 3.8, which leaves FP16 as the
+        // only valid choice for that body.
+        var runtimeOptions = AppRuntimeOptions(persisted: settings)
+        if !runtimeOptions.kvCacheMode.isAvailable(for: descriptor.architecture) {
+            runtimeOptions.kvCacheMode = .fp16
+        }
+        self.runtimeOptions = runtimeOptions
         self.maxContextTokens = settings.contextTokens
         self.temperature = settings.temperature
         self.topKEnabled = settings.topKEnabled
@@ -361,12 +382,34 @@ public final class AppModel {
             descriptor: choice.descriptor)
     }
 
+    /// Points the app at an existing `.finch` directory chosen by the user.
+    ///
+    /// A directory with no `manifest.json` is not a model, and selecting one
+    /// must not silently fall back to the default descriptor — that turned
+    /// "I picked the wrong folder" into "the app switched to Gemma and
+    /// offered a download". The error is surfaced by the install screen and
+    /// the current selection is left alone.
     public func setModelURL(_ url: URL) {
+        let manifest = url.appendingPathComponent("manifest.json")
+        guard FileManager.default.fileExists(atPath: manifest.path) else {
+            modelSelectionError = url.lastPathComponent
+                + " is not a .finch model folder: manifest.json was not found. "
+                + "Choose the model directory itself, not its parent."
+            return
+        }
+        modelSelectionError = nil
         setModelURL(url, descriptor: AppModelInstallationProbe.matchingDescriptor(at: url))
+    }
+
+    /// Reports a picker failure (the file importer's own error) in the same
+    /// place as a rejected selection.
+    public func reportModelSelectionError(_ message: String) {
+        modelSelectionError = message
     }
 
     private func setModelURL(_ url: URL, descriptor: AppModelInstallDescriptor) {
         guard !isRunning else { return }
+        modelSelectionError = nil
         let path = url.standardizedFileURL.path
         let newChoice = Self.modelChoice(for: url, descriptor: descriptor)
         guard path != modelPathText || descriptor != installer.descriptor else { return }
@@ -378,6 +421,10 @@ public final class AppModel {
         installer = Self.makeInstaller(descriptor: descriptor)
         applyPersistedSettings(
             forModelDirectory: URL(fileURLWithPath: path, isDirectory: true))
+        // The persistence store may be off (tests) or the loaded settings may
+        // predate the model the row now selects; the current descriptor is the
+        // authority either way.
+        sanitizeRuntimeOptionsForCurrentModel()
         loadGeneration &+= 1
         loadTask?.cancel()
         loadTask = nil
@@ -803,6 +850,7 @@ public final class AppModel {
         let settings = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: modelDirectory)
         runtimeOptions = AppRuntimeOptions(persisted: settings)
+        sanitizeRuntimeOptionsForCurrentModel()
         maxContextTokens = settings.contextTokens
         temperature = settings.temperature
         topKEnabled = settings.topKEnabled
@@ -812,6 +860,15 @@ public final class AppModel {
         newlineShortcut = settings.newlineShortcut
         sentPromptBehavior = settings.sentPromptBehavior
         promptReuseEnabled = settings.promptReuseEnabled
+    }
+
+    /// Keeps a load-time option inside what the selected install can actually
+    /// run. Int8 KV is Qwen 3.6 only; the runner traps rather than misread a
+    /// 3.8 timeline, so the app must fall back before asking it to load.
+    private func sanitizeRuntimeOptionsForCurrentModel() {
+        guard !runtimeOptions.kvCacheMode.isAvailable(
+            for: installDescriptor.architecture) else { return }
+        runtimeOptions.kvCacheMode = .fp16
     }
 
     private func persistSettings() {
@@ -1093,11 +1150,8 @@ public final class AppModel {
                 canonicalURL($0.defaultURL(packageRoot: root)) == directory
             }
         }
-        let support = AppModelLocation.applicationSupportURL()
         return candidates.first {
-            canonicalURL(AppModelLocation.appInstallURL(for: $0,
-                                                        applicationSupportURL: support))
-                == directory
+            canonicalURL(AppModelLocation.appInstallURL(for: $0)) == directory
         }
     }
 

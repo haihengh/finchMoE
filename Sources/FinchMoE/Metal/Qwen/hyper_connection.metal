@@ -182,7 +182,9 @@ void hc_combine(
     uint  lid          [[thread_position_in_threadgroup]],
     uint  lsize        [[threads_per_threadgroup]]
 ) {
-    threadgroup float wTg;
+    // `lid == 0` is the only writer; initialize so the barrier read has a
+    // defined value on every path the compiler can see.
+    threadgroup float wTg = 0.0f;
     if (lid == 0) {
         wTg = 2.0f * hc_sigmoid(float(inject[stream]) * invHc);
     }
@@ -310,7 +312,7 @@ void hc_seq_combine(
     uint  lid            [[thread_position_in_threadgroup]],
     uint  lsize          [[threads_per_threadgroup]]
 ) {
-    threadgroup float wTg;
+    threadgroup float wTg = 0.0f;
     if (lid == 0) {
         wTg = 2.0f * hc_sigmoid(float(inject[tgid]) * invHc);
     }

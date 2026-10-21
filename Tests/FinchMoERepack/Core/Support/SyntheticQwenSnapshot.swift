@@ -39,9 +39,38 @@ enum SyntheticQwenSnapshot {
             fullMask.map { $0 == 1 ? "full_attention" : "linear_attention" }
         }
 
+        /// Toy vision tower geometry. Real checkpoints carry 27 blocks at
+        /// hidden 1152 with a 16×16 patch; the toy keeps the name inventory
+        /// and the 12-tensors-per-block shape, shrunk to keep fixtures small.
+        static let visionHidden = 32
+        static let visionLayers = 2
+        static let visionIntermediate = 64
+        static let visionPositions = 4
+        static let visionPatch = 2
+
+        static func visionConfigJSON() -> [String: Any] {
+            [
+                "depth": visionLayers,
+                "hidden_size": visionHidden,
+                "hidden_act": "gelu_pytorch_tanh",
+                "intermediate_size": visionIntermediate,
+                "num_heads": 2,
+                "in_chans": 3,
+                "patch_size": visionPatch,
+                "temporal_patch_size": 2,
+                "spatial_merge_size": 2,
+                "num_position_embeddings": visionPositions,
+            ]
+        }
+
         static func configJSON() -> [String: Any] {
             [
                 "model_type": "qwen3_5_moe",
+                "vision_config": visionConfigJSON(),
+                "image_token_id": 248_056,
+                "video_token_id": 248_057,
+                "vision_start_token_id": 248_053,
+                "vision_end_token_id": 248_054,
                 "text_config": [
                     "model_type": "qwen3_5_moe_text",
                     "hidden_size": D,
@@ -74,14 +103,58 @@ enum SyntheticQwenSnapshot {
             ]
         }
 
+        /// The `model.visual.*` inventory the real Qwen checkpoints carry:
+        /// patch embed (Conv3d), learned position table, 12 tensors per
+        /// transformer block, and the merger. Mirrors the real naming so the
+        /// vision writer copies exactly what the runtime will look up.
+        static func visionTensorShapes() -> [(name: String, shape: [Int])] {
+            var out: [(String, [Int])] = [
+                ("model.visual.patch_embed.proj.weight",
+                 [visionHidden, 3, 2, visionPatch, visionPatch]),
+                ("model.visual.patch_embed.proj.bias", [visionHidden]),
+                ("model.visual.pos_embed.weight", [visionPositions, visionHidden]),
+            ]
+            for block in 0..<visionLayers {
+                let p = "model.visual.blocks.\(block)"
+                out.append((p + ".norm1.weight", [visionHidden]))
+                out.append((p + ".norm1.bias", [visionHidden]))
+                out.append((p + ".norm2.weight", [visionHidden]))
+                out.append((p + ".norm2.bias", [visionHidden]))
+                out.append((p + ".attn.qkv.weight", [3 * visionHidden, visionHidden]))
+                out.append((p + ".attn.qkv.bias", [3 * visionHidden]))
+                out.append((p + ".attn.proj.weight", [visionHidden, visionHidden]))
+                out.append((p + ".attn.proj.bias", [visionHidden]))
+                out.append((p + ".mlp.linear_fc1.weight", [visionIntermediate, visionHidden]))
+                out.append((p + ".mlp.linear_fc1.bias", [visionIntermediate]))
+                out.append((p + ".mlp.linear_fc2.weight", [visionHidden, visionIntermediate]))
+                out.append((p + ".mlp.linear_fc2.bias", [visionHidden]))
+            }
+            out.append(("model.visual.merger.norm.weight", [visionHidden]))
+            out.append(("model.visual.merger.norm.bias", [visionHidden]))
+            out.append(("model.visual.merger.linear_fc1.weight",
+                        [2 * visionHidden, 2 * visionHidden]))
+            out.append(("model.visual.merger.linear_fc1.bias", [2 * visionHidden]))
+            out.append(("model.visual.merger.linear_fc2.weight",
+                        [D, 2 * visionHidden]))
+            out.append(("model.visual.merger.linear_fc2.bias", [D]))
+            return out
+        }
+
         /// All checkpoint tensor names → shapes, in deterministic order.
-        static func tensorShapes() -> [(name: String, shape: [Int])] {
+        /// `includeVision` replaces the text run's single visual decoy with
+        /// the full toy tower, as a vision-capable source snapshot would have.
+        static func tensorShapes(includeVision: Bool = false)
+            -> [(name: String, shape: [Int])] {
             var out: [(String, [Int])] = [
                 ("model.language_model.embed_tokens.weight", [vocab, D]),
                 ("model.language_model.norm.weight", [D]),
                 ("lm_head.weight", [vocab, D]),
-                ("model.visual.blocks.0.attn.proj.weight", [D, D]),
             ]
+            if includeVision {
+                out.append(contentsOf: visionTensorShapes())
+            } else {
+                out.append(("model.visual.blocks.0.attn.proj.weight", [D, D]))
+            }
             for L in 0..<numLayers {
                 let p = "model.language_model.layers.\(L)"
                 out.append((p + ".input_layernorm.weight", [D]))
@@ -189,6 +262,13 @@ enum SyntheticQwenSnapshot {
         static func configJSON() -> [String: Any] {
             [
                 "model_type": "qwen4_exp",
+                // The toy 3.6 tower is reused: same text width, so the merger
+                // output shape matches this family as well.
+                "vision_config": Toy.visionConfigJSON(),
+                "image_token_id": 248_056,
+                "video_token_id": 248_057,
+                "vision_start_token_id": 248_053,
+                "vision_end_token_id": 248_054,
                 "text_config": [
                     "model_type": "qwen4_exp_text",
                     "hidden_size": D,
@@ -238,7 +318,10 @@ enum SyntheticQwenSnapshot {
         }
 
         /// All checkpoint tensor names → shapes → dtypes, deterministic order.
-        static func tensorShapes() -> [(name: String, shape: [Int], dtype: String)] {
+        /// `includeVision` replaces the text run's two visual decoys with the
+        /// full toy tower.
+        static func tensorShapes(includeVision: Bool = false)
+            -> [(name: String, shape: [Int], dtype: String)] {
             var out: [(String, [Int], String)] = [
                 ("model.language_model.embed_tokens.weight", [vocab, D], "BF16"),
                 ("lm_head.weight", [vocab, D], "BF16"),
@@ -252,11 +335,17 @@ enum SyntheticQwenSnapshot {
                 // Decoys the planner must drop: vision tower + MTP next-token
                 // head (mtp carries a `.layers.0.` stage and hyper-connection
                 // names that must never reach routing / transform).
-                ("model.visual.blocks.0.attn.qkv.weight", [D, D], "BF16"),
-                ("model.visual.blocks.0.attn.proj.weight", [D, D], "BF16"),
                 ("mtp.layers.0.self_attn.q_proj.weight", [2 * numHeads * fullHeadDim, D], "BF16"),
                 ("mtp.hyper_connection_mixer.hc_norm.weight", [plane], "BF16"),
             ]
+            if includeVision {
+                out.append(contentsOf: Toy.visionTensorShapes().map {
+                    (name: $0.name, shape: $0.shape, dtype: "BF16")
+                })
+            } else {
+                out.append(("model.visual.blocks.0.attn.qkv.weight", [D, D], "BF16"))
+                out.append(("model.visual.blocks.0.attn.proj.weight", [D, D], "BF16"))
+            }
             for L in 0..<numLayers {
                 let p = "model.language_model.layers.\(L)"
                 // Per-layer hyper-connection bundles (all 48 real layers have
@@ -397,7 +486,9 @@ enum SyntheticQwenSnapshot {
     private static func writeFiles(into dir: String,
                                    config: [String: Any],
                                    entries: [(name: String, shape: [Int], dtype: String)],
-                                   seed: UInt64) throws -> String {
+                                   seed: UInt64,
+                                   visionSidecars: Bool,
+                                   videoSidecar: Bool) throws -> String {
         try FileManager.default.createDirectory(
             at: URL(fileURLWithPath: dir), withIntermediateDirectories: true)
 
@@ -445,29 +536,70 @@ enum SyntheticQwenSnapshot {
             try Data("{}".utf8).write(
                 to: URL(fileURLWithPath: dir).appendingPathComponent(tokenizer))
         }
+        if visionSidecars {
+            let preprocessor: [String: Any] = [
+                "processor_class": "Qwen3VLProcessor",
+                "patch_size": Toy.visionPatch,
+                "temporal_patch_size": 2,
+                "merge_size": 2,
+                "shortest_edge": 65_536,
+                "longest_edge": 16_777_216,
+                "image_mean": [0.5, 0.5, 0.5],
+                "image_std": [0.5, 0.5, 0.5],
+            ]
+            try JSONSerialization.data(withJSONObject: preprocessor, options: [.sortedKeys])
+                .write(to: URL(fileURLWithPath: dir)
+                    .appendingPathComponent("preprocessor_config.json"))
+        }
+        if videoSidecar {
+            let video: [String: Any] = [
+                "processor_class": "Qwen3VLProcessor",
+                "patch_size": Toy.visionPatch,
+                "temporal_patch_size": 2,
+                "merge_size": 2,
+                "min_frames": 4,
+                "max_frames": 768,
+            ]
+            try JSONSerialization.data(withJSONObject: video, options: [.sortedKeys])
+                .write(to: URL(fileURLWithPath: dir)
+                    .appendingPathComponent("video_preprocessor_config.json"))
+        }
         return dir
     }
 
     /// Writes a single-shard snapshot into `dir`: config.json,
     /// model.safetensors.index.json, model-00001-of-00001.safetensors, and
     /// dummy tokenizer files. Returns the snapshot directory path.
+    /// `includeVision` writes the full toy tower plus the preprocessor config
+    /// a vision-capable Qwen 3.6 source carries (no video config: the real 3.6
+    /// snapshot has none).
     @discardableResult
-    static func write(into dir: String, seed: UInt64 = 0x51A7) throws -> String {
+    static func write(into dir: String,
+                      seed: UInt64 = 0x51A7,
+                      includeVision: Bool = false) throws -> String {
         try writeFiles(into: dir,
                        config: Toy.configJSON(),
-                       entries: Toy.tensorShapes().map {
+                       entries: Toy.tensorShapes(includeVision: includeVision).map {
                            (name: $0.name, shape: $0.shape, dtype: "BF16")
                        },
-                       seed: seed)
+                       seed: seed,
+                       visionSidecars: includeVision,
+                       videoSidecar: false)
     }
 
     /// The qwen3_8-Flash-Next toy (see `Toy38`): mixed BF16/I64 shard with
     /// hyper-connection, indexer, and PLE tensors plus vision/MTP decoys.
+    /// `includeVision` writes the full toy tower plus both preprocessor
+    /// configs, as the real Qwen 3.8 snapshot carries a video one too.
     @discardableResult
-    static func write38(into dir: String, seed: UInt64 = 0x51A8) throws -> String {
+    static func write38(into dir: String,
+                        seed: UInt64 = 0x51A8,
+                        includeVision: Bool = false) throws -> String {
         try writeFiles(into: dir,
                        config: Toy38.configJSON(),
-                       entries: Toy38.tensorShapes(),
-                       seed: seed)
+                       entries: Toy38.tensorShapes(includeVision: includeVision),
+                       seed: seed,
+                       visionSidecars: includeVision,
+                       videoSidecar: includeVision)
     }
 }

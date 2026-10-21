@@ -57,7 +57,10 @@ import FinchMoEDecodeProtocol
                         forceLogitsHead: request.forceLogitsHead) { _ in }
                     modelDirectory = directory
                     loadedOptions = request.runtimeOptions
-                    let memory = AppMemorySampler().sample()
+                    // The client reports the device's allocated engine bytes,
+                    // which include the mmap-backed resident weights the
+                    // process footprint leaves out.
+                    let memory = client.currentInferenceMemoryBytes
                     try write(DecodeServiceEvent(
                         kind: .ready, generationID: request.requestID,
                         currentMemoryBytes: memory, peakMemoryBytes: memory,

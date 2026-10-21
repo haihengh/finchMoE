@@ -14,10 +14,11 @@ import Foundation
 /// misnamed bytes and then flip rows once the install completed.
 public enum AppModelChoice: String, CaseIterable, Identifiable, Sendable {
     case gemma4
-    case qwen3_6, qwen3_6_3bit
+    case qwen3_6, qwen3_6_3bit, qwen3_6_3bit_vision
     case qwen3_6_abliterated, qwen3_6_abliterated_3bit
     case qwen3_8, qwen3_8_3bit, qwen3_8_2bit
-    case qwen3_8_abliterated, qwen3_8_abliterated_3bit, qwen3_8_abliterated_2bit
+    case qwen3_8_abliterated, qwen3_8_abliterated_3bit,
+         qwen3_8_abliterated_2bit, qwen3_8_abliterated_2bit_vision
 
     public var id: String { rawValue }
 
@@ -30,6 +31,7 @@ public enum AppModelChoice: String, CaseIterable, Identifiable, Sendable {
         case .gemma4: return .default
         case .qwen3_6: return .qwen3_6
         case .qwen3_6_3bit: return .qwen3_6_3bit
+        case .qwen3_6_3bit_vision: return .qwen3_6_3bit_vision
         case .qwen3_6_abliterated: return .qwen3_6_abliterated
         case .qwen3_6_abliterated_3bit: return .qwen3_6_abliterated_3bit
         case .qwen3_8: return .qwen3_8
@@ -38,6 +40,7 @@ public enum AppModelChoice: String, CaseIterable, Identifiable, Sendable {
         case .qwen3_8_abliterated: return .qwen3_8_abliterated
         case .qwen3_8_abliterated_3bit: return .qwen3_8_abliterated_3bit
         case .qwen3_8_abliterated_2bit: return .qwen3_8_abliterated_2bit
+        case .qwen3_8_abliterated_2bit_vision: return .qwen3_8_abliterated_2bit_vision
         }
     }
 
@@ -49,6 +52,7 @@ public enum AppModelChoice: String, CaseIterable, Identifiable, Sendable {
         case .gemma4: return "gemma4.finch"
         case .qwen3_6: return "Qwen3.6-35B-A3B-4bit.finch"
         case .qwen3_6_3bit: return "Qwen3.6-35B-A3B-3bit.finch"
+        case .qwen3_6_3bit_vision: return "Qwen3.6-35B-A3B-3bit-vision.finch"
         case .qwen3_6_abliterated: return "Qwen3.6-35B-A3B-abliterated-4bit.finch"
         case .qwen3_6_abliterated_3bit: return "Qwen3.6-35B-A3B-abliterated-3bit.finch"
         case .qwen3_8: return "Qwen3.8-Flash-Next-125B-ple4bit.finch"
@@ -57,6 +61,8 @@ public enum AppModelChoice: String, CaseIterable, Identifiable, Sendable {
         case .qwen3_8_abliterated: return "Qwen3.8-Flash-Next-abliterated-ple4bit.finch"
         case .qwen3_8_abliterated_3bit: return "Qwen3.8-Flash-Next-abliterated-ple3bit.finch"
         case .qwen3_8_abliterated_2bit: return "Qwen3.8-Flash-Next-abliterated-ple2bit.finch"
+        case .qwen3_8_abliterated_2bit_vision:
+            return "Qwen3.8-Flash-Next-abliterated-ple2bit-vision.finch"
         }
     }
 

@@ -34,6 +34,7 @@ struct ChatMessageBubble: View {
 
     @State private var isHovering = false
     @State private var copyFeedback = false
+    @Environment(\.finchAccentColor) private var accentColor
 
     private var isUser: Bool { message.role == .user }
 
@@ -86,7 +87,7 @@ struct ChatMessageBubble: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .background(FinchMoEMacTheme.accentColor, in: .rect(cornerRadius: 18))
+                .background(accentColor, in: .rect(cornerRadius: 18))
                 // The cap goes on the content so the text wraps short of the
                 // cap; the background above has already hugged what is left.
                 .frame(maxWidth: 560, alignment: .trailing)
@@ -210,7 +211,7 @@ struct ChatMessageBubble: View {
             actionButton(
                 systemName: copyFeedback ? "checkmark.circle.fill" : "doc.on.doc",
                 label: copyFeedback ? "Copied" : "Copy",
-                tint: copyFeedback ? FinchMoEMacTheme.accentColor : .secondary,
+                tint: copyFeedback ? accentColor : .secondary,
                 action: copyPlainText)
             if canRegenerate {
                 actionButton(
@@ -264,9 +265,11 @@ private struct TypingIndicator: View {
 
 /// A cursor at the end of the reply being written.
 private struct StreamingCaret: View {
+    @Environment(\.finchAccentColor) private var accentColor
+
     var body: some View {
         RoundedRectangle(cornerRadius: 1)
-            .fill(FinchMoEMacTheme.accentColor)
+            .fill(accentColor)
             .frame(width: 2.5, height: 14)
             .phaseAnimator([1.0, 0.15]) { caret, opacity in
                 caret.opacity(opacity)

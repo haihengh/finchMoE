@@ -4,6 +4,7 @@ import SwiftUI
 
 struct GenerateControl: View {
     let model: AppModel
+    @Environment(\.finchAccentColor) private var accentColor
 
     init(model: AppModel) {
         self.model = model
@@ -28,7 +29,7 @@ struct GenerateControl: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(.white)
-        .background(FinchMoEMacTheme.accentColor, in: .circle)
+        .background(accentColor, in: .circle)
         .overlay {
             Circle().stroke(.white.opacity(0.16), lineWidth: 0.5)
         }
@@ -59,7 +60,7 @@ struct GenerateControl: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(.white)
-        .background(FinchMoEMacTheme.accentColor, in: .capsule)
+        .background(accentColor, in: .capsule)
         .overlay {
             Capsule().stroke(.white.opacity(0.16), lineWidth: 0.5)
         }

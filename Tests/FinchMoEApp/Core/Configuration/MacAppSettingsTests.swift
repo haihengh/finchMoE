@@ -327,6 +327,14 @@ import Testing
         defer { try? FileManager.default.removeItem(at: root) }
         let first = root.appendingPathComponent("first/model.finch", isDirectory: true)
         let second = root.appendingPathComponent("second/model.finch", isDirectory: true)
+        // Selecting a local directory now requires it to be a model folder;
+        // this test cares about the settings that ride along with that change.
+        for directory in [first, second] {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true)
+            try Data("{}".utf8).write(
+                to: directory.appendingPathComponent("manifest.json"))
+        }
         try MacAppSettingsFileStore.save(
             MacAppSettings(newlineShortcut: .return),
             forModelDirectory: first)

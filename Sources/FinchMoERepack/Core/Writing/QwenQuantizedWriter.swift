@@ -185,19 +185,19 @@ enum QwenQuantizedWriter {
                     let q = floats.withUnsafeBufferPointer {
                         FinchQuantization.quantizeInt4Affine($0, count: cols)
                     }
-                    q.packed.withUnsafeBytes { raw in
+                    _ = q.packed.withUnsafeBytes { raw in
                         packedBatch.withUnsafeMutableBytes { dst in
                             memcpy(dst.baseAddress!.advanced(by: i * packedRowBytes),
                                    raw.baseAddress!, raw.count)
                         }
                     }
-                    q.scales.withUnsafeBytes { raw in
+                    _ = q.scales.withUnsafeBytes { raw in
                         scalesBatch.withUnsafeMutableBytes { dst in
                             memcpy(dst.baseAddress!.advanced(by: i * groups * 2),
                                    raw.baseAddress!, raw.count)
                         }
                     }
-                    q.biases.withUnsafeBytes { raw in
+                    _ = q.biases.withUnsafeBytes { raw in
                         biasesBatch.withUnsafeMutableBytes { dst in
                             memcpy(dst.baseAddress!.advanced(by: i * groups * 2),
                                    raw.baseAddress!, raw.count)
@@ -207,19 +207,19 @@ enum QwenQuantizedWriter {
                     let q = floats.withUnsafeBufferPointer {
                         FinchQuantization.quantizeInt2Affine($0, count: cols)
                     }
-                    q.packed.withUnsafeBytes { raw in
+                    _ = q.packed.withUnsafeBytes { raw in
                         packedBatch.withUnsafeMutableBytes { dst in
                             memcpy(dst.baseAddress!.advanced(by: i * packedRowBytes),
                                    raw.baseAddress!, raw.count)
                         }
                     }
-                    q.scales.withUnsafeBytes { raw in
+                    _ = q.scales.withUnsafeBytes { raw in
                         scalesBatch.withUnsafeMutableBytes { dst in
                             memcpy(dst.baseAddress!.advanced(by: i * groups * 2),
                                    raw.baseAddress!, raw.count)
                         }
                     }
-                    q.biases.withUnsafeBytes { raw in
+                    _ = q.biases.withUnsafeBytes { raw in
                         biasesBatch.withUnsafeMutableBytes { dst in
                             memcpy(dst.baseAddress!.advanced(by: i * groups * 2),
                                    raw.baseAddress!, raw.count)
@@ -229,19 +229,19 @@ enum QwenQuantizedWriter {
                     let q = floats.withUnsafeBufferPointer {
                         FinchQuantization.quantizeInt3Affine($0, count: cols)
                     }
-                    q.packed.withUnsafeBytes { raw in
+                    _ = q.packed.withUnsafeBytes { raw in
                         packedBatch.withUnsafeMutableBytes { dst in
                             memcpy(dst.baseAddress!.advanced(by: i * packedRowBytes),
                                    raw.baseAddress!, raw.count)
                         }
                     }
-                    q.scales.withUnsafeBytes { raw in
+                    _ = q.scales.withUnsafeBytes { raw in
                         scalesBatch.withUnsafeMutableBytes { dst in
                             memcpy(dst.baseAddress!.advanced(by: i * groups * 2),
                                    raw.baseAddress!, raw.count)
                         }
                     }
-                    q.biases.withUnsafeBytes { raw in
+                    _ = q.biases.withUnsafeBytes { raw in
                         biasesBatch.withUnsafeMutableBytes { dst in
                             memcpy(dst.baseAddress!.advanced(by: i * groups * 2),
                                    raw.baseAddress!, raw.count)
@@ -251,19 +251,19 @@ enum QwenQuantizedWriter {
                     let q = floats.withUnsafeBufferPointer {
                         FinchQuantization.quantizeInt8Affine($0, count: cols)
                     }
-                    q.packed.withUnsafeBytes { raw in
+                    _ = q.packed.withUnsafeBytes { raw in
                         packedBatch.withUnsafeMutableBytes { dst in
                             memcpy(dst.baseAddress!.advanced(by: i * packedRowBytes),
                                    raw.baseAddress!, raw.count)
                         }
                     }
-                    q.scales.withUnsafeBytes { raw in
+                    _ = q.scales.withUnsafeBytes { raw in
                         scalesBatch.withUnsafeMutableBytes { dst in
                             memcpy(dst.baseAddress!.advanced(by: i * groups * 2),
                                    raw.baseAddress!, raw.count)
                         }
                     }
-                    q.biases.withUnsafeBytes { raw in
+                    _ = q.biases.withUnsafeBytes { raw in
                         biasesBatch.withUnsafeMutableBytes { dst in
                             memcpy(dst.baseAddress!.advanced(by: i * groups * 2),
                                    raw.baseAddress!, raw.count)
@@ -475,7 +475,6 @@ enum QwenQuantizedWriter {
         let srcBase = plan.source.absoluteOffset
 
         let batchRows = 1024
-        let srcBatchBytes = batchRows * cols * 2
         let outBatchBytes = batchRows * rowStride
         let scratchBytes = outBatchBytes + cols * MemoryLayout<Float>.size
         if scratchBytes > audit.largestScratchBytes {
@@ -503,9 +502,9 @@ enum QwenQuantizedWriter {
                     FinchQuantization.quantizeInt4AffinePLE($0, count: cols, groupSize: groupSize)
                 }
                 let dst = i * rowStride
-                q.packed.withUnsafeBytes { memcpy(&out[dst], $0.baseAddress!, $0.count) }
-                q.scales.withUnsafeBytes { memcpy(&out[dst + packedRowBytes], $0.baseAddress!, $0.count) }
-                q.biases.withUnsafeBytes { memcpy(&out[dst + packedRowBytes + auxBytes], $0.baseAddress!, $0.count) }
+                _ = q.packed.withUnsafeBytes { memcpy(&out[dst], $0.baseAddress!, $0.count) }
+                _ = q.scales.withUnsafeBytes { memcpy(&out[dst + packedRowBytes], $0.baseAddress!, $0.count) }
+                _ = q.biases.withUnsafeBytes { memcpy(&out[dst + packedRowBytes + auxBytes], $0.baseAddress!, $0.count) }
             }
 
             try out.withUnsafeBytes { raw in

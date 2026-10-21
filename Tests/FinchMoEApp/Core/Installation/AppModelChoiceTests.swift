@@ -76,6 +76,7 @@ import FinchMoE
             (.gemma4, "gemma4.finch"),
             (.qwen3_6, "Qwen3.6-35B-A3B-4bit.finch"),
             (.qwen3_6_3bit, "Qwen3.6-35B-A3B-3bit.finch"),
+            (.qwen3_6_3bit_vision, "Qwen3.6-35B-A3B-3bit-vision.finch"),
             (.qwen3_6_abliterated, "Qwen3.6-35B-A3B-abliterated-4bit.finch"),
             (.qwen3_6_abliterated_3bit, "Qwen3.6-35B-A3B-abliterated-3bit.finch"),
             (.qwen3_8, "Qwen3.8-Flash-Next-125B-ple4bit.finch"),
@@ -84,6 +85,8 @@ import FinchMoE
             (.qwen3_8_abliterated, "Qwen3.8-Flash-Next-abliterated-ple4bit.finch"),
             (.qwen3_8_abliterated_3bit, "Qwen3.8-Flash-Next-abliterated-ple3bit.finch"),
             (.qwen3_8_abliterated_2bit, "Qwen3.8-Flash-Next-abliterated-ple2bit.finch"),
+            (.qwen3_8_abliterated_2bit_vision,
+             "Qwen3.8-Flash-Next-abliterated-ple2bit-vision.finch"),
         ]
         #expect(expected.count == AppModelChoice.allCases.count)
         for (choice, name) in expected {

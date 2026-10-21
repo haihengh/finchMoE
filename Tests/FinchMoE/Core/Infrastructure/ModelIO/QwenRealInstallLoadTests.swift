@@ -19,6 +19,33 @@ import Metal
             atPath: installPath + "/manifest.json")
     }
 
+    private static let visionInstallPath =
+        "/Volumes/samsung 2t/code/finchmoe/models/Qwen3.6-35B-A3B-3bit-vision.finch"
+
+    private static var visionInstallExists: Bool {
+        FileManager.default.fileExists(atPath: visionInstallPath + "/manifest.json")
+    }
+
+    /// The published vision-bearing install is still a text install: the four
+    /// extra `vision/` files are ordinary manifest entries the loader never
+    /// opens, and every text entry resolves exactly as it does without them.
+    @Test(.enabled(if: visionInstallExists))
+    func visionInstallLoadsTextOnly() throws {
+        let ctx = try MetalContext()
+        let model = try Model.load(
+            directoryURL: URL(fileURLWithPath: Self.visionInstallPath),
+            device: ctx.device,
+            expecting: .qwen3_6_35B_A3B)
+        #expect(model.routedExpertWeightBits == 3)
+        #expect(model.embedding.shape == (248_320, 2_048, 0, 0))
+        #expect(model.packedExpertsLayout.expertsPerLayer == 256)
+        #expect(try model.router(layer: 0).shape == (256, 2_048, 0, 0))
+        // The app's memory readout uses the device allocation ledger because
+        // process footprint accounting can leave the clean mmap pages out.
+        // The resident buffer alone must already be counted here.
+        #expect(ctx.device.currentAllocatedSize >= 1_894_721_536)
+    }
+
     @Test(.enabled(if: installExists))
     func realInstallLoadsWithQwenPreset() throws {
         let ctx = try MetalContext()
