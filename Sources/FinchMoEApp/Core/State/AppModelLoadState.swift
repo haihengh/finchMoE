@@ -44,6 +44,12 @@ public enum AppModelLoadState: Equatable, Sendable {
 
 public enum AppGenerationPhase: String, Equatable, Sendable {
     case idle
+    /// The vision tower is encoding an attached image (and the multimodal
+    /// prompt is being assembled). On a phone this is the long silent stretch
+    /// before the first prefill chunk, so it must not read as "Prefill":
+    /// there are no prefill counts to show yet and the text engine has not
+    /// started.
+    case processingImage
     case prefill
     case decode
 }

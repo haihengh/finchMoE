@@ -32,6 +32,9 @@ public final class AppModel {
     public var modelPathText: String
     public private(set) var selectedModelChoice: AppModelChoice?
     public var promptText: String = ""
+    /// Images attached to the draft. Cleared when the message is sent (with
+    /// the prompt) or when the model changes.
+    public var pendingImages: [AppPendingImage] = []
     // `internal(set)` rather than `private(set)`: the chat layer lives in
     // `AppModel+Chat.swift`, and `private` setters are only visible inside the
     // file that declares them. Still hidden from the SwiftUI target, which is
@@ -147,6 +150,14 @@ public final class AppModel {
         if !runtimeOptions.kvCacheMode.isAvailable(for: descriptor.architecture) {
             runtimeOptions.kvCacheMode = .fp16
         }
+        // Qwen 3.8 routes to ten experts per token. A persisted 8-slot choice
+        // from a 3.6 layout would otherwise trap the first decode layer.
+        let minimumSlots = descriptor.architecture.topKExperts
+        if runtimeOptions.expertCacheSlots < minimumSlots,
+           let replacement = AppRuntimeOptions.allowedSlotCounts.first(
+               where: { $0 >= minimumSlots }) {
+            runtimeOptions.expertCacheSlots = replacement
+        }
         self.runtimeOptions = runtimeOptions
         self.maxContextTokens = settings.contextTokens
         self.temperature = settings.temperature
@@ -201,6 +212,61 @@ public final class AppModel {
     public var requiresModelInstallation: Bool { !isModelInstalled }
 
     public var installDescriptor: AppModelInstallDescriptor { installer.descriptor }
+
+    /// The phone-only budget for the largest vision model, or nil when the
+    /// current model fits the persisted settings as-is.
+    public var memoryCap: AppModelMemoryBudget.Cap? {
+        AppModelMemoryBudget.cap(for: installDescriptor)
+    }
+
+    /// The context actually loaded and requested. The picker keeps the user's
+    /// persisted choice; this is the value the runner is built with.
+    public var effectiveMaxContextTokens: Int {
+        min(maxContextTokens, memoryCap?.contextTokens ?? Int.max)
+    }
+
+    /// The cache sizes the current model can actually use. Qwen 3.8 routes
+    /// to ten experts per token, and a layer's cache must hold at least
+    /// top-k; offering the 8-slot choice there would trap the decoder.
+    public var allowedExpertCacheSlots: [Int] {
+        var slots = AppRuntimeOptions.allowedSlotCounts.filter {
+            $0 >= installDescriptor.architecture.topKExperts
+        }
+        if let memoryCap {
+            slots = slots.filter { $0 <= memoryCap.expertCacheSlots }
+        }
+        return slots
+    }
+
+    /// Context choices that fit the current model on this device.
+    public var allowedContextLengths: [AppContextLengthOption] {
+        let maximum = memoryCap?.contextTokens ?? Int.max
+        return AppContextLengthOption.allCases.filter { $0.tokens <= maximum }
+    }
+
+    public var allowedPrefillChunkTokens: [Int] {
+        let maximum = memoryCap?.prefillChunkTokens ?? Int.max
+        return AppRuntimeOptions.allowedPrefillChunkTokens.filter { $0 <= maximum }
+    }
+
+    /// The options actually loaded and requested. Settings are shared across
+    /// models in one folder, so the cap is applied here rather than written
+    /// back into `runtimeOptions`: switching to a smaller model must not
+    /// inherit the phone's 3.8-vision limits.
+    public var effectiveRuntimeOptions: AppRuntimeOptions {
+        var options = runtimeOptions
+        if let minimumSlots = AppRuntimeOptions.allowedSlotCounts.first(
+            where: { $0 >= installDescriptor.architecture.topKExperts }) {
+            options.expertCacheSlots = max(options.expertCacheSlots, minimumSlots)
+        }
+        if let memoryCap {
+            options.expertCacheSlots = min(options.expertCacheSlots,
+                                           memoryCap.expertCacheSlots)
+            options.prefillChunkTokens = min(options.prefillChunkTokens,
+                                             memoryCap.prefillChunkTokens)
+        }
+        return options
+    }
 
     public var modelChoices: [AppModelChoice] { AppModelChoice.allCases }
 
@@ -280,9 +346,40 @@ public final class AppModel {
     }
 
     public var canRun: Bool {
-        !isRunning && isModelAvailable && !loadState.isLoading
+        let hasText = !promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasImages = !pendingImages.isEmpty
+        return !isRunning && isModelAvailable && !loadState.isLoading
             && !hasStaleLoadedRuntime
-            && !promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (hasText || hasImages)
+            && (!hasImages || supportsVision)
+    }
+
+    /// The selected install is one of the vision builds and is complete.
+    public var supportsVision: Bool {
+        isModelInstalled
+            && installDescriptor.requiresVision
+            && (installDescriptor.architecture.isQwen3_6
+                || installDescriptor.architecture.isQwen3_8)
+    }
+
+    /// Attaching is offered only where the runtime can consume the image.
+    public var canAttachImage: Bool {
+        supportsVision && !isRunning && !loadState.isLoading
+    }
+
+    public func addPendingImages(_ images: [AppPendingImage]) {
+        guard canAttachImage else { return }
+        let room = AppImageAttachment.maximumImagesPerTurn - pendingImages.count
+        guard room > 0 else { return }
+        pendingImages.append(contentsOf: images.prefix(room))
+    }
+
+    public func removePendingImage(id: UUID) {
+        pendingImages.removeAll { $0.id == id }
+    }
+
+    public func clearPendingImages() {
+        pendingImages.removeAll()
     }
 
     public var canCancel: Bool { isRunning && !isCancellationPending }
@@ -357,14 +454,24 @@ public final class AppModel {
         return memorySampler.sample()
     }
 
+    /// The jetsam ceiling for this process, when the platform reports one.
+    ///
+    /// Shown beside the live footprint so the cap in
+    /// `AppModelMemoryBudget` can be checked against the machine it is
+    /// running on instead of the iPhone figure it was priced for. nil on
+    /// macOS, where no such limit exists.
+    public var processMemoryLimitBytes: UInt64? {
+        AppMemorySampler.memoryLimitBytes
+    }
+
     public var generationTranscriptMailbox: GenerationTranscriptMailbox? {
         (client as? any AppInferenceTranscriptReporting)?.generationTranscriptMailbox
     }
 
     private var currentRuntimeKey: AppLoadedRuntimeKey {
         AppLoadedRuntimeKey(modelDirectory: URL(fileURLWithPath: modelPathText),
-                            maxContextTokens: maxContextTokens,
-                            options: runtimeOptions,
+                            maxContextTokens: effectiveMaxContextTokens,
+                            options: effectiveRuntimeOptions,
                             forceLogitsHead: currentForceLogitsHead)
     }
 
@@ -415,6 +522,7 @@ public final class AppModel {
         guard path != modelPathText || descriptor != installer.descriptor else { return }
 
         stopLocalServer()
+        pendingImages.removeAll()
         modelPathText = path
         selectedModelChoice = newChoice
         installer.cancel()
@@ -494,8 +602,8 @@ public final class AppModel {
             return
         }
         let directory = URL(fileURLWithPath: modelPathText)
-        let maxContext = maxContextTokens
-        let options = runtimeOptions
+        let maxContext = effectiveMaxContextTokens
+        let options = effectiveRuntimeOptions
         let forceLogitsHead = currentForceLogitsHead
         let runtimeKey = AppLoadedRuntimeKey(modelDirectory: directory,
                                              maxContextTokens: maxContext,
@@ -583,8 +691,8 @@ public final class AppModel {
             "--model", URL(fileURLWithPath: modelPathText).standardizedFileURL.path,
             "--port", "\(localServerPort)",
             "--model-id", localServerModelID.isEmpty ? installDescriptor.shortName : localServerModelID,
-            "--max-context", "\(maxContextTokens)",
-            "--verify", runtimeOptions.modelVerification.rawValue,
+            "--max-context", "\(effectiveMaxContextTokens)",
+            "--verify", effectiveRuntimeOptions.modelVerification.rawValue,
         ]
         process.standardOutput = outputPipe
         process.standardError = outputPipe
@@ -866,9 +974,18 @@ public final class AppModel {
     /// run. Int8 KV is Qwen 3.6 only; the runner traps rather than misread a
     /// 3.8 timeline, so the app must fall back before asking it to load.
     private func sanitizeRuntimeOptionsForCurrentModel() {
-        guard !runtimeOptions.kvCacheMode.isAvailable(
-            for: installDescriptor.architecture) else { return }
-        runtimeOptions.kvCacheMode = .fp16
+        if !runtimeOptions.kvCacheMode.isAvailable(
+            for: installDescriptor.architecture) {
+            runtimeOptions.kvCacheMode = .fp16
+        }
+        // 3.8 routes to ten experts per token; 8 slots cannot hold one
+        // layer's working set and `makeExpertCachePlan` traps on it.
+        let minimumSlots = installDescriptor.architecture.topKExperts
+        if runtimeOptions.expertCacheSlots < minimumSlots,
+           let replacement = AppRuntimeOptions.allowedSlotCounts.first(
+               where: { $0 >= minimumSlots }) {
+            runtimeOptions.expertCacheSlots = replacement
+        }
     }
 
     private func persistSettings() {
@@ -948,6 +1065,7 @@ public final class AppModel {
         guard !isRunning else { return }
         outputPromptText = ""
         outputText = ""
+        pendingImages.removeAll()
         generationTranscriptMailbox?.reset()
         diagnostics = nil
         error = nil
@@ -972,7 +1090,7 @@ public final class AppModel {
         generationTranscriptMailbox?.reset()
         outputPromptText = request.prompt
         outputText = ""
-        beginChatExchange(prompt: request.prompt)
+        beginChatExchange(prompt: request.prompt, images: request.images)
         diagnostics = nil
         error = nil
         hasHandledTerminalEvent = false
@@ -988,10 +1106,15 @@ public final class AppModel {
         livePrefillTotal = 0
         livePrefillCached = 0
         liveMemoryBytes = nil
-        phase = .prefill
+        // An image turn spends its first seconds in the vision tower, before
+        // the text engine has any prefill counts to report. Naming that phase
+        // separately is what stops a phone from showing "Prefill" for a
+        // picture that is still being encoded.
+        phase = request.hasImageContent ? .processingImage : .prefill
         runState = .running
         if sentPromptBehavior == .clear {
             promptText = ""
+            pendingImages.removeAll()
         }
 
         runTask = Task.detached { [weak self, client, request] in
@@ -1018,18 +1141,17 @@ public final class AppModel {
         let request = AppGenerationRequest(
             modelDirectory: URL(fileURLWithPath: modelPathText),
             prompt: promptText,
-            history: activeSession.replayableMessages.map {
-                AppChatTurn(
-                    role: $0.role,
-                    text: $0.text)
+            images: pendingImages.map(\.attachment),
+            history: activeSession.replayableMessages.map { message in
+                chatTurn(for: message)
             },
-            maxNewTokens: maxNewTokensOverride ?? maxContextTokens,
-            maxContextTokens: maxContextTokens,
+            maxNewTokens: maxNewTokensOverride ?? effectiveMaxContextTokens,
+            maxContextTokens: effectiveMaxContextTokens,
             temperature: Float(temperature),
             topK: topKEnabled ? topK : nil,
             topP: topKEnabled && topPEnabled ? Float(topP) : nil,
             repetitionPenalty: 1.0,
-            runtimeOptions: runtimeOptions,
+            runtimeOptions: effectiveRuntimeOptions,
             promptReuseEnabled: promptReuseEnabled)
         try request.validate(requireModelDirectory: true)
         return request

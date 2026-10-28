@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import FinchMoE
 @testable import FinchMoEAppCore
 
 @Suite struct AppModelLiveMetricsTests {
@@ -50,6 +51,36 @@ import Testing
             runtimeOptions: AppRuntimeOptions())))
         #expect(model.phase == .idle)
         #expect(model.liveTokenCount == 3)
+    }
+
+    @MainActor
+    @Test func imageTurnStartsInImageProcessingNotPrefill() async throws {
+        let directory = try makeCompleteModelInstall(
+            "vision-processing-phase",
+            arch: .qwen3_6_35B_A3B,
+            descriptor: .qwen3_6_3bit_vision)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let client = MockInferenceClient(tokenDelayNanos: 1_000_000_000)
+        let model = AppModel(modelDirectory: directory, client: client)
+        model.loadState = .ready(modelDirectory: directory, loadSeconds: 1)
+        model.promptText = "what is in this photo?"
+        model.addPendingImages([AppPendingImage(
+            data: Data([0xFF, 0xD8, 0xFF]),
+            mediaType: "image/jpeg")])
+        #expect(model.supportsVision)
+        #expect(model.pendingImages.count == 1)
+
+        model.run()
+
+        #expect(model.phase == .processingImage)
+        #expect(model.presentation.label == "Processing image")
+        #expect(model.presentation.showsActivity)
+        #expect(model.livePrefillTotal == 0)
+
+        model.cancel()
+        for _ in 0..<200 where model.isRunning {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
     }
 
     @MainActor

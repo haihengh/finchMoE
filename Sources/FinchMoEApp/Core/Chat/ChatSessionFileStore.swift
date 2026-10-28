@@ -55,6 +55,52 @@ public struct ChatSessionFileStore: Sendable {
             .appendingPathComponent(fileName, isDirectory: false)
     }
 
+    /// Images live beside the archive, never inside its JSON.
+    public var attachmentsDirectory: URL {
+        fileURL.deletingLastPathComponent()
+            .appendingPathComponent("chat-attachments", isDirectory: true)
+    }
+
+    public func attachmentData(relativePath: String) -> Data? {
+        guard let url = attachmentURL(relativePath) else { return nil }
+        return try? Data(contentsOf: url)
+    }
+
+    public func saveAttachment(_ data: Data, relativePath: String) throws {
+        guard let url = attachmentURL(relativePath) else {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try data.write(to: url, options: .atomic)
+    }
+
+    public func removeAttachment(relativePath: String) {
+        guard let url = attachmentURL(relativePath) else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    /// Removes the whole attachment subtree for one message or session.
+    public func removeAttachmentDirectory(relativePath: String) {
+        guard let url = attachmentURL(relativePath) else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    private func attachmentURL(_ relativePath: String) -> URL? {
+        let components = relativePath.split(separator: "/", omittingEmptySubsequences: true)
+        guard !components.isEmpty,
+              !relativePath.hasPrefix("/"),
+              !components.contains(where: { $0 == ".." || $0 == "." }) else {
+            return nil
+        }
+        var url = attachmentsDirectory
+        for component in components {
+            url.appendPathComponent(String(component), isDirectory: false)
+        }
+        return url
+    }
+
     public func load(fileManager: FileManager = .default) -> ChatSessionArchive? {
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
         guard let archive = try? JSONDecoder().decode(

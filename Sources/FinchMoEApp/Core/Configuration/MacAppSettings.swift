@@ -1,3 +1,4 @@
+import FinchMoE
 import Foundation
 
 struct MacAppSettings: Codable, Equatable, Sendable {
@@ -13,7 +14,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var topPEnabled: Bool = true
     var topP: Double = 0.95
     var prefillEnabled: Bool = true
-    var prefillChunkTokens: Int = 512
+    var prefillChunkTokens: Int = RuntimeConfiguration.defaultPrefillChunkTokens
     var expertCachePolicy: AppExpertCachePolicy = .lfu
     /// Whether chat turns may resume from the previous turn's KV cache.
     /// Live: unlike the runtime options above, flipping it needs no reload.
@@ -59,7 +60,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          topPEnabled: Bool = true,
          topP: Double = 0.95,
          prefillEnabled: Bool = true,
-         prefillChunkTokens: Int = 512,
+         prefillChunkTokens: Int = RuntimeConfiguration.defaultPrefillChunkTokens,
          expertCachePolicy: AppExpertCachePolicy = .lfu,
          promptReuseEnabled: Bool = true,
          modelVerification: AppModelVerification = .automatic,
@@ -98,7 +99,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         topP = try container.decode(Double.self, forKey: .topP)
         prefillEnabled = try container.decode(Bool.self, forKey: .prefillEnabled)
         prefillChunkTokens = try container.decodeIfPresent(
-            Int.self, forKey: .prefillChunkTokens) ?? 512
+            Int.self, forKey: .prefillChunkTokens)
+            ?? RuntimeConfiguration.defaultPrefillChunkTokens
         // Raw-string decode for the same reason as `modelVerification`: an
         // unrecognized value must fall back, not reset every other setting.
         expertCachePolicy = (try container.decodeIfPresent(

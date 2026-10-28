@@ -47,20 +47,47 @@ public struct DecodeLoadRequest: Codable, Sendable {
     }
 }
 
+/// One image attached to a turn. The app downsizes images before sending, so
+/// the base64 JSON representation stays well inside the frame cap.
+public struct DecodeImage: Codable, Sendable, Equatable, Identifiable {
+    public var id: UUID
+    public var mediaType: String
+    public var data: Data
+    public var pixelWidth: Int?
+    public var pixelHeight: Int?
+
+    public init(id: UUID = UUID(),
+                mediaType: String,
+                data: Data,
+                pixelWidth: Int? = nil,
+                pixelHeight: Int? = nil) {
+        self.id = id
+        self.mediaType = mediaType
+        self.data = data
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+    }
+}
+
 /// One earlier conversation turn carried to the service, which is the side
 /// that owns the tokenizer and therefore the chat template.
 public struct DecodeChatTurn: Codable, Sendable, Equatable {
     public var role: String
     public var text: String
+    /// Absent on the wire from a build that predates image attachments.
+    public var images: [DecodeImage]?
 
-    public init(role: String, text: String) {
+    public init(role: String, text: String, images: [DecodeImage]? = nil) {
         self.role = role
         self.text = text
+        self.images = images
     }
 }
 
 public struct DecodeGenerationRequest: Codable, Sendable {
     public var prompt: String
+    /// Images attached to the new user turn, in prompt order.
+    public var images: [DecodeImage]?
     /// Older turns, oldest first. Absent on the wire means "no history",
     /// which keeps a request from a build that predates chat history decodable.
     public var history: [DecodeChatTurn]
@@ -75,12 +102,14 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     public var generationID: UUID
 
     public init(prompt: String, history: [DecodeChatTurn] = [],
+                images: [DecodeImage]? = nil,
                 maxNewTokens: Int, maxContextTokens: Int,
                 temperature: Float, repetitionPenalty: Float = 1,
                 runtimeOptions: DecodeRuntimeOptions = DecodeRuntimeOptions(),
                 promptReuseEnabled: Bool? = nil,
                 generationID: UUID = UUID()) {
         self.prompt = prompt
+        self.images = images
         self.history = history
         self.maxNewTokens = maxNewTokens
         self.maxContextTokens = maxContextTokens
@@ -92,7 +121,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case prompt, history, maxNewTokens, maxContextTokens
+        case prompt, images, history, maxNewTokens, maxContextTokens
         case temperature, repetitionPenalty, runtimeOptions
         case promptReuseEnabled, generationID
     }
@@ -100,6 +129,8 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         prompt = try container.decode(String.self, forKey: .prompt)
+        images = try container.decodeIfPresent(
+            [DecodeImage].self, forKey: .images)
         history = try container.decodeIfPresent(
             [DecodeChatTurn].self, forKey: .history) ?? []
         maxNewTokens = try container.decode(Int.self, forKey: .maxNewTokens)
@@ -246,7 +277,10 @@ public struct DecodeServiceEvent: Codable, Sendable {
 }
 
 public enum DecodeFrameCodec {
-    public static let maximumPayloadBytes = 4 * 1_024 * 1_024
+    /// Images travel as base64 in the generation frame; the app's per-request
+    /// image budget is 24 MiB, which is at most 32 MiB once base64-encoded,
+    /// plus the prompt and JSON overhead.
+    public static let maximumPayloadBytes = 40 * 1_024 * 1_024
 
     public static func encode<T: Encodable>(_ value: T) throws -> Data {
         let payload = try JSONEncoder().encode(value)

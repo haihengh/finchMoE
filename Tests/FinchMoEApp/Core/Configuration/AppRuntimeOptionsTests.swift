@@ -9,14 +9,26 @@ import FinchMoE
         #expect(options.expertCacheSlots == 16)
         #expect(options.expertCachePolicy == .lfu)
         #expect(options.prefillEnabled)
-        #expect(options.prefillChunkTokens == 512)
+        #expect(options.prefillChunkTokens == 1024)
         #expect(options.rdadvisePolicy == .off)
         #expect(options.modelVerification == .automatic)
 
         let runtime = try options.resolvedRuntimeConfiguration(forceLogitsHead: false)
         #expect(runtime == .production)
         #expect(options.resultSummary ==
-            "Cache 16 LFU, prefill 512, FP16 KV, RDADVISE off, auto verification")
+            "Cache 16 LFU, prefill 1024, FP16 KV, RDADVISE off, auto verification")
+    }
+
+    @Test func prefillChunkDefaultIsOfferedByThePicker() {
+        // The settings picker marks `defaultPrefillChunkTokens` "(default)". A
+        // default outside the offered set would render no marker at all, and
+        // the picker had hardcoded 512 as its default long after 1,024 became
+        // the real one — this is what keeps the two from drifting apart again.
+        #expect(AppRuntimeOptions.defaultPrefillChunkTokens == 1024)
+        #expect(AppRuntimeOptions.allowedPrefillChunkTokens
+            .contains(AppRuntimeOptions.defaultPrefillChunkTokens))
+        #expect(AppRuntimeOptions().prefillChunkTokens
+            == AppRuntimeOptions.defaultPrefillChunkTokens)
     }
 
     @Test func persistedSettingsCarryTheCacheChoices() {
@@ -85,6 +97,7 @@ import FinchMoE
             #expect(runtime.prefillTilesFitSlots(slots))
         }
         #expect(AppRuntimeOptions.prefillTileExperts(forSlots: 8) == 4)
+        #expect(AppRuntimeOptions.prefillTileExperts(forSlots: 10) == 5)
         #expect(AppRuntimeOptions.prefillTileExperts(forSlots: 16) == 8)
         for chunk in AppRuntimeOptions.allowedPrefillChunkTokens {
             let runtime = try AppRuntimeOptions(prefillChunkTokens: chunk)
@@ -136,7 +149,7 @@ import FinchMoE
         value = base; value.rdadvisePolicy = .bounded; variants.append(value)
         value = base; value.modelVerification = .trustedInstall; variants.append(value)
         value = base; value.prefillEnabled = false; variants.append(value)
-        value = base; value.prefillChunkTokens = 1024; variants.append(value)
+        value = base; value.prefillChunkTokens = 512; variants.append(value)
 
         for variant in variants {
             #expect(AppLoadedRuntimeKey(

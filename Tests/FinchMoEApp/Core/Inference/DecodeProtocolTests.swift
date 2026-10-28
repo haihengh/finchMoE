@@ -113,6 +113,40 @@ import FinchMoEDecodeProtocol
         #expect(decoded.textDelta == "caf\u{00E9}")
     }
 
+    @Test func generationRequestCarriesImagesInTurnOrder() throws {
+        let image = DecodeImage(mediaType: "image/jpeg",
+                                data: Data([0x01, 0x02, 0x03]),
+                                pixelWidth: 4,
+                                pixelHeight: 5)
+        let historyImage = DecodeImage(mediaType: "image/png",
+                                       data: Data([0x04]))
+        let request = DecodeGenerationRequest(
+            prompt: "what is this?",
+            history: [DecodeChatTurn(role: "user", text: "", images: [historyImage])],
+            images: [image],
+            maxNewTokens: 8,
+            maxContextTokens: 4_096,
+            temperature: 0)
+        let data = try JSONEncoder().encode(request)
+        let decoded = try JSONDecoder().decode(DecodeGenerationRequest.self, from: data)
+        #expect(decoded.images?.first?.data == image.data)
+        #expect(decoded.images?.first?.pixelWidth == 4)
+        #expect(decoded.history.first?.images?.first?.data == historyImage.data)
+    }
+
+    @Test func imageFieldsAreAbsentFromTextOnlyFrames() throws {
+        let request = DecodeGenerationRequest(
+            prompt: "hello",
+            maxNewTokens: 1,
+            maxContextTokens: 4_096,
+            temperature: 0)
+        let data = try JSONEncoder().encode(request)
+        #expect(String(data: data, encoding: .utf8)?.contains("\"images\"") == false)
+        let decoded = try JSONDecoder().decode(DecodeGenerationRequest.self, from: data)
+        #expect(decoded.images == nil)
+        #expect(decoded.history.isEmpty)
+    }
+
     @Test func oversizedPayloadIsRejectedBeforeEncoding() {
         let request = DecodeGenerationRequest(
             prompt: String(repeating: "x", count: DecodeFrameCodec.maximumPayloadBytes + 1),

@@ -13,6 +13,7 @@ struct ModelInstallView: View {
     #endif
     @State private var showingDiscardConfirmation = false
     @Environment(\.finchAccentColor) private var accentColor
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     init(model: AppModel) {
         self.model = model
@@ -76,7 +77,7 @@ struct ModelInstallView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             if !model.installDescriptor.supportsRemoteInstall {
-                Text("This model is loaded from an existing .finch directory.")
+                Text("This preset has no published download. Choose an existing .finch directory, or pick a downloadable preset.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -208,41 +209,91 @@ struct ModelInstallView: View {
         }
     }
 
+    private var isLocalOnly: Bool {
+        !model.installDescriptor.supportsRemoteInstall
+    }
+
     private var actions: some View {
-        HStack(spacing: 12) {
+        Group {
             if model.isInstallingModel {
                 Button("Cancel", action: model.cancelInstall)
                     .buttonStyle(.bordered)
                     .keyboardShortcut(.cancelAction)
                     .disabled(!model.canCancelInstall)
-            } else {
-                if model.hasPartialModelDownload {
-                    Button("Discard Download", role: .destructive) {
-                        showingDiscardConfirmation = true
+            } else if horizontalSizeClass == .compact {
+                // A phone cannot fit Check Again + Choose Local + Download in
+                // one row; the last button used to be clipped off-screen, which
+                // left a not-installed model with no tappable Download.
+                VStack(spacing: 10) {
+                    if isLocalOnly {
+                        chooseAction.frame(maxWidth: .infinity)
+                    } else {
+                        downloadAction.frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(!model.canDiscardModelDownload)
+                    if model.hasPartialModelDownload {
+                        discardAction.frame(maxWidth: .infinity)
+                    }
+                    checkAction.frame(maxWidth: .infinity)
+                    if !isLocalOnly {
+                        chooseAction.frame(maxWidth: .infinity)
+                    }
                 }
-
-                Button("Check Again", action: model.recheckModelAtCurrentLocation)
-                .buttonStyle(.bordered)
-                .disabled(model.isInstallingModel)
-
-                Button {
-                    chooseLocalModelDirectory()
-                } label: {
-                    Label("Choose Local", systemImage: "folder")
+            } else {
+                HStack(spacing: 12) {
+                    if model.hasPartialModelDownload {
+                        discardAction
+                    }
+                    checkAction
+                    chooseAction
+                    if !isLocalOnly {
+                        downloadAction
+                    }
                 }
-                .buttonStyle(.bordered)
-                .disabled(model.isRunning || model.isInstallingModel)
-
-                Button(model.hasPartialModelDownload ? "Resume" : "Download",
-                       action: model.installModel)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!model.canInstallModel)
             }
         }
         .controlSize(.large)
+    }
+
+    private var downloadAction: some View {
+        Button(model.hasPartialModelDownload ? "Resume" : "Download",
+               action: model.installModel)
+            .buttonStyle(.borderedProminent)
+            .disabled(!model.canInstallModel)
+    }
+
+    private var discardAction: some View {
+        Button("Discard Download", role: .destructive) {
+            showingDiscardConfirmation = true
+        }
+        .buttonStyle(.bordered)
+        .disabled(!model.canDiscardModelDownload)
+    }
+
+    private var checkAction: some View {
+        Button("Check Again", action: model.recheckModelAtCurrentLocation)
+            .buttonStyle(.bordered)
+            .disabled(model.isInstallingModel)
+    }
+
+    @ViewBuilder
+    private var chooseAction: some View {
+        if isLocalOnly {
+            // A probe-only row has no published distribution; choosing an
+            // existing directory is its only install path, so it gets the
+            // primary weight instead of a disabled Download.
+            chooseButton.buttonStyle(.borderedProminent)
+        } else {
+            chooseButton.buttonStyle(.bordered)
+        }
+    }
+
+    private var chooseButton: some View {
+        Button {
+            chooseLocalModelDirectory()
+        } label: {
+            Label("Choose Local", systemImage: "folder")
+        }
+        .disabled(model.isRunning || model.isInstallingModel)
     }
 
     private var readinessLabel: String {

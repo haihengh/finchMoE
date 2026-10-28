@@ -277,8 +277,8 @@ struct InspectorView: View {
     private var memorySection: some View {
         Section("Memory") {
             LabeledContent {
-                Picker("Context", selection: $model.maxContextTokens) {
-                    ForEach(AppContextLengthOption.allCases) { option in
+                Picker("Context", selection: contextSelection) {
+                    ForEach(model.allowedContextLengths) { option in
                         Text(option.menuLabel(architecture: model.installDescriptor.architecture))
                             .tag(option.tokens)
                     }
@@ -289,7 +289,7 @@ struct InspectorView: View {
                 settingLabel("Context", """
                 Maximum number of tokens the model can see and keep in memory: \
                 the prompt plus the reply. Larger contexts cost more KV-cache \
-                RAM; 4K is a safe default on a phone.
+                RAM; 4K is a safe default on iPhone and iPad.
                 """)
             }
             LabeledContent {
@@ -326,8 +326,8 @@ struct InspectorView: View {
                     .foregroundStyle(.secondary)
             }
             LabeledContent {
-                Picker("Slots", selection: $model.runtimeOptions.expertCacheSlots) {
-                    ForEach(AppRuntimeOptions.allowedSlotCounts, id: \.self) { slots in
+                Picker("Slots", selection: slotsSelection) {
+                    ForEach(model.allowedExpertCacheSlots, id: \.self) { slots in
                         Text(AppRuntimeOptions.slotsLabel(for: slots)).tag(slots)
                     }
                 }
@@ -336,7 +336,8 @@ struct InspectorView: View {
             } label: {
                 settingLabel("Slots", """
                 How many routed-expert tiles stay cached in RAM. More slots can \
-                speed up decoding but use more memory; 16 is the default. \
+                speed up decoding but use more memory; 16 is the default. Qwen \
+                3.8 routes to 10 experts per token, so 10 is its minimum. \
                 Applies after reloading the model.
                 """)
             }
@@ -358,6 +359,11 @@ struct InspectorView: View {
             Text("More slots can improve decode speed by keeping more experts in memory, but they also use more RAM. Changes are compared with 4K context and 16 slots and apply after reloading the model.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let cap = model.memoryCap {
+                Text("On this device, Qwen 3.8 Vision runs with at most \(cap.expertCacheSlots) expert slots, \(cap.contextTokens / 1_024)K context and \(cap.prefillChunkTokens)-token prefill chunks so the vision tower fits under the app memory limit. Your choices above are kept for other models.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .disabled(model.isRunning || model.loadState.isLoading)
     }
@@ -426,9 +432,10 @@ struct InspectorView: View {
             """, isOn: $model.runtimeOptions.prefillEnabled)
             if model.runtimeOptions.prefillEnabled {
                 LabeledContent {
-                    Picker("Prefill chunk", selection: $model.runtimeOptions.prefillChunkTokens) {
-                        ForEach(AppRuntimeOptions.allowedPrefillChunkTokens, id: \.self) { tokens in
-                            Text(tokens == 512 ? "\(tokens) (default)" : "\(tokens)")
+                    Picker("Prefill chunk", selection: prefillChunkSelection) {
+                        ForEach(model.allowedPrefillChunkTokens, id: \.self) { tokens in
+                            Text(tokens == AppRuntimeOptions.defaultPrefillChunkTokens
+                                    ? "\(tokens) (default)" : "\(tokens)")
                                 .tag(tokens)
                         }
                     }
@@ -521,6 +528,34 @@ struct InspectorView: View {
         HStack(spacing: 4) {
             Toggle(title, isOn: isOn)
             SettingInfoButton(title: title, detail: detail)
+        }
+    }
+
+    /// The pickers show the values the current model will actually load. On
+    /// a phone the 3.8 vision row is capped (see `AppModelMemoryBudget`); the
+    /// user's persisted choice stays in `maxContextTokens`/`runtimeOptions`
+    /// for the other models, while the setter edits the persisted value.
+    private var contextSelection: Binding<Int> {
+        Binding {
+            model.effectiveMaxContextTokens
+        } set: { tokens in
+            model.maxContextTokens = tokens
+        }
+    }
+
+    private var slotsSelection: Binding<Int> {
+        Binding {
+            model.effectiveRuntimeOptions.expertCacheSlots
+        } set: { slots in
+            model.runtimeOptions.expertCacheSlots = slots
+        }
+    }
+
+    private var prefillChunkSelection: Binding<Int> {
+        Binding {
+            model.effectiveRuntimeOptions.prefillChunkTokens
+        } set: { tokens in
+            model.runtimeOptions.prefillChunkTokens = tokens
         }
     }
 

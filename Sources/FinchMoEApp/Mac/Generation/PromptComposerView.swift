@@ -1,6 +1,11 @@
 import FinchMoEAppCore
 import FinchMoEMacPresentation
+import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// The message box at the bottom of the chat.
 struct PromptComposerView: View {
@@ -12,12 +17,19 @@ struct PromptComposerView: View {
 
     @FocusState private var promptFocused: Bool
     @State private var showingPromptTips = false
+    @State private var showingPhotoPicker = false
+    @State private var showingFileImporter = false
+    @State private var showingCamera = false
+    @State private var photoItem: PhotosPickerItem?
     /// Height the draft actually needs once it wraps, measured off a hidden
     /// copy of the same text. A `TextEditor` does not size itself.
     @State private var measuredTextHeight: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if !model.pendingImages.isEmpty {
+                attachmentStrip
+            }
             editor
             footer
         }
@@ -32,6 +44,39 @@ struct PromptComposerView: View {
                 }
         }
         .animation(.easeOut(duration: 0.12), value: editorHeight)
+        .animation(.easeOut(duration: 0.15), value: model.pendingImages.count)
+        .photosPicker(isPresented: $showingPhotoPicker,
+                      selection: $photoItem,
+                      matching: .images)
+        .fileImporter(isPresented: $showingFileImporter,
+                      allowedContentTypes: [.image],
+                      allowsMultipleSelection: true) { result in
+            importFiles(result)
+        }
+        #if canImport(UIKit)
+        .fullScreenCover(isPresented: $showingCamera) {
+            CameraPicker(
+                isPresented: $showingCamera,
+                maxDimension: CGFloat(AppImagePreparation.recommendedPixelDimension(
+                    for: model.installDescriptor.architecture))) { data in
+                addImage(data: data)
+            }
+            .ignoresSafeArea()
+        }
+        #endif
+        .onChange(of: photoItem) { _, item in
+            guard let item else { return }
+            Task { @MainActor in
+                defer { photoItem = nil }
+                guard let data = try? await item.loadTransferable(type: Data.self)
+                else {
+                    model.error = .invalidRequest(
+                        "That photo could not be loaded.")
+                    return
+                }
+                addImage(data: data)
+            }
+        }
         #if canImport(AppKit)
         .onAppear { promptFocused = true }
         #endif
@@ -43,6 +88,74 @@ struct PromptComposerView: View {
             FinchPlatformInput.setTextInputFocused(focused)
         }
         .onDisappear { FinchPlatformInput.setTextInputFocused(false) }
+    }
+
+    private var attachmentStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(model.pendingImages) { image in
+                    AttachmentThumbnail(data: image.data, size: 58)
+                        .overlay(alignment: .topTrailing) {
+                            Button {
+                                model.removePendingImage(id: image.id)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .symbolRenderingMode(.palette)
+                                    .foregroundStyle(.white, .black.opacity(0.62))
+                            }
+                            .buttonStyle(.plain)
+                            .offset(x: 5, y: -5)
+                            .accessibilityLabel("Remove image")
+                        }
+                }
+            }
+            .padding(.top, 4)
+            .padding(.trailing, 6)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func importFiles(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            for url in urls {
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer {
+                    if scoped { url.stopAccessingSecurityScopedResource() }
+                }
+                guard let data = try? Data(contentsOf: url) else {
+                    model.error = .invalidRequest(
+                        "\(url.lastPathComponent) could not be read.")
+                    continue
+                }
+                addImage(data: data)
+            }
+        case .failure(let error):
+            model.error = .invalidRequest(error.localizedDescription)
+        }
+    }
+
+    private func addImage(data: Data) {
+        // The import budget is model/platform-specific: a 3.8 image on a
+        // phone is 1024 px, not the tower's desktop 1536 px ceiling.
+        let maxDimension = AppImagePreparation.recommendedPixelDimension(
+            for: model.installDescriptor.architecture)
+        Task { @MainActor in
+            do {
+                let prepared = try await Task.detached(priority: .userInitiated) {
+                    try AppImagePreparation.prepare(data: data,
+                                                    maxDimension: maxDimension)
+                }.value
+                model.addPendingImages([AppPendingImage(
+                    data: prepared.data,
+                    mediaType: prepared.mediaType,
+                    pixelWidth: prepared.pixelWidth,
+                    pixelHeight: prepared.pixelHeight)])
+            } catch {
+                model.error = .invalidRequest("\(error)")
+            }
+        }
     }
 
     private var editor: some View {
@@ -117,11 +230,69 @@ struct PromptComposerView: View {
 
     private var footer: some View {
         HStack(spacing: 10) {
+            HStack(spacing: 4) {
+                attachControl
+                cameraControl
+            }
             promptTips
             Spacer()
             secondaryAction
             GenerateControl(model: model)
         }
+    }
+
+    /// iOS only. The Mac shell has no camera; its file importer covers images.
+    @ViewBuilder
+    private var cameraControl: some View {
+        #if canImport(UIKit)
+        if UIImagePickerController.isSourceTypeAvailable(.camera) {
+            Button {
+                showingCamera = true
+            } label: {
+                Image(systemName: "camera")
+                    .font(.system(size: 14, weight: .medium))
+                    .frame(width: 26, height: 26)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(model.canAttachImage ? .secondary : .tertiary)
+            .disabled(!model.canAttachImage)
+            .help("Take a photo")
+            .accessibilityLabel("Take photo")
+        }
+        #endif
+    }
+
+    private var attachControl: some View {
+        Menu {
+            #if canImport(UIKit)
+            Button {
+                showingPhotoPicker = true
+            } label: {
+                Label("Photo Library", systemImage: "photo.on.rectangle")
+            }
+            #endif
+            Button {
+                showingFileImporter = true
+            } label: {
+                Label("Choose File…", systemImage: "folder")
+            }
+        } label: {
+            Image(systemName: "paperclip")
+                .font(.system(size: 14, weight: .medium))
+                .frame(width: 26, height: 26)
+                .contentShape(Circle())
+        }
+        #if canImport(AppKit)
+        .menuStyle(.borderlessButton)
+        #endif
+        .fixedSize()
+        .foregroundStyle(model.canAttachImage ? .secondary : .tertiary)
+        .disabled(!model.canAttachImage)
+        .help(model.supportsVision
+              ? "Attach a photo or image file"
+              : "Attach images (requires a Qwen Vision model)")
+        .accessibilityLabel("Attach image")
     }
 
     private var promptTips: some View {
@@ -190,9 +361,11 @@ struct PromptComposerView: View {
             .buttonStyle(.borderless)
             .foregroundStyle(.secondary)
             .help("Clear chat")
-        } else if !model.isRunning && !model.promptText.isEmpty {
+        } else if !model.isRunning && (!model.promptText.isEmpty
+                                       || !model.pendingImages.isEmpty) {
             Button {
                 model.promptText = ""
+                model.clearPendingImages()
                 promptFocused = true
             } label: {
                 Label("Clear message", systemImage: "xmark.circle.fill")

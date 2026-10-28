@@ -414,6 +414,12 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         try executeExpertCachePlan(planExpertsCached(experts: experts))
     }
 
+    /// Read every expert on every call, with no cross-call cache retention.
+    public func loadExpertsDirect(experts: [Int]) throws
+        -> [(buffer: MTLBuffer, offset: UInt64, size: UInt64)] {
+        try executeExpertCachePlan(planExpertsDirect(experts: experts))
+    }
+
     public func planExpertsCached(experts: [Int],
                                   avoidingSlots: Set<Int> = []) -> ExpertCachePlan {
         guard let plan = makeExpertCachePlan(experts: experts, avoidingSlots: avoidingSlots) else {
@@ -425,6 +431,42 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public func planExpertsCachedIfPossible(experts: [Int],
                                             avoidingSlots: Set<Int> = []) -> ExpertCachePlan? {
         makeExpertCachePlan(experts: experts, avoidingSlots: avoidingSlots)
+    }
+
+    /// Plan every expert as a miss, assigning distinct scratch slots without
+    /// consulting or updating the persistent cache.
+    ///
+    /// This is the decode-only "trust the OS page cache" mode: no expert
+    /// contents survive a token, so every routed expert is read from the file
+    /// on every decode step and the OS page cache -- not the per-layer LFU --
+    /// decides what is hot. `avoidingSlots` still reserves slots that an
+    /// in-flight buffer may be using. Prefill keeps the cached planner.
+    public func planExpertsDirect(experts: [Int],
+                                  avoidingSlots: Set<Int> = []) -> ExpertCachePlan {
+        precondition(experts.count <= slotCount,
+                     "expert cache needs at least \(experts.count) slots")
+        let avoiding = Set(avoidingSlots.filter { $0 >= 0 && $0 < slotCount })
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        var reserved = [Bool](repeating: false, count: slotCount)
+        for slot in avoiding { reserved[slot] = true }
+        var candidates: [Int] = []
+        candidates.reserveCapacity(slotCount)
+        for slot in 0..<slotCount where !reserved[slot] { candidates.append(slot) }
+        precondition(experts.count <= candidates.count,
+                     "direct expert plan cannot place requested experts")
+        var assignedSlots = [Int](repeating: -1, count: experts.count)
+        for index in experts.indices {
+            let slot = candidates[index]
+            assignedSlots[index] = slot
+            // A later cached plan (prefill after decode) must not treat this
+            // scratch slot as still holding whatever the direct read left in it.
+            slotExpert[slot] = -1
+        }
+        return ExpertCachePlan(experts: experts,
+                               assignedSlots: assignedSlots,
+                               misses: Array(experts.indices),
+                               hits: 0)
     }
 
     private func makeExpertCachePlan(experts: [Int],

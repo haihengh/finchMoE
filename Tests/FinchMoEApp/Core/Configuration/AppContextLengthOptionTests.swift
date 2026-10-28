@@ -11,16 +11,23 @@ import FinchMoE
     /// Gemma has a sliding window, so only its full-attention layers grow with
     /// context; the sliding layers are capped at window + chunk.
     ///
-    /// These numbers moved +75 MiB each when the prefill chunk default went
-    /// 128 → 512 (`docs/OPTIMIZATION_PLAN.md` 1.1): the sliding layers must hold
-    /// one chunk's rows beyond the window, so 384 more tokens per sliding layer
-    /// is 384 × 10 layers × 2 heads × 256 dim × 2 (K+V) × 2 B. Qwen is
-    /// unaffected — its `slidingWindow` is 0, so it has no sliding layers.
+    /// The sliding layers must hold one chunk's rows beyond the window, so these
+    /// numbers are a function of the prefill chunk default and move whenever it
+    /// does: +75 MiB each at chunk 512 (`docs/OPTIMIZATION_PLAN.md` 1.1), and
+    /// +100 MiB each at chunk 1,024 (`STRATA_PP_KV_ANALYSIS.md` §4.1). The
+    /// 1,024 delta is 512 added rows × 25 sliding layers × (8 KV heads × 256 dim
+    /// × 2 K+V × 2 B) = 512 × 25 × 8192 B. Qwen is unaffected — its
+    /// `slidingWindow` is 0, so it has no sliding layers to size by the chunk.
+    ///
+    /// This is not a test-only figure: `KVCacheManager.swift:152` allocates
+    /// `slidingWindow + maxPrefillChunkTokens` rows, so a Gemma pack now carries
+    /// 100 MiB more cache at every context length than it did at chunk 512.
+    /// Gemma's 480 MiB at 4K is 16× that floor against Qwen 3.6's 80 MiB.
     @Test func gemmaFP16KVAllocationMatchesProduction() {
         let mebibytes = AppContextLengthOption.allCases.map {
             $0.fp16KVBytes(architecture: .gemma4_26B_A4B) / 1_048_576
         }
-        #expect(mebibytes == [380, 460, 620, 940, 1_580, 2_860, 5_420])
+        #expect(mebibytes == [480, 560, 720, 1_040, 1_680, 2_960, 5_520])
     }
 
     /// Qwen 3.6 has no sliding-window layers: 10 full-attention layers ×

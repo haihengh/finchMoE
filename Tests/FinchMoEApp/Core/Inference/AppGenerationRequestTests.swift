@@ -39,6 +39,27 @@ import Testing
         }
     }
 
+    @Test func imageContentCoversCurrentTurnAndReplayedHistory() {
+        let image = AppImageAttachment(data: Data([0xFF, 0xD8, 0xFF]))
+        let textOnly = AppGenerationRequest(modelDirectory: existingDirectory,
+                                            prompt: "hello")
+        #expect(!textOnly.hasImageContent)
+
+        let current = AppGenerationRequest(modelDirectory: existingDirectory,
+                                           prompt: "what is this?",
+                                           images: [image])
+        #expect(current.hasImageContent)
+
+        let replayed = AppGenerationRequest(
+            modelDirectory: existingDirectory,
+            prompt: "and now?",
+            history: [
+                AppChatTurn(role: .user, text: "look", images: [image]),
+                AppChatTurn(role: .assistant, text: "a red square"),
+            ])
+        #expect(replayed.hasImageContent)
+    }
+
     @Test func invalidMaxTokensRejected() {
         let request = AppGenerationRequest(modelDirectory: existingDirectory,
                                            prompt: "hello", maxNewTokens: 0)

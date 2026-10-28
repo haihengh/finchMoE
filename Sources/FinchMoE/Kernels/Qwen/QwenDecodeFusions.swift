@@ -19,13 +19,32 @@ final class QwenDecodeFusions {
     private let psoOutputGate: MTLComputePipelineState
     private let psoSharedGate: MTLComputePipelineState
     private let psoFullAttnEpilogue: MTLComputePipelineState
+    /// Compiled on first multimodal use. Text-only applications never build
+    /// the mRoPE shader module.
+    private var psoFullAttnEpilogueMRoPE: MTLComputePipelineState?
+    private let context: MetalContext
 
     init(context: MetalContext) throws {
+        self.context = context
         self.psoPostAttn         = try context.pipeline("qwen_post_attn")
         self.psoVecAdd           = try context.pipeline("vec_add_fp16")
         self.psoOutputGate       = try context.pipeline("qwen_attn_output_gate")
         self.psoSharedGate       = try context.pipeline("qwen_shared_gate")
         self.psoFullAttnEpilogue = try context.pipeline("qwen_full_attn_epilogue")
+    }
+
+    private func mropePipeline() throws -> MTLComputePipelineState {
+        if let psoFullAttnEpilogueMRoPE { return psoFullAttnEpilogueMRoPE }
+        let library = try MetalContext.moduleLibrary(device: context.device,
+                                                     module: "mrope")
+        guard let function = library.makeFunction(
+            name: "qwen_full_attn_epilogue_mrope") else {
+            throw MetalError.missingFunction("qwen_full_attn_epilogue_mrope")
+        }
+        let pipeline = try context.device.makeComputePipelineState(
+            function: function)
+        psoFullAttnEpilogueMRoPE = pipeline
+        return pipeline
     }
 
     /// `hidden[i] += attn[i]` (in place), then `out = rmsnorm(hidden) * weight`.
@@ -169,6 +188,70 @@ final class QwenDecodeFusions {
         enc.setBytes(&th,   length: MemoryLayout<Float>.size,  index: 10)
         enc.setBytes(&rd,   length: MemoryLayout<UInt32>.size, index: 11)
         enc.setBytes(&epsVar, length: MemoryLayout<Float>.size, index: 12)
+        let groups = Int(numQHeads + numKVHeads)
+        enc.dispatchThreadgroups(MTLSize(width: groups, height: 1, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Multimodal variant of `encodeFullAttnEpilogue`: the same norm and
+    /// q|gate split, but pair `i` rotates against the interleaved mRoPE axis
+    /// selected by `sections`. Text-only prompts keep calling the original
+    /// method, so their kernel and arguments are unchanged.
+    func encodeFullAttnEpilogueMRoPE(
+        commandBuffer: MTLCommandBuffer,
+        qProj: MTLBuffer, qProjOffset: Int = 0,
+        qOut: MTLBuffer, qOutOffset: Int = 0,
+        gateOut: MTLBuffer, gateOutOffset: Int = 0,
+        k: MTLBuffer, kOffset: Int = 0,
+        qWeight: MTLBuffer, qWeightOffset: Int = 0,
+        kWeight: MTLBuffer, kWeightOffset: Int = 0,
+        headDim: UInt32,
+        numQHeads: UInt32,
+        numKVHeads: UInt32,
+        positionT: UInt32,
+        positionH: UInt32,
+        positionW: UInt32,
+        sections: [Int],
+        theta: Float,
+        rotaryDim: UInt32,
+        eps: Float = 1e-6
+    ) throws {
+        precondition(headDim <= 512, "qwen_full_attn_epilogue caps head_dim at 512")
+        precondition(rotaryDim <= headDim && rotaryDim.isMultiple(of: 2),
+                     "rotary_dim must be an even divisor bound of head_dim")
+        precondition(sections.count >= 2, "mRoPE needs H and W sections")
+        let pipeline = try mropePipeline()
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(pipeline)
+        enc.setBuffer(qProj,   offset: qProjOffset,   index: 0)
+        enc.setBuffer(qOut,    offset: qOutOffset,    index: 1)
+        enc.setBuffer(gateOut, offset: gateOutOffset, index: 2)
+        enc.setBuffer(k,       offset: kOffset,       index: 3)
+        enc.setBuffer(qWeight, offset: qWeightOffset, index: 4)
+        enc.setBuffer(kWeight, offset: kWeightOffset, index: 5)
+        var hd = headDim
+        var nq = numQHeads
+        var nkv = numKVHeads
+        var posT = positionT
+        var th = theta
+        var rd = rotaryDim
+        var epsVar = eps
+        var posH = positionH
+        var posW = positionW
+        var sectionH = UInt32(sections[1])
+        var sectionW = UInt32(sections[2])
+        enc.setBytes(&hd,   length: MemoryLayout<UInt32>.size, index: 6)
+        enc.setBytes(&nq,   length: MemoryLayout<UInt32>.size, index: 7)
+        enc.setBytes(&nkv,  length: MemoryLayout<UInt32>.size, index: 8)
+        enc.setBytes(&posT, length: MemoryLayout<UInt32>.size, index: 9)
+        enc.setBytes(&th,   length: MemoryLayout<Float>.size,  index: 10)
+        enc.setBytes(&rd,   length: MemoryLayout<UInt32>.size, index: 11)
+        enc.setBytes(&epsVar, length: MemoryLayout<Float>.size, index: 12)
+        enc.setBytes(&posH, length: MemoryLayout<UInt32>.size, index: 13)
+        enc.setBytes(&posW, length: MemoryLayout<UInt32>.size, index: 14)
+        enc.setBytes(&sectionH, length: MemoryLayout<UInt32>.size, index: 15)
+        enc.setBytes(&sectionW, length: MemoryLayout<UInt32>.size, index: 16)
         let groups = Int(numQHeads + numKVHeads)
         enc.dispatchThreadgroups(MTLSize(width: groups, height: 1, depth: 1),
                                  threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))

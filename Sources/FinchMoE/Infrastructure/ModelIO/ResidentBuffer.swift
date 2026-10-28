@@ -5,14 +5,14 @@ import Metal
 /// `mmap`'d view of `model_weights.bin`'s tensor data region, wrapped in
 /// one shared `MTLBuffer`. All resident `TensorView`s alias byte offsets
 /// inside `buffer`.
-final class ResidentBuffer {
-    let buffer: MTLBuffer
+package final class ResidentBuffer {
+    package let buffer: MTLBuffer
 
     /// `mmap` the page-aligned window covering `[fileOffset, fileOffset + residentSize)`
     /// inside the file at `fileURL`. The wrapped `MTLBuffer` starts at the
     /// (sub-page) offset within the mapping so the resident bytes start at
     /// byte 0 of the buffer.
-    init(fileURL: URL,
+    package init(fileURL: URL,
                 fileOffset: UInt64,
                 residentSize: UInt64,
                 device: MTLDevice,

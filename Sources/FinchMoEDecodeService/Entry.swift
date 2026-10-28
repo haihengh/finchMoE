@@ -103,10 +103,24 @@ import FinchMoEDecodeProtocol
                     let options = try appRuntimeOptions(request.runtimeOptions)
                     let generation = AppGenerationRequest(
                         modelDirectory: modelDirectory, prompt: request.prompt,
+                        images: request.images?.map {
+                            AppImageAttachment(id: $0.id,
+                                               mediaType: $0.mediaType,
+                                               data: $0.data,
+                                               pixelWidth: $0.pixelWidth,
+                                               pixelHeight: $0.pixelHeight)
+                        } ?? [],
                         history: request.history.map { turn in
                             AppChatTurn(
                                 role: turn.role == "assistant" ? .assistant : .user,
-                                text: turn.text)
+                                text: turn.text,
+                                images: turn.images?.map {
+                                    AppImageAttachment(id: $0.id,
+                                                       mediaType: $0.mediaType,
+                                                       data: $0.data,
+                                                       pixelWidth: $0.pixelWidth,
+                                                       pixelHeight: $0.pixelHeight)
+                                } ?? [])
                         },
                         maxNewTokens: request.maxNewTokens,
                         maxContextTokens: request.maxContextTokens,

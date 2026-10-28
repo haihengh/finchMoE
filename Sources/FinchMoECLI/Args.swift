@@ -15,6 +15,7 @@ public struct Args: Equatable, Sendable {
     public var quiet: Bool
     public var counters: Bool
     public var expertCacheSlots: Int?
+    public var directExpertCache: Bool
     public var prefillChunkTokens: Int
     /// `--kv-int8`: store full-attention K/V as int8 plus per-64-block fp16 scales.
     public var kvInt8: Bool
@@ -40,7 +41,8 @@ public struct Args: Equatable, Sendable {
                 quiet: Bool = false,
                 counters: Bool = false,
                 expertCacheSlots: Int? = nil,
-                prefillChunkTokens: Int = 512,
+                directExpertCache: Bool = false,
+                prefillChunkTokens: Int = RuntimeConfiguration.defaultPrefillChunkTokens,
                 kvInt8: Bool = false,
                 prefillTileDepth: Int = 1,
                 prefillTileExperts: Int = 8,
@@ -59,6 +61,7 @@ public struct Args: Equatable, Sendable {
         self.quiet = quiet
         self.counters = counters
         self.expertCacheSlots = expertCacheSlots
+        self.directExpertCache = directExpertCache
         self.prefillChunkTokens = prefillChunkTokens
         self.kvInt8 = kvInt8
         self.prefillTileDepth = prefillTileDepth
@@ -135,12 +138,17 @@ extension Args {
                                 (default 16). Same knob the app and the server
                                 expose. A count below the model's top-k is
                                 rejected rather than left to trap.
+      --expert-cache-direct     Decode-only: read every routed expert on every
+                                token and keep no expert contents between
+                                tokens; let the OS page cache decide what is
+                                hot. Prefill keeps the cached 16-slot path.
+                                Experimental A/B knob.
       --kv-int8
             Store full-attention K/V as int8 with one fp16 scale per
             64-element block. Experimental; Qwen 3.6 only.
       --prefill-chunk-tokens <n>
                                 Prompt-prefill chunk size, one of
-                                \(prefillChunkList) (default 512). Chunked
+                                \(prefillChunkList) (default \(RuntimeConfiguration.defaultPrefillChunkTokens)). Chunked
                                 prefill re-reads a layer's routed-expert pool
                                 once per chunk, so this is the prefill I/O
                                 divisor: a larger chunk cuts expert bytes read
@@ -177,7 +185,8 @@ extension Args {
         var quiet = false
         var counters = false
         var expertCacheSlots: Int?
-        var prefillChunkTokens = 512
+        var directExpertCache = false
+        var prefillChunkTokens = RuntimeConfiguration.defaultPrefillChunkTokens
         var kvInt8 = false
         var prefillTileDepth = 1
         var prefillTileExperts = 8
@@ -207,6 +216,9 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 expertCacheSlots = parsed
+            case "--expert-cache-direct":
+                directExpertCache = true
+                index += 1
             case "--prefill-chunk-tokens":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Int(value),
@@ -326,7 +338,9 @@ extension Args {
                     quiet: quiet,
                     counters: counters,
                     expertCacheSlots: expertCacheSlots,
+                    directExpertCache: directExpertCache,
                     prefillChunkTokens: prefillChunkTokens,
+                    kvInt8: kvInt8,
                     prefillTileDepth: prefillTileDepth,
                     prefillTileExperts: prefillTileExperts,
                     verify: verify)

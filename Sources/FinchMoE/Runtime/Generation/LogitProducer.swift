@@ -78,4 +78,36 @@ protocol ChunkedPrefillRunner: LogitProducer {
                         config: PrefillRuntimeConfig,
                         into logits: MTLBuffer,
                         onProgress: (Int) -> Void) async throws -> PrefillResult
+
+    /// Multimodal variant. `multimodal == nil` must behave exactly like the
+    /// text-only call. Producers that cannot inject image embeddings keep the
+    /// default implementation, which rejects a non-nil input.
+    func prefillChunked(tokens: ArraySlice<Int32>,
+                        startPosition: Int,
+                        outputMode: PrefillOutputMode,
+                        config: PrefillRuntimeConfig,
+                        into logits: MTLBuffer,
+                        onProgress: (Int) -> Void,
+                        multimodal: MultimodalPrefillInput?) async throws -> PrefillResult
+}
+
+extension ChunkedPrefillRunner {
+    func prefillChunked(tokens: ArraySlice<Int32>,
+                        startPosition: Int,
+                        outputMode: PrefillOutputMode,
+                        config: PrefillRuntimeConfig,
+                        into logits: MTLBuffer,
+                        onProgress: (Int) -> Void,
+                        multimodal: MultimodalPrefillInput?) async throws -> PrefillResult {
+        guard multimodal == nil else {
+            throw PrefillError.multimodalUnsupported(
+                "this producer cannot inject multimodal embeddings")
+        }
+        return try await prefillChunked(tokens: tokens,
+                                        startPosition: startPosition,
+                                        outputMode: outputMode,
+                                        config: config,
+                                        into: logits,
+                                        onProgress: onProgress)
+    }
 }

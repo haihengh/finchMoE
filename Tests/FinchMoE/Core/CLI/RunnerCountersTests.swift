@@ -69,6 +69,136 @@ import Testing
         #expect(Self.field("cb1_cpu_ms/step", in: one) == "80.00")
     }
 
+    /// A prefill line reports prefill counters. `expertMisses` is
+    /// structurally zero there — the chunked prefill streams tiles through its
+    /// own fetch bindings and never calls `encodeRoutedTail` — so a line that
+    /// printed it would report "no expert I/O" as a measurement, and `io_mb`
+    /// beside it would divide that zero by the same stride. The prefill pair is
+    /// prefill-only, so on the decode side of the same snapshot it reads zero
+    /// rather than picking up prefill work that the decode figure is not
+    /// supposed to contain.
+    @Test func aPrefillLineReportsPrefillCounters() {
+        let stride: UInt64 = 2_768_896
+        let atBoundary = RunnerCounterValues(forwards: 0,
+                                             cb1Nanos: 80_000_000,
+                                             expertMisses: 0,
+                                             prefillCommandBuffers: 40,
+                                             prefillExpertMisses: 30,
+                                             gpuCb1Nanos: 60_000_000,
+                                             gpuCb1FullAttnNanos: 20_000_000,
+                                             gpuCb1GdnNanos: 40_000_000,
+                                             gpuRoutedNanos: 20_000_000,
+                                             gpuSamples: 12)
+        let prefill = RunnerCounters.line(atBoundary, expertStride: stride,
+                                          scope: "prefill")
+        #expect(Self.field("misses", in: prefill) == "30")
+        // 30 x 2,768,896 B = 83,066,880 B = 79.2 MiB, and a prefill total is
+        // not divided by a step count.
+        #expect(Self.field("io_mb", in: prefill) == "79.2")
+        #expect(Self.field("io_mb/step", in: prefill) == nil)
+        // The GPU figure a prefill line exists to report. The two layer-kind
+        // stacks tile `gpu_cb1` exactly — 40 + 20 = 60 — with `gpu_routed`
+        // beside them rather than inside them, which is what makes a non-zero
+        // `gpu_cb1` mean "measured" instead of "double-counted".
+        #expect(Self.field("gpu_cb1_wall_ms", in: prefill) == "60.00")
+        #expect(Self.field("gpu_cb1_gdn_wall_ms", in: prefill) == "40.00")
+        #expect(Self.field("gpu_cb1_fullattn_wall_ms", in: prefill) == "20.00")
+        #expect(Self.field("gpu_routed_wall_ms", in: prefill) == "20.00")
+        #expect(Self.field("gpu_samples", in: prefill) == "12")
+        // The CPU bucket is a separate figure, not the GPU one; asserting the
+        // two differ pins the `gpu_` prefix to the GPU counter.
+        #expect(Self.field("cb1_cpu_ms", in: prefill) == "80.00")
+
+        let afterDecode = RunnerCounterValues(forwards: 2, cb1Nanos: 10_000_000)
+        let decode = RunnerCounters.line(
+            afterDecode.delta(from: atBoundary), expertStride: stride)
+        #expect(Self.field("misses", in: decode) == "0")
+        #expect(Self.field("io_mb/step", in: decode) == "0.0")
+    }
+
+    /// The two counters that only exist on a `scope=prefill` line: the CPU cost
+    /// of the prefill's layer calls, and its share spent inside waits. Neither
+    /// can be read from the decode fields — those are structurally zero there,
+    /// which is the whole reason this instrumentation was added.
+    @Test func prefillLineReportsItsOwnCpuAccounting() {
+        let values = RunnerCounterValues(
+            forwards: 0,
+            prefillCb1Nanos: 201_600_000_000,
+            prefillCb1WaitNanos: 65_960_000_000,
+            prefillCb1Layers: 144,
+            prefillCb1FullAttnLayers: 36)
+        let line = RunnerCounters.line(values, expertStride: nil, scope: "prefill")
+
+        // 48 layers × 3 chunks. The divisor must be the layer count: `forwards`
+        // is zero on a prefill line, so the per-step divisor is 1 and a whole-run
+        // total would otherwise be printed as if it were one step.
+        #expect(Self.field("prefill_cb1_total_s", in: line) == "201.60")
+        #expect(Self.field("prefill_cb1_wait_total_s", in: line) == "65.96")
+        #expect(Self.field("prefill_cb1_encode_total_s", in: line) == "135.64")
+        #expect(Self.field("prefill_cb1_layers", in: line) == "144")
+        #expect(Self.field("prefill_cb1_fullattn_layers", in: line) == "36")
+        #expect(Self.field("prefill_cb1_cpu_ms", in: line) == "1400.00")
+        #expect(Self.field("prefill_cb1_identity", in: line) == "ok")
+
+        // The decode fields stay zero, which is what they have always read here.
+        #expect(Self.field("cb1_cpu_ms", in: line) == "0.00")
+
+        // A wait larger than the layer spans is impossible — the sites live
+        // inside the calls — so when it happens the split must be labelled, not
+        // printed as a plausible-looking negative encode time. This is exactly
+        // how the missing 3.8 call site first showed up.
+        let off = RunnerCounterValues(
+            forwards: 0,
+            prefillCb1Nanos: 10_000_000_000,
+            prefillCb1WaitNanos: 65_960_000_000,
+            prefillCb1Layers: 144)
+        let offLine = RunnerCounters.line(off, expertStride: nil, scope: "prefill")
+        #expect(Self.field("prefill_cb1_identity", in: offLine) == "OFF(wait>cb1)")
+        // Signed, so it reads as a defect rather than wrapping to ~5.8e8 seconds.
+        #expect(Self.field("prefill_cb1_encode_total_s", in: offLine) == "-55.96")
+
+        // Uninstrumented — the Gemma path — must not report `ok` over zeros.
+        let none = RunnerCounters.line(RunnerCounterValues(forwards: 0),
+                                      expertStride: nil, scope: "prefill")
+        #expect(Self.field("prefill_cb1_identity", in: none) == "none")
+
+        // These fields belong to the prefill line only.
+        let decodeLine = RunnerCounters.line(
+            RunnerCounterValues(forwards: 2, cb1Nanos: 10_000_000),
+            expertStride: nil)
+        #expect(Self.field("prefill_cb1_total_s", in: decodeLine) == nil)
+        #expect(Self.field("prefill_cb1_identity", in: decodeLine) == nil)
+    }
+
+    /// A prefill line used to print `cbs` twice: the real commit count, then a
+    /// second literal `cbs=` built from the *decode* counter divided by 1, so a
+    /// 6,779-buffer prefill read `cbs=6779 cbs=0.0`. A line with one key repeated
+    /// is ambiguous to anything parsing it, so the count is what is asserted.
+    @Test func prefillLineNeverDuplicatesTheCommitCount() {
+        func count(_ key: String, in line: String) -> Int {
+            line.split(separator: " ")
+                .map { $0.hasSuffix("]") ? $0.dropLast() : $0[...] }
+                .filter { $0.split(separator: "=", maxSplits: 1).first == Substring(key) }
+                .count
+        }
+
+        let prefill = RunnerCounters.line(
+            RunnerCounterValues(forwards: 0,
+                                prefillCommandBuffers: 6779),
+            expertStride: nil, scope: "prefill")
+        #expect(count("cbs", in: prefill) == 1)
+        #expect(Self.field("cbs", in: prefill) == "6779")
+
+        // The decode form still exists; only the prefill duplicate is removed.
+        let decode = RunnerCounters.line(
+            RunnerCounterValues(forwards: 15,
+                                commandBuffers: 2841),
+            expertStride: nil)
+        #expect(count("cbs", in: decode) == 1)
+        #expect(Self.field("cbs", in: decode) == "2841")
+        #expect(Self.field("cbs/step", in: decode) == "189.4")
+    }
+
     @Test func missBytesUseTheSameUnitAsTheAdviceCounter() {
         let stride: UInt64 = 2_768_896
         let line = RunnerCounters.line(

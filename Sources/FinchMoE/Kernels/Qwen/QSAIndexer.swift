@@ -49,12 +49,39 @@ final class QSAIndexer {
     private let psoPool: MTLComputePipelineState
     private let psoScores: MTLComputePipelineState
     private let psoSelect: MTLComputePipelineState
+    /// mRoPE variants are compiled on the first multimodal turn, so a
+    /// text-only 3.8 run never builds the lazy shader module.
+    private let context: MetalContext
+    private var mropeLibrary: MTLLibrary?
+    private var psoQKPostMRoPE: MTLComputePipelineState?
+    private var psoPoolMRoPE: MTLComputePipelineState?
 
     init(context: MetalContext) throws {
+        self.context = context
         self.psoQKPost  = try context.pipeline("idx_qk_post")
         self.psoPool    = try context.pipeline("idx_block_pool_norm_rope")
         self.psoScores  = try context.pipeline("idx_block_scores")
         self.psoSelect  = try context.pipeline("idx_select_cells")
+    }
+
+    private func mropePipeline(named name: String,
+                               cache: inout MTLComputePipelineState?) throws
+        -> MTLComputePipelineState {
+        if let cached = cache { return cached }
+        let library: MTLLibrary
+        if let existing = mropeLibrary {
+            library = existing
+        } else {
+            library = try MetalContext.moduleLibrary(device: context.device,
+                                                     module: "mrope")
+            mropeLibrary = library
+        }
+        guard let function = library.makeFunction(name: name) else {
+            throw MetalError.missingFunction(name)
+        }
+        let pipeline = try context.device.makeComputePipelineState(function: function)
+        cache = pipeline
+        return pipeline
     }
 
     private static func width(_ pso: MTLComputePipelineState) -> Int {
@@ -129,6 +156,69 @@ final class QSAIndexer {
         enc.endEncoding()
     }
 
+    /// Multimodal variant of `encodeQKPost`: the raw key is stored at the KV
+    /// position, while the query heads rotate at the token's mRoPE triple.
+    func encodeQKPostMRoPE(
+        commandBuffer: MTLCommandBuffer,
+        qk: MTLBuffer, qkOffset: Int = 0,
+        qGamma: MTLBuffer, qGammaOffset: Int = 0,
+        qOut: MTLBuffer, qOutOffset: Int = 0,
+        kRaw: MTLBuffer,
+        storePos: UInt32,
+        positionT: UInt32,
+        positionH: UInt32,
+        positionW: UInt32,
+        sections: [Int],
+        nHeads: UInt32,
+        idxDim: UInt32,
+        nRot: UInt32 = UInt32(defaultNRot),
+        theta: Float = defaultTheta,
+        eps: Float = defaultEps
+    ) throws {
+        precondition(idxDim <= UInt32(Self.maxDim),
+                     "indexer head dim \(idxDim) exceeds the kernels' width")
+        precondition(nRot <= idxDim, "rotary width \(nRot) exceeds the head dim \(idxDim)")
+        precondition(sections.count >= 2, "mRoPE needs H and W sections")
+        precondition(kRaw.length >= Int(storePos + 1) * Int(idxDim)
+                        * MemoryLayout<Float16>.stride,
+                     "raw timeline is too short for position \(storePos)")
+        let pipeline = try mropePipeline(named: "idx_qk_post_mrope",
+                                         cache: &psoQKPostMRoPE)
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(pipeline)
+        enc.setBuffer(qk,     offset: qkOffset,     index: 0)
+        enc.setBuffer(qGamma, offset: qGammaOffset, index: 1)
+        enc.setBuffer(qOut,   offset: qOutOffset,   index: 2)
+        enc.setBuffer(kRaw,   offset: 0,            index: 3)
+        var storeVar = storePos
+        var nHeadsVar = nHeads
+        var idxDimVar = idxDim
+        var nRotVar = nRot
+        var thetaVar = theta
+        var epsVar = eps
+        var posTVar = positionT
+        var posHVar = positionH
+        var posWVar = positionW
+        var sectionH = UInt32(sections[1])
+        var sectionW = UInt32(sections[2])
+        enc.setBytes(&storeVar, length: MemoryLayout<UInt32>.size, index: 4)
+        enc.setBytes(&nHeadsVar, length: MemoryLayout<UInt32>.size, index: 5)
+        enc.setBytes(&idxDimVar, length: MemoryLayout<UInt32>.size, index: 6)
+        enc.setBytes(&nRotVar, length: MemoryLayout<UInt32>.size, index: 7)
+        enc.setBytes(&thetaVar, length: MemoryLayout<Float>.size, index: 8)
+        enc.setBytes(&epsVar, length: MemoryLayout<Float>.size, index: 9)
+        enc.setBytes(&posTVar, length: MemoryLayout<UInt32>.size, index: 10)
+        enc.setBytes(&posHVar, length: MemoryLayout<UInt32>.size, index: 11)
+        enc.setBytes(&posWVar, length: MemoryLayout<UInt32>.size, index: 12)
+        enc.setBytes(&sectionH, length: MemoryLayout<UInt32>.size, index: 13)
+        enc.setBytes(&sectionW, length: MemoryLayout<UInt32>.size, index: 14)
+        enc.dispatchThreadgroups(
+            MTLSize(width: Int(nHeads) + 1, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: Self.width(pipeline),
+                                           height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
     /// Finalise `blockCount` whole blocks starting at `firstBlock`: pool the
     /// `r` raw keys, RMS with `kGamma`, partial rope at the block's first
     /// cell `b·r`. One threadgroup per block; nothing is carried between
@@ -179,6 +269,70 @@ final class QSAIndexer {
         enc.dispatchThreadgroups(
             MTLSize(width: Int(blockCount), height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: Self.width(psoPool), height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Multimodal variant of `encodeBlockPoolNormRope`: each pooled block
+    /// rotates at its first cell's mRoPE triple. `positions` packs three
+    /// UInt32 per prompt cell (t, h, w), index 0 == position 0; cells past
+    /// `promptLength` (decode) use `cell + decodeOffset` on all axes.
+    func encodeBlockPoolNormRopeMRoPE(
+        commandBuffer: MTLCommandBuffer,
+        kRaw: MTLBuffer,
+        kGamma: MTLBuffer, kGammaOffset: Int = 0,
+        pooled: MTLBuffer, pooledOffset: Int = 0,
+        positions: MTLBuffer,
+        promptLength: Int,
+        decodeOffset: Int,
+        sections: [Int],
+        firstBlock: UInt32,
+        blockCount: UInt32,
+        r: UInt32,
+        idxDim: UInt32,
+        nRot: UInt32 = UInt32(defaultNRot),
+        theta: Float = defaultTheta,
+        eps: Float = defaultEps
+    ) throws {
+        precondition(blockCount > 0, "pool dispatch needs at least one block")
+        precondition(idxDim <= UInt32(Self.maxDim),
+                     "indexer head dim \(idxDim) exceeds the kernels' width")
+        precondition(nRot <= idxDim, "rotary width \(nRot) exceeds the head dim \(idxDim)")
+        precondition(sections.count >= 2, "mRoPE needs H and W sections")
+        precondition(promptLength >= 0)
+        precondition(positions.length >= promptLength * 3 * MemoryLayout<UInt32>.stride,
+                     "position timeline is too short for \(promptLength) cells")
+        let pipeline = try mropePipeline(named: "idx_block_pool_norm_rope_mrope",
+                                         cache: &psoPoolMRoPE)
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(pipeline)
+        enc.setBuffer(kRaw,   offset: 0,            index: 0)
+        enc.setBuffer(kGamma, offset: kGammaOffset, index: 1)
+        enc.setBuffer(pooled, offset: pooledOffset, index: 2)
+        enc.setBuffer(positions, offset: 0,         index: 9)
+        var firstVar = firstBlock
+        var rVar = r
+        var idxDimVar = idxDim
+        var nRotVar = nRot
+        var thetaVar = theta
+        var epsVar = eps
+        var promptVar = UInt32(promptLength)
+        var offsetVar = Int32(clamping: decodeOffset)
+        var sectionH = UInt32(sections[1])
+        var sectionW = UInt32(sections[2])
+        enc.setBytes(&firstVar,  length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&rVar,      length: MemoryLayout<UInt32>.size, index: 4)
+        enc.setBytes(&idxDimVar, length: MemoryLayout<UInt32>.size, index: 5)
+        enc.setBytes(&nRotVar,   length: MemoryLayout<UInt32>.size, index: 6)
+        enc.setBytes(&thetaVar,  length: MemoryLayout<Float>.size,  index: 7)
+        enc.setBytes(&epsVar,    length: MemoryLayout<Float>.size,  index: 8)
+        enc.setBytes(&promptVar, length: MemoryLayout<UInt32>.size, index: 10)
+        enc.setBytes(&offsetVar, length: MemoryLayout<Int32>.size,  index: 11)
+        enc.setBytes(&sectionH,  length: MemoryLayout<UInt32>.size, index: 12)
+        enc.setBytes(&sectionW,  length: MemoryLayout<UInt32>.size, index: 13)
+        enc.dispatchThreadgroups(
+            MTLSize(width: Int(blockCount), height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: Self.width(pipeline),
+                                           height: 1, depth: 1))
         enc.endEncoding()
     }
 

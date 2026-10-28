@@ -92,7 +92,7 @@ import Testing
         #expect(settings.modelVerification == .automatic)
         // Fields added after this file was written fall back to their
         // shipping defaults rather than resetting anything.
-        #expect(settings.prefillChunkTokens == 512)
+        #expect(settings.prefillChunkTokens == 1024)
         #expect(settings.expertCachePolicy == .lfu)
         #expect(settings.promptReuseEnabled)
         // No migration marker: a file from the single-shot app is moved onto

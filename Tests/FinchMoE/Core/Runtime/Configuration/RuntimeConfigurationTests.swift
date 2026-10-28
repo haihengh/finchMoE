@@ -10,7 +10,7 @@ import Testing
         #expect(runtime.rdadvisePolicy == .off)
         #expect(!runtime.rdadviseEnabled)
         #expect(runtime.prefillPolicy == .chunked)
-        #expect(runtime.prefillChunkTokens == 512)
+        #expect(runtime.prefillChunkTokens == 1024)
         #expect(runtime.prefillAttentionPath == .fullTensorOps2DPreferred)
         #expect(runtime.headPath == .fusedRows)
     }

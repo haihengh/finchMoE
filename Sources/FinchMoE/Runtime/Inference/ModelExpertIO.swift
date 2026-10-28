@@ -58,9 +58,32 @@ extension Model {
         return UInt64(missCount) * streamer.layout.expertStride
     }
 
+    /// Decode's planner. Under `directExpertCache` every expert is planned as
+    /// a miss and read on every token; otherwise the per-layer LFU cache plans
+    /// hits and misses as usual.
     public func planRoutedExperts(layer: Int,
                                   experts: [Int],
                                   avoidingSlots: Set<Int> = []) throws -> RoutedExpertFetchPlan? {
+        try ensureLayerOpened(layer)
+        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
+        let validSlots = Set(avoidingSlots.filter { $0 >= 0 && $0 < streamer.slotCount })
+        if directExpertCache {
+            return RoutedExpertFetchPlan(
+                layer: layer,
+                cachePlan: streamer.planExpertsDirect(experts: experts,
+                                                      avoidingSlots: validSlots))
+        }
+        return RoutedExpertFetchPlan(
+            layer: layer,
+            cachePlan: streamer.planExpertsCached(experts: experts, avoidingSlots: validSlots))
+    }
+
+    /// Prefill's planner: always cache-backed, even when decode is running in
+    /// direct mode. Prefill reuses a layer's routed-expert pool across a whole
+    /// chunk, so losing those hits would multiply its I/O.
+    public func planRoutedExpertsCached(layer: Int,
+                                        experts: [Int],
+                                        avoidingSlots: Set<Int> = []) throws -> RoutedExpertFetchPlan? {
         try ensureLayerOpened(layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
         let validSlots = Set(avoidingSlots.filter { $0 >= 0 && $0 < streamer.slotCount })
@@ -150,7 +173,9 @@ extension Model {
         }
     }
 
-    public func fetchRoutedExperts(layer: Int, experts: [Int]) async throws -> [TensorView] {
+    public func fetchRoutedExperts(layer: Int,
+                                   experts: [Int],
+                                   direct: Bool = false) async throws -> [TensorView] {
         try ensureLayerOpened(layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
         let box = streamersBox
@@ -159,7 +184,9 @@ extension Model {
             DispatchQueue.global(qos: .userInitiated).async {
                 let entered = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
                 do {
-                    let buffers = try streamer.loadExpertsCached(experts: experts)
+                    let buffers = direct
+                        ? try streamer.loadExpertsDirect(experts: experts)
+                        : try streamer.loadExpertsCached(experts: experts)
                     box.ioDispatchNanos &+= entered &- dispatched
                     box.ioReadNanos &+= streamer.lastReadNanos
                     box.ioTailNanos &+= streamer.lastTailNanos

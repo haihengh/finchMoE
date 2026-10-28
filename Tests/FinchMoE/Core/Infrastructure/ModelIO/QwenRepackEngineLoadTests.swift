@@ -3,6 +3,7 @@ import Foundation
 import Metal
 import FinchMoERepackCore
 import FinchMoEFormat
+import FinchMoECLICore
 @testable import FinchMoE
 
 /// End-to-end proof of the Qwen quantizing repack: a tiny synthetic bf16
@@ -587,5 +588,110 @@ import FinchMoEFormat
                 }
             }
         }
+    }
+
+    /// The prefill path must attribute its own GPU time and its own expert
+    /// bytes, on the real encoder and not in a unit test of the fields.
+    ///
+    /// Before those calls were added, every `gpu_*` and every `io_mb` on a
+    /// `scope=prefill` counters line was structurally zero: the counters
+    /// existed, the 3.6 prefill body simply never wrote them. A field that can
+    /// only ever print zero looks exactly like a measurement of zero, so the
+    /// prefill ranking in `docs/STRATA_PP_KV_ANALYSIS.md` rested on a number
+    /// that was never taken. `RunnerCountersTests` cannot see that -- it tests
+    /// the arithmetic on numbers a hand-built snapshot supplies. Only running
+    /// the encoder can.
+    ///
+    /// This toy is the smallest thing that reaches every site on that path.
+    /// `fullMask = [0, 0, 0, 1]` gives three GDN layers and one full-attention
+    /// layer, so both layer-kind stacks are non-zero and their sum is exactly
+    /// the layer total; and 4 tokens x 4 layers x topK 2 routes enough experts
+    /// through the tile prefetch for the prefill miss count to be non-zero.
+    @Test
+    func prefillAttributesGpuTimeAndExpertBytesToItself() async throws {
+        let base = NSTemporaryDirectory() + "qwen-pp-\(UUID().uuidString)"
+        let src = base + "-src"
+        try Toy.writeSnapshot(into: src, seed: 0x51EE)
+        defer { try? FileManager.default.removeItem(atPath: src) }
+
+        let out = base + "-out"
+        _ = try await LocalQwenRepacker(options: LocalQwenRepackOptions(
+            snapshotDir: src, outputDir: out, minFreeReserveBytes: 0)).run()
+        defer { try? FileManager.default.removeItem(atPath: out) }
+
+        let dest = URL(fileURLWithPath: out)
+        let ctx = try MetalContext()
+        let model = try Model.load(directoryURL: dest, device: ctx.device,
+                                   expecting: Toy.arch)
+        let runner = try RealForwardRunner(model: model, context: ctx,
+                                           maxContext: 8,
+                                           runtimeConfiguration: .production)
+        // Wide enough for either head path, matching the CLI's own
+        // `logitBytes` calculation.
+        let logits = try #require(ctx.device.makeBuffer(
+            length: model.config.vocabSize * MemoryLayout<Int32>.stride,
+            options: .storageModeShared))
+        let wallStart = ContinuousClock.now
+        _ = try await runner.prefillChunked(
+            tokens: [1, 2, 3, 4][0...], startPosition: 0,
+            outputMode: .greedyIfAvailable, config: .defaultChunked,
+            into: logits, onProgress: { _ in })
+        let wallNanos = wallStart.duration(to: .now).components.attoseconds / 1_000_000_000
+
+        // The two layer-kind stacks must tile the layer total exactly, so
+        // `gpu_cb1` cannot be silently dropping or double-counting a kind.
+        #expect(runner.totalGpuCb1GdnNanos > 0)
+        #expect(runner.totalGpuCb1FullAttnNanos > 0)
+        #expect(runner.totalGpuCb1GdnNanos + runner.totalGpuCb1FullAttnNanos
+                == runner.totalGpuCb1Nanos)
+        // The routed stack sits beside those rather than inside them: `cb1` is
+        // the layer's own forward, `routed` is that separate per-layer buffer.
+        #expect(runner.totalGpuRoutedNanos > 0)
+        // Bytes, not only time. The chunked prefill streams tiles through its
+        // own `fetch` bindings and never reaches the decode-side miss counter,
+        // which is why this needs its own total.
+        #expect(runner.totalPrefillExpertMisses > 0)
+        // The coverage gate the decode counters document: a buffer still in
+        // flight reports no timestamps, so `gpu_samples` against the buffer
+        // count says how much of the total was actually measured. Zero samples
+        // would mean the driver publishes nothing and every assertion above is
+        // vacuous.
+        #expect(runner.totalGpuSamples > 0)
+        #expect(runner.totalPrefillCommandBuffers > 0)
+        #expect(runner.totalGpuSamples
+                >= runner.totalPrefillCommandBuffers / 2)
+        // Plausibility, the same gate the decode counters state: every recorded
+        // buffer ran on this one queue inside this call, so the two stacks
+        // cannot sum to more than the call took. The 4x slack is for timer
+        // granularity and the host work between buffers -- a total much larger
+        // than the wall clock means the timestamps are not usable, and that is
+        // the finding worth failing on.
+        let measuredNanos = runner.totalGpuCb1Nanos + runner.totalGpuRoutedNanos
+        #expect(wallNanos > 0)
+        #expect(measuredNanos <= wallNanos * 4)
+
+        // The point of all of the above is one line a human ranks work by, so
+        // render it from the live counters rather than only checking the fields.
+        // A prefill-scoped line folded the prefill miss total into `misses` and
+        // multiplied it by the expert stride for `io_mb`; both must be non-zero
+        // here, because a zero in either is indistinguishable from a real
+        // measurement of zero in the logs this ranking was built from.
+        let line = RunnerCounters.line(RunnerCounterValues(runner),
+                                       expertStride: model.routedExpertStrideBytes(),
+                                       scope: "prefill")
+        func field(_ key: String) -> String? {
+            for token in line.split(separator: " ") {
+                let trimmed = token.hasSuffix("]") ? token.dropLast() : token[...]
+                let parts = trimmed.split(separator: "=", maxSplits: 1)
+                if parts.count == 2, parts[0] == Substring(key) { return String(parts[1]) }
+            }
+            return nil
+        }
+        #expect(field("misses") != "0" && field("misses") != nil)
+        #expect(field("io_mb").map { Double($0) ?? 0 } != 0)
+        #expect(field("gpu_cb1_wall_ms").map { Double($0) ?? 0 } != 0)
+        #expect(field("gpu_cb1_gdn_wall_ms").map { Double($0) ?? 0 } != 0)
+        #expect(field("gpu_cb1_fullattn_wall_ms").map { Double($0) ?? 0 } != 0)
+        #expect(field("gpu_routed_wall_ms").map { Double($0) ?? 0 } != 0)
     }
 }

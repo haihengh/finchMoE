@@ -69,4 +69,29 @@ public final class AppMemorySampler: @unchecked Sendable {
         lock.unlock()
         return value == 0 ? nil : value
     }
+
+    /// The jetsam ceiling this process is allowed to grow into, in bytes, or
+    /// nil where the platform does not report one.
+    ///
+    /// `os_proc_available_memory()` returns the bytes still available before
+    /// the kernel jetsams us — the footprint budget *minus* what we already
+    /// hold — so the ceiling is that plus `footprintBytes`. This is the figure
+    /// `AppModelMemoryBudget`'s caps are priced against, and the only way to
+    /// answer "what is the ceiling on *this* iPad?" from inside the app
+    /// instead of assuming the iPhone's ~6 GB.
+    ///
+    /// There is no such limit on macOS, and the symbol is unavailable there at
+    /// compile time, so the whole thing sits behind a platform gate.
+    public static var memoryLimitBytes: UInt64? {
+        #if os(iOS) || os(visionOS) || os(tvOS) || os(watchOS)
+        // The C call is imported as `Int`, so test it before widening —
+        // `UInt64(-1)` would trap.
+        let available = os_proc_available_memory()
+        guard available > 0 else { return nil }
+        let used = Self.readProcessMemory()?.footprintBytes ?? 0
+        return used + UInt64(available)
+        #else
+        return nil
+        #endif
+    }
 }

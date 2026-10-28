@@ -17,17 +17,21 @@ struct ChatMessageBubble: View {
     let message: ChatMessage
     /// Non-nil only for the reply currently being written.
     var streamingText: String?
+    /// Bytes for the user turn's persisted images, in attachment order.
+    var attachmentImages: [Data]
     var canRegenerate: Bool
     var onRegenerate: () -> Void
 
     init(
         message: ChatMessage,
         streamingText: String? = nil,
+        attachmentImages: [Data] = [],
         canRegenerate: Bool = false,
         onRegenerate: @escaping () -> Void = {}
     ) {
         self.message = message
         self.streamingText = streamingText
+        self.attachmentImages = attachmentImages
         self.canRegenerate = canRegenerate
         self.onRegenerate = onRegenerate
     }
@@ -80,17 +84,33 @@ struct ChatMessageBubble: View {
     @ViewBuilder
     private var bubble: some View {
         if isUser {
-            Text(message.text)
-                .font(.body)
-                .foregroundStyle(.white)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(accentColor, in: .rect(cornerRadius: 18))
-                // The cap goes on the content so the text wraps short of the
-                // cap; the background above has already hugged what is left.
-                .frame(maxWidth: 560, alignment: .trailing)
+            VStack(alignment: .trailing, spacing: 6) {
+                if !attachmentImages.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(Array(attachmentImages.enumerated()), id: \.offset) {
+                                AttachmentThumbnail(data: $0.element,
+                                                    size: 180,
+                                                    cornerRadius: 14)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: 560, alignment: .trailing)
+                }
+                if !message.text.isEmpty {
+                    Text(message.text)
+                        .font(.body)
+                        .foregroundStyle(.white)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(accentColor, in: .rect(cornerRadius: 18))
+                }
+            }
+            // The cap goes on the content so the text wraps short of the
+            // cap; the backgrounds above have already hugged what is left.
+            .frame(maxWidth: 560, alignment: .trailing)
         } else {
             assistantContent
                 .padding(.horizontal, 16)

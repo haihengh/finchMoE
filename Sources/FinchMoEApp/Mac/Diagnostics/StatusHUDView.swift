@@ -53,7 +53,7 @@ struct StatusHUDView: View {
         HStack(spacing: 12) {
             ModelStatusBadge(model: model)
             Divider().frame(height: 16)
-            PhaseLabel(model: model)
+            GenerationPhaseLabel(model: model)
             Spacer(minLength: 12)
             if showsMetrics {
                 HUDMetricView(value: rateText, label: "tok/s", animated: !model.isRunning)
@@ -96,67 +96,5 @@ struct StatusHUDView: View {
 
     private var showsMetrics: Bool {
         model.loadState.isReady || model.isRunning || model.diagnostics != nil
-    }
-}
-
-private struct PhaseLabel: View {
-    let model: AppModel
-    @Environment(\.finchAccentColor) private var accentColor
-
-    var body: some View {
-        HStack(spacing: 6) {
-            switch content {
-            case .loading(let label):
-                ProgressView().controlSize(.mini)
-                Text(label)
-            case .pulse(let label):
-                PulsingDot()
-                Text(label)
-                    .monospacedDigit()
-                    .contentTransition(.numericText())
-            case .steady(let label):
-                Circle().fill(accentColor).frame(width: 7, height: 7)
-                Text(label).contentTransition(.opacity)
-            case .quiet(let label):
-                Text(label)
-                    .foregroundStyle(.secondary)
-                    .contentTransition(.opacity)
-            }
-        }
-        .font(.caption.weight(.medium))
-        .lineLimit(1)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Model status")
-        .accessibilityValue(model.presentation.label)
-    }
-
-    private enum Content {
-        case loading(String)
-        case pulse(String)
-        case steady(String)
-        case quiet(String)
-    }
-
-    private var content: Content {
-        let presentation = model.presentation
-        if presentation.showsActivity { return .loading(presentation.label) }
-        if model.isRunning && model.phase == .prefill { return .pulse(presentation.label) }
-        if model.isRunning && model.phase == .decode { return .steady(presentation.label) }
-        return .quiet(presentation.label)
-    }
-}
-
-private struct PulsingDot: View {
-    @Environment(\.finchAccentColor) private var accentColor
-
-    var body: some View {
-        Circle()
-            .fill(accentColor)
-            .frame(width: 7, height: 7)
-            .phaseAnimator([0.4, 1.0]) { dot, opacity in
-                dot.opacity(opacity)
-            } animation: { _ in
-                .easeInOut(duration: 0.7)
-            }
     }
 }

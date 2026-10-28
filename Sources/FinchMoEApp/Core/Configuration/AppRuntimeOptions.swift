@@ -117,6 +117,11 @@ public enum AppKVCacheMode: String, CaseIterable, Codable, Sendable, Identifiabl
 public struct AppRuntimeOptions: Equatable, Sendable {
     public static let allowedSlotCounts = RuntimeConfiguration.allowedExpertCacheSlots
     public static let allowedPrefillChunkTokens = RuntimeConfiguration.allowedPrefillChunkTokens
+    /// The chunk the app starts a fresh install on, which the settings picker
+    /// marks "(default)". Kept pointed at the engine's constant so the label
+    /// cannot drift when the default moves — it did: the picker hardcoded 512
+    /// long after the engine default became 1,024.
+    public static let defaultPrefillChunkTokens = RuntimeConfiguration.defaultPrefillChunkTokens
 
     public var expertCacheSlots: Int
     public var expertCachePolicy: AppExpertCachePolicy
@@ -131,7 +136,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public init(expertCacheSlots: Int = 16,
                 expertCachePolicy: AppExpertCachePolicy = .lfu,
                 prefillEnabled: Bool = true,
-                prefillChunkTokens: Int = 512,
+                prefillChunkTokens: Int = RuntimeConfiguration.defaultPrefillChunkTokens,
                 rdadvisePolicy: AppRDAdvicePolicy = .off,
                 modelVerification: AppModelVerification = .automatic,
                 kvCacheMode: AppKVCacheMode = .fp16) {
@@ -193,6 +198,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public static func slotsLabel(for slots: Int) -> String {
         switch slots {
         case 8: "8, -0.8 GB"
+        case 10: "10, Low"
         case 16: "16, Default"
         case 24: "24, +0.8 GB"
         case 32: "32, +1.61 GB"
