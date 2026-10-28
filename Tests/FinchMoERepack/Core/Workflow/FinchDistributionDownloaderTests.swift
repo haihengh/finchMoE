@@ -30,6 +30,39 @@ struct FinchDistributionDownloaderTests {
         #expect(try Data(contentsOf: URL(fileURLWithPath: path)).count < 4096)
     }
 
+    /// A first download fetches `manifest.json` into `.partial` before the
+    /// resume state is read. With no checkpoint, that state's clear used to
+    /// delete the whole directory — including the manifest the verification
+    /// step needs at the end — so the payload downloaded to 100% and then the
+    /// install failed with a missing manifest, recovering only when Resume
+    /// re-fetched it. The clear must drop unidentifiable payload bytes but keep
+    /// the manifest this run just wrote.
+    @Test func clearingAnUnidentifiedPartialKeepsTheFetchedManifest() throws {
+        let output = tmpPathForRemote("dist-no-checkpoint")
+        defer { cleanUpRemote([output]) }
+        let paths = try RemoteInstallPaths(outputDirectory: output)
+        let partial = paths.partialDirectory
+        try Posix.mkdirP(partial)
+        try Posix.mkdirP((partial as NSString).appendingPathComponent("packed_experts"))
+        try Data("{}".utf8).write(
+            to: URL(fileURLWithPath: (partial as NSString)
+                .appendingPathComponent(FinchDistributionDownloader.manifestName)))
+        try Data("stale".utf8).write(
+            to: URL(fileURLWithPath: (partial as NSString)
+                .appendingPathComponent("packed_experts/layer_00.bin")))
+
+        let checkpoint = try FinchDistributionDownloader.loadCheckpoint(
+            paths: paths,
+            fingerprint: sampleFingerprint())
+
+        let manifest = (partial as NSString)
+            .appendingPathComponent(FinchDistributionDownloader.manifestName)
+        #expect(checkpoint.entries.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: manifest))
+        #expect(!FileManager.default.fileExists(
+            atPath: (partial as NSString).appendingPathComponent("packed_experts")))
+    }
+
     @Test func oversizedCheckpointIsRejectedBeforeDecode() throws {
         let root = tmpDirForRemote("dist-checkpoint-large")
         let path = (root as NSString).appendingPathComponent("resume.json")

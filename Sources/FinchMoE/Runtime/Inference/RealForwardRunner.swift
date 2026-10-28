@@ -497,6 +497,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     public let maxContext: Int
 
+    /// RoPE offset used by decode after a multimodal prefill. Zero for every
+    /// text-only run; images advance the mRoPE timeline by the merged grid
+    /// width rather than by the placeholder token count.
+    private var decodePositionOffset: Int = 0
+    /// Full-prompt mRoPE timeline of the active generation, kept for the QSA
+    /// indexer: a pooled block is rotated at its first cell, which can be in
+    /// an earlier prefill chunk or in the prompt while decoding.
+    private var activeMRoPEPositions: [MRoPEPosition]?
+    private var activeMRoPESection: [Int]?
+    /// The same timeline packed as three UInt32 per cell for the pool kernel.
+    private var multimodalPositionBuffer: MTLBuffer?
+
     /// Per-instance head and RDADVISE modes. The fused head (default) folds
     /// RMSNorm + lm_head into one kernel that skips the 512 KB logits write and
     /// leaves a greedy argmax in `lastGreedyToken`; callers that sample from the
@@ -880,7 +892,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                            layerCount: cfg.numLayers)
                 self.rowHashLayout = layout
                 self.rowHash = try PrefillRowHash(context: ctx)
-                self.rowHashBuffer = try ctx.device.makeBuffer(
+                self.rowHashBuffer = ctx.device.makeBuffer(
                     length: layout.totalBytes, options: .storageModeShared)
                 if let buf = rowHashBuffer {
                     // Shared storage, so the dump is a host read of bytes the
@@ -925,7 +937,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let pleQuantSimulation = ProcessInfo.processInfo
                 .environment["FQ_PLE_QUANT_SIM"].flatMap(Int.init)
             if let c = pleConstants,
-               let host = try PLEHost(config: cfg,
+               let host = PLEHost(config: cfg,
                                       multipliers: c.multipliers,
                                       headOffsets: c.headOffsets,
                                       headVocabSizes: c.headVocabSizes,
@@ -1008,6 +1020,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     public func reset() {
         kv?.reset()
+        decodePositionOffset = 0
+        activeMRoPEPositions = nil
+        activeMRoPESection = nil
+        multimodalPositionBuffer = nil
         // The GDN recurrent/conv states are part of the KV-cache-style
         // persistent state — zeroed here, NOT in resetTransientState(), which
         // also runs on continuation and must keep the state intact.
@@ -1221,6 +1237,53 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     // and if they do not, that is the finding.
     public private(set) var totalPrefillCommandBuffers: UInt64 = 0
 
+    // The prefill's CPU cost, measured for the first time on 2026-10-21. Until
+    // now every `*_cpu_ms` field on a `scope=prefill` line was structurally
+    // zero: the cursor tiling that produces them lives in the two decode bodies
+    // (`encodeQwenDecodeLayer` and `encodeQwen38DecodeLayer` — `tCb1Start` is
+    // declared in those and nowhere in either prefill layer function). So the
+    // prefill's encode cost — seven per-token
+    // dispatch loops in `encodeQwen38PrefillLayer` alone — had no measurement
+    // at all, and "prefill CPU is ~80% of prefill" could not be answered
+    // either way. See `STRATA_PP_KV_ANALYSIS.md` §4.1.
+    //
+    // Not the decode fields, and that is not a style choice: `RunnerCounterValues`
+    // reads these as *deltas*, and a decode-scoped line taken after a prefill
+    // would subtract a prefill-inflated baseline and report the prefill's
+    // encode time as decode work. The GPU fields escape that only because
+    // prefill and decode write them in the same units; these do not.
+    //
+    // `cb1` is taken at the layer call site in `prefillChunked`, over a whole
+    // layer — encode, commits, and the layer's own waits. `wait` is taken at
+    // the four `waitForCompletion` sites inside each layer function. So
+    // `cb1 - wait` is what the CPU spent encoding, and `cb1` is the layer's
+    // wall time.
+    //
+    // Deliberately NOT the cursor tiling the decode bodies use. Threading a
+    // cursor through two ~1,200-line prefill bodies to make the split exact is
+    // more risk than the question needs, and the difference between the two is
+    // itself the report: the two totals come from different clock readings, so
+    // `cb1 - wait` also carries the one `await` in each body (:5488's tile
+    // `fetchBindingForTile`, an executor hop). Read the split as "encode plus
+    // executor hops", not as a tiling.
+    public private(set) var totalPrefillCb1Nanos: UInt64 = 0
+    /// The part of `totalPrefillCb1Nanos` that is `waitUntilCompleted`, i.e. the
+    /// part where the CPU is blocked rather than encoding. `cb1 - wait` is the
+    /// encode cost D4 is about; the two together are the layer's wall time.
+    ///
+    /// The gap between them is what says whether D4 is worth doing at all. GPU
+    /// busy is 89.75 s of a 113.87 s prefill wall (chunk 1,024, 3.8 125B,
+    /// 2,907 tokens), so if `cb1 - wait` comes out small the CPU is idle inside
+    /// its own waits, and the win is in removing the waits rather than batching
+    /// dispatches.
+    public private(set) var totalPrefillCb1WaitNanos: UInt64 = 0
+    /// Prefill layer encodes by kind, so the total can be read per layer
+    /// (48 layers on 3.8, 40 on 3.6) rather than only per chunk. `forwards` is
+    /// zero on a prefill line, so without these the only divisor available is
+    /// the chunk count.
+    public private(set) var totalPrefillCb1Layers: UInt64 = 0
+    public private(set) var totalPrefillCb1FullAttnLayers: UInt64 = 0
+
     // The GDN sub-stage split (`FQ_GDN_SPLIT=1`). `totalGpuCb1GdnNanos` says the
     // linear-attention stack owns 44% of a prefill without saying which part of
     // it does, and the three candidates want different work done to them: the
@@ -1361,6 +1424,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         return next
     }
 
+    /// Wait on a prefill buffer and charge the blocked wall to
+    /// `totalPrefillCb1WaitNanos`. The timing lives in the helper so that every
+    /// prefill wait site stays one line and none of them can quietly omit the
+    /// accounting — an uncounted wait makes `cb1 - wait` read as encoding cost
+    /// that is partly blocking, which is the exact error this split exists to
+    /// avoid.
+    private func waitCountingPrefill(_ cb: MTLCommandBuffer) {
+        let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        waitForCompletion(cb)
+        totalPrefillCb1WaitNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- start
+    }
+
     private func recordPrefillLayerGpuTime(_ cb: MTLCommandBuffer, isFull: Bool) {
         let nanos = recordGpuTime(cb)
         totalGpuCb1Nanos &+= nanos
@@ -1443,6 +1518,22 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                config: PrefillRuntimeConfig,
                                into logits: MTLBuffer,
                                onProgress: (Int) -> Void) async throws -> PrefillResult {
+        try await prefillChunked(tokens: tokens,
+                                 startPosition: startPosition,
+                                 outputMode: outputMode,
+                                 config: config,
+                                 into: logits,
+                                 onProgress: onProgress,
+                                 multimodal: nil)
+    }
+
+    public func prefillChunked(tokens: ArraySlice<Int32>,
+                               startPosition: Int,
+                               outputMode: PrefillOutputMode,
+                               config: PrefillRuntimeConfig,
+                               into logits: MTLBuffer,
+                               onProgress: (Int) -> Void,
+                               multimodal: MultimodalPrefillInput?) async throws -> PrefillResult {
         try prefillChunkState.requireClean(operation: "prefillChunked")
         guard config.mode == .chunked else {
             throw PrefillError.chunkedUnsupported(
@@ -1464,6 +1555,34 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         guard !tokens.isEmpty else {
             return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
         }
+        if let multimodal {
+            try validateMultimodal(multimodal, tokenCount: tokens.count)
+            guard startPosition == 0 else {
+                throw PrefillError.multimodalUnsupported(
+                    "a multimodal prefill must start at position 0")
+            }
+            var packed: [UInt32] = []
+            packed.reserveCapacity(multimodal.positions.count * 3)
+            for position in multimodal.positions {
+                packed.append(UInt32(position.temporal))
+                packed.append(UInt32(position.height))
+                packed.append(UInt32(position.width))
+            }
+            guard let buffer = ctx.device.makeBuffer(
+                bytes: packed,
+                length: packed.count * MemoryLayout<UInt32>.stride,
+                options: .storageModeShared) else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            activeMRoPEPositions = multimodal.positions
+            activeMRoPESection = multimodal.mropeSection
+            multimodalPositionBuffer = buffer
+        } else {
+            activeMRoPEPositions = nil
+            activeMRoPESection = nil
+            multimodalPositionBuffer = nil
+        }
+        decodePositionOffset = 0
 
         let scratch = try ensurePrefillScratch(config: config)
         let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count,
@@ -1472,6 +1591,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         for (spanIndex, span) in spans.enumerated() {
             let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
             let upper = tokens.index(lower, offsetBy: span.tokenCount)
+            let chunkPositions: ArraySlice<MRoPEPosition>? = multimodal.map {
+                $0.positions[span.tokenOffset..<(span.tokenOffset + span.tokenCount)]
+            }
             try await executePrefillChunk(
                 tokens: tokens[lower..<upper],
                 startPosition: span.startPosition,
@@ -1479,7 +1601,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 logits: logits,
                 scratch: scratch,
                 config: config,
-                writeFinalHead: spanIndex == spans.count - 1)
+                writeFinalHead: spanIndex == spans.count - 1,
+                multimodal: multimodal,
+                mropePositions: chunkPositions)
             onProgress(span.completedCount)
             // The row fingerprints are written by this chunk's command buffers;
             // remember how far they reach so the dump knows how much of the
@@ -1499,12 +1623,53 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  phase: "prefill")
             }
         }
+        decodePositionOffset = multimodal?.decodePositionOffset ?? 0
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {
             return PrefillResult(newPosition: startPosition + tokens.count,
                                  seed: .greedyToken(lastGreedyToken))
         }
         return PrefillResult(newPosition: startPosition + tokens.count,
                              seed: .logitsWritten)
+    }
+
+    private func validateMultimodal(_ input: MultimodalPrefillInput,
+                                    tokenCount: Int) throws {
+        guard cfg.isQwen3_6 || cfg.isQwen3_8 else {
+            throw PrefillError.multimodalUnsupported(
+                "multimodal prefill is implemented for the Qwen 3.6/3.8 families")
+        }
+        guard input.positions.count == tokenCount else {
+            throw PrefillError.multimodalUnsupported(
+                "multimodal positions cover \(input.positions.count) tokens, chunk has \(tokenCount)")
+        }
+        guard input.positions.allSatisfy({
+            $0.temporal >= 0 && $0.height >= 0 && $0.width >= 0
+        }) else {
+            throw PrefillError.multimodalUnsupported(
+                "mRoPE positions must be non-negative")
+        }
+        guard input.mropeSection.count == 3, input.mropeSection.allSatisfy({ $0 > 0 }) else {
+            throw PrefillError.multimodalUnsupported(
+                "mRoPE section must be three positive widths")
+        }
+        let rotaryDim = Int(Double(cfg.fullHeadDim) * cfg.partialRotaryFactor)
+        guard input.mropeSection.reduce(0, +) == rotaryDim / 2 else {
+            throw PrefillError.multimodalUnsupported(
+                "mRoPE section \(input.mropeSection) does not cover \(rotaryDim / 2) pairs")
+        }
+        let rowBytes = cfg.hiddenSize * MemoryLayout<Float16>.stride
+        guard input.hiddenRowByteOffset >= 0,
+              input.hiddenRowByteOffset <= input.hiddenRows.length,
+              input.hiddenRowPositions.count
+                <= (input.hiddenRows.length - input.hiddenRowByteOffset) / rowBytes else {
+            throw PrefillError.multimodalUnsupported(
+                "image embedding rows exceed the supplied buffer")
+        }
+        guard zip(input.hiddenRowPositions, input.hiddenRowPositions.dropFirst())
+            .allSatisfy({ $0 < $1 }) else {
+            throw PrefillError.multimodalUnsupported(
+                "image embedding positions must be strictly ascending")
+        }
     }
 
     @discardableResult
@@ -1526,7 +1691,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      logits: MTLBuffer,
                                      scratch: PrefillChunkScratchBuffers,
                                      config: PrefillRuntimeConfig,
-                                     writeFinalHead: Bool) async throws {
+                                     writeFinalHead: Bool,
+                                     multimodal: MultimodalPrefillInput? = nil,
+                                     mropePositions: ArraySlice<MRoPEPosition>? = nil) async throws {
         guard !tokens.isEmpty else { return }
         guard kv != nil else {
             throw PrefillError.chunkedUnsupported("chunked prefill attention requires FP16 KV")
@@ -1638,7 +1805,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 // this wide, but a short read would be silent garbage.
                 precondition(gathered.count >= width,
                              "PLE gather returned \(gathered.count) elements, need \(width)")
-                gathered.withUnsafeBytes { src in
+                _ = gathered.withUnsafeBytes { src in
                     memcpy(scratch.qwen38PleGathered.contents().advanced(by: row * bytes),
                            src.baseAddress!,
                            bytes)
@@ -1664,6 +1831,28 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             t: UInt32(t),
                             d: UInt32(D),
                             outScale: sqrtHidden)
+        if let multimodal {
+            // Replace the placeholder token embeddings with the vision tower's
+            // merged rows. The blit follows the embedding lookup in the same
+            // command buffer, and the layer loop below reads the result.
+            let rowBytes = D * MemoryLayout<Float16>.stride
+            if let blit = cb.makeBlitCommandEncoder() {
+                for (index, position) in multimodal.hiddenRowPositions.enumerated() {
+                    guard position >= Int32(startPosition),
+                          position < Int32(startPosition + t) else { continue }
+                    let row = Int(position) - startPosition
+                    blit.copy(
+                        from: multimodal.hiddenRows,
+                        sourceOffset: multimodal.hiddenRowByteOffset + index * rowBytes,
+                        to: scratch.hidden,
+                        destinationOffset: row * rowBytes,
+                        size: rowBytes)
+                }
+                blit.endEncoding()
+            } else {
+                throw ModelError.residentBufferWrapFailed
+            }
+        }
         if cfg.isQwen3_8 {
             // The 3.8 residual is the wide hyper-connection plane, seeded once
             // per chunk with hc copies of each row's embedding (`hc_init`,
@@ -1678,12 +1867,30 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                tokens: UInt32(t))
         }
 
+        // Prefill CPU accounting, taken in this loop and not inside the layer
+        // functions, so the two decode bodies are not touched at all. The total
+        // is wall over the whole encode — it includes the layer's own
+        // `waitUntilCompleted` calls, which is why the wait spans are timed at
+        // those sites instead: `cb1 - wait` is the encoding cost. The Gemma path
+        // below is deliberately left uninstrumented, exactly as in decode, so a
+        // zero here means "not instrumented" rather than "the spans were empty".
+        func accountPrefillLayer(isFull: Bool, from layerStart: UInt64) {
+            let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            totalPrefillCb1Nanos &+= now &- layerStart
+            totalPrefillCb1Layers &+= 1
+            if isFull { totalPrefillCb1FullAttnLayers &+= 1 }
+        }
         for L in 0..<cfg.numLayers {
+            let thisLayerStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             model.beginOpeningRoutedExpertStreamer(layer: L)
             if cfg.isQwen3_6 {
                 cb = try await encodeQwenPrefillLayer(L, scratch: scratch,
                                                       startPosition: startPosition,
-                                                      tokenCount: t, cb: cb)
+                                                      tokenCount: t, cb: cb,
+                                                      mropePositions: mropePositions,
+                                                      mropeSection: multimodal?.mropeSection)
+                accountPrefillLayer(isFull: cfg.fullAttentionLayerMask[L] != 0,
+                                    from: thisLayerStart)
                 continue
             }
             if cfg.isQwen3_8 {
@@ -1693,7 +1900,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 // not carry.
                 cb = try await encodeQwen38PrefillLayer(L, scratch: scratch,
                                                         startPosition: startPosition,
-                                                        tokenCount: t, cb: cb)
+                                                        tokenCount: t, cb: cb,
+                                                        mropePositions: mropePositions,
+                                                        mropeSection: multimodal?.mropeSection)
+                accountPrefillLayer(isFull: cfg.fullAttentionLayerMask[L] != 0,
+                                    from: thisLayerStart)
                 continue
             }
             let views = layerViews[L]
@@ -2479,7 +2690,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         scratch: PrefillChunkScratchBuffers,
         startPosition: Int,
         tokenCount: Int,
-        cb: MTLCommandBuffer
+        cb: MTLCommandBuffer,
+        mropePositions: ArraySlice<MRoPEPosition>? = nil,
+        mropeSection: [Int]? = nil
     ) async throws -> MTLCommandBuffer {
         let t = tokenCount
         let D = cfg.hiddenSize
@@ -2567,21 +2780,43 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  yStrideElements: kvDim)
 
             for row in 0..<t {
-                qwenFusions.encodeFullAttnEpilogue(
-                    commandBuffer: cb,
-                    qProj: scratch.q, qProjOffset: row * 2 * qDim * 2,
-                    qOut: scratch.q, qOutOffset: row * qDim * 2,
-                    gateOut: scratch.qwenQGate, gateOutOffset: row * qDim * 2,
-                    k: scratch.kStage, kOffset: row * kvDim * 2,
-                    qWeight: qN.buffer, qWeightOffset: Int(qN.offset),
-                    kWeight: kN.buffer, kWeightOffset: Int(kN.offset),
-                    headDim: UInt32(headDim),
-                    numQHeads: UInt32(numQ),
-                    numKVHeads: UInt32(numKV),
-                    position: UInt32(startPosition + row),
-                    theta: Float(cfg.fullRopeTheta),
-                    rotaryDim: UInt32(rotaryDim),
-                    eps: eps)
+                if let mropePositions, let mropeSection {
+                    let p = mropePositions[mropePositions.startIndex + row]
+                    try qwenFusions.encodeFullAttnEpilogueMRoPE(
+                        commandBuffer: cb,
+                        qProj: scratch.q, qProjOffset: row * 2 * qDim * 2,
+                        qOut: scratch.q, qOutOffset: row * qDim * 2,
+                        gateOut: scratch.qwenQGate, gateOutOffset: row * qDim * 2,
+                        k: scratch.kStage, kOffset: row * kvDim * 2,
+                        qWeight: qN.buffer, qWeightOffset: Int(qN.offset),
+                        kWeight: kN.buffer, kWeightOffset: Int(kN.offset),
+                        headDim: UInt32(headDim),
+                        numQHeads: UInt32(numQ),
+                        numKVHeads: UInt32(numKV),
+                        positionT: UInt32(p.temporal),
+                        positionH: UInt32(p.height),
+                        positionW: UInt32(p.width),
+                        sections: mropeSection,
+                        theta: Float(cfg.fullRopeTheta),
+                        rotaryDim: UInt32(rotaryDim),
+                        eps: eps)
+                } else {
+                    qwenFusions.encodeFullAttnEpilogue(
+                        commandBuffer: cb,
+                        qProj: scratch.q, qProjOffset: row * 2 * qDim * 2,
+                        qOut: scratch.q, qOutOffset: row * qDim * 2,
+                        gateOut: scratch.qwenQGate, gateOutOffset: row * qDim * 2,
+                        k: scratch.kStage, kOffset: row * kvDim * 2,
+                        qWeight: qN.buffer, qWeightOffset: Int(qN.offset),
+                        kWeight: kN.buffer, kWeightOffset: Int(kN.offset),
+                        headDim: UInt32(headDim),
+                        numQHeads: UInt32(numQ),
+                        numKVHeads: UInt32(numKV),
+                        position: UInt32(startPosition + row),
+                        theta: Float(cfg.fullRopeTheta),
+                        rotaryDim: UInt32(rotaryDim),
+                        eps: eps)
+                }
             }
 
             if let sim = kvPrecisionSim, !(kv?.usesInt8Storage(layer: L) ?? false) {
@@ -2885,11 +3120,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             d: UInt32(D),
             topK: UInt32(cfg.topKExperts),
             hiddenStrideElements: UInt32(D))
-        cb.commit()
-        waitForCompletion(cb)
+        commitCountingPrefill(cb)
+        waitCountingPrefill(cb)
         if let error = cb.error {
             throw error
         }
+        // The layer's own forward: attention or GDN, plus its projections.
+        // The same bucket the decode path calls cb1, and the same split by
+        // layer kind. Until this call the 3.6 prefill body had no GPU
+        // attribution at all, so every `gpu_*` field on a `scope=prefill` line
+        // was structurally zero rather than measured zero.
+        recordPrefillLayerGpuTime(cb, isFull: isFull)
 
         if let hook = qwenLayerDebugHook, !isFull {
             // The mixer CB has completed and nothing has reused h1 yet: for a
@@ -2906,7 +3147,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                           to: tmp, destinationOffset: 0, size: bytes)
                 blit.endEncoding()
                 snapCB.commit()
-                waitForCompletion(snapCB)
+                waitCountingPrefill(snapCB)
                 let ptr = tmp.contents().bindMemory(to: Float16.self,
                                                     capacity: t * D)
                 for row in 0..<t {
@@ -2933,7 +3174,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                           size: elements * MemoryLayout<Float16>.stride)
                 blit.endEncoding()
                 snapCB.commit()
-                waitForCompletion(snapCB)
+                waitCountingPrefill(snapCB)
                 let ptr = tmp.contents().bindMemory(to: Float16.self,
                                                     capacity: elements)
                 hook(L, name, Array(UnsafeBufferPointer(start: ptr,
@@ -2958,7 +3199,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                           size: elements * MemoryLayout<Float>.stride)
                 blit.endEncoding()
                 snapCB.commit()
-                waitForCompletion(snapCB)
+                waitCountingPrefill(snapCB)
                 let ptr = tmp.contents().bindMemory(to: Float.self,
                                                     capacity: elements)
                 hook(L, name,
@@ -3041,11 +3282,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                          h1: scratch.h1, h1Offset: row * D * 2,
                                          n: UInt32(D), d: UInt32(D))
         }
-        sharedCB.commit()
-        waitForCompletion(sharedCB)
+        commitCountingPrefill(sharedCB)
+        waitCountingPrefill(sharedCB)
         if let error = sharedCB.error {
             throw error
         }
+        totalGpuRoutedNanos &+= recordGpuTime(sharedCB)
 
         // Streamed routed-expert tiles (silu), mirroring the Gemma tile loop.
         let metadata = try prefillGroupedMoE.makeStreamedMetadataBuffers(
@@ -3064,7 +3306,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             guard !pendingTiles.isEmpty else { return }
             let pending = pendingTiles.removeFirst()
             withExtendedLifetime((pending.fetch, pending.argumentBuffer)) {
-                waitForCompletion(pending.commandBuffer)
+                waitCountingPrefill(pending.commandBuffer)
+                totalGpuRoutedNanos &+= recordGpuTime(pending.commandBuffer)
             }
             if let error = pending.commandBuffer.error {
                 throw error
@@ -3180,7 +3423,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 pairMicrobatchRows: scratch.layout.routedPairMicrobatchRows,
                 activation: .silu,
                 expertBits: model.routedExpertWeightBits)
-            tileCB.commit()
+            commitCountingPrefill(tileCB)
             pendingTiles.append(PendingPrefillTile(tileIndex: tileIndex,
                                                    commandBuffer: tileCB,
                                                    fetch: fetch,
@@ -3216,13 +3459,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      b: scratch.h2, bOffset: row * D * 2,
                                      d: UInt32(D))
         }
-        tailCB.commit()
+        commitCountingPrefill(tailCB)
         withExtendedLifetime(metadata) {
-            waitForCompletion(tailCB)
+            waitCountingPrefill(tailCB)
         }
         if let error = tailCB.error {
             throw error
         }
+        totalGpuRoutedNanos &+= recordGpuTime(tailCB)
 
         if let hook = qwenLayerDebugHook {
             // The prefill scratch is private-storage; blit the row to a
@@ -3570,7 +3814,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         if let plannedFetch {
             blobs = try await model.fetchRoutedExperts(plan: plannedFetch)
         } else {
-            blobs = try await model.fetchRoutedExperts(layer: L, experts: experts)
+            blobs = try await model.fetchRoutedExperts(layer: L,
+                                                       experts: experts,
+                                                       direct: model.directExpertCache)
         }
         let layerIo = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
         totalIoNanos &+= layerIo
@@ -3629,6 +3875,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private func encodeQwenDecodeLayer(
         _ L: Int,
         position: Int,
+        ropeOffset: Int = 0,
         pending: inout PendingRoutedCommand?
     ) async throws {
         let D = UInt32(cfg.hiddenSize)
@@ -3731,7 +3978,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     headDim: headDim,
                     numQHeads: numQ,
                     numKVHeads: numKV,
-                    position: UInt32(position),
+                    position: UInt32(position + ropeOffset),
                     theta: Float(cfg.fullRopeTheta),
                     rotaryDim: rotaryDim,
                     eps: eps)
@@ -4225,7 +4472,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         scratch: PrefillChunkScratchBuffers,
         startPosition: Int,
         tokenCount: Int,
-        cb inbound: MTLCommandBuffer
+        cb inbound: MTLCommandBuffer,
+        mropePositions: ArraySlice<MRoPEPosition>? = nil,
+        mropeSection: [Int]? = nil
     ) async throws -> MTLCommandBuffer {
         // `cb` is a local so the GDN sub-stage split can move the buffer
         // boundary mid-layer (see `splitGdnSubStage`); every encode site in this
@@ -4456,21 +4705,43 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  yStrideElements: kvDim)
 
             for row in 0..<t {
-                qwenFusions.encodeFullAttnEpilogue(
-                    commandBuffer: cb,
-                    qProj: scratch.q, qProjOffset: row * 2 * qDim * 2,
-                    qOut: scratch.q, qOutOffset: row * qDim * 2,
-                    gateOut: scratch.qwenQGate, gateOutOffset: row * qDim * 2,
-                    k: scratch.kStage, kOffset: row * kvDim * 2,
-                    qWeight: qN.buffer, qWeightOffset: Int(qN.offset),
-                    kWeight: kN.buffer, kWeightOffset: Int(kN.offset),
-                    headDim: UInt32(headDim),
-                    numQHeads: UInt32(numQ),
-                    numKVHeads: UInt32(numKV),
-                    position: UInt32(startPosition + row),
-                    theta: Float(cfg.fullRopeTheta),
-                    rotaryDim: UInt32(rotaryDim),
-                    eps: eps)
+                if let mropePositions, let mropeSection {
+                    let p = mropePositions[mropePositions.startIndex + row]
+                    try qwenFusions.encodeFullAttnEpilogueMRoPE(
+                        commandBuffer: cb,
+                        qProj: scratch.q, qProjOffset: row * 2 * qDim * 2,
+                        qOut: scratch.q, qOutOffset: row * qDim * 2,
+                        gateOut: scratch.qwenQGate, gateOutOffset: row * qDim * 2,
+                        k: scratch.kStage, kOffset: row * kvDim * 2,
+                        qWeight: qN.buffer, qWeightOffset: Int(qN.offset),
+                        kWeight: kN.buffer, kWeightOffset: Int(kN.offset),
+                        headDim: UInt32(headDim),
+                        numQHeads: UInt32(numQ),
+                        numKVHeads: UInt32(numKV),
+                        positionT: UInt32(p.temporal),
+                        positionH: UInt32(p.height),
+                        positionW: UInt32(p.width),
+                        sections: mropeSection,
+                        theta: Float(cfg.fullRopeTheta),
+                        rotaryDim: UInt32(rotaryDim),
+                        eps: eps)
+                } else {
+                    qwenFusions.encodeFullAttnEpilogue(
+                        commandBuffer: cb,
+                        qProj: scratch.q, qProjOffset: row * 2 * qDim * 2,
+                        qOut: scratch.q, qOutOffset: row * qDim * 2,
+                        gateOut: scratch.qwenQGate, gateOutOffset: row * qDim * 2,
+                        k: scratch.kStage, kOffset: row * kvDim * 2,
+                        qWeight: qN.buffer, qWeightOffset: Int(qN.offset),
+                        kWeight: kN.buffer, kWeightOffset: Int(kN.offset),
+                        headDim: UInt32(headDim),
+                        numQHeads: UInt32(numQ),
+                        numKVHeads: UInt32(numKV),
+                        position: UInt32(startPosition + row),
+                        theta: Float(cfg.fullRopeTheta),
+                        rotaryDim: UInt32(rotaryDim),
+                        eps: eps)
+                }
             }
 
             // Hand the chunk's K/V to the cache before anything reads it. The
@@ -4590,21 +4861,44 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      yStrideElements: projDim)
                 for row in 0..<t {
                     let pos = startPosition + row
-                    qsaIndexer.encodeQKPost(
-                        commandBuffer: cb,
-                        qk: scratch.qwen38IdxQKProj,
-                        qkOffset: row * projDim * MemoryLayout<Float16>.stride,
-                        qGamma: idxQGamma.buffer,
-                        qGammaOffset: Int(idxQGamma.offset),
-                        qOut: scratch.qwen38IdxQ,
-                        qOutOffset: row * nHeads * idxDim * MemoryLayout<Float16>.stride,
-                        kRaw: lay.rawKeys,
-                        pos: UInt32(pos),
-                        nHeads: UInt32(nHeads),
-                        idxDim: UInt32(idxDim),
-                        nRot: UInt32(st.nRot),
-                        theta: st.theta,
-                        eps: st.eps)
+                    if let mropePositions, let mropeSection {
+                        let p = mropePositions[mropePositions.startIndex + row]
+                        try qsaIndexer.encodeQKPostMRoPE(
+                            commandBuffer: cb,
+                            qk: scratch.qwen38IdxQKProj,
+                            qkOffset: row * projDim * MemoryLayout<Float16>.stride,
+                            qGamma: idxQGamma.buffer,
+                            qGammaOffset: Int(idxQGamma.offset),
+                            qOut: scratch.qwen38IdxQ,
+                            qOutOffset: row * nHeads * idxDim * MemoryLayout<Float16>.stride,
+                            kRaw: lay.rawKeys,
+                            storePos: UInt32(pos),
+                            positionT: UInt32(p.temporal),
+                            positionH: UInt32(p.height),
+                            positionW: UInt32(p.width),
+                            sections: mropeSection,
+                            nHeads: UInt32(nHeads),
+                            idxDim: UInt32(idxDim),
+                            nRot: UInt32(st.nRot),
+                            theta: st.theta,
+                            eps: st.eps)
+                    } else {
+                        qsaIndexer.encodeQKPost(
+                            commandBuffer: cb,
+                            qk: scratch.qwen38IdxQKProj,
+                            qkOffset: row * projDim * MemoryLayout<Float16>.stride,
+                            qGamma: idxQGamma.buffer,
+                            qGammaOffset: Int(idxQGamma.offset),
+                            qOut: scratch.qwen38IdxQ,
+                            qOutOffset: row * nHeads * idxDim * MemoryLayout<Float16>.stride,
+                            kRaw: lay.rawKeys,
+                            pos: UInt32(pos),
+                            nHeads: UInt32(nHeads),
+                            idxDim: UInt32(idxDim),
+                            nRot: UInt32(st.nRot),
+                            theta: st.theta,
+                            eps: st.eps)
+                    }
                 }
                 // The indexer's own q and its raw key timeline, after the
                 // projection and the layer norms. The keys are the interesting
@@ -4632,19 +4926,40 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     poolCount += 1
                 }
                 if poolCount > 0 {
-                    qsaIndexer.encodeBlockPoolNormRope(
-                        commandBuffer: cb,
-                        kRaw: lay.rawKeys,
-                        kGamma: idxKGamma.buffer,
-                        kGammaOffset: Int(idxKGamma.offset),
-                        pooled: lay.pooled,
-                        firstBlock: UInt32(bFirst),
-                        blockCount: UInt32(poolCount),
-                        r: UInt32(r),
-                        idxDim: UInt32(idxDim),
-                        nRot: UInt32(st.nRot),
-                        theta: st.theta,
-                        eps: st.eps)
+                    if let mropeSection, let positionBuffer = multimodalPositionBuffer,
+                       let promptPositions = activeMRoPEPositions {
+                        try qsaIndexer.encodeBlockPoolNormRopeMRoPE(
+                            commandBuffer: cb,
+                            kRaw: lay.rawKeys,
+                            kGamma: idxKGamma.buffer,
+                            kGammaOffset: Int(idxKGamma.offset),
+                            pooled: lay.pooled,
+                            positions: positionBuffer,
+                            promptLength: promptPositions.count,
+                            decodeOffset: 0,
+                            sections: mropeSection,
+                            firstBlock: UInt32(bFirst),
+                            blockCount: UInt32(poolCount),
+                            r: UInt32(r),
+                            idxDim: UInt32(idxDim),
+                            nRot: UInt32(st.nRot),
+                            theta: st.theta,
+                            eps: st.eps)
+                    } else {
+                        qsaIndexer.encodeBlockPoolNormRope(
+                            commandBuffer: cb,
+                            kRaw: lay.rawKeys,
+                            kGamma: idxKGamma.buffer,
+                            kGammaOffset: Int(idxKGamma.offset),
+                            pooled: lay.pooled,
+                            firstBlock: UInt32(bFirst),
+                            blockCount: UInt32(poolCount),
+                            r: UInt32(r),
+                            idxDim: UInt32(idxDim),
+                            nRot: UInt32(st.nRot),
+                            theta: st.theta,
+                            eps: st.eps)
+                    }
                     st.advancePooledBlocks(li, by: poolCount)
                     // The pooled keys, immediately after the pool writes them and
                     // before any score reads them. This is the checkpoint the
@@ -5058,7 +5373,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             topK: UInt32(cfg.topKExperts),
             hiddenStrideElements: UInt32(D))
         commitCountingPrefill(cb)
-        waitForCompletion(cb)
+        waitCountingPrefill(cb)
         if let error = cb.error {
             throw error
         }
@@ -5153,7 +5468,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                          n: UInt32(D), d: UInt32(D))
         }
         commitCountingPrefill(sharedCB)
-        waitForCompletion(sharedCB)
+        waitCountingPrefill(sharedCB)
         if let error = sharedCB.error {
             throw error
         }
@@ -5176,7 +5491,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             guard !pendingTiles.isEmpty else { return }
             let pending = pendingTiles.removeFirst()
             withExtendedLifetime((pending.fetch, pending.argumentBuffer)) {
-                waitForCompletion(pending.commandBuffer)
+                waitCountingPrefill(pending.commandBuffer)
             totalGpuRoutedNanos &+= recordGpuTime(pending.commandBuffer)
             }
             if let error = pending.commandBuffer.error {
@@ -5344,12 +5659,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                            rowBase: startPosition, into: tailCB)
         commitCountingPrefill(tailCB)
         withExtendedLifetime(metadata) {
-            waitForCompletion(tailCB)
+            waitCountingPrefill(tailCB)
         }
         if let error = tailCB.error {
             throw error
-        totalGpuRoutedNanos &+= recordGpuTime(tailCB)
         }
+        totalGpuRoutedNanos &+= recordGpuTime(tailCB)
         drainSnapshots()
 
         if L + 1 < cfg.numLayers {
@@ -5454,6 +5769,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private func encodeQwen38DecodeLayer(
         _ L: Int,
         position: Int,
+        ropeOffset: Int = 0,
         pending: inout PendingRoutedCommand?
     ) async throws {
         let D = UInt32(cfg.hiddenSize)
@@ -5675,7 +5991,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     headDim: headDim,
                     numQHeads: numQ,
                     numKVHeads: numKV,
-                    position: UInt32(position),
+                    position: UInt32(position + ropeOffset),
                     theta: Float(cfg.fullRopeTheta),
                     rotaryDim: rotaryDim,
                     eps: eps)
@@ -5706,7 +6022,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // still runs every step, so the pooled blocks are there on the
             // step this stops being true.
             let idxDense = (qsaLayer?.state.capacity ?? Int.max) >= position + 1
-            let gIndexer: ((MTLCommandBuffer) -> Void)?
+            let gIndexer: ((MTLCommandBuffer) throws -> Void)?
             if let qsaIndexer, let qsaLayer {
                 let idxQK = try model.indexerQKProj(layer: L)
                 let idxQGamma = try model.indexerQLayernorm(layer: L)
@@ -5736,31 +6052,75 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                 m: (nHeads + UInt32(st.numKVHeads)) * idxDim, n: D)
                     // Query heads normed and partially roped at this position;
                     // the key head copied verbatim into the timeline.
-                    qsaIndexer.encodeQKPost(commandBuffer: cb,
-                                            qk: lay.qkProj,
-                                            qGamma: idxQGamma.buffer,
-                                            qGammaOffset: Int(idxQGamma.offset),
-                                            qOut: lay.qIdx,
-                                            kRaw: lay.rawKeys,
-                                            pos: pos,
-                                            nHeads: nHeads,
-                                            idxDim: idxDim,
-                                            nRot: nRot,
-                                            theta: st.theta,
-                                            eps: st.eps)
+                    if let mropeSection = activeMRoPESection,
+                       activeMRoPEPositions != nil {
+                        let ropePosition = max(0, position + ropeOffset)
+                        try qsaIndexer.encodeQKPostMRoPE(
+                            commandBuffer: cb,
+                            qk: lay.qkProj,
+                            qGamma: idxQGamma.buffer,
+                            qGammaOffset: Int(idxQGamma.offset),
+                            qOut: lay.qIdx,
+                            kRaw: lay.rawKeys,
+                            storePos: pos,
+                            positionT: UInt32(ropePosition),
+                            positionH: UInt32(ropePosition),
+                            positionW: UInt32(ropePosition),
+                            sections: mropeSection,
+                            nHeads: nHeads,
+                            idxDim: idxDim,
+                            nRot: nRot,
+                            theta: st.theta,
+                            eps: st.eps)
+                    } else {
+                        qsaIndexer.encodeQKPost(commandBuffer: cb,
+                                                qk: lay.qkProj,
+                                                qGamma: idxQGamma.buffer,
+                                                qGammaOffset: Int(idxQGamma.offset),
+                                                qOut: lay.qIdx,
+                                                kRaw: lay.rawKeys,
+                                                pos: pos,
+                                                nHeads: nHeads,
+                                                idxDim: idxDim,
+                                                nRot: nRot,
+                                                theta: st.theta,
+                                                eps: st.eps)
+                    }
                     if completesPool {
-                        qsaIndexer.encodeBlockPoolNormRope(commandBuffer: cb,
-                                                           kRaw: lay.rawKeys,
-                                                           kGamma: idxKGamma.buffer,
-                                                           kGammaOffset: Int(idxKGamma.offset),
-                                                           pooled: lay.pooled,
-                                                           firstBlock: poolBlock,
-                                                           blockCount: 1,
-                                                           r: UInt32(r),
-                                                           idxDim: idxDim,
-                                                           nRot: nRot,
-                                                           theta: st.theta,
-                                                           eps: st.eps)
+                        if let mropeSection = activeMRoPESection,
+                           let positionBuffer = multimodalPositionBuffer,
+                           let promptPositions = activeMRoPEPositions {
+                            try qsaIndexer.encodeBlockPoolNormRopeMRoPE(
+                                commandBuffer: cb,
+                                kRaw: lay.rawKeys,
+                                kGamma: idxKGamma.buffer,
+                                kGammaOffset: Int(idxKGamma.offset),
+                                pooled: lay.pooled,
+                                positions: positionBuffer,
+                                promptLength: promptPositions.count,
+                                decodeOffset: ropeOffset,
+                                sections: mropeSection,
+                                firstBlock: poolBlock,
+                                blockCount: 1,
+                                r: UInt32(r),
+                                idxDim: idxDim,
+                                nRot: nRot,
+                                theta: st.theta,
+                                eps: st.eps)
+                        } else {
+                            qsaIndexer.encodeBlockPoolNormRope(commandBuffer: cb,
+                                                               kRaw: lay.rawKeys,
+                                                               kGamma: idxKGamma.buffer,
+                                                               kGammaOffset: Int(idxKGamma.offset),
+                                                               pooled: lay.pooled,
+                                                               firstBlock: poolBlock,
+                                                               blockCount: 1,
+                                                               r: UInt32(r),
+                                                               idxDim: idxDim,
+                                                               nRot: nRot,
+                                                               theta: st.theta,
+                                                               eps: st.eps)
+                        }
                         st.advancePooledBlocks(li)
                     }
                     guard !idxDense else { return }
@@ -5851,7 +6211,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 // count the step has no explanation.
                 totalIndexerRankedLayers &+= 1
             }
-            gIndexer?(cb)
+            try gIndexer?(cb)
             gEpilogue(cb)
             gAttention(cb)
             gGate(cb)
@@ -6260,7 +6620,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             totalPleRowBytes &+= pleHost.totalRowBytesRead &- pleBytesBefore
             totalPleGatherNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- tPle
             totalPleGathers &+= 1
-            gathered.withUnsafeBytes { src in
+            _ = gathered.withUnsafeBytes { src in
                 memcpy(pleGathered.contents(), src.baseAddress!, src.count)
             }
         }
@@ -6269,9 +6629,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             if cfg.isQwenHybrid {
                 if cfg.isQwen3_6 {
                     try await encodeQwenDecodeLayer(L, position: position,
+                                                    ropeOffset: decodePositionOffset,
                                                     pending: &pendingRoutedCommand)
                 } else {
                     try await encodeQwen38DecodeLayer(L, position: position,
+                                                      ropeOffset: decodePositionOffset,
                                                       pending: &pendingRoutedCommand)
                 }
                 continue

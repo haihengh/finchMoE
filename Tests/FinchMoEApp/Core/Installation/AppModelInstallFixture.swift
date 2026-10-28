@@ -30,6 +30,16 @@ func makeCompleteModelInstall(_ tag: String,
             "sha256": String(repeating: "0", count: 64),
         ]
     }
+    if descriptor.requiresVision {
+        // Real payloads are ~0.9 GB; the fixture only needs the declared file
+        // set so the probe's capability check and size fallback have something
+        // to find.
+        for path in ["vision/vision.safetensors",
+                     "vision/model_config.json",
+                     "vision/preprocessor_config.json"] {
+            files[path] = ["size": 2, "sha256": String(repeating: "0", count: 64)]
+        }
+    }
     var archFields: [String: Any] = [
         "modelFamily": arch.modelFamily,
         "hiddenSize": arch.hiddenSize,
@@ -82,6 +92,20 @@ func makeCompleteModelInstall(_ tag: String,
         archFields["pleConvKernelSize"] = arch.pleConvKernelSize
         archFields["pleEosTokenId"] = arch.pleEosTokenId
     }
+    // Materialize every declared file at its declared size. The probe's
+    // size-check fallback (used when a receipt is missing or bound to another
+    // path) requires the directory to actually contain the file set it
+    // claims; an empty or truncated file must fail that check.
+    for (relativePath, value) in files {
+        guard let entry = value as? [String: Any],
+              let size = entry["size"] as? Int else { continue }
+        let fileURL = directory.appendingPathComponent(relativePath)
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try Data(count: size).write(to: fileURL)
+    }
+
     let manifest: [String: Any] = [
         "magic": "FINCH",
         "versionMajor": 1,

@@ -9,6 +9,7 @@ public enum PrefillError: Error, CustomStringConvertible, Equatable {
     case prefillCursorMismatch(String)
     case unsupportedPrefillSeed(String)
     case modelFamilyUnsupported(String)
+    case multimodalUnsupported(String)
 
     public var description: String {
         switch self {
@@ -16,7 +17,8 @@ public enum PrefillError: Error, CustomStringConvertible, Equatable {
              .chunkedRunnerDirty(let reason),
              .prefillCursorMismatch(let reason),
              .unsupportedPrefillSeed(let reason),
-             .modelFamilyUnsupported(let reason):
+             .modelFamilyUnsupported(let reason),
+             .multimodalUnsupported(let reason):
             return reason
         }
     }
@@ -186,17 +188,19 @@ public struct PrefillRuntimeConfig: Sendable, Equatable {
         PrefillRuntimeConfig(mode: .off, chunkTokens: 128)
     }
 
-    /// Prefill is chunked by default, at 512 tokens per chunk.
+    /// Prefill is chunked by default, at the configured ceiling of 1,024.
     ///
     /// The chunk size is the prefill I/O divisor — a layer's routed-expert pool
-    /// is re-read once per chunk — and the measured curve is steep: on the
-    /// 125B, a 2900-token prompt prefills in 215 s at 512 against 344 s at 128,
-    /// with expert bytes read falling 645 GB → 251 GB, and 1024 adds only a
-    /// little more (182 s) for twice the scratch. 512 is the knee. Scratch
-    /// grows ~154 KiB per chunk token, so this costs ~0.3 GB of peak over the
-    /// old 128 on a 2900-token prompt. See `docs/OPTIMIZATION_PLAN.md` 1.1.
+    /// is re-read once per chunk — and the curve is steep and keeps paying: on
+    /// the 125B a 2,907-token prompt prefills in 344 s at 128, 141.6 s at 512
+    /// and 111.3 s at 1,024, with expert bytes read falling 645 GB → 128 GB →
+    /// 72 GB. The old 512 default was set from a sweep that read 1,024 as
+    /// "182 s, only a little more, for twice the scratch"; scratch is ~154 KiB
+    /// per chunk token and doubling it cost no peak RSS at all (4.91 GB →
+    /// 4.84 GB), because GPU time is flat across both (48.1 s) while the I/O
+    /// halves. 1,024 is +27 % pp. See `STRATA_PP_KV_ANALYSIS.md` §4.1.
     public static var defaultChunked: PrefillRuntimeConfig {
-        production(chunkTokens: 512)
+        production(chunkTokens: RuntimeConfiguration.defaultPrefillChunkTokens)
     }
 
     public static func production(chunkTokens: Int) -> PrefillRuntimeConfig {

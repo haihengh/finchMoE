@@ -19,9 +19,9 @@ import FinchMoEFormat
 
     // MARK: - Fixtures
 
-    private static func makeSnapshot38() throws -> String {
+    private static func makeSnapshot38(includeVision: Bool = false) throws -> String {
         let dir = NSTemporaryDirectory() + "qwen38-resume-src-\(UUID().uuidString)"
-        try SyntheticQwenSnapshot.write38(into: dir)
+        try SyntheticQwenSnapshot.write38(into: dir, includeVision: includeVision)
         return dir
     }
 
@@ -32,12 +32,14 @@ import FinchMoEFormat
     private static func repack(snapshot: String,
                                output: String,
                                resume: Bool,
+                               includeVision: Bool = false,
                                audit: RepackAudit = RepackAudit()) async throws
         -> LocalQwenRepackResult {
         let options = LocalQwenRepackOptions(snapshotDir: snapshot,
                                              outputDir: output,
                                              resume: resume,
-                                             minFreeReserveBytes: 0)
+                                             minFreeReserveBytes: 0,
+                                             includeVision: includeVision)
         return try await LocalQwenRepacker(options: options, audit: audit).run()
     }
 
@@ -53,7 +55,9 @@ import FinchMoEFormat
     /// resume tests fail loudly instead of quietly resuming onto a stale
     /// partial.
     private static func fingerprint(snapshot: String,
-                                    output: String) throws -> LocalRepackJournal.Fingerprint {
+                                    output: String,
+                                    includeVision: Bool = false) throws
+        -> LocalRepackJournal.Fingerprint {
         let loaded = try QwenLocalSnapshot.load(snapshotDir: snapshot)
         return LocalRepackJournal.Fingerprint(
             sourceDirectory: URL(fileURLWithPath: snapshot).path,
@@ -61,7 +65,8 @@ import FinchMoEFormat
             outputDirectory: URL(fileURLWithPath: output).path,
             modelFamily: loaded.arch.modelFamily,
             numLayers: loaded.arch.numLayers,
-            routedExpertBits: 4)
+            routedExpertBits: 4,
+            includeVision: includeVision)
     }
 
     /// Stages the state a run killed *after* finishing every file would leave:
@@ -77,9 +82,11 @@ import FinchMoEFormat
     private static func stagePartial(fromCleanRunOf snapshot: String,
                                      output: String,
                                      torn: String? = nil,
-                                     dropJournal: Bool = false) async throws
+                                     dropJournal: Bool = false,
+                                     includeVision: Bool = false) async throws
         -> [String: FinchManifestFileV1] {
-        let clean = try await repack(snapshot: snapshot, output: output, resume: false)
+        let clean = try await repack(snapshot: snapshot, output: output,
+                                     resume: false, includeVision: includeVision)
         let files = try manifestFiles(clean.outputDir)
 
         let partial = output + ".partial"
@@ -94,7 +101,7 @@ import FinchMoEFormat
         guard !dropJournal else { return files }
 
         var journal = LocalRepackJournal(fingerprint: try fingerprint(
-            snapshot: snapshot, output: output))
+            snapshot: snapshot, output: output, includeVision: includeVision))
         for (relativePath, entry) in files {
             journal.record(LocalRepackJournal.Entry(relativePath: relativePath,
                                                     size: entry.size,
@@ -176,6 +183,66 @@ import FinchMoEFormat
             }
             #expect(detail.contains("different source"))
         }
+    }
+
+    /// A text-only partial and a vision partial are different installs: the
+    /// manifest file set differs by the `vision/` entries, so resuming one as
+    /// the other would leave a manifest that disagrees with the directory.
+    @Test func resumeRefusesACrossVisionModePartial() async throws {
+        let snapshot = try Self.makeSnapshot38(includeVision: true)
+        defer { try? FileManager.default.removeItem(atPath: snapshot) }
+        let output = Self.makeOutput()
+        defer { try? FileManager.default.removeItem(atPath: output) }
+        try await Self.stagePartial(fromCleanRunOf: snapshot, output: output,
+                                    includeVision: true)
+
+        do {
+            // Same source, same output, but this run would not write vision/.
+            _ = try await Self.repack(snapshot: snapshot, output: output,
+                                      resume: true, includeVision: false)
+            Issue.record("resumed a vision partial as a text-only run")
+        } catch let error as RepackError {
+            guard case .installStateIncompatible(let detail) = error else {
+                Issue.record("expected installStateIncompatible, got \(error)")
+                return
+            }
+            #expect(detail.contains("different source"))
+        }
+    }
+
+    /// A vision partial resumes on its own terms: every file, the payload
+    /// included, is reused and the resulting install is byte-identical to a
+    /// clean vision run.
+    @Test func visionResumeReusesTheVisionPayload() async throws {
+        let snapshot = try Self.makeSnapshot38(includeVision: true)
+        defer { try? FileManager.default.removeItem(atPath: snapshot) }
+
+        let reference = Self.makeOutput()
+        defer { try? FileManager.default.removeItem(atPath: reference) }
+        let referenceRun = try await Self.repack(snapshot: snapshot, output: reference,
+                                                 resume: false, includeVision: true)
+        let referenceManifest = try Data(contentsOf: URL(
+            fileURLWithPath: referenceRun.outputDir + "/manifest.json"))
+        let referencePayload = try Data(contentsOf: URL(
+            fileURLWithPath: referenceRun.outputDir + "/vision/vision.safetensors"))
+
+        let output = Self.makeOutput()
+        defer { try? FileManager.default.removeItem(atPath: output) }
+        let staged = try await Self.stagePartial(
+            fromCleanRunOf: snapshot, output: output, includeVision: true)
+        #expect(staged["vision/vision.safetensors"] != nil)
+
+        let reusedAudit = RepackAudit()
+        let resumed = try await Self.repack(snapshot: snapshot, output: output,
+                                            resume: true, includeVision: true,
+                                            audit: reusedAudit)
+        let resumedManifest = try Data(contentsOf: URL(
+            fileURLWithPath: resumed.outputDir + "/manifest.json"))
+        #expect(resumedManifest == referenceManifest)
+        let resumedPayload = try Data(contentsOf: URL(
+            fileURLWithPath: resumed.outputDir + "/vision/vision.safetensors"))
+        #expect(resumedPayload == referencePayload)
+        #expect(reusedAudit.sourceBytesRead == 0)
     }
 
     /// A partial with no journal records nothing as complete, so there is

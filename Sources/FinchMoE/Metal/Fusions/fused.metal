@@ -10,7 +10,7 @@ using namespace metal;
 
 constant constexpr uint kFusedThreads        = 256;
 constant constexpr uint kFusedMaxSimdGroups  = kFusedThreads / 32;  // 8
-constant constexpr uint kFusedGroupSize      = 64;
+constant constexpr uint kFusedGroupSize __attribute__((unused)) = 64;
 // Threadgroup-memory cap for the normalized-hidden staging slot. Sized for
 // D=2816 (production hidden dim) with headroom; consumes 8 KB per threadgroup.
 constant constexpr uint kFusedMaxD           = 4096;
@@ -31,7 +31,7 @@ static inline uint fused_fc_d(constant uint& D) {
     return (fused_use_fc() && is_function_constant_defined(FC_FUSED_D)) ? FC_FUSED_D : D;
 }
 
-static inline uint fused_fc_n(constant uint& N) {
+static inline __attribute__((unused)) uint fused_fc_n(constant uint& N) {
     return (fused_use_fc() && is_function_constant_defined(FC_FUSED_N)) ? FC_FUSED_N : N;
 }
 

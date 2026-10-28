@@ -12,7 +12,15 @@ import Testing
         #expect(request.topK == 64)
         #expect(request.topP == 0.95)
         #expect(request.repetitionPenalty == 1)
+        #expect(request.promptReuseEnabled)
         #expect(!request.isPureGreedy)
+    }
+
+    @Test func promptReuseCanBeTurnedOffPerRequest() {
+        let request = AppGenerationRequest(modelDirectory: existingDirectory,
+                                           prompt: "hello",
+                                           promptReuseEnabled: false)
+        #expect(!request.promptReuseEnabled)
     }
 
     @Test func temperatureZeroRemainsPureGreedyWithTruncationDefaults() {
@@ -29,6 +37,27 @@ import Testing
         #expect(throws: AppInferenceError.self) {
             try request.validate()
         }
+    }
+
+    @Test func imageContentCoversCurrentTurnAndReplayedHistory() {
+        let image = AppImageAttachment(data: Data([0xFF, 0xD8, 0xFF]))
+        let textOnly = AppGenerationRequest(modelDirectory: existingDirectory,
+                                            prompt: "hello")
+        #expect(!textOnly.hasImageContent)
+
+        let current = AppGenerationRequest(modelDirectory: existingDirectory,
+                                           prompt: "what is this?",
+                                           images: [image])
+        #expect(current.hasImageContent)
+
+        let replayed = AppGenerationRequest(
+            modelDirectory: existingDirectory,
+            prompt: "and now?",
+            history: [
+                AppChatTurn(role: .user, text: "look", images: [image]),
+                AppChatTurn(role: .assistant, text: "a red square"),
+            ])
+        #expect(replayed.hasImageContent)
     }
 
     @Test func invalidMaxTokensRejected() {

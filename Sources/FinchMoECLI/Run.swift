@@ -89,6 +89,7 @@ public func run(args: Args,
         let prefillLogitsDumpPath = environment["FQ_DUMP_PREFILL_LOGITS"]
         let runtime = RuntimeConfiguration(
             expertCacheSlots: args.expertCacheSlots ?? RuntimeConfiguration.production.expertCacheSlots,
+            directExpertCache: args.directExpertCache,
             prefillChunkTokens: args.prefillChunkTokens,
             forceLogitsHead: !config.isPureGreedy || prefillLogitsDumpPath != nil,
             prefillTileDepth: args.prefillTileDepth,
@@ -107,6 +108,7 @@ public func run(args: Args,
                 allowManifestArch: environment["FINCHMOE_EXPECT_ARCH"] == "1"),
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
+            directExpertCache: runtime.directExpertCache,
             integrityPolicy: args.verify)
         // A receipt that is present but unusable is the one case worth
         // interrupting for: the caller may have been relying on it. An absent
@@ -119,6 +121,16 @@ public func run(args: Args,
         if let message = ExpertCacheSlotCheck.error(slots: runtime.expertCacheSlots,
                                                     topKExperts: model.config.topKExperts) {
             return errored(stderr, message, 2)
+        }
+        // int8 KV is written and read by the Qwen 3.6 prefill/decode bodies
+        // only; `RealForwardRunner` refuses anything else with a `precondition`.
+        // Catch it here so `--kv-int8` on a 3.8 or Gemma pack is a stated
+        // refusal with exit 2 rather than a SIGTRAP — the trap is not catchable
+        // and the message names the runner, not the flag the user typed.
+        if runtime.kvStorageMode == .int8, !model.config.isQwen3_6 {
+            return errored(stderr,
+                           "--kv-int8 is wired for the Qwen 3.6 body only; drop the flag "
+                            + "to run this pack at fp16", 2)
         }
         // The Phase 5.1 isolation knob changes what the model reads without
         // changing what is on disk, so a run has to say it was on: a dump whose

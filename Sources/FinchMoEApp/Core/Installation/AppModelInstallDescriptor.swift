@@ -55,6 +55,14 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     public let installedBytes: UInt64
     public let rangeStagingBytes: UInt64
     public let reserveBytes: UInt64
+    /// Whether this row downloads an install that carries `vision/` files.
+    ///
+    /// The resident weights and routed-expert width are identical to the text
+    /// sibling, so this capability is the only axis that separates the two
+    /// directories; `AppModelInstallationProbe` requires it to match the
+    /// manifest's file set exactly. Defaults false so every existing row keeps
+    /// its behavior.
+    public let requiresVision: Bool
     /// The architecture this checkpoint loads as. Required rather than
     /// defaulted: the context-length menu sizes its KV figures off this, and a
     /// default here is what previously reported Gemma's numbers against a Qwen
@@ -82,6 +90,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
                 reserveBytes: UInt64,
                 architecture: ArchConfig,
                 shortDisplayName: String? = nil,
+                requiresVision: Bool = false,
                 finchDistribution: FinchDistribution? = nil) {
         self.displayName = displayName
         self.repoID = repoID
@@ -95,6 +104,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         self.reserveBytes = reserveBytes
         self.architecture = architecture
         self.shortDisplayName = shortDisplayName
+        self.requiresVision = requiresVision
         self.finchDistribution = finchDistribution
     }
 
@@ -118,6 +128,14 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     /// disagrees rejects the match.
     func accepts(routedExpertBits declared: Int) -> Bool {
         routedExpertBits == nil || routedExpertBits == declared
+    }
+
+    /// The vision capability is an identity axis, not a preference: a directory
+    /// either carries `vision/vision.safetensors` or it does not. Requiring an
+    /// exact match is what stops the text and vision siblings — which share
+    /// `weightsSHA256` and routed bits — from claiming each other.
+    func accepts(visionPayloadPresent: Bool) -> Bool {
+        requiresVision == visionPayloadPresent
     }
 
     /// Gemma has one build, so it pins no expert width (`nil` accepts any);
@@ -176,6 +194,25 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         architecture: .qwen3_6_35B_A3B,
         shortDisplayName: "Qwen 3.6 3-bit",
         finchDistribution: qwen36ThreeBitDistribution)
+
+    /// The 3.6 3-bit build plus the source BF16 vision tower. Text bytes are
+    /// identical to `.qwen3_6_3bit`; `requiresVision` is what the probe uses to
+    /// keep the two directories from claiming each other.
+    public static let qwen3_6_3bit_vision = AppModelInstallDescriptor(
+        displayName: "Qwen 3.6 35B-A3B 3-bit (Vision)",
+        repoID: "Qwen/Qwen3.6-35B-A3B",
+        revision: "",
+        sourceIndexSHA256: "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83",
+        weightsSHA256: "9644b61a7369787c4397f2f8272e9e95f3eaaf11d6d7be40164a6ec288a8228d",
+        routedExpertBits: 3,
+        approximateDownloadBytes: qwen36VisionThreeBitDistribution.approximateDownloadBytes,
+        installedBytes: 16_926_159_989,
+        rangeStagingBytes: 0,
+        reserveBytes: distributionReserveBytes,
+        architecture: .qwen3_6_35B_A3B,
+        shortDisplayName: "Qwen 3.6 3-bit Vision",
+        requiresVision: true,
+        finchDistribution: qwen36VisionThreeBitDistribution)
 
     /// Qwen 3.8 Flash-Next 125B made by `FinchMoERepack`. Unlike 3.6 this one
     /// has a published distribution, so it is downloadable even though its own
@@ -347,6 +384,23 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         shortDisplayName: "Qwen 3.8 Abl. 2-bit",
         finchDistribution: qwen38TwoBitAbliteratedDistribution)
 
+    /// The abliterated 2-bit build plus the source BF16 vision tower.
+    public static let qwen3_8_abliterated_2bit_vision = AppModelInstallDescriptor(
+        displayName: "Qwen 3.8 Flash-Next 125B 2-bit (Abliterated, Vision)",
+        repoID: "windowsxp811203/Qwen3.8-Flash-Next-Abliterated",
+        revision: "",
+        sourceIndexSHA256: "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
+        weightsSHA256: "6af82b557d8207e470f50c1fba5dbb14e7ff4b48139a5b0b2e4f8ac56d188acb",
+        routedExpertBits: 2,
+        approximateDownloadBytes: qwen38VisionTwoBitAbliteratedDistribution.approximateDownloadBytes,
+        installedBytes: 74_701_690_351,
+        rangeStagingBytes: 0,
+        reserveBytes: distributionReserveBytes,
+        architecture: .qwen3_8_flashNext_125B,
+        shortDisplayName: "Qwen 3.8 Abl. 2-bit Vision",
+        requiresVision: true,
+        finchDistribution: qwen38VisionTwoBitAbliteratedDistribution)
+
     /// Every descriptor the app can identify a local directory as, in probe
     /// order. `matchingDescriptor` scans this rather than testing each hash
     /// inline: the second family is what makes a list worth having, and a
@@ -366,9 +420,11 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     /// first-match-wins. Each family therefore keeps its 4-bit entry first, so
     /// that fallback answers exactly as it did before widths existed.
     public static let installable: [AppModelInstallDescriptor] = [
-        .qwen3_6, .qwen3_6_3bit, .qwen3_6_abliterated, .qwen3_6_abliterated_3bit,
+        .qwen3_6, .qwen3_6_3bit, .qwen3_6_3bit_vision,
+        .qwen3_6_abliterated, .qwen3_6_abliterated_3bit,
         .qwen3_8, .qwen3_8_3bit, .qwen3_8_2bit,
-        .qwen3_8_abliterated, .qwen3_8_abliterated_3bit, .qwen3_8_abliterated_2bit,
+        .qwen3_8_abliterated, .qwen3_8_abliterated_3bit,
+        .qwen3_8_abliterated_2bit, .qwen3_8_abliterated_2bit_vision,
     ]
 }
 
@@ -404,6 +460,14 @@ private let qwen36ThreeBitAbliteratedDistribution = FinchDistribution(
     approximateDownloadBytes: 16_032_957_550,
     installedBytes: 16_032_975_496)
 
+/// Vision-bearing siblings. Their text bytes are identical to the text rows
+/// above; the extra payload is the 333-tensor BF16 vision tower plus configs.
+private let qwen36VisionThreeBitDistribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.6-35B-A3B-finch-3bit-vision",
+    revision: "5208d13622f30566bb8b12183d161e8cecdb81e5",
+    approximateDownloadBytes: 16_926_141_154,
+    installedBytes: 16_926_159_989)
+
 private let qwen38ThreeBitDistribution = FinchDistribution(
     repoID: "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple3bit",
     revision: "80a63e6294655af8a9424ce1307478d294d9e463",
@@ -427,6 +491,12 @@ private let qwen38TwoBitAbliteratedDistribution = FinchDistribution(
     revision: "1e4a82c4955dee0845639fa8cf7abcf9b55be1dc",
     approximateDownloadBytes: 73_803_724_449,
     installedBytes: 73_803_784_477)
+
+private let qwen38VisionTwoBitAbliteratedDistribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple2bit-abliterated-vision",
+    revision: "e27a5361544c5902f3e46c2220d961c16164ef96",
+    approximateDownloadBytes: 74_701_629_113,
+    installedBytes: 74_701_690_351)
 
 private let qwen36AbliteratedDistribution = FinchDistribution(
     repoID: "haihengh/Qwen3.6-35B-A3B-finchmoe-4bit-abliterated",

@@ -56,6 +56,30 @@ public struct RunnerCounterValues: Equatable, Sendable {
     public var gdnScanNanos: UInt64
     public var gdnOutProjNanos: UInt64
     public var prefillCommandBuffers: UInt64
+    /// Prefill-side expert misses, counted separately for the same reason as
+    /// `prefillCommandBuffers`: the chunked prefill loops stream tiles through
+    /// their own `fetch` bindings and never call `encodeRoutedTail`, so
+    /// `expertMisses` is structurally zero on the chunked path. Folded into
+    /// `misses`/`io_mb` on a `scope=prefill` line rather than printed under a
+    /// second name — see the fold in `line(_:)`, which is also where the
+    /// asymmetry with `hits` is explained. Multiply by `expert_stride` on the
+    /// same line for bytes, the same print-time multiplication the decode path
+    /// does; `FQ_PREFILL_COUNTERS` prints the same total directly.
+    public var prefillExpertMisses: UInt64
+    /// The prefill's CPU cost, measured at the layer call site: wall over each
+    /// whole layer, so it includes the layer's own `waitUntilCompleted`.
+    /// Printed with prefill units and divided by `prefillCb1Layers`, never by
+    /// `forwards` — which is zero on a prefill line, so `msPerStep` would
+    /// silently divide by 1. Not the decode `cb1` fields, because the counter
+    /// struct is read as a delta and a decode line taken after a prefill would
+    /// otherwise report the prefill's encode time as decode work.
+    public var prefillCb1Nanos: UInt64
+    /// The blocked part of `prefillCb1Nanos`. `prefillCb1 - prefillCb1Wait` is
+    /// what the CPU spent encoding, which is the quantity D4 is about; the
+    /// `await` in the tile loop lands here too, as an executor hop.
+    public var prefillCb1WaitNanos: UInt64
+    public var prefillCb1Layers: UInt64
+    public var prefillCb1FullAttnLayers: UInt64
     public var gpuCb1Nanos: UInt64
     public var gpuCb1FullAttnNanos: UInt64
     public var gpuCb1GdnNanos: UInt64
@@ -94,10 +118,15 @@ public struct RunnerCounterValues: Equatable, Sendable {
                 indexerRankedLayers: UInt64 = 0,
                 commandBuffers: UInt64 = 0,
                 prefillCommandBuffers: UInt64 = 0,
+                prefillExpertMisses: UInt64 = 0,
                 gdnProjNanos: UInt64 = 0,
                 gdnConvNanos: UInt64 = 0,
                 gdnScanNanos: UInt64 = 0,
                 gdnOutProjNanos: UInt64 = 0,
+                prefillCb1Nanos: UInt64 = 0,
+                prefillCb1WaitNanos: UInt64 = 0,
+                prefillCb1Layers: UInt64 = 0,
+                prefillCb1FullAttnLayers: UInt64 = 0,
                 gpuCb1Nanos: UInt64 = 0,
                 gpuCb1FullAttnNanos: UInt64 = 0,
                 gpuCb1GdnNanos: UInt64 = 0,
@@ -135,10 +164,15 @@ public struct RunnerCounterValues: Equatable, Sendable {
         self.indexerRankedLayers = indexerRankedLayers
         self.commandBuffers = commandBuffers
         self.prefillCommandBuffers = prefillCommandBuffers
+        self.prefillExpertMisses = prefillExpertMisses
         self.gdnProjNanos = gdnProjNanos
         self.gdnConvNanos = gdnConvNanos
         self.gdnScanNanos = gdnScanNanos
         self.gdnOutProjNanos = gdnOutProjNanos
+        self.prefillCb1Nanos = prefillCb1Nanos
+        self.prefillCb1WaitNanos = prefillCb1WaitNanos
+        self.prefillCb1Layers = prefillCb1Layers
+        self.prefillCb1FullAttnLayers = prefillCb1FullAttnLayers
         self.gpuCb1Nanos = gpuCb1Nanos
         self.gpuCb1FullAttnNanos = gpuCb1FullAttnNanos
         self.gpuCb1GdnNanos = gpuCb1GdnNanos
@@ -197,10 +231,16 @@ public struct RunnerCounterValues: Equatable, Sendable {
             indexerRankedLayers: d(indexerRankedLayers, base.indexerRankedLayers),
             commandBuffers: d(commandBuffers, base.commandBuffers),
             prefillCommandBuffers: d(prefillCommandBuffers, base.prefillCommandBuffers),
+            prefillExpertMisses: d(prefillExpertMisses, base.prefillExpertMisses),
             gdnProjNanos: d(gdnProjNanos, base.gdnProjNanos),
             gdnConvNanos: d(gdnConvNanos, base.gdnConvNanos),
             gdnScanNanos: d(gdnScanNanos, base.gdnScanNanos),
             gdnOutProjNanos: d(gdnOutProjNanos, base.gdnOutProjNanos),
+            prefillCb1Nanos: d(prefillCb1Nanos, base.prefillCb1Nanos),
+            prefillCb1WaitNanos: d(prefillCb1WaitNanos, base.prefillCb1WaitNanos),
+            prefillCb1Layers: d(prefillCb1Layers, base.prefillCb1Layers),
+            prefillCb1FullAttnLayers: d(prefillCb1FullAttnLayers,
+                                        base.prefillCb1FullAttnLayers),
             gpuCb1Nanos: d(gpuCb1Nanos, base.gpuCb1Nanos),
             gpuCb1FullAttnNanos: d(gpuCb1FullAttnNanos, base.gpuCb1FullAttnNanos),
             gpuCb1GdnNanos: d(gpuCb1GdnNanos, base.gpuCb1GdnNanos),
@@ -248,10 +288,15 @@ extension RunnerCounterValues {
                   indexerRankedLayers: runner.totalIndexerRankedLayers,
                   commandBuffers: runner.totalDecodeCommandBuffers,
                   prefillCommandBuffers: runner.totalPrefillCommandBuffers,
+                  prefillExpertMisses: runner.totalPrefillExpertMisses,
                   gdnProjNanos: runner.totalGpuGdnProjNanos,
                   gdnConvNanos: runner.totalGpuGdnConvNanos,
                   gdnScanNanos: runner.totalGpuGdnScanNanos,
                   gdnOutProjNanos: runner.totalGpuGdnOutProjNanos,
+                  prefillCb1Nanos: runner.totalPrefillCb1Nanos,
+                  prefillCb1WaitNanos: runner.totalPrefillCb1WaitNanos,
+                  prefillCb1Layers: runner.totalPrefillCb1Layers,
+                  prefillCb1FullAttnLayers: runner.totalPrefillCb1FullAttnLayers,
                   gpuCb1Nanos: runner.totalGpuCb1Nanos,
                   gpuCb1FullAttnNanos: runner.totalGpuCb1FullAttnNanos,
                   gpuCb1GdnNanos: runner.totalGpuCb1GdnNanos,
@@ -410,9 +455,54 @@ public enum RunnerCounters {
         // thousands of buffers.
         let commits = scope == "prefill" ? values.prefillCommandBuffers
                                          : values.commandBuffers
+        // The same reasoning applies to the expert counters, and here the wrong
+        // choice is worse than a zero coverage figure: the chunked prefill
+        // streams tiles through their own `fetch` bindings and never calls
+        // `encodeRoutedTail`, so `expertMisses` is structurally zero on a
+        // prefill line, and `io_mb` beside it reads as a measured "the prefill
+        // read no expert bytes" on the run that reads the most. `hits` has no
+        // prefill counterpart — prefill planning counts misses only — so it
+        // stays the decode count.
+        let misses = scope == "prefill" ? values.prefillExpertMisses
+                                        : values.expertMisses
 
         func msPerStep(_ nanos: UInt64) -> String {
             String(format: "%.2f", Double(nanos) / nanosPerMilli / n)
+        }
+
+        // The prefill CPU buckets need their own divisor, and it is not
+        // `forwards`: that is zero on a prefill line, so `msPerStep` would
+        // divide by 1 and print a whole-chunk total beside a `/step` label that
+        // invites dividing it again. Layer count is the divisor that means
+        // something — 48 on 3.8, 40 on 3.6 — and `for per layer` is the unit the
+        // question is asked in, since these are per-layer encode loops.
+        let prefillLayers = max(values.prefillCb1Layers, 1)
+        func msPerPrefillLayer(_ nanos: UInt64) -> String {
+            String(format: "%.2f", Double(nanos) / nanosPerMilli / Double(prefillLayers))
+        }
+        // The two prefill totals come from different clock readings — `cb1` at
+        // the layer call site, `wait` at the wait sites inside the body — so
+        // they are not tiled the way the decode buckets are, and the split has
+        // to be checked rather than assumed. `wait` above `cb1` can only mean a
+        // wait was counted that the layer total did not cover, which is the one
+        // way this instrumentation could lie.
+        let prefillSplit: String
+        if values.prefillCb1Layers == 0 {
+            prefillSplit = "none"
+        } else if values.prefillCb1WaitNanos > values.prefillCb1Nanos {
+            prefillSplit = "OFF(wait>cb1)"
+        } else {
+            prefillSplit = "ok"
+        }
+        // Signed so an off split prints a negative number instead of wrapping to
+        // ~5.8e8 seconds and looking like a real measurement.
+        let prefillEncodeNanos = Int64(bitPattern: values.prefillCb1Nanos)
+            &- Int64(bitPattern: values.prefillCb1WaitNanos)
+        func msPerPrefillLayerSigned(_ nanos: Int64) -> String {
+            String(format: "%.2f", Double(nanos) / nanosPerMilli / Double(prefillLayers))
+        }
+        func secondsSigned(_ nanos: Int64) -> String {
+            String(format: "%.2f", Double(nanos) / 1e9)
         }
 
         // The sub-buckets must tile `cb1` exactly: the cursor skips the wait
@@ -492,13 +582,12 @@ public enum RunnerCounters {
             "head_wall_ms\(unit)=\(msPerStep(values.headNanos))",
             "ple_wall_ms\(unit)=\(msPerStep(values.pleGatherNanos))",
             "hits=\(values.expertHits)",
-            "misses=\(values.expertMisses)",
+            "misses=\(misses)",
             "ple_opens=\(values.plePartOpens)",
             "ple_bytes=\(values.pleRowBytes)",
             "ple_bytes/token=\(values.pleGathers > 0 ? String(format: "%.0f", Double(values.pleRowBytes) / Double(values.pleGathers)) : "-")",
             "indexer_ranked=\(values.indexerRankedLayers)",
             "cbs=\(commits)",
-            "cbs\(unit)=\(String(format: "%.1f", Double(values.commandBuffers) / n))",
             "gpu_cb1_wall_ms\(unit)=\(msPerStep(values.gpuCb1Nanos))",
             // The two stacks are alternatives, so these are compared per layer,
             // not per step: divide by the full-attention and GDN layer counts.
@@ -516,6 +605,28 @@ public enum RunnerCounters {
             "gpu_gdn_outproj_ms/split=\(msPerStep(values.gdnOutProjNanos))",
             "gpu_samples=\(values.gpuSamples)",
         ])
+        // Appended after the array rather than spread into it: `...(cond ? [] : [])`
+        // inside an array literal parses as a range operator, not a spread.
+        if scope == "prefill" {
+            fields.append(contentsOf: [
+                "prefill_cb1_cpu_ms=\(msPerPrefillLayer(values.prefillCb1Nanos))",
+                "prefill_cb1_wait_cpu_ms=\(msPerPrefillLayer(values.prefillCb1WaitNanos))",
+                "prefill_cb1_encode_cpu_ms=\(msPerPrefillLayerSigned(prefillEncodeNanos))",
+                "prefill_cb1_layers=\(values.prefillCb1Layers)",
+                "prefill_cb1_fullattn_layers=\(values.prefillCb1FullAttnLayers)",
+                "prefill_cb1_total_s=\(String(format: "%.2f", Double(values.prefillCb1Nanos) / 1e9))",
+                "prefill_cb1_wait_total_s=\(String(format: "%.2f", Double(values.prefillCb1WaitNanos) / 1e9))",
+                "prefill_cb1_encode_total_s=\(secondsSigned(prefillEncodeNanos))",
+                "prefill_cb1_identity=\(prefillSplit)",
+            ])
+        } else {
+            // The per-step commit form is decode-only. On a prefill line `unit`
+            // is `""`, which used to emit a *second* literal `cbs=` immediately
+            // after the real commit count — a 6,779-buffer prefill printed
+            // `cbs=6779 cbs=0.0`, two agreeable-looking numbers where the second
+            // is the decode counter (zero there) divided by 1.
+            fields.append("cbs\(unit)=\(String(format: "%.1f", Double(values.commandBuffers) / n))")
+        }
 
         if let stride = expertStride {
             // Exact, not an estimate: every miss reads exactly one expert
@@ -523,7 +634,7 @@ public enum RunnerCounters {
             // at print time, rather than per layer — the only per-layer byte
             // accessor takes a lock and opens the layer, which would add the
             // very per-layer overhead item 2.2 exists to remove.
-            let bytes = Double(values.expertMisses &* stride)
+            let bytes = Double(misses &* stride)
             fields.append("io_mb\(unit)=\(String(format: "%.1f", bytes / 1_048_576.0 / n))")
             fields.append("expert_stride=\(stride)")
         }

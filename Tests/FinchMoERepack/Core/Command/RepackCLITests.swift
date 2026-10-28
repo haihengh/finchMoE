@@ -28,6 +28,29 @@ struct RepackCLITests {
         #expect(result.stderr.contains("no resumable install state exists"))
     }
 
+    @Test func includeVisionRequiresAnInputSnapshot() throws {
+        let output = temporaryOutput("vision-no-snapshot")
+        defer { clean(output) }
+        let result = try run([
+            "--output", output,
+            "--include-vision",
+        ])
+
+        #expect(result.status == 2)
+        #expect(result.stderr.contains("--include-vision requires --input-snapshot"))
+    }
+
+    @Test func includeVisionIsRejectedForVerification() throws {
+        let result = try run([
+            "--verify-install",
+            "--input-finch", temporaryOutput("vision-verify"),
+            "--include-vision",
+        ])
+
+        #expect(result.status == 2)
+        #expect(result.stderr.contains("verification accepts only --input-finch"))
+    }
+
     @Test func discardWithoutStateReportsAnError() throws {
         let output = temporaryOutput("missing-discard")
         defer { clean(output) }

@@ -100,13 +100,28 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         history: request.history.map {
                             DecodeChatTurn(
                                 role: $0.role == .user ? "user" : "assistant",
-                                text: $0.text)
+                                text: $0.text,
+                                images: $0.images.isEmpty ? nil : $0.images.map {
+                                    DecodeImage(id: $0.id,
+                                                mediaType: $0.mediaType,
+                                                data: $0.data,
+                                                pixelWidth: $0.pixelWidth,
+                                                pixelHeight: $0.pixelHeight)
+                                })
+                        },
+                        images: request.images.isEmpty ? nil : request.images.map {
+                            DecodeImage(id: $0.id,
+                                        mediaType: $0.mediaType,
+                                        data: $0.data,
+                                        pixelWidth: $0.pixelWidth,
+                                        pixelHeight: $0.pixelHeight)
                         },
                         maxNewTokens: request.maxNewTokens,
                         maxContextTokens: request.maxContextTokens,
                         temperature: request.temperature,
                         repetitionPenalty: request.repetitionPenalty,
                         runtimeOptions: Self.decodeRuntimeOptions(request.runtimeOptions),
+                        promptReuseEnabled: request.promptReuseEnabled,
                         generationID: generationID)
                     try handles.input.write(contentsOf: DecodeFrameCodec.encode(
                         DecodeServiceCommand.generate(command)))

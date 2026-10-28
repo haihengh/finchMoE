@@ -3,6 +3,7 @@ import Foundation
 import Metal
 import FinchMoERepackCore
 import FinchMoEFormat
+import FinchMoECLICore
 @testable import FinchMoE
 
 /// End-to-end proof of the Qwen quantizing repack: a tiny synthetic bf16
@@ -101,7 +102,45 @@ import FinchMoEFormat
             ]
         }
 
-        static func tensorShapes() -> [(name: String, shape: [Int])] {
+        /// The same toy `model.visual.*` tower the repack fixture writes:
+        /// patch embed, position table, 12 tensors per block, merger. Only
+        /// used by the vision-install load test; a text-only fixture keeps
+        /// its original tensor stream byte for byte.
+        static func visionTensorShapes() -> [(name: String, shape: [Int])] {
+            let hidden = 32
+            let layers = 2
+            let mlp = 64
+            var out: [(String, [Int])] = [
+                ("model.visual.patch_embed.proj.weight", [hidden, 3, 2, 2, 2]),
+                ("model.visual.patch_embed.proj.bias", [hidden]),
+                ("model.visual.pos_embed.weight", [4, hidden]),
+            ]
+            for block in 0..<layers {
+                let p = "model.visual.blocks.\(block)"
+                out.append((p + ".norm1.weight", [hidden]))
+                out.append((p + ".norm1.bias", [hidden]))
+                out.append((p + ".norm2.weight", [hidden]))
+                out.append((p + ".norm2.bias", [hidden]))
+                out.append((p + ".attn.qkv.weight", [3 * hidden, hidden]))
+                out.append((p + ".attn.qkv.bias", [3 * hidden]))
+                out.append((p + ".attn.proj.weight", [hidden, hidden]))
+                out.append((p + ".attn.proj.bias", [hidden]))
+                out.append((p + ".mlp.linear_fc1.weight", [mlp, hidden]))
+                out.append((p + ".mlp.linear_fc1.bias", [mlp]))
+                out.append((p + ".mlp.linear_fc2.weight", [hidden, mlp]))
+                out.append((p + ".mlp.linear_fc2.bias", [hidden]))
+            }
+            out.append(("model.visual.merger.norm.weight", [hidden]))
+            out.append(("model.visual.merger.norm.bias", [hidden]))
+            out.append(("model.visual.merger.linear_fc1.weight", [2 * hidden, 2 * hidden]))
+            out.append(("model.visual.merger.linear_fc1.bias", [2 * hidden]))
+            out.append(("model.visual.merger.linear_fc2.weight", [D, 2 * hidden]))
+            out.append(("model.visual.merger.linear_fc2.bias", [D]))
+            return out
+        }
+
+        static func tensorShapes(includeVision: Bool = false)
+            -> [(name: String, shape: [Int])] {
             var out: [(String, [Int])] = [
                 ("model.language_model.embed_tokens.weight", [vocab, D]),
                 ("model.language_model.norm.weight", [D]),
@@ -137,10 +176,14 @@ import FinchMoEFormat
                 out.append((p + ".mlp.experts.gate_up_proj", [experts, 2 * moeIntermediate, D]))
                 out.append((p + ".mlp.experts.down_proj", [experts, D, moeIntermediate]))
             }
+            if includeVision {
+                out.append(contentsOf: visionTensorShapes())
+            }
             return out
         }
 
-        static func writeSnapshot(into dir: String, seed: UInt64) throws {
+        static func writeSnapshot(into dir: String, seed: UInt64,
+                                  includeVision: Bool = false) throws {
             try FileManager.default.createDirectory(
                 at: URL(fileURLWithPath: dir), withIntermediateDirectories: true)
             let configData = try JSONSerialization.data(
@@ -153,7 +196,7 @@ import FinchMoEFormat
             var payload = Data()
             var cursor = 0
             var state = seed
-            for (name, shape) in tensorShapes() {
+            for (name, shape) in tensorShapes(includeVision: includeVision) {
                 let elements = shape.reduce(1, *)
                 var bytes = Data(capacity: elements * 2)
                 for _ in 0..<elements {
@@ -190,6 +233,11 @@ import FinchMoEFormat
             for tokenizer in ["tokenizer.json", "tokenizer_config.json"] {
                 try Data("{}".utf8).write(
                     to: URL(fileURLWithPath: dir).appendingPathComponent(tokenizer))
+            }
+            if includeVision {
+                try Data(#"{"patch_size":2,"temporal_patch_size":2,"merge_size":2}"#.utf8)
+                    .write(to: URL(fileURLWithPath: dir)
+                        .appendingPathComponent("preprocessor_config.json"))
             }
         }
     }
@@ -253,6 +301,67 @@ import FinchMoEFormat
 
         // Routed experts: layout.json metadata validated at load; the blobs
         // open lazily via the streamer path.
+        #expect(model.packedExpertsLayout.expertsPerLayer == Toy.experts)
+    }
+
+    /// A vision-bearing install is still a valid text install: the extra
+    /// `vision/` files are declared in the manifest and verified, but the
+    /// loader opens only the text file set, and every text byte is identical
+    /// to the text-only repack of the same snapshot. This is the compatibility
+    /// claim the published `-vision` artifacts rest on until the runtime
+    /// consumes the tower.
+    @Test func visionToyInstallLoadsTextOnly() async throws {
+        let base = NSTemporaryDirectory() + "qwen-engine-vision-\(UUID().uuidString)"
+        let src = base + "-src"
+        try Toy.writeSnapshot(into: src, seed: 0x71ED, includeVision: true)
+        defer { try? FileManager.default.removeItem(atPath: src) }
+
+        let textOut = base + "-text"
+        _ = try await LocalQwenRepacker(
+            options: LocalQwenRepackOptions(snapshotDir: src, outputDir: textOut,
+                                            minFreeReserveBytes: 0)).run()
+        defer { try? FileManager.default.removeItem(atPath: textOut) }
+
+        let visionOut = base + "-vision"
+        _ = try await LocalQwenRepacker(
+            options: LocalQwenRepackOptions(snapshotDir: src, outputDir: visionOut,
+                                            minFreeReserveBytes: 0,
+                                            includeVision: true)).run()
+        defer { try? FileManager.default.removeItem(atPath: visionOut) }
+
+        let fm = FileManager.default
+        #expect(fm.fileExists(atPath: visionOut + "/vision/vision.safetensors"))
+        #expect(fm.fileExists(atPath: visionOut + "/vision/model_config.json"))
+        #expect(fm.fileExists(atPath: visionOut + "/vision/preprocessor_config.json"))
+        #expect(!fm.fileExists(atPath: textOut + "/vision"))
+
+        // The text payloads are the same bytes: including the tower changes
+        // no engine-visible file.
+        for relative in ["model_weights.bin", "packed_experts/layer_00.bin"] {
+            let text = try Data(contentsOf: URL(fileURLWithPath: textOut + "/" + relative))
+            let vision = try Data(contentsOf: URL(fileURLWithPath: visionOut + "/" + relative))
+            #expect(text == vision, "\(relative) differs when vision is included")
+        }
+
+        // Manifest + receipt cover the extras, and the verifier accepts them.
+        let manifestData = try Data(contentsOf: URL(
+            fileURLWithPath: visionOut + "/manifest.json"))
+        let manifest = try FinchManifestCodec.decode(manifestData)
+        #expect(manifest.files["vision/vision.safetensors"] != nil)
+        #expect(manifest.files["vision/model_config.json"] != nil)
+        #expect(manifest.files["vision/preprocessor_config.json"] != nil)
+        let verify = try VerifiedInstallTool.run(
+            options: VerifyInstallOptions(inputFinch: visionOut))
+        #expect(verify.unexpectedEntries.isEmpty)
+
+        // The real runtime load ignores the extras and resolves the text
+        // entries exactly as it does for the text-only install.
+        let ctx = try MetalContext()
+        let model = try Model.load(
+            directoryURL: URL(fileURLWithPath: visionOut),
+            device: ctx.device,
+            expecting: Toy.arch)
+        #expect(model.embedding.shape == (UInt32(Toy.vocab), UInt32(Toy.D), 0, 0))
         #expect(model.packedExpertsLayout.expertsPerLayer == Toy.experts)
     }
 
@@ -479,5 +588,110 @@ import FinchMoEFormat
                 }
             }
         }
+    }
+
+    /// The prefill path must attribute its own GPU time and its own expert
+    /// bytes, on the real encoder and not in a unit test of the fields.
+    ///
+    /// Before those calls were added, every `gpu_*` and every `io_mb` on a
+    /// `scope=prefill` counters line was structurally zero: the counters
+    /// existed, the 3.6 prefill body simply never wrote them. A field that can
+    /// only ever print zero looks exactly like a measurement of zero, so the
+    /// prefill ranking in `docs/STRATA_PP_KV_ANALYSIS.md` rested on a number
+    /// that was never taken. `RunnerCountersTests` cannot see that -- it tests
+    /// the arithmetic on numbers a hand-built snapshot supplies. Only running
+    /// the encoder can.
+    ///
+    /// This toy is the smallest thing that reaches every site on that path.
+    /// `fullMask = [0, 0, 0, 1]` gives three GDN layers and one full-attention
+    /// layer, so both layer-kind stacks are non-zero and their sum is exactly
+    /// the layer total; and 4 tokens x 4 layers x topK 2 routes enough experts
+    /// through the tile prefetch for the prefill miss count to be non-zero.
+    @Test
+    func prefillAttributesGpuTimeAndExpertBytesToItself() async throws {
+        let base = NSTemporaryDirectory() + "qwen-pp-\(UUID().uuidString)"
+        let src = base + "-src"
+        try Toy.writeSnapshot(into: src, seed: 0x51EE)
+        defer { try? FileManager.default.removeItem(atPath: src) }
+
+        let out = base + "-out"
+        _ = try await LocalQwenRepacker(options: LocalQwenRepackOptions(
+            snapshotDir: src, outputDir: out, minFreeReserveBytes: 0)).run()
+        defer { try? FileManager.default.removeItem(atPath: out) }
+
+        let dest = URL(fileURLWithPath: out)
+        let ctx = try MetalContext()
+        let model = try Model.load(directoryURL: dest, device: ctx.device,
+                                   expecting: Toy.arch)
+        let runner = try RealForwardRunner(model: model, context: ctx,
+                                           maxContext: 8,
+                                           runtimeConfiguration: .production)
+        // Wide enough for either head path, matching the CLI's own
+        // `logitBytes` calculation.
+        let logits = try #require(ctx.device.makeBuffer(
+            length: model.config.vocabSize * MemoryLayout<Int32>.stride,
+            options: .storageModeShared))
+        let wallStart = ContinuousClock.now
+        _ = try await runner.prefillChunked(
+            tokens: [1, 2, 3, 4][0...], startPosition: 0,
+            outputMode: .greedyIfAvailable, config: .defaultChunked,
+            into: logits, onProgress: { _ in })
+        let wallNanos = wallStart.duration(to: .now).components.attoseconds / 1_000_000_000
+
+        // The two layer-kind stacks must tile the layer total exactly, so
+        // `gpu_cb1` cannot be silently dropping or double-counting a kind.
+        #expect(runner.totalGpuCb1GdnNanos > 0)
+        #expect(runner.totalGpuCb1FullAttnNanos > 0)
+        #expect(runner.totalGpuCb1GdnNanos + runner.totalGpuCb1FullAttnNanos
+                == runner.totalGpuCb1Nanos)
+        // The routed stack sits beside those rather than inside them: `cb1` is
+        // the layer's own forward, `routed` is that separate per-layer buffer.
+        #expect(runner.totalGpuRoutedNanos > 0)
+        // Bytes, not only time. The chunked prefill streams tiles through its
+        // own `fetch` bindings and never reaches the decode-side miss counter,
+        // which is why this needs its own total.
+        #expect(runner.totalPrefillExpertMisses > 0)
+        // The coverage gate the decode counters document: a buffer still in
+        // flight reports no timestamps, so `gpu_samples` against the buffer
+        // count says how much of the total was actually measured. Zero samples
+        // would mean the driver publishes nothing and every assertion above is
+        // vacuous.
+        #expect(runner.totalGpuSamples > 0)
+        #expect(runner.totalPrefillCommandBuffers > 0)
+        #expect(runner.totalGpuSamples
+                >= runner.totalPrefillCommandBuffers / 2)
+        // Plausibility, the same gate the decode counters state: every recorded
+        // buffer ran on this one queue inside this call, so the two stacks
+        // cannot sum to more than the call took. The 4x slack is for timer
+        // granularity and the host work between buffers -- a total much larger
+        // than the wall clock means the timestamps are not usable, and that is
+        // the finding worth failing on.
+        let measuredNanos = runner.totalGpuCb1Nanos + runner.totalGpuRoutedNanos
+        #expect(wallNanos > 0)
+        #expect(measuredNanos <= wallNanos * 4)
+
+        // The point of all of the above is one line a human ranks work by, so
+        // render it from the live counters rather than only checking the fields.
+        // A prefill-scoped line folded the prefill miss total into `misses` and
+        // multiplied it by the expert stride for `io_mb`; both must be non-zero
+        // here, because a zero in either is indistinguishable from a real
+        // measurement of zero in the logs this ranking was built from.
+        let line = RunnerCounters.line(RunnerCounterValues(runner),
+                                       expertStride: model.routedExpertStrideBytes(),
+                                       scope: "prefill")
+        func field(_ key: String) -> String? {
+            for token in line.split(separator: " ") {
+                let trimmed = token.hasSuffix("]") ? token.dropLast() : token[...]
+                let parts = trimmed.split(separator: "=", maxSplits: 1)
+                if parts.count == 2, parts[0] == Substring(key) { return String(parts[1]) }
+            }
+            return nil
+        }
+        #expect(field("misses") != "0" && field("misses") != nil)
+        #expect(field("io_mb").map { Double($0) ?? 0 } != 0)
+        #expect(field("gpu_cb1_wall_ms").map { Double($0) ?? 0 } != 0)
+        #expect(field("gpu_cb1_gdn_wall_ms").map { Double($0) ?? 0 } != 0)
+        #expect(field("gpu_cb1_fullattn_wall_ms").map { Double($0) ?? 0 } != 0)
+        #expect(field("gpu_routed_wall_ms").map { Double($0) ?? 0 } != 0)
     }
 }

@@ -224,7 +224,11 @@ import Testing
     @Test func staleReadyStateForOldModelPathIsIgnored() {
         let model = AppModel(client: MockInferenceClient())
         let oldURL = URL(fileURLWithPath: "/tmp/old.finch")
-        let newURL = URL(fileURLWithPath: "/tmp/new.finch")
+        let newURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "new-load-state-\(UUID().uuidString).finch", isDirectory: true)
+        try? FileManager.default.createDirectory(at: newURL, withIntermediateDirectories: true)
+        try? Data("{}".utf8).write(to: newURL.appendingPathComponent("manifest.json"))
+        defer { try? FileManager.default.removeItem(at: newURL) }
         model.modelPathText = oldURL.path
 
         model.setModelURL(newURL)

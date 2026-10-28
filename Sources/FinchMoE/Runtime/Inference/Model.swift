@@ -31,6 +31,9 @@ public struct Model {
     public let config: ArchConfig
     public let streamingMode: ExpertStreamingMode
     public let expertCachePolicy: ExpertCachePolicy
+    /// Decode reads every routed expert on every step and does not retain
+    /// expert contents between steps. Prefill keeps the cached planner.
+    public let directExpertCache: Bool
     /// The policy the loader *resolved to*. Under
     /// `ModelIntegrityPreference.automatic` this is the answer, not the request;
     /// see `integrityOutcome` for which it was.
@@ -130,6 +133,7 @@ public struct Model {
          config: ArchConfig,
          streamingMode: ExpertStreamingMode,
          expertCachePolicy: ExpertCachePolicy,
+         directExpertCache: Bool,
          integrityPolicy: ModelIntegrityPolicy,
          integrityOutcome: ModelIntegrityOutcome,
          residentBuffer: ResidentBuffer,
@@ -142,6 +146,7 @@ public struct Model {
         self.config = config
         self.streamingMode = streamingMode
         self.expertCachePolicy = expertCachePolicy
+        self.directExpertCache = directExpertCache
         self.integrityPolicy = integrityPolicy
         self.integrityOutcome = integrityOutcome
         self.residentBuffer = residentBuffer
@@ -744,6 +749,7 @@ extension Model {
                             expecting: ArchConfig = .gemma4_26B_A4B,
                             streamingMode: ExpertStreamingMode = .pread(slotCount: 16),
                             expertCachePolicy: ExpertCachePolicy = PreadExpertStreamer.cachePolicyDefault,
+                            directExpertCache: Bool = false,
                             integrityPolicy: ModelIntegrityPreference = .automatic,
                             loadStats: UnsafeMutablePointer<ModelLoadStats>? = nil) throws -> Model {
         var stats = ModelLoadStats()
@@ -862,6 +868,7 @@ extension Model {
             config: expecting,
             streamingMode: streamingMode,
             expertCachePolicy: expertCachePolicy,
+            directExpertCache: directExpertCache,
             integrityPolicy: effectivePolicy,
             integrityOutcome: resolution.outcome,
             residentBuffer: residentBuffer,

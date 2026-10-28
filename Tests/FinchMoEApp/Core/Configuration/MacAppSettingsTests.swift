@@ -26,6 +26,15 @@ import Testing
         #expect(decoded == MacAppSettings())
     }
 
+    @Test func cacheChoicesRoundTripThroughTheFile() throws {
+        let settings = MacAppSettings(prefillChunkTokens: 1024,
+                                      expertCachePolicy: .lru,
+                                      promptReuseEnabled: false)
+        let data = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(MacAppSettings.self, from: data)
+        #expect(decoded == settings)
+    }
+
     @Test func malformedFileIsReplacedWithDefaults() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -81,6 +90,11 @@ import Testing
         #expect(settings.topP == 0.8)
         #expect(!settings.prefillEnabled)
         #expect(settings.modelVerification == .automatic)
+        // Fields added after this file was written fall back to their
+        // shipping defaults rather than resetting anything.
+        #expect(settings.prefillChunkTokens == 1024)
+        #expect(settings.expertCachePolicy == .lfu)
+        #expect(settings.promptReuseEnabled)
         // No migration marker: a file from the single-shot app is moved onto
         // the chat conventions.
         #expect(settings.newlineShortcut == .shiftReturn)
@@ -313,6 +327,14 @@ import Testing
         defer { try? FileManager.default.removeItem(at: root) }
         let first = root.appendingPathComponent("first/model.finch", isDirectory: true)
         let second = root.appendingPathComponent("second/model.finch", isDirectory: true)
+        // Selecting a local directory now requires it to be a model folder;
+        // this test cares about the settings that ride along with that change.
+        for directory in [first, second] {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true)
+            try Data("{}".utf8).write(
+                to: directory.appendingPathComponent("manifest.json"))
+        }
         try MacAppSettingsFileStore.save(
             MacAppSettings(newlineShortcut: .return),
             forModelDirectory: first)

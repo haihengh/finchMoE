@@ -9,11 +9,14 @@ import FinchMoEFormat
         NSTemporaryDirectory() + "qwen-finch-\(UUID().uuidString)"
     }
 
-    private static func runRepack(snapshotDir: String) async throws -> LocalQwenRepackResult {
+    private static func runRepack(snapshotDir: String,
+                                  includeVision: Bool = false) async throws
+        -> LocalQwenRepackResult {
         let out = makeOutputDir()
         let options = LocalQwenRepackOptions(
             snapshotDir: snapshotDir, outputDir: out,
-            minFreeReserveBytes: 0)
+            minFreeReserveBytes: 0,
+            includeVision: includeVision)
         return try await LocalQwenRepacker(options: options).run()
     }
 
@@ -52,6 +55,8 @@ import FinchMoEFormat
         }
         #expect(fm.fileExists(atPath: out + "/tokenizer/config.json"))
         #expect(fm.fileExists(atPath: out + "/tokenizer/tokenizer.json"))
+        // Text-only remains text-only: no vision payload unless asked for.
+        #expect(!fm.fileExists(atPath: out + "/vision"))
 
         // Manifest: qwen3_6 arch + locked quant slots.
         let manifestData = try Data(contentsOf: URL(fileURLWithPath: out + "/manifest.json"))
@@ -227,13 +232,114 @@ import FinchMoEFormat
         }
     }
 
+    // MARK: - Vision payload
+
+    /// The vision repack carries the source `model.visual.*` tower in one
+    /// safetensors file plus its config sidecars, and declares all of them in
+    /// the manifest so the download and verification paths cover them.
+    @Test func visionRepackWritesTowerAndSidecars() async throws {
+        let dir = NSTemporaryDirectory() + "qwen-vision-src-\(UUID().uuidString)"
+        try SyntheticQwenSnapshot.write(into: dir, includeVision: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        let result = try await Self.runRepack(snapshotDir: dir, includeVision: true)
+        defer { try? FileManager.default.removeItem(atPath: result.outputDir) }
+        let out = result.outputDir
+        let fm = FileManager.default
+
+        // The toy source has no MTP head, so including vision leaves nothing
+        // dropped — and the tower must not be counted as dropped either.
+        #expect(result.excludedTensorCount == 0)
+
+        let payloadPath = out + "/vision/vision.safetensors"
+        #expect(fm.fileExists(atPath: payloadPath))
+        #expect(fm.fileExists(atPath: out + "/vision/model_config.json"))
+        #expect(fm.fileExists(atPath: out + "/vision/preprocessor_config.json"))
+        // The real 3.6 snapshot has no video preprocessor config.
+        #expect(!fm.fileExists(atPath: out + "/vision/video_preprocessor_config.json"))
+
+        let manifestData = try Data(contentsOf: URL(fileURLWithPath: out + "/manifest.json"))
+        let manifest = try FinchManifestCodec.decode(manifestData)
+        for path in ["vision/vision.safetensors",
+                     "vision/model_config.json",
+                     "vision/preprocessor_config.json"] {
+            let entry = try #require(manifest.files[path])
+            let size = try #require(fm.attributesOfItem(
+                atPath: out + "/" + path)[.size] as? NSNumber)
+            #expect(entry.size == size.uint64Value)
+        }
+        #expect(manifest.files["vision/video_preprocessor_config.json"] == nil)
+
+        // The receipt covers the same file set, and a full verify accepts it.
+        let verify = try VerifiedInstallTool.run(
+            options: VerifyInstallOptions(inputFinch: out))
+        #expect(verify.unexpectedEntries.isEmpty)
+        #expect(verify.fileCount == manifest.files.count + 1)   // + manifest.json
+
+        // The payload is a standard safetensors file holding exactly the
+        // source tower, byte for byte.
+        let payload = try Data(contentsOf: URL(fileURLWithPath: payloadPath))
+        var headerLength: UInt64 = 0
+        for i in 0..<8 {
+            headerLength |= UInt64(payload[i]) << UInt64(i * 8)
+        }
+        let headerData = payload.subdata(in: 8..<(8 + Int(headerLength)))
+        let header = try Safetensors.parseHeaderBytes(
+            path: payloadPath, fileSize: UInt64(payload.count), headerBytes: headerData)
+        let source = try QwenLocalSnapshot.load(snapshotDir: dir)
+        let expected = source.shardHeaders.flatMap(\.tensors)
+            .filter { $0.name.hasPrefix("model.visual.") }
+        let t = SyntheticQwenSnapshot.Toy.self
+        #expect(expected.count == t.visionLayers * 12 + 9)
+        #expect(header.tensors.count == expected.count)
+        #expect(Set(header.tensors.map(\.name)) == Set(expected.map(\.name)))
+
+        let name = "model.visual.blocks.1.attn.qkv.weight"
+        let placed = try #require(header.tensors.first { $0.name == name })
+        let copied = payload.subdata(
+            in: Int(placed.absoluteOffset)..<Int(placed.absoluteOffset + placed.sizeBytes))
+        #expect(copied == (try Self.readSourceTensor(source, name: name)))
+
+        // The sidecar is a verbatim copy of the source config.
+        let sourceConfig = try Data(contentsOf: URL(
+            fileURLWithPath: dir + "/config.json"))
+        let copiedConfig = try Data(contentsOf: URL(
+            fileURLWithPath: out + "/vision/model_config.json"))
+        #expect(copiedConfig == sourceConfig)
+    }
+
+    /// Without the preprocessor config there is no way for a vision runtime to
+    /// reproduce the source's image preprocessing, so the repack refuses
+    /// instead of shipping a payload with missing semantics.
+    @Test func visionRepackRequiresThePreprocessorConfig() async throws {
+        let dir = NSTemporaryDirectory() + "qwen-vision-missing-\(UUID().uuidString)"
+        try SyntheticQwenSnapshot.write(into: dir, includeVision: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try FileManager.default.removeItem(
+            atPath: dir + "/preprocessor_config.json")
+
+        do {
+            _ = try await Self.runRepack(snapshotDir: dir, includeVision: true)
+            Issue.record("repacked a vision payload with no preprocessor config")
+        } catch let error as RepackError {
+            guard case .configurationInvalid(let detail) = error else {
+                Issue.record("expected configurationInvalid, got \(error)")
+                return
+            }
+            #expect(detail.contains("preprocessor_config.json"))
+        }
+    }
+
     // MARK: - Qwen3.8-Flash-Next
 
-    private static func runRepack38(snapshotDir: String) async throws -> LocalQwenRepackResult {
+    private static func runRepack38(snapshotDir: String,
+                                    includeVision: Bool = false) async throws
+        -> LocalQwenRepackResult {
         let out = makeOutputDir()
         let options = LocalQwenRepackOptions(
             snapshotDir: snapshotDir, outputDir: out,
-            minFreeReserveBytes: 0)
+            minFreeReserveBytes: 0,
+            includeVision: includeVision)
         return try await LocalQwenRepacker(options: options).run()
     }
 
@@ -385,6 +491,39 @@ import FinchMoEFormat
         #expect(byName["language_model.hyper_connection_mixer.hc_norm.weight"] != nil)
         // The 3.8 family has no model.norm / no inner model. stage.
         #expect(byName["language_model.model.norm.weight"] == nil)
+    }
+
+    /// Qwen 3.8 sources also carry a video preprocessor config; it is optional
+    /// in the payload contract, and when present it ships with the install.
+    @Test func qwen38VisionRepackWritesBothPreprocessorConfigs() async throws {
+        let dir = NSTemporaryDirectory() + "qwen38-vision-src-\(UUID().uuidString)"
+        try SyntheticQwenSnapshot.write38(into: dir, includeVision: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        let result = try await Self.runRepack38(snapshotDir: dir, includeVision: true)
+        defer { try? FileManager.default.removeItem(atPath: result.outputDir) }
+        let out = result.outputDir
+        let fm = FileManager.default
+
+        // Only the two MTP decoys remain excluded; the visual tensors are now
+        // part of the install.
+        #expect(result.excludedTensorCount == 2)
+        #expect(fm.fileExists(atPath: out + "/vision/vision.safetensors"))
+        #expect(fm.fileExists(atPath: out + "/vision/model_config.json"))
+        #expect(fm.fileExists(atPath: out + "/vision/preprocessor_config.json"))
+        #expect(fm.fileExists(atPath: out + "/vision/video_preprocessor_config.json"))
+
+        let manifestData = try Data(contentsOf: URL(fileURLWithPath: out + "/manifest.json"))
+        let manifest = try FinchManifestCodec.decode(manifestData)
+        for path in ["vision/vision.safetensors",
+                     "vision/model_config.json",
+                     "vision/preprocessor_config.json",
+                     "vision/video_preprocessor_config.json"] {
+            #expect(manifest.files[path] != nil)
+        }
+        let verify = try VerifiedInstallTool.run(
+            options: VerifyInstallOptions(inputFinch: out))
+        #expect(verify.unexpectedEntries.isEmpty)
     }
 
     @Test func qwen38RawNormMetadataAndBakedNormPayloads() async throws {

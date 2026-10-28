@@ -1,7 +1,7 @@
 import Foundation
 import FinchMoE
 
-public enum AppExpertCachePolicy: String, CaseIterable, Sendable, Identifiable {
+public enum AppExpertCachePolicy: String, CaseIterable, Codable, Sendable, Identifiable {
     case lfu
     case lru
 
@@ -84,9 +84,27 @@ public enum AppKVCacheMode: String, CaseIterable, Codable, Sendable, Identifiabl
         }
     }
 
-    /// int8 ships; turbo-4bit is still a planned format with no kernel behind
-    /// it, so it stays disabled rather than pretending to load.
-    public var isAvailable: Bool { self == .fp16 || self == .int8 }
+    /// int8 ships for the Qwen 3.6 body only: only its prefill and decode
+    /// bodies quantize on write and bind the int8 timelines on read, and the
+    /// runner refuses a Qwen 3.8 install rather than read a timeline nobody
+    /// writes. turbo-4bit is still a planned format with no kernel behind it,
+    /// so both are disabled where they cannot load rather than crashing later.
+    public func isAvailable(for architecture: ArchConfig) -> Bool {
+        switch self {
+        case .fp16: return true
+        case .int8: return architecture.isQwen3_6
+        case .turbo4bit: return false
+        }
+    }
+
+    /// Compact form for the settings summary line.
+    public var shortLabel: String {
+        switch self {
+        case .fp16: return "FP16 KV"
+        case .int8: return "int8 KV"
+        case .turbo4bit: return "4-bit KV"
+        }
+    }
 
     public var kvStorageMode: KVStorageMode {
         switch self {
@@ -99,6 +117,11 @@ public enum AppKVCacheMode: String, CaseIterable, Codable, Sendable, Identifiabl
 public struct AppRuntimeOptions: Equatable, Sendable {
     public static let allowedSlotCounts = RuntimeConfiguration.allowedExpertCacheSlots
     public static let allowedPrefillChunkTokens = RuntimeConfiguration.allowedPrefillChunkTokens
+    /// The chunk the app starts a fresh install on, which the settings picker
+    /// marks "(default)". Kept pointed at the engine's constant so the label
+    /// cannot drift when the default moves — it did: the picker hardcoded 512
+    /// long after the engine default became 1,024.
+    public static let defaultPrefillChunkTokens = RuntimeConfiguration.defaultPrefillChunkTokens
 
     public var expertCacheSlots: Int
     public var expertCachePolicy: AppExpertCachePolicy
@@ -113,7 +136,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public init(expertCacheSlots: Int = 16,
                 expertCachePolicy: AppExpertCachePolicy = .lfu,
                 prefillEnabled: Bool = true,
-                prefillChunkTokens: Int = 512,
+                prefillChunkTokens: Int = RuntimeConfiguration.defaultPrefillChunkTokens,
                 rdadvisePolicy: AppRDAdvicePolicy = .off,
                 modelVerification: AppModelVerification = .automatic,
                 kvCacheMode: AppKVCacheMode = .fp16) {
@@ -133,7 +156,9 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     /// setting survived changing models but not relaunching the app.
     init(persisted settings: MacAppSettings) {
         self.init(expertCacheSlots: settings.expertCacheSlots,
+                  expertCachePolicy: settings.expertCachePolicy,
                   prefillEnabled: settings.prefillEnabled,
+                  prefillChunkTokens: settings.prefillChunkTokens,
                   modelVerification: settings.modelVerification,
                   kvCacheMode: settings.kvCacheMode)
     }
@@ -167,17 +192,28 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         case .fullSha256: verification = "full SHA-256"
         case .trustedInstall: verification = "trusted receipt"
         }
-        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), FP16 KV, RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
+        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), \(kvCacheMode.shortLabel), RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
     }
 
     public static func slotsLabel(for slots: Int) -> String {
         switch slots {
         case 8: "8, -0.8 GB"
+        case 10: "10, Low"
         case 16: "16, Default"
         case 24: "24, +0.8 GB"
         case 32: "32, +1.61 GB"
         default: "\(slots)"
         }
+    }
+
+    /// The prefill pipeline keeps `(depth + 1)` tiles in flight, and the
+    /// engine refuses a tile plan that does not fit the slot pool. The app
+    /// exposes the slot count but not the tile geometry, so derive the tile
+    /// width from the budget: the low-memory 8-slot setting must use 4
+    /// experts per tile at the default depth 1, or the engine rejects the
+    /// first prefill after the user picked that setting to save memory.
+    static func prefillTileExperts(forSlots slots: Int) -> Int {
+        max(1, min(8, slots / 2))
     }
 
     public func resolvedRuntimeConfiguration(forceLogitsHead: Bool) throws -> RuntimeConfiguration {
@@ -189,6 +225,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
             prefillEnabled: prefillEnabled,
             prefillChunkTokens: prefillChunkTokens,
             forceLogitsHead: forceLogitsHead,
+            prefillTileExperts: Self.prefillTileExperts(forSlots: expertCacheSlots),
             kvStorageMode: kvCacheMode.kvStorageMode)
     }
 }
@@ -201,6 +238,11 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
     public var rdadvisePolicy: AppRDAdvicePolicy
     public var modelVerification: AppModelVerification
     public var kvCacheMode: AppKVCacheMode
+    /// The engine builds its prefill path from these, so a session loaded
+    /// with one chunk size cannot serve a request built for another — the
+    /// regenerate must be flagged here or the next run fails late instead.
+    public var prefillEnabled: Bool
+    public var prefillChunkTokens: Int
     public var forceLogitsHead: Bool
 
     public init(modelDirectory: URL,
@@ -214,6 +256,8 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
         self.rdadvisePolicy = options.rdadvisePolicy
         self.modelVerification = options.modelVerification
         self.kvCacheMode = options.kvCacheMode
+        self.prefillEnabled = options.prefillEnabled
+        self.prefillChunkTokens = options.prefillChunkTokens
         self.forceLogitsHead = forceLogitsHead
     }
 }

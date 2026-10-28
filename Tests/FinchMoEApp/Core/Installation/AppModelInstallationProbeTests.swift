@@ -28,17 +28,46 @@ import FinchMoE
         #expect(AppModelInstallationProbe.status(at: url) == .complete)
     }
 
-    @Test func receiptBoundToDifferentPathIsPartial() throws {
+    /// A receipt records the physical directory it was made for. Moving or
+    /// copying an install — the Documents migration, the Files app, unpacking
+    /// a Hugging Face download — leaves that path stale. The directory is
+    /// still usable: the file set is complete, and the engine falls back to
+    /// hashing the bytes because the receipt no longer binds. Refusing it is
+    /// what left the install screen with a disabled Download and no Load.
+    @Test func receiptBoundToDifferentPathIsAdoptedWhenFilesArePresent() throws {
         let url = try makeCompleteModelInstall("wrong-path")
         defer { try? FileManager.default.removeItem(at: url) }
         let receiptURL = url.appendingPathComponent("verified-install.json")
         var receipt = try JSONSerialization.jsonObject(with: Data(contentsOf: receiptURL)) as! [String: Any]
         receipt["modelDirectoryPath"] = "/different/model.finch"
         try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys]).write(to: receiptURL)
-        guard case .partial = AppModelInstallationProbe.status(at: url) else {
+        #expect(AppModelInstallationProbe.status(at: url) == .complete)
+    }
+
+    @Test func missingReceiptIsAdoptedWhenFilesArePresent() throws {
+        let url = try makeCompleteModelInstall("no-receipt")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try FileManager.default.removeItem(
+            at: url.appendingPathComponent("verified-install.json"))
+        #expect(AppModelInstallationProbe.status(at: url) == .complete)
+    }
+
+    /// The fallback is a presence check, not a trust decision: a declared
+    /// file that is gone (or the wrong length) still reports why.
+    @Test func incompleteFileSetIsPartialEvenWithoutAReceipt() throws {
+        let url = try makeCompleteModelInstall("short-file")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try FileManager.default.removeItem(
+            at: url.appendingPathComponent("verified-install.json"))
+        // The fixture declares layer_00 as zero bytes; writing any content
+        // makes the on-disk size disagree with the manifest.
+        let layer = url.appendingPathComponent("packed_experts/layer_00.bin")
+        try Data(count: 7).write(to: layer)
+        guard case .partial(let message) = AppModelInstallationProbe.status(at: url) else {
             Issue.record("expected partial status")
             return
         }
+        #expect(message.contains("layer_00.bin"))
     }
 
     @Test func differentCheckpointIsPartial() throws {
@@ -85,6 +114,69 @@ import FinchMoE
         #expect(message.contains("does not match Gemma 4 26B-A4B IT 4-bit"))
     }
 
+    // MARK: - Vision capability
+
+    /// The text and vision siblings share resident weights and routed bits, so
+    /// only the manifest's `vision/vision.safetensors` entry can tell them
+    /// apart. A vision directory must resolve to the vision row and must not
+    /// satisfy its text sibling (or vice versa).
+    @Test func visionInstallResolvesToTheVisionRow() throws {
+        let url = try makeCompleteModelInstall(
+            "vision-36",
+            arch: .qwen3_6_35B_A3B,
+            modelID: "local/Qwen3.6-35B-A3B",
+            descriptor: .qwen3_6_3bit_vision)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(AppModelInstallationProbe.matchingDescriptor(at: url)
+            == .qwen3_6_3bit_vision)
+        #expect(AppModelInstallationProbe.status(
+            at: url, descriptor: .qwen3_6_3bit_vision) == .complete)
+        guard case .partial = AppModelInstallationProbe.status(
+            at: url, descriptor: .qwen3_6_3bit) else {
+            Issue.record("a vision install satisfied its text sibling")
+            return
+        }
+    }
+
+    @Test func textInstallDoesNotSatisfyTheVisionRow() throws {
+        let url = try makeCompleteModelInstall(
+            "text-36",
+            arch: .qwen3_6_35B_A3B,
+            modelID: "local/Qwen3.6-35B-A3B",
+            descriptor: .qwen3_6_3bit)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(AppModelInstallationProbe.matchingDescriptor(at: url) == .qwen3_6_3bit)
+        guard case .partial = AppModelInstallationProbe.status(
+            at: url, descriptor: .qwen3_6_3bit_vision) else {
+            Issue.record("a text install satisfied the vision row")
+            return
+        }
+    }
+
+    @Test func visionInstallWithAMissingPayloadIsPartial() throws {
+        let url = try makeCompleteModelInstall(
+            "vision-missing",
+            arch: .qwen3_6_35B_A3B,
+            modelID: "local/Qwen3.6-35B-A3B",
+            descriptor: .qwen3_6_3bit_vision)
+        defer { try? FileManager.default.removeItem(at: url) }
+        // Drop the receipt so the probe's size-check fallback runs, then remove
+        // the payload it should notice.
+        try FileManager.default.removeItem(
+            at: url.appendingPathComponent("verified-install.json"))
+        try FileManager.default.removeItem(
+            at: url.appendingPathComponent("vision/vision.safetensors"))
+
+        guard case .partial(let message) = AppModelInstallationProbe.status(
+            at: url, descriptor: .qwen3_6_3bit_vision) else {
+            Issue.record("missing vision payload was not reported")
+            return
+        }
+        #expect(message.contains("vision/vision.safetensors"))
+    }
+
     @Test func matchingDescriptorReadsManifestHash() throws {
         let qwen = try makeCompleteModelInstall(
             "match-qwen",
@@ -125,15 +217,15 @@ import FinchMoE
     /// scan — an entry that exists but is not in `installable` is dead code
     /// that reads as "unknown checkpoint" at runtime.
     ///
-    /// Uniqueness is asserted on the **(weights digest, expert width) pair**,
-    /// not on either field alone. `sourceIndexSHA256` cannot carry it because a
-    /// base install and its abliterated twin genuinely share a source snapshot
-    /// hash (it covers the tensor index, which abliteration does not change).
-    /// `weightsSHA256` cannot carry it either, now that widths exist: the 2-,
-    /// 3- and 4-bit builds of one checkpoint differ only under
-    /// `packed_experts/`, so they share the resident digest too. What the scan
-    /// actually needs to be able to separate two entries is that pair — which
-    /// is exactly what `matchingDescriptor` reads.
+    /// Uniqueness is asserted on the **(weights digest, expert width, vision
+    /// payload) triple**, not on any field alone. `sourceIndexSHA256` cannot
+    /// carry it because a base install and its abliterated twin genuinely share
+    /// a source snapshot hash (it covers the tensor index, which abliteration
+    /// does not change). `weightsSHA256` cannot carry it either: the 2-, 3- and
+    /// 4-bit builds of one checkpoint share the resident digest, and a vision
+    /// sibling shares both the digest and the width — only the `vision/`
+    /// file set differs. What the scan needs is that triple, which is exactly
+    /// what `matchingDescriptor` reads.
     @Test func everyDescriptorResolvesFromItsOwnHash() {
         for descriptor in AppModelInstallDescriptor.installable {
             #expect(!descriptor.sourceIndexSHA256.isEmpty,
@@ -144,14 +236,18 @@ import FinchMoE
                     "\(descriptor.displayName) pins no expert width; the scan cannot tell it apart from a width twin")
         }
         let identities = AppModelInstallDescriptor.installable.map {
-            "\($0.weightsSHA256 ?? "none")|\($0.routedExpertBits.map(String.init) ?? "any")"
+            "\($0.weightsSHA256 ?? "none")"
+                + "|\($0.routedExpertBits.map(String.init) ?? "any")"
+                + "|\($0.requiresVision)"
         }
         #expect(Set(identities).count == identities.count,
-                "two descriptors share a weights digest and width; the scan cannot tell them apart")
+                "two descriptors share a weights digest, width and vision capability; the scan cannot tell them apart")
         for expected: AppModelInstallDescriptor in [
-            .qwen3_6, .qwen3_6_3bit, .qwen3_6_abliterated, .qwen3_6_abliterated_3bit,
+            .qwen3_6, .qwen3_6_3bit, .qwen3_6_3bit_vision,
+            .qwen3_6_abliterated, .qwen3_6_abliterated_3bit,
             .qwen3_8, .qwen3_8_3bit, .qwen3_8_2bit,
-            .qwen3_8_abliterated, .qwen3_8_abliterated_3bit, .qwen3_8_abliterated_2bit,
+            .qwen3_8_abliterated, .qwen3_8_abliterated_3bit,
+            .qwen3_8_abliterated_2bit, .qwen3_8_abliterated_2bit_vision,
         ] {
             #expect(AppModelInstallDescriptor.installable.contains(expected),
                     "\(expected.displayName) is not in `installable`; the scan cannot find it")

@@ -21,6 +21,34 @@ extension PreadExpertStreamerTests {
     }
   }
 
+  /// Direct mode must never answer a hit, even after the same experts were
+  /// just read, and it must deliver the same bytes as the cached path. That is
+  /// the whole decode A/B: no expert contents are reused between tokens.
+  @Test func directPlanIsAlwaysAllMissesAndReadsTheTaggedBytes() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+    let streamer = try PreadExpertStreamer(
+      layout: Self.makeLayout(path: url.path), device: device, slotCount: 4)
+
+    let requested = [3, 1, 2]
+    for round in 0..<2 {
+      let plan = streamer.planExpertsDirect(experts: requested)
+      #expect(plan.hits == 0, "round \(round): direct plan must not hit")
+      #expect(plan.misses == Array(requested.indices),
+              "round \(round): every expert must be a miss")
+      #expect(Set(plan.assignedSlots).count == requested.count,
+              "round \(round): assigned slots must be distinct")
+
+      let results = try streamer.executeExpertCachePlan(plan)
+      for (index, result) in results.enumerated() {
+        let got = Self.bytes(of: result.buffer, offset: 0, count: Self.expertStride)
+        #expect(got.allSatisfy { $0 == Self.tagByte(requested[index]) },
+                "round \(round): expert \(requested[index]) read the wrong bytes")
+      }
+    }
+  }
+
   /// The read split has to tile the window it claims to split, on the real
   /// code path and not just in the formatter.
   ///

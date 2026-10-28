@@ -80,7 +80,7 @@ public enum FinchDistributionDownloader {
             resolvedCommit: manifestInfo.resolvedCommit,
             manifestSha256: manifestSha)
         var checkpoint = try loadCheckpoint(paths: paths, fingerprint: fingerprint)
-        var reusedBytes = try validateReusedFiles(expected: manifest.files,
+        let reusedBytes = try validateReusedFiles(expected: manifest.files,
                                                   files: files,
                                                   partialDirectory: paths.partialDirectory,
                                                   checkpoint: &checkpoint)
@@ -398,14 +398,27 @@ public enum FinchDistributionDownloader {
         return UInt64(info.st_size)
     }
 
-    private static func loadCheckpoint(paths: RemoteInstallPaths,
-                                       fingerprint: FinchDistributionCheckpoint.Fingerprint)
+    /// Reads the resume checkpoint, clearing a partial directory it cannot
+    /// identify first.
+    ///
+    /// That clear must keep `manifest.json`: it was fetched into `.partial`
+    /// before this point (it is what supplied the fingerprint) and
+    /// `VerifiedInstallTool.verify` reads it again after the payload. Removing
+    /// the whole directory here is what made every first download fail at the
+    /// last step with a missing manifest — an orange "saved download needs
+    /// attention" that only cleared once Resume re-fetched the manifest beside
+    /// an existing checkpoint.
+    ///
+    /// Internal rather than private so the clear can be tested directly.
+    static func loadCheckpoint(paths: RemoteInstallPaths,
+                               fingerprint: FinchDistributionCheckpoint.Fingerprint)
         throws -> FinchDistributionCheckpoint {
         guard try Posix.entryKind(paths.checkpointFile) == .regular else {
             // No checkpoint. Any existing partial belongs to a run we cannot
-            // identify, so it is cleared rather than mixed with this one.
+            // identify, so it is cleared rather than mixed with this one. The
+            // manifest is the one entry this run already wrote.
             if try Posix.entryKind(paths.partialDirectory) == .directory {
-                try FileManager.default.removeItem(atPath: paths.partialDirectory)
+                try clearUnidentifiedPartial(paths.partialDirectory)
             }
             try Posix.mkdirP(paths.partialDirectory)
             return FinchDistributionCheckpoint(fingerprint: fingerprint)
@@ -418,6 +431,16 @@ public enum FinchDistributionDownloader {
                     + "\(fingerprint.repoID) at \(fingerprint.resolvedCommit)")
         }
         return existing
+    }
+
+    /// Empties a partial directory that no checkpoint vouches for, preserving
+    /// the manifest this run just fetched.
+    private static func clearUnidentifiedPartial(_ directory: String) throws {
+        let names = try FileManager.default.contentsOfDirectory(atPath: directory)
+        for name in names where name != manifestName {
+            try FileManager.default.removeItem(
+                atPath: (directory as NSString).appendingPathComponent(name))
+        }
     }
 
     // MARK: - Helpers

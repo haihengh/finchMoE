@@ -12,6 +12,8 @@ struct ModelInstallView: View {
     @State private var showsFolderImporter = false
     #endif
     @State private var showingDiscardConfirmation = false
+    @Environment(\.finchAccentColor) private var accentColor
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     init(model: AppModel) {
         self.model = model
@@ -48,8 +50,14 @@ struct ModelInstallView: View {
             isPresented: $showsFolderImporter,
             allowedContentTypes: [.folder]
         ) { result in
-            if case .success(let url) = result {
+            switch result {
+            case .success(let url):
+                // A folder chosen from another provider (iCloud Drive, another
+                // app's container) needs the security scope for the session.
+                _ = url.startAccessingSecurityScopedResource()
                 model.setModelURL(url)
+            case .failure(let error):
+                model.reportModelSelectionError(error.localizedDescription)
             }
         }
         #endif
@@ -59,17 +67,17 @@ struct ModelInstallView: View {
         VStack(spacing: 10) {
             Image(systemName: "externaldrive.badge.plus")
                 .font(.system(.largeTitle, design: .rounded))
-                .foregroundStyle(FinchMoEMacTheme.accentColor)
+                .foregroundStyle(accentColor)
                 .accessibilityHidden(true)
             Text("Model required")
                 .font(.title.bold())
                 .accessibilityHeading(.h1)
-            Text("FinchMoE needs \(model.installDescriptor.displayName) before it can generate text.")
+            Text("FinchMoE needs \(model.installDescriptor.displayName) before it can generate.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             if !model.installDescriptor.supportsRemoteInstall {
-                Text("This model is loaded from an existing .finch directory.")
+                Text("This preset has no published download. Choose an existing .finch directory, or pick a downloadable preset.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -106,6 +114,7 @@ struct ModelInstallView: View {
                 .lineLimit(2)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("model-path")
         }
         .padding(18)
         .background {
@@ -134,6 +143,21 @@ struct ModelInstallView: View {
 
     @ViewBuilder
     private var progressArea: some View {
+        if let message = model.modelSelectionError {
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .multilineTextAlignment(.center)
+        } else if !model.isInstallingModel,
+                  case .partial(let message) = model.installationStatus {
+            // The probe knows why a directory is not usable (a file missing,
+            // a checkpoint mismatch); without this line the screen only shows
+            // a disabled Download and no reason for it.
+            Label(message, systemImage: "exclamationmark.triangle")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .multilineTextAlignment(.center)
+        }
         if model.isInstallingModel {
             VStack(alignment: .leading, spacing: 8) {
                 if let fraction = model.installProgressFraction,
@@ -185,41 +209,91 @@ struct ModelInstallView: View {
         }
     }
 
+    private var isLocalOnly: Bool {
+        !model.installDescriptor.supportsRemoteInstall
+    }
+
     private var actions: some View {
-        HStack(spacing: 12) {
+        Group {
             if model.isInstallingModel {
                 Button("Cancel", action: model.cancelInstall)
                     .buttonStyle(.bordered)
                     .keyboardShortcut(.cancelAction)
                     .disabled(!model.canCancelInstall)
-            } else {
-                if model.hasPartialModelDownload {
-                    Button("Discard Download", role: .destructive) {
-                        showingDiscardConfirmation = true
+            } else if horizontalSizeClass == .compact {
+                // A phone cannot fit Check Again + Choose Local + Download in
+                // one row; the last button used to be clipped off-screen, which
+                // left a not-installed model with no tappable Download.
+                VStack(spacing: 10) {
+                    if isLocalOnly {
+                        chooseAction.frame(maxWidth: .infinity)
+                    } else {
+                        downloadAction.frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(!model.canDiscardModelDownload)
+                    if model.hasPartialModelDownload {
+                        discardAction.frame(maxWidth: .infinity)
+                    }
+                    checkAction.frame(maxWidth: .infinity)
+                    if !isLocalOnly {
+                        chooseAction.frame(maxWidth: .infinity)
+                    }
                 }
-
-                Button("Check Again", action: model.recheckModelAtCurrentLocation)
-                .buttonStyle(.bordered)
-                .disabled(model.isInstallingModel)
-
-                Button {
-                    chooseLocalModelDirectory()
-                } label: {
-                    Label("Choose Local", systemImage: "folder")
+            } else {
+                HStack(spacing: 12) {
+                    if model.hasPartialModelDownload {
+                        discardAction
+                    }
+                    checkAction
+                    chooseAction
+                    if !isLocalOnly {
+                        downloadAction
+                    }
                 }
-                .buttonStyle(.bordered)
-                .disabled(model.isRunning || model.isInstallingModel)
-
-                Button(model.hasPartialModelDownload ? "Resume" : "Download",
-                       action: model.installModel)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!model.canInstallModel)
             }
         }
         .controlSize(.large)
+    }
+
+    private var downloadAction: some View {
+        Button(model.hasPartialModelDownload ? "Resume" : "Download",
+               action: model.installModel)
+            .buttonStyle(.borderedProminent)
+            .disabled(!model.canInstallModel)
+    }
+
+    private var discardAction: some View {
+        Button("Discard Download", role: .destructive) {
+            showingDiscardConfirmation = true
+        }
+        .buttonStyle(.bordered)
+        .disabled(!model.canDiscardModelDownload)
+    }
+
+    private var checkAction: some View {
+        Button("Check Again", action: model.recheckModelAtCurrentLocation)
+            .buttonStyle(.bordered)
+            .disabled(model.isInstallingModel)
+    }
+
+    @ViewBuilder
+    private var chooseAction: some View {
+        if isLocalOnly {
+            // A probe-only row has no published distribution; choosing an
+            // existing directory is its only install path, so it gets the
+            // primary weight instead of a disabled Download.
+            chooseButton.buttonStyle(.borderedProminent)
+        } else {
+            chooseButton.buttonStyle(.bordered)
+        }
+    }
+
+    private var chooseButton: some View {
+        Button {
+            chooseLocalModelDirectory()
+        } label: {
+            Label("Choose Local", systemImage: "folder")
+        }
+        .disabled(model.isRunning || model.isInstallingModel)
     }
 
     private var readinessLabel: String {
@@ -247,6 +321,7 @@ struct ModelInstallView: View {
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose"
         if panel.runModal() == .OK, let url = panel.url {
+            _ = url.startAccessingSecurityScopedResource()
             model.setModelURL(url)
         }
         #else

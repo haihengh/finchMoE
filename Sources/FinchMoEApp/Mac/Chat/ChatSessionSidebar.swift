@@ -6,16 +6,24 @@ import SwiftUI
 /// the newest at the top, plus the actions that manage them.
 struct ChatSessionSidebar: View {
     let model: AppModel
+    /// The Mac's three-column layout keeps the historical width; the iOS
+    /// slide-out drawer asks for a wider panel.
+    var width: CGFloat = 236
+    /// Non-nil in the iOS drawer, where the header gets a close control.
+    var onClose: (() -> Void)?
 
-    init(model: AppModel) {
+    init(model: AppModel,
+                width: CGFloat = 236,
+                onClose: (() -> Void)? = nil) {
         self.model = model
+        self.width = width
+        self.onClose = onClose
     }
 
     @State private var renameTarget: ChatSession?
     @State private var renameDraft = ""
     @State private var isConfirmingDeleteAll = false
-
-    private let rowWidth: CGFloat = 236
+    @Environment(\.finchAccentColor) private var accentColor
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,7 +34,7 @@ struct ChatSessionSidebar: View {
             Divider()
             footer
         }
-        .frame(width: rowWidth)
+        .frame(width: width)
         .background(FinchPlatformColors.underPageBackground)
         .alert("Rename Chat", isPresented: renameBinding) {
             TextField("Name", text: $renameDraft)
@@ -54,19 +62,32 @@ struct ChatSessionSidebar: View {
     /// The traffic lights float over the top-left of the window, so the list
     /// starts below them and this strip keeps the window draggable.
     ///
-    /// `WindowDragGesture` is macOS-only, so the strip is inert on iOS (the
-    /// sidebar is a sheet there, and there is no window frame to drag).
+    /// `WindowDragGesture` is macOS-only, and the iOS drawer sits inside the
+    /// safe area with no window frame to drag, so the strip is omitted there.
     private var titleBarDragArea: some View {
+        #if canImport(AppKit)
         Color.clear
             .frame(height: 38)
             .contentShape(Rectangle())
-            #if canImport(AppKit)
             .gesture(WindowDragGesture())
-            #endif
+        #else
+        EmptyView()
+        #endif
     }
 
     private var header: some View {
         HStack(spacing: 8) {
+            if let onClose {
+                Button(action: onClose) {
+                    Label("Close chat list", systemImage: "chevron.left")
+                        .labelStyle(.iconOnly)
+                        .frame(width: 26, height: 26)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.borderless)
+                .help("Close chat list")
+                .accessibilityLabel("Close chat list")
+            }
             Text("Chats")
                 .font(.headline)
             Spacer()
@@ -106,7 +127,7 @@ struct ChatSessionSidebar: View {
                 Image(systemName: isActive ? "bubble.left.fill" : "bubble.left")
                     .font(.caption)
                     .foregroundStyle(isActive
-                                     ? FinchMoEMacTheme.accentColor
+                                     ? accentColor
                                      : Color.secondary)
                     .frame(width: 14)
                 VStack(alignment: .leading, spacing: 1) {
@@ -130,7 +151,7 @@ struct ChatSessionSidebar: View {
         .background {
             RoundedRectangle(cornerRadius: 8)
                 .fill(isActive
-                      ? FinchMoEMacTheme.accentColor.opacity(0.16)
+                      ? accentColor.opacity(0.16)
                       : Color.clear)
         }
         .disabled(!model.canStartNewSession)

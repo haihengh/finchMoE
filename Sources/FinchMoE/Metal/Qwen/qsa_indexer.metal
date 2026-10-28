@@ -60,7 +60,7 @@ using namespace metal;
 // intermediate leaves FP32.
 // ============================================================================
 
-constant constexpr uint kIdxDim          = 128;  // indexer head width (indexer_head_dim)
+constant constexpr uint kIdxDim __attribute__((unused)) = 128;  // indexer head width (indexer_head_dim)
 constant constexpr uint kIdxThreads      = 128;  // one thread per indexer dim
 constant constexpr uint kIdxMaxDim       = 512;  // threadgroup staging cap
 constant constexpr uint kIdxScoreThreads = 256;  // 8 SIMD groups = up to 8 query heads

@@ -5,7 +5,7 @@ private let usage = """
 Usage:
   FinchMoERepack --output <model.finch> [--overwrite] [--resume]
   FinchMoERepack --input-snapshot <dir> --output <model.finch> [--overwrite]
-                 [--routed-expert-bits 2|3|4]
+                 [--routed-expert-bits 2|3|4] [--include-vision]
   FinchMoERepack --download-finch <owner/name> --output <model.finch>
                  [--revision <commit>] [--concurrency <n>]
   FinchMoERepack --discard-partial --output <model.finch>
@@ -21,8 +21,12 @@ authentication. A cancelled or interrupted download can be continued with
 With --input-snapshot, the installer quantizes a LOCAL bf16 Qwen 3.6 35B-A3B
 or Qwen 3.8 Flash-Next safetensors snapshot (affine, group 64) into the
 .finch format. --routed-expert-bits selects the routed-expert width: 4
-(default) or 3 (24-bit triplets, ~25% smaller expert blobs; the runtime
-decodes both, and the manifest records which). An interrupted run of either kind can be continued with
+(default), 3 (24-bit triplets, ~25% smaller expert blobs; the runtime
+decodes both, and the manifest records which) or 2 (PLE two-bit).
+--include-vision also copies the checkpoint's BF16 vision tower into
+vision/vision.safetensors with its config sidecars; the current engine runs
+such an install text-only, and the extra files are declared in the manifest
+and verified like any other. An interrupted run of either kind can be continued with
 --resume, which reuses the output files the partial directory's journal
 records as complete and rewrites the rest; a partial whose journal is missing
 or describes a different source is refused rather than guessed at.
@@ -50,6 +54,7 @@ private struct Arguments {
     var revision: String?
     var concurrency: Int?
     var routedExpertBits: Int?
+    var includeVision = false
 
     static func parse(_ values: [String]) throws -> Arguments {
         var parsed = Arguments()
@@ -70,6 +75,9 @@ private struct Arguments {
                 index += 1
             case "--verify-install":
                 parsed.verifyInstall = true
+                index += 1
+            case "--include-vision":
+                parsed.includeVision = true
                 index += 1
             case "--output", "--input-finch", "--input-snapshot",
                  "--download-finch", "--revision", "--concurrency",
@@ -111,7 +119,7 @@ private struct Arguments {
                 throw ParseError.missingRequired("--output")
             }
             guard parsed.inputFinch == nil, !parsed.overwrite, !parsed.verifyInstall,
-                  parsed.inputSnapshot == nil else {
+                  parsed.inputSnapshot == nil, !parsed.includeVision else {
                 throw ParseError.invalidMode("--discard-partial only accepts --output")
             }
             guard parsed.revision == nil, parsed.concurrency == nil else {
@@ -126,7 +134,8 @@ private struct Arguments {
             }
             guard parsed.output == nil, !parsed.overwrite, !parsed.resume,
                   parsed.inputSnapshot == nil, parsed.downloadFinch == nil,
-                  parsed.revision == nil, parsed.concurrency == nil else {
+                  parsed.revision == nil, parsed.concurrency == nil,
+                  !parsed.includeVision else {
                 throw ParseError.invalidMode("verification accepts only --input-finch")
             }
         } else {
@@ -161,6 +170,10 @@ private struct Arguments {
             guard parsed.routedExpertBits == nil || parsed.inputSnapshot != nil else {
                 throw ParseError.invalidMode(
                     "--routed-expert-bits requires --input-snapshot")
+            }
+            guard !parsed.includeVision || parsed.inputSnapshot != nil else {
+                throw ParseError.invalidMode(
+                    "--include-vision requires --input-snapshot")
             }
         }
         return parsed
@@ -339,7 +352,8 @@ private func run(_ values: [String]) async -> Int32 {
             outputDir: URL(fileURLWithPath: output).path,
             overwrite: arguments.overwrite,
             resume: arguments.resume,
-            routedExpertBits: arguments.routedExpertBits ?? 4)
+            routedExpertBits: arguments.routedExpertBits ?? 4,
+            includeVision: arguments.includeVision)
         do {
             let result = try await LocalQwenRepacker(options: options).run()
             print("Repacked bf16 snapshot (\(snapshot))")

@@ -18,8 +18,28 @@ import Testing
         #expect(arguments.stops.isEmpty)
         #expect(!arguments.quiet)
         #expect(!arguments.counters)
+        #expect(!arguments.kvInt8)
         #expect(arguments.expertCacheSlots == nil)
         #expect(arguments.verify == .automatic)
+    }
+
+    /// The one flag whose declared effect was never reachable: `--kv-int8` was
+    /// parsed into a local, and then the `return Args(...)` omitted it. The local
+    /// was never read, so the struct kept its default and `Run.swift`'s
+    /// `kvStorageMode: args.kvInt8 ? .int8 : .fp16` always took the `.fp16` arm —
+    /// the flag ran the whole request at fp16 with no error and no notice.
+    /// Pinned here because `helpListsExactlyThePublicOptions` already passed: a
+    /// test on the usage text cannot see a dropped field.
+    @Test func kvInt8FlagReachesTheArgsStruct() throws {
+        let on = try Args.parse(["--model", "m.finch", "--prompt", "hi", "--kv-int8"])
+        #expect(on.kvInt8)
+        // A flag, not a value-taking option: the next token is still an option,
+        // and the cursor advances past the flag rather than swallowing it.
+        let followed = try Args.parse([
+            "--model", "m.finch", "--prompt", "hi", "--kv-int8", "--counters",
+        ])
+        #expect(followed.kvInt8)
+        #expect(followed.counters)
     }
 
     /// All three modes parse, and the two explicit ones keep their meaning.

@@ -36,6 +36,14 @@ let package = Package(
             ]
         ),
         .target(
+            name: "FinchMoEVision",
+            dependencies: ["FinchMoE"],
+            path: "Sources/FinchMoEVision",
+            resources: [
+                .copy("Metal"),
+            ]
+        ),
+        .target(
             name: "FinchMoERepackCore",
             dependencies: ["FinchMoEFormat"],
             path: "Sources/FinchMoERepack/Core"
@@ -58,7 +66,7 @@ let package = Package(
         ),
         .target(
             name: "FinchMoEAppCore",
-            dependencies: ["FinchMoE", "FinchMoERepackCore", "FinchMoEDecodeProtocol"],
+            dependencies: ["FinchMoE", "FinchMoEVision", "FinchMoERepackCore", "FinchMoEDecodeProtocol"],
             path: "Sources/FinchMoEApp/Core"
         ),
         .target(
@@ -130,7 +138,7 @@ let package = Package(
         ),
         .testTarget(
             name: "FinchMoEAppCoreTests",
-            dependencies: ["FinchMoEAppCore", "FinchMoE", "FinchMoERepackCore", "FinchMoEDecodeProtocol"],
+            dependencies: ["FinchMoEAppCore", "FinchMoEVision", "FinchMoE", "FinchMoERepackCore", "FinchMoEDecodeProtocol"],
             path: "Tests/FinchMoEApp/Core"
         ),
         .testTarget(

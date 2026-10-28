@@ -28,7 +28,9 @@ struct LocalRepackJournal: Codable {
     /// Bumped when the on-disk shape changes; an older journal is refused
     /// rather than misread. Version 2 added the routed-expert bit width to
     /// the fingerprint, so a 3-bit partial and a 4-bit run cannot be mixed.
-    static let currentVersion = 2
+    /// Version 3 adds the vision payload bit, so a text-only partial and a
+    /// vision run cannot be mixed.
+    static let currentVersion = 3
 
     /// A real Qwen 3.8 install journals 179 entries — 1 resident, 48 expert
     /// layers, 128 PLE parts, `layout.json`, and the tokenizer sidecars. The
@@ -56,6 +58,11 @@ struct LocalRepackJournal: Codable {
         /// journal still decodes and gets the version refusal rather than a
         /// decode error.
         let routedExpertBits: Int?
+        /// Whether the run writes the `vision/` payload. Without this bit a
+        /// text-only partial could be resumed as a vision run (or the reverse)
+        /// and the manifest would describe a different file set than the
+        /// directory. Optional for the same version-refusal reason above.
+        let includeVision: Bool?
     }
 
     /// One finished output file. `sha256` is the digest the writer computed

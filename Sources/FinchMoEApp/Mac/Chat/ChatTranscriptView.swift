@@ -44,6 +44,8 @@ struct ChatTranscriptView: View {
                                 streamingText: message.id == streamingMessageID
                                     ? liveReplyText
                                     : nil,
+                                attachmentImages: (message.attachments ?? [])
+                                    .compactMap { model.attachmentData($0) },
                                 canRegenerate: canRegenerate(message),
                                 onRegenerate: model.regenerateLastReply)
                                 .id(message.id)

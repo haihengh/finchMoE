@@ -22,6 +22,10 @@ public struct LocalQwenRepackOptions: Sendable {
     /// (nibbles vs 24-bit triplets) and so does the runtime kernel. Resuming
     /// across a change of width is refused via the journal fingerprint.
     public let routedExpertBits: Int
+    /// Carry the source `model.visual.*` tower in a `vision/` payload. The
+    /// text engine ignores it; a vision-capable runtime consumes it. Resuming
+    /// across a change of this flag is refused via the journal fingerprint.
+    public let includeVision: Bool
 
     public init(snapshotDir: String,
                 outputDir: String,
@@ -29,7 +33,8 @@ public struct LocalQwenRepackOptions: Sendable {
                 resume: Bool = false,
                 copyAuditPath: String? = nil,
                 minFreeReserveBytes: UInt64 = 1 * 1024 * 1024 * 1024,
-                routedExpertBits: Int = 4) {
+                routedExpertBits: Int = 4,
+                includeVision: Bool = false) {
         self.snapshotDir = snapshotDir
         self.outputDir = outputDir
         self.overwrite = overwrite
@@ -37,6 +42,7 @@ public struct LocalQwenRepackOptions: Sendable {
         self.copyAuditPath = copyAuditPath
         self.minFreeReserveBytes = minFreeReserveBytes
         self.routedExpertBits = routedExpertBits
+        self.includeVision = includeVision
     }
 }
 
@@ -129,7 +135,8 @@ public final class LocalQwenRepacker {
             outputDirectory: URL(fileURLWithPath: options.outputDir).path,
             modelFamily: snapshot.arch.modelFamily,
             numLayers: snapshot.arch.numLayers,
-            routedExpertBits: options.routedExpertBits)
+            routedExpertBits: options.routedExpertBits,
+            includeVision: options.includeVision)
         if let resumeJournal, resumeJournal.fingerprint != fingerprint {
             // This is the property the old unconditional refusal protected: a
             // partial is never written into by a run that would produce
@@ -153,9 +160,33 @@ public final class LocalQwenRepacker {
         let pleBytes = plan.pleParts.reduce(UInt64(0)) {
             $0 + $1.quantizedByteCount
         }
+        let vision: (payload: VisionPayloadWriter.Payload,
+                     configs: [(source: String, relativePath: String, required: Bool)])?
+        if options.includeVision {
+            if let missing = try VisionPayloadWriter.missingRequiredConfig(
+                snapshotDir: options.snapshotDir) {
+                throw RepackError.configurationInvalid(
+                    detail: "vision repack requires \(missing) in the source snapshot")
+            }
+            vision = (try VisionPayloadWriter.makePayload(snapshot: snapshot),
+                      try VisionPayloadWriter.configSources(
+                        snapshotDir: options.snapshotDir))
+        } else {
+            vision = nil
+        }
+        var visionBytes: UInt64 = 0
+        if let vision {
+            visionBytes += vision.payload.fileBytes
+            for config in vision.configs where try Posix.entryKind(config.source) == .regular {
+                let fd = try Posix.openRead(config.source)
+                visionBytes &+= try Posix.fileSize(fd: fd, path: config.source)
+                close(fd)
+            }
+        }
         let outputBytes = plan.resident.totalSize
             + plan.layers.reduce(UInt64(0)) { $0 + $1.fileSize }
             + pleBytes
+            + visionBytes
         progress(.planning(downloadBytes: 0, outputBytes: outputBytes))
 
         let diskRequirement = try DiskSpaceChecker.requireAvailable(
@@ -165,10 +196,15 @@ public final class LocalQwenRepacker {
         progress(.checkingDisk(diskRequirement))
         try Task.checkCancellation()
 
+        let droppedTensorNames = options.includeVision
+            ? plan.excludedTensorNames.filter {
+                !$0.hasPrefix(VisionPayloadWriter.tensorPrefix)
+            }
+            : plan.excludedTensorNames
         audit.remoteRepoID = nil
         audit.sourceSnapshotSha256 = snapshot.metadata.indexSha256Hex
         audit.bitWidthOverridesHonored = 0
-        audit.tensorsDroppedMultimodal = plan.excludedTensorNames
+        audit.tensorsDroppedMultimodal = droppedTensorNames
         audit.packedExpertLayoutMode = "identity"
 
         progress(.reservingOutput(bytes: outputBytes))
@@ -248,6 +284,40 @@ public final class LocalQwenRepacker {
                            partialDir: paths.partialDirectory,
                            progress: progress)
 
+        if let vision {
+            let visionDir = (paths.partialDirectory as NSString)
+                .appendingPathComponent("vision")
+            try Posix.mkdirP(visionDir)
+            let visionPath = (visionDir as NSString)
+                .appendingPathComponent("vision.safetensors")
+            _ = try produce(relativePath: VisionPayloadWriter.relativePath,
+                            path: visionPath) {
+                try VisionPayloadWriter.write(vision.payload,
+                                              to: visionPath,
+                                              audit: audit)
+                return try recordOutputFile(
+                    relativePath: VisionPayloadWriter.relativePath,
+                    path: visionPath,
+                    progress: progress)
+            }
+            for config in vision.configs {
+                // The required ones were checked before the disk-space gate;
+                // the optional video preprocessor may be absent in a source.
+                guard try Posix.entryKind(config.source) == .regular else { continue }
+                let dst = (paths.partialDirectory as NSString)
+                    .appendingPathComponent(config.relativePath)
+                _ = try produce(relativePath: config.relativePath, path: dst) {
+                    if try Posix.entryKind(dst) == .regular {
+                        try FileManager.default.removeItem(atPath: dst)
+                    }
+                    try FileManager.default.copyItem(atPath: config.source, toPath: dst)
+                    return try recordOutputFile(relativePath: config.relativePath,
+                                                path: dst,
+                                                progress: progress)
+                }
+            }
+        }
+
         progress(.finalizing)
         try Task.checkCancellation()
         try writeManifest(plan: plan,
@@ -282,7 +352,7 @@ public final class LocalQwenRepacker {
 
         return LocalQwenRepackResult(outputDir: options.outputDir,
                                      outputBytes: outputBytes,
-                                     excludedTensorCount: plan.excludedTensorNames.count)
+                                     excludedTensorCount: droppedTensorNames.count)
     }
 
     private func validateOptions() throws {

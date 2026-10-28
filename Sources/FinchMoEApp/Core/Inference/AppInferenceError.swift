@@ -9,6 +9,7 @@ public enum AppInferenceError: Error, Equatable, Sendable, CustomStringConvertib
     case generationInFlight
     case modelNotLoaded
     case reloadRequired
+    case visionUnsupported(String)
     case cancelled
     case unknown(String)
 
@@ -32,6 +33,8 @@ public enum AppInferenceError: Error, Equatable, Sendable, CustomStringConvertib
             return "Load the model before generating."
         case .reloadRequired:
             return "Model settings changed. Reload the model before generating."
+        case .visionUnsupported(let message):
+            return message
         case .cancelled:
             return "Generation cancelled."
         case .unknown(let message):

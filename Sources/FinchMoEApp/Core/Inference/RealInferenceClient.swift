@@ -1,6 +1,7 @@
 import Foundation
 import Metal
 import FinchMoE
+import FinchMoEVision
 import Synchronization
 
 final class GenerationTaskRegistry: Sendable {
@@ -56,9 +57,13 @@ final class GenerationTaskRegistry: Sendable {
 /// template) behind the `AppInferenceClient` event stream, with an explicit
 /// load lifecycle so the resident weights stay warm across generations.
 public final class RealInferenceClient: AppModelLifecycleClient,
-    AppModelIntegrityReporting, @unchecked Sendable {
+    AppModelIntegrityReporting, AppInferenceMemoryReporting, @unchecked Sendable {
     private let session: RealInferenceSession
     private let memorySampler: AppMemorySampler
+    /// The device the loaded model allocated its buffers on. Held outside the
+    /// actor so `currentInferenceMemoryBytes` can answer synchronously from
+    /// the main actor (the header samples it once a second).
+    private let deviceBox = Mutex<MTLDevice?>(nil)
     private let generationTasks = GenerationTaskRegistry()
     private let integrity = Mutex<String?>(nil)
 
@@ -97,6 +102,40 @@ public final class RealInferenceClient: AppModelLifecycleClient,
         // *current* load decided, not what a previous one did.
         let description = await session.integrityDescription
         integrity.withLock { $0 = description }
+        if let device = await session.metalDevice() {
+            deviceBox.withLock { $0 = device }
+        }
+    }
+
+    /// The engine's live memory as the app should show it.
+    ///
+    /// The model's `model_weights.bin` is `mmap`ed read-only and wrapped in a
+    /// Metal buffer. Those are *clean* file-backed pages: `phys_footprint`
+    /// excludes them deliberately, and on a memory-pressured iOS device
+    /// `resident_size` can be small too even though the engine's working set
+    /// is the whole mapping. `MTLDevice.currentAllocatedSize` counts the
+    /// buffers themselves — the resident mapping plus every expert-cache
+    /// slot, KV cache and scratch buffer — which is the number a user means
+    /// by "how much RAM is the model using".
+    ///
+    /// `max` rather than a sum: the same bytes can appear in both the
+    /// process's resident accounting and the device's allocation ledger, and
+    /// adding them would double-count the dirty buffers.
+    public var currentInferenceMemoryBytes: UInt64? {
+        let measured = memorySampler.sample()
+        let allocated = deviceBox.withLock { $0 }.map {
+            UInt64(max(0, $0.currentAllocatedSize))
+        }
+        switch (measured, allocated) {
+        case let (measured?, allocated?):
+            return max(measured, allocated)
+        case let (measured?, nil):
+            return measured
+        case let (nil, allocated?):
+            return allocated > 0 ? allocated : nil
+        case (nil, nil):
+            return nil
+        }
     }
 
     public func unload() async {
@@ -180,6 +219,17 @@ actor RealInferenceSession {
     private var tokenizerDirectoryCache = TokenizerDirectoryCache()
     private var runner: RealForwardRunner?
     private var scratch: RawCompletionScratch?
+    /// Lazily loaded only when a request carries an image; a text-only session
+    /// never maps the vision payload.
+    private var visionEngine: VisionEngine?
+    /// The payload's placeholder-token id, kept even after the tower itself is
+    /// released: replayed images can be resolved from the embedding cache
+    /// without mapping the 0.9 GB of vision weights again.
+    private var cachedImageTokenID: Int32?
+    /// Tower output per attachment id, so replaying an image from history does
+    /// not re-run the tower on every follow-up. Bounded to a handful of images.
+    private var visionEmbeddingCache: [UUID: VisionEngine.ImageEmbedding] = [:]
+    private var visionEmbeddingOrder: [UUID] = []
     /// What the last successful load resolved the verification policy to. Held
     /// here because the `Model` that knows is released on the next reload, and
     /// the diagnostics pane reports on the load that is still resident.
@@ -198,6 +248,10 @@ actor RealInferenceSession {
         promptCache.invalidate()
         runner = nil
         scratch = nil
+        visionEngine = nil
+        cachedImageTokenID = nil
+        visionEmbeddingCache.removeAll()
+        visionEmbeddingOrder.removeAll()
         loadedKey = nil
 
         let start = Date()
@@ -322,16 +376,101 @@ actor RealInferenceSession {
         promptCache.invalidate()
         runner = nil
         scratch = nil
+        visionEngine = nil
+        cachedImageTokenID = nil
+        visionEmbeddingCache.removeAll()
+        visionEmbeddingOrder.removeAll()
         tokenizer = nil
         tokenizerDirectoryCache.clear()
         loadedKey = nil
         integrityDescription = nil
     }
 
+    /// The device the loaded model allocated its buffers on. The client's
+    /// memory readout samples its `currentAllocatedSize`, which includes the
+    /// mmap-backed resident weights that process footprint accounting can
+    /// leave out.
+    func metalDevice() -> MTLDevice? {
+        ctx?.device
+    }
+
+    private func visionEngine(for directory: URL) throws -> VisionEngine {
+        if let visionEngine { return visionEngine }
+        guard let ctx else {
+            throw AppInferenceError.modelLoadFailed("session lost its Metal context")
+        }
+        guard VisionEngine.isAvailable(modelDirectory: directory) else {
+            throw AppInferenceError.visionUnsupported(
+                "This model install has no vision payload. Choose a Vision model to attach images.")
+        }
+        do {
+            let engine = try VisionEngine(modelDirectory: directory,
+                                          device: ctx.device,
+                                          queue: ctx.queue)
+            visionEngine = engine
+            return engine
+        } catch {
+            throw AppInferenceError.modelLoadFailed("vision engine: \(error)")
+        }
+    }
+
+    /// Images in prompt order that are not already in the embedding cache.
+    private func imagesNeedingEncoding(
+        _ request: AppGenerationRequest
+    ) -> [AppImageAttachment] {
+        (request.history.flatMap(\.images) + request.images)
+            .filter { visionEmbeddingCache[$0.id] == nil }
+    }
+
+    private func encodeVisionImages(
+        _ request: AppGenerationRequest,
+        engine: VisionEngine?
+    ) throws -> [UUID: VisionEngine.ImageEmbedding] {
+        var result: [UUID: VisionEngine.ImageEmbedding] = [:]
+        for image in request.history.flatMap(\.images) + request.images {
+            if let cached = visionEmbeddingCache[image.id] {
+                result[image.id] = cached
+                continue
+            }
+            guard let engine else {
+                // `imagesNeedingEncoding` decides whether the tower is
+                // loaded; an uncached image without one is a programming
+                // error, not a user error.
+                throw AppInferenceError.visionUnsupported(
+                    "An attached image needs the vision tower, but it is not loaded.")
+            }
+            do {
+                let embedding = try engine.encode(imageData: image.data)
+                result[image.id] = embedding
+                visionEmbeddingCache[image.id] = embedding
+                visionEmbeddingOrder.append(image.id)
+                while visionEmbeddingOrder.count > 8 {
+                    let evicted = visionEmbeddingOrder.removeFirst()
+                    visionEmbeddingCache.removeValue(forKey: evicted)
+                }
+            } catch {
+                throw AppInferenceError.invalidRequest(
+                    "Could not read an attached image: \(error)")
+            }
+        }
+        return result
+    }
+
     func run(request: AppGenerationRequest,
              memorySampler: AppMemorySampler,
              continuation: AsyncThrowingStream<AppInferenceEvent, Error>.Continuation) async {
-        let prefillConfig = request.runtimeOptions.prefillConfig
+        // Image embedding injection is a chunked-prefill feature; a user who
+        // turned prefill off still gets a working image turn. The image turn
+        // must not grow the chunk past the configured one: prefill scratch is
+        // the difference between fitting and hitting jetsam on a device, and
+        // the 3.8-vision cap already pins the largest choice to its own
+        // `prefillChunkTokens` (128 today).
+        let hasImages = request.hasImageContent
+        let prefillConfig = hasImages
+            ? .production(chunkTokens: min(
+                request.runtimeOptions.prefillChunkTokens,
+                PrefillRuntimeConfig.defaultChunked.chunkTokens))
+            : request.runtimeOptions.prefillConfig
         let progress = ProgressState()
         do {
             try request.validate()
@@ -357,58 +496,118 @@ actor RealInferenceSession {
             // prompt that exactly fills the context generates nothing.
             let answerReserve = min(request.maxNewTokens,
                                     max(1, runner.maxContext / 4))
-            let fits: ([AppChatTurn]) -> Bool = { candidate in
-                guard let rendered = try? tokenizer.applyChatTemplate(
-                    Self.chatMessages(prompt: request.prompt, history: candidate))
-                else { return false }
-                return tokenizer.encode(rendered, addBOS: false).count + answerReserve
-                    <= runner.maxContext
-            }
-            let history = Self.trimmedHistory(request.history, fits: fits)
-            let messages = Self.chatMessages(prompt: request.prompt, history: history)
-            let renderedPrompt = try tokenizer.applyChatTemplate(messages)
-            let renderedPromptIDs = tokenizer.encode(renderedPrompt, addBOS: false)
-
-            // How this turn starts: on the retained prefix when it can be
-            // proven to match what decode wrote, otherwise from scratch. A
-            // miss also drops the entry — the reset below is what makes it
-            // unusable.
-            var resolved: (promptIDs: [Int32], start: RawCompletionStart, cached: Int)?
-            if promptReuseEnabled {
-                switch promptCache.match(sessionKey: loadedKey,
-                                         messages: messages,
-                                         renderedPromptIDs: renderedPromptIDs) {
-                case .prefixHit(let cached):
-                    resolved = (renderedPromptIDs, .resume(cachedPromptTokens: cached), cached)
-                case .continuation(let cached, let backed, let boundary, let reason, let content):
-                    var bridge = tokenizer.encodeTextContinuation(userContent: content)
-                    if reason == .maxTokens {
-                        bridge = [boundary] + bridge
-                    } else if bridge.first != boundary {
-                        // The re-rendered turn does not line up with what
-                        // decode sampled; do not resume from a guess.
-                        break
-                    }
-                    resolved = (backed + bridge,
-                                .resume(cachedPromptTokens: cached),
-                                cached)
-                case .miss:
-                    break
-                }
-            }
+            let messages: [GFTokenizer.Message]
             let promptIds: [Int32]
             let start: RawCompletionStart
             let cachedPromptTokens: Int
-            if let resolved {
-                promptIds = resolved.promptIDs
-                start = resolved.start
-                cachedPromptTokens = resolved.cached
-            } else {
-                promptCache.invalidate()
-                runner.reset()
-                promptIds = renderedPromptIDs
+            var multimodal: MultimodalPrefillInput?
+            let visionTurn = hasImages
+
+            if hasImages {
+                // Only an uncached image needs the tower. Replayed images are
+                // served from `visionEmbeddingCache`, and after a phone turn
+                // the tower itself is released, so a follow-up must not load
+                // it just to look at the token id.
+                let missing = imagesNeedingEncoding(request)
+                let imageTokenID: Int32
+                if missing.isEmpty, let cached = cachedImageTokenID {
+                    imageTokenID = cached
+                } else {
+                    let engine = try visionEngine(for: request.modelDirectory)
+                    cachedImageTokenID = engine.imageTokenID
+                    imageTokenID = engine.imageTokenID
+                }
+                let embeddings = try encodeVisionImages(request, engine: visionEngine)
+                let tokenCounts = embeddings.mapValues { $0.tokenCount }
+                let fits: ([AppChatTurn]) -> Bool = { candidate in
+                    let candidateMessages = AppVisionPromptBuilder.messages(
+                        history: candidate, prompt: request.prompt,
+                        images: request.images, tokenCounts: tokenCounts)
+                    guard let rendered = try? tokenizer.applyChatTemplate(candidateMessages)
+                    else { return false }
+                    return tokenizer.encode(rendered, addBOS: false).count + answerReserve
+                        <= runner.maxContext
+                }
+                let history = Self.trimmedHistory(request.history, fits: fits)
+                let plan = try AppVisionPromptBuilder.build(
+                    history: history,
+                    prompt: request.prompt,
+                    images: request.images,
+                    tokenCounts: tokenCounts,
+                    embeddings: embeddings,
+                    tokenizer: tokenizer,
+                    imageTokenID: imageTokenID,
+                    device: ctx.device,
+                    queue: ctx.queue)
+                messages = plan.messages
+                promptIds = plan.promptIDs
+                multimodal = plan.multimodal
                 start = .reset
                 cachedPromptTokens = 0
+                // An image-conditioned KV prefix cannot be identified by token
+                // ids alone, so image turns never reuse or publish the cache.
+                promptCache.invalidate()
+                runner.reset()
+                #if canImport(UIKit)
+                // The tower's ~0.9 GB is only needed to encode an uncached
+                // image. Release it before the text prefill and decode so
+                // that memory belongs to KV, scratch and the expert cache.
+                // `cachedImageTokenID` and the embedding cache keep replayed
+                // images working; a new image loads the tower again.
+                visionEngine = nil
+                #endif
+            } else {
+                let fits: ([AppChatTurn]) -> Bool = { candidate in
+                    guard let rendered = try? tokenizer.applyChatTemplate(
+                        Self.chatMessages(prompt: request.prompt, history: candidate))
+                    else { return false }
+                    return tokenizer.encode(rendered, addBOS: false).count + answerReserve
+                        <= runner.maxContext
+                }
+                let history = Self.trimmedHistory(request.history, fits: fits)
+                messages = Self.chatMessages(prompt: request.prompt, history: history)
+                let renderedPrompt = try tokenizer.applyChatTemplate(messages)
+                let renderedPromptIDs = tokenizer.encode(renderedPrompt, addBOS: false)
+
+                // How this turn starts: on the retained prefix when it can be
+                // proven to match what decode wrote, otherwise from scratch. A
+                // miss also drops the entry — the reset below is what makes it
+                // unusable. The request flag is the user's setting (live, per
+                // turn); the stored one is the process-level override.
+                var resolved: (promptIDs: [Int32], start: RawCompletionStart, cached: Int)?
+                if promptReuseEnabled, request.promptReuseEnabled {
+                    switch promptCache.match(sessionKey: loadedKey,
+                                             messages: messages,
+                                             renderedPromptIDs: renderedPromptIDs) {
+                    case .prefixHit(let cached):
+                        resolved = (renderedPromptIDs, .resume(cachedPromptTokens: cached), cached)
+                    case .continuation(let cached, let backed, let boundary, let reason, let content):
+                        var bridge = tokenizer.encodeTextContinuation(userContent: content)
+                        if reason == .maxTokens {
+                            bridge = [boundary] + bridge
+                        } else if bridge.first != boundary {
+                            // The re-rendered turn does not line up with what
+                            // decode sampled; do not resume from a guess.
+                            break
+                        }
+                        resolved = (backed + bridge,
+                                    .resume(cachedPromptTokens: cached),
+                                    cached)
+                    case .miss:
+                        break
+                    }
+                }
+                if let resolved {
+                    promptIds = resolved.promptIDs
+                    start = resolved.start
+                    cachedPromptTokens = resolved.cached
+                } else {
+                    promptCache.invalidate()
+                    runner.reset()
+                    promptIds = renderedPromptIDs
+                    start = .reset
+                    cachedPromptTokens = 0
+                }
             }
             progress.promptTokenCount = promptIds.count
             guard promptIds.count < runner.maxContext else {
@@ -441,7 +640,9 @@ actor RealInferenceSession {
             let result = try await runRawCompletion(
                 producer: runner, tokenizer: tokenizer, promptIds: promptIds,
                 config: config, context: ctx, scratch: scratch,
-                prefillConfig: prefillConfig, start: start) { event in
+                prefillConfig: prefillConfig,
+                multimodal: multimodal,
+                start: start) { event in
                 switch event {
                 case .prefill(let done, let total):
                     if done == total {
@@ -468,7 +669,7 @@ actor RealInferenceSession {
                 }
             }
 
-            if promptReuseEnabled {
+            if promptReuseEnabled, !visionTurn {
                 promptCache.publish(sessionKey: loadedKey,
                                     messages: messages,
                                     assistantText: progress.text,

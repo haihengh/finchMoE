@@ -32,6 +32,9 @@ public final class AppModel {
     public var modelPathText: String
     public private(set) var selectedModelChoice: AppModelChoice?
     public var promptText: String = ""
+    /// Images attached to the draft. Cleared when the message is sent (with
+    /// the prompt) or when the model changes.
+    public var pendingImages: [AppPendingImage] = []
     // `internal(set)` rather than `private(set)`: the chat layer lives in
     // `AppModel+Chat.swift`, and `private` setters are only visible inside the
     // file that declares them. Still hidden from the SwiftUI target, which is
@@ -47,6 +50,9 @@ public final class AppModel {
     public var topK: Int = 64
     public var topPEnabled: Bool = true
     public var topP: Double = 0.95
+    /// Whether a chat turn may resume from the previous turn's retained KV
+    /// prefix. Live: applied per request, no model reload on change.
+    public var promptReuseEnabled: Bool = true
     public private(set) var newlineShortcut: AppNewlineShortcut = .return
     public private(set) var sentPromptBehavior: AppSentPromptBehavior = .clear
     /// Every conversation, newest first. Never empty: an empty list is
@@ -65,6 +71,10 @@ public final class AppModel {
     public private(set) var installETAText: String?
     public private(set) var installReadiness: AppModelInstallReadiness = .checking
     public private(set) var installationStatus: AppModelInstallationStatus
+    /// Why the last local-folder selection was refused, if it was. Kept apart
+    /// from `error` (a generation error) so the install screen can explain a
+    /// bad picker choice without looking like a failed run.
+    public private(set) var modelSelectionError: String?
 
     public var loadState: AppModelLoadState = .notLoaded
     public private(set) var loadedRuntimeKey: AppLoadedRuntimeKey?
@@ -111,19 +121,44 @@ public final class AppModel {
                 memorySampler: AppMemorySampler = AppMemorySampler(),
                 settingsPersistenceEnabled: Bool = false,
                 chatStore: ChatSessionFileStore? = nil) {
+        #if canImport(UIKit)
+        // iOS keeps app-owned models in Documents so the Files app can see
+        // them; move installs made before that change before resolving paths.
+        AppModelLocation.prepareAppModelStorage()
+        #endif
         let directory = (modelDirectory ?? AppModelLocation.defaultURL()).standardizedFileURL
         // The descriptor must key off the directory's checkpoint (Qwen or
         // Gemma), because it drives the probe, the install UI, and the
-        // installer; nil means "build the default remote installer for the
-        // matched descriptor".
-        let descriptor = AppModelInstallationProbe.matchingDescriptor(at: directory)
+        // installer. A fresh app-owned destination has no manifest yet, so it
+        // takes the app's default row (Qwen 3.6 3-bit) instead of Gemma; every
+        // other destination keeps the probe's own fallback.
+        let descriptor = AppModelInstallationProbe.matchingDescriptor(
+            at: directory,
+            missingManifestFallback: AppModelLocation.defaultDescriptor(for: directory)
+                ?? .default)
         let installETAClock = SuspendingClock()
         let settings = settingsPersistenceEnabled
             ? MacAppSettingsFileStore.loadOrCreate(forModelDirectory: directory)
             : MacAppSettings()
         self.modelPathText = directory.path
         self.selectedModelChoice = Self.modelChoice(for: directory, descriptor: descriptor)
-        self.runtimeOptions = AppRuntimeOptions(persisted: settings)
+        // A setting saved before int8 KV became model-gated (or copied from a
+        // 3.6 install) must not reach the runner on a model that cannot serve
+        // it: the runner traps on int8 + Qwen 3.8, which leaves FP16 as the
+        // only valid choice for that body.
+        var runtimeOptions = AppRuntimeOptions(persisted: settings)
+        if !runtimeOptions.kvCacheMode.isAvailable(for: descriptor.architecture) {
+            runtimeOptions.kvCacheMode = .fp16
+        }
+        // Qwen 3.8 routes to ten experts per token. A persisted 8-slot choice
+        // from a 3.6 layout would otherwise trap the first decode layer.
+        let minimumSlots = descriptor.architecture.topKExperts
+        if runtimeOptions.expertCacheSlots < minimumSlots,
+           let replacement = AppRuntimeOptions.allowedSlotCounts.first(
+               where: { $0 >= minimumSlots }) {
+            runtimeOptions.expertCacheSlots = replacement
+        }
+        self.runtimeOptions = runtimeOptions
         self.maxContextTokens = settings.contextTokens
         self.temperature = settings.temperature
         self.topKEnabled = settings.topKEnabled
@@ -132,6 +167,7 @@ public final class AppModel {
         self.topP = settings.topP
         self.newlineShortcut = settings.newlineShortcut
         self.sentPromptBehavior = settings.sentPromptBehavior
+        self.promptReuseEnabled = settings.promptReuseEnabled
         self.installationStatus = AppModelInstallationProbe.status(at: directory,
                                                                     descriptor: descriptor)
         self.client = client
@@ -176,6 +212,61 @@ public final class AppModel {
     public var requiresModelInstallation: Bool { !isModelInstalled }
 
     public var installDescriptor: AppModelInstallDescriptor { installer.descriptor }
+
+    /// The phone-only budget for the largest vision model, or nil when the
+    /// current model fits the persisted settings as-is.
+    public var memoryCap: AppModelMemoryBudget.Cap? {
+        AppModelMemoryBudget.cap(for: installDescriptor)
+    }
+
+    /// The context actually loaded and requested. The picker keeps the user's
+    /// persisted choice; this is the value the runner is built with.
+    public var effectiveMaxContextTokens: Int {
+        min(maxContextTokens, memoryCap?.contextTokens ?? Int.max)
+    }
+
+    /// The cache sizes the current model can actually use. Qwen 3.8 routes
+    /// to ten experts per token, and a layer's cache must hold at least
+    /// top-k; offering the 8-slot choice there would trap the decoder.
+    public var allowedExpertCacheSlots: [Int] {
+        var slots = AppRuntimeOptions.allowedSlotCounts.filter {
+            $0 >= installDescriptor.architecture.topKExperts
+        }
+        if let memoryCap {
+            slots = slots.filter { $0 <= memoryCap.expertCacheSlots }
+        }
+        return slots
+    }
+
+    /// Context choices that fit the current model on this device.
+    public var allowedContextLengths: [AppContextLengthOption] {
+        let maximum = memoryCap?.contextTokens ?? Int.max
+        return AppContextLengthOption.allCases.filter { $0.tokens <= maximum }
+    }
+
+    public var allowedPrefillChunkTokens: [Int] {
+        let maximum = memoryCap?.prefillChunkTokens ?? Int.max
+        return AppRuntimeOptions.allowedPrefillChunkTokens.filter { $0 <= maximum }
+    }
+
+    /// The options actually loaded and requested. Settings are shared across
+    /// models in one folder, so the cap is applied here rather than written
+    /// back into `runtimeOptions`: switching to a smaller model must not
+    /// inherit the phone's 3.8-vision limits.
+    public var effectiveRuntimeOptions: AppRuntimeOptions {
+        var options = runtimeOptions
+        if let minimumSlots = AppRuntimeOptions.allowedSlotCounts.first(
+            where: { $0 >= installDescriptor.architecture.topKExperts }) {
+            options.expertCacheSlots = max(options.expertCacheSlots, minimumSlots)
+        }
+        if let memoryCap {
+            options.expertCacheSlots = min(options.expertCacheSlots,
+                                           memoryCap.expertCacheSlots)
+            options.prefillChunkTokens = min(options.prefillChunkTokens,
+                                             memoryCap.prefillChunkTokens)
+        }
+        return options
+    }
 
     public var modelChoices: [AppModelChoice] { AppModelChoice.allCases }
 
@@ -255,9 +346,40 @@ public final class AppModel {
     }
 
     public var canRun: Bool {
-        !isRunning && isModelAvailable && !loadState.isLoading
+        let hasText = !promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasImages = !pendingImages.isEmpty
+        return !isRunning && isModelAvailable && !loadState.isLoading
             && !hasStaleLoadedRuntime
-            && !promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (hasText || hasImages)
+            && (!hasImages || supportsVision)
+    }
+
+    /// The selected install is one of the vision builds and is complete.
+    public var supportsVision: Bool {
+        isModelInstalled
+            && installDescriptor.requiresVision
+            && (installDescriptor.architecture.isQwen3_6
+                || installDescriptor.architecture.isQwen3_8)
+    }
+
+    /// Attaching is offered only where the runtime can consume the image.
+    public var canAttachImage: Bool {
+        supportsVision && !isRunning && !loadState.isLoading
+    }
+
+    public func addPendingImages(_ images: [AppPendingImage]) {
+        guard canAttachImage else { return }
+        let room = AppImageAttachment.maximumImagesPerTurn - pendingImages.count
+        guard room > 0 else { return }
+        pendingImages.append(contentsOf: images.prefix(room))
+    }
+
+    public func removePendingImage(id: UUID) {
+        pendingImages.removeAll { $0.id == id }
+    }
+
+    public func clearPendingImages() {
+        pendingImages.removeAll()
     }
 
     public var canCancel: Bool { isRunning && !isCancellationPending }
@@ -332,14 +454,24 @@ public final class AppModel {
         return memorySampler.sample()
     }
 
+    /// The jetsam ceiling for this process, when the platform reports one.
+    ///
+    /// Shown beside the live footprint so the cap in
+    /// `AppModelMemoryBudget` can be checked against the machine it is
+    /// running on instead of the iPhone figure it was priced for. nil on
+    /// macOS, where no such limit exists.
+    public var processMemoryLimitBytes: UInt64? {
+        AppMemorySampler.memoryLimitBytes
+    }
+
     public var generationTranscriptMailbox: GenerationTranscriptMailbox? {
         (client as? any AppInferenceTranscriptReporting)?.generationTranscriptMailbox
     }
 
     private var currentRuntimeKey: AppLoadedRuntimeKey {
         AppLoadedRuntimeKey(modelDirectory: URL(fileURLWithPath: modelPathText),
-                            maxContextTokens: maxContextTokens,
-                            options: runtimeOptions,
+                            maxContextTokens: effectiveMaxContextTokens,
+                            options: effectiveRuntimeOptions,
                             forceLogitsHead: currentForceLogitsHead)
     }
 
@@ -348,27 +480,59 @@ public final class AppModel {
     }
 
     public func setModelChoice(_ choice: AppModelChoice) {
-        guard let packageRootURL else { return }
-        setModelURL(choice.defaultURL(packageRoot: packageRootURL), descriptor: choice.descriptor)
+        // A checkout resolves rows against `models/`; an app bundle (iOS) has
+        // no checkout, so the row resolves to the app-owned Models directory.
+        // Gating on `packageRootURL` here is what made every iOS selection a
+        // silent no-op.
+        setModelURL(
+            AppModelLocation.installURL(for: choice, packageRoot: packageRootURL),
+            descriptor: choice.descriptor)
     }
 
+    /// Points the app at an existing `.finch` directory chosen by the user.
+    ///
+    /// A directory with no `manifest.json` is not a model, and selecting one
+    /// must not silently fall back to the default descriptor — that turned
+    /// "I picked the wrong folder" into "the app switched to Gemma and
+    /// offered a download". The error is surfaced by the install screen and
+    /// the current selection is left alone.
     public func setModelURL(_ url: URL) {
+        let manifest = url.appendingPathComponent("manifest.json")
+        guard FileManager.default.fileExists(atPath: manifest.path) else {
+            modelSelectionError = url.lastPathComponent
+                + " is not a .finch model folder: manifest.json was not found. "
+                + "Choose the model directory itself, not its parent."
+            return
+        }
+        modelSelectionError = nil
         setModelURL(url, descriptor: AppModelInstallationProbe.matchingDescriptor(at: url))
+    }
+
+    /// Reports a picker failure (the file importer's own error) in the same
+    /// place as a rejected selection.
+    public func reportModelSelectionError(_ message: String) {
+        modelSelectionError = message
     }
 
     private func setModelURL(_ url: URL, descriptor: AppModelInstallDescriptor) {
         guard !isRunning else { return }
+        modelSelectionError = nil
         let path = url.standardizedFileURL.path
         let newChoice = Self.modelChoice(for: url, descriptor: descriptor)
         guard path != modelPathText || descriptor != installer.descriptor else { return }
 
         stopLocalServer()
+        pendingImages.removeAll()
         modelPathText = path
         selectedModelChoice = newChoice
         installer.cancel()
         installer = Self.makeInstaller(descriptor: descriptor)
         applyPersistedSettings(
             forModelDirectory: URL(fileURLWithPath: path, isDirectory: true))
+        // The persistence store may be off (tests) or the loaded settings may
+        // predate the model the row now selects; the current descriptor is the
+        // authority either way.
+        sanitizeRuntimeOptionsForCurrentModel()
         loadGeneration &+= 1
         loadTask?.cancel()
         loadTask = nil
@@ -438,8 +602,8 @@ public final class AppModel {
             return
         }
         let directory = URL(fileURLWithPath: modelPathText)
-        let maxContext = maxContextTokens
-        let options = runtimeOptions
+        let maxContext = effectiveMaxContextTokens
+        let options = effectiveRuntimeOptions
         let forceLogitsHead = currentForceLogitsHead
         let runtimeKey = AppLoadedRuntimeKey(modelDirectory: directory,
                                              maxContextTokens: maxContext,
@@ -527,8 +691,8 @@ public final class AppModel {
             "--model", URL(fileURLWithPath: modelPathText).standardizedFileURL.path,
             "--port", "\(localServerPort)",
             "--model-id", localServerModelID.isEmpty ? installDescriptor.shortName : localServerModelID,
-            "--max-context", "\(maxContextTokens)",
-            "--verify", runtimeOptions.modelVerification.rawValue,
+            "--max-context", "\(effectiveMaxContextTokens)",
+            "--verify", effectiveRuntimeOptions.modelVerification.rawValue,
         ]
         process.standardOutput = outputPipe
         process.standardError = outputPipe
@@ -726,6 +890,13 @@ public final class AppModel {
             installState = .installed(modelDirectory: directory)
             installTask = nil
             modelPathText = directory.path
+            // The installer promotes into a `realpath`-resolved directory,
+            // which can differ from the row's logical path (the checkout's
+            // `models/` is a symlink; on iOS `/var` is). `modelChoice`
+            // canonicalizes both sides, so this cannot clear a correct
+            // highlight.
+            selectedModelChoice = Self.modelChoice(for: directory,
+                                                   descriptor: installer.descriptor)
             loadState = .notLoaded
         }
     }
@@ -787,6 +958,7 @@ public final class AppModel {
         let settings = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: modelDirectory)
         runtimeOptions = AppRuntimeOptions(persisted: settings)
+        sanitizeRuntimeOptionsForCurrentModel()
         maxContextTokens = settings.contextTokens
         temperature = settings.temperature
         topKEnabled = settings.topKEnabled
@@ -795,6 +967,25 @@ public final class AppModel {
         topP = settings.topP
         newlineShortcut = settings.newlineShortcut
         sentPromptBehavior = settings.sentPromptBehavior
+        promptReuseEnabled = settings.promptReuseEnabled
+    }
+
+    /// Keeps a load-time option inside what the selected install can actually
+    /// run. Int8 KV is Qwen 3.6 only; the runner traps rather than misread a
+    /// 3.8 timeline, so the app must fall back before asking it to load.
+    private func sanitizeRuntimeOptionsForCurrentModel() {
+        if !runtimeOptions.kvCacheMode.isAvailable(
+            for: installDescriptor.architecture) {
+            runtimeOptions.kvCacheMode = .fp16
+        }
+        // 3.8 routes to ten experts per token; 8 slots cannot hold one
+        // layer's working set and `makeExpertCachePlan` traps on it.
+        let minimumSlots = installDescriptor.architecture.topKExperts
+        if runtimeOptions.expertCacheSlots < minimumSlots,
+           let replacement = AppRuntimeOptions.allowedSlotCounts.first(
+               where: { $0 >= minimumSlots }) {
+            runtimeOptions.expertCacheSlots = replacement
+        }
     }
 
     private func persistSettings() {
@@ -808,6 +999,9 @@ public final class AppModel {
             topPEnabled: topPEnabled,
             topP: topP,
             prefillEnabled: runtimeOptions.prefillEnabled,
+            prefillChunkTokens: runtimeOptions.prefillChunkTokens,
+            expertCachePolicy: runtimeOptions.expertCachePolicy,
+            promptReuseEnabled: promptReuseEnabled,
             modelVerification: runtimeOptions.modelVerification,
             newlineShortcut: newlineShortcut,
             sentPromptBehavior: sentPromptBehavior,
@@ -871,6 +1065,7 @@ public final class AppModel {
         guard !isRunning else { return }
         outputPromptText = ""
         outputText = ""
+        pendingImages.removeAll()
         generationTranscriptMailbox?.reset()
         diagnostics = nil
         error = nil
@@ -895,7 +1090,7 @@ public final class AppModel {
         generationTranscriptMailbox?.reset()
         outputPromptText = request.prompt
         outputText = ""
-        beginChatExchange(prompt: request.prompt)
+        beginChatExchange(prompt: request.prompt, images: request.images)
         diagnostics = nil
         error = nil
         hasHandledTerminalEvent = false
@@ -911,10 +1106,15 @@ public final class AppModel {
         livePrefillTotal = 0
         livePrefillCached = 0
         liveMemoryBytes = nil
-        phase = .prefill
+        // An image turn spends its first seconds in the vision tower, before
+        // the text engine has any prefill counts to report. Naming that phase
+        // separately is what stops a phone from showing "Prefill" for a
+        // picture that is still being encoded.
+        phase = request.hasImageContent ? .processingImage : .prefill
         runState = .running
         if sentPromptBehavior == .clear {
             promptText = ""
+            pendingImages.removeAll()
         }
 
         runTask = Task.detached { [weak self, client, request] in
@@ -941,18 +1141,18 @@ public final class AppModel {
         let request = AppGenerationRequest(
             modelDirectory: URL(fileURLWithPath: modelPathText),
             prompt: promptText,
-            history: activeSession.replayableMessages.map {
-                AppChatTurn(
-                    role: $0.role,
-                    text: $0.text)
+            images: pendingImages.map(\.attachment),
+            history: activeSession.replayableMessages.map { message in
+                chatTurn(for: message)
             },
-            maxNewTokens: maxNewTokensOverride ?? maxContextTokens,
-            maxContextTokens: maxContextTokens,
+            maxNewTokens: maxNewTokensOverride ?? effectiveMaxContextTokens,
+            maxContextTokens: effectiveMaxContextTokens,
             temperature: Float(temperature),
             topK: topKEnabled ? topK : nil,
             topP: topKEnabled && topPEnabled ? Float(topP) : nil,
             repetitionPenalty: 1.0,
-            runtimeOptions: runtimeOptions)
+            runtimeOptions: effectiveRuntimeOptions,
+            promptReuseEnabled: promptReuseEnabled)
         try request.validate(requireModelDirectory: true)
         return request
     }
@@ -1058,13 +1258,27 @@ public final class AppModel {
         return RepackModelInstallerClient(descriptor: descriptor)
     }
 
+    /// A row's destination is checkout-relative on the Mac and app-owned inside
+    /// a bundle; both sides are canonicalized before comparing, because
+    /// installers hand back `realpath`-resolved directories (the checkout's
+    /// `models/` is a symlink here, and `/var` is one on iOS) while the row
+    /// path is the logical one.
     private static func modelChoice(for directory: URL,
                                     descriptor: AppModelInstallDescriptor) -> AppModelChoice? {
-        guard let root = AppModelLocation.packageRootURL() else { return nil }
-        return AppModelChoice.allCases.first {
-            $0.descriptor == descriptor
-                && $0.defaultURL(packageRoot: root).standardizedFileURL == directory.standardizedFileURL
+        let directory = canonicalURL(directory)
+        let candidates = AppModelChoice.allCases.filter { $0.descriptor == descriptor }
+        if let root = AppModelLocation.packageRootURL() {
+            return candidates.first {
+                canonicalURL($0.defaultURL(packageRoot: root)) == directory
+            }
         }
+        return candidates.first {
+            canonicalURL(AppModelLocation.appInstallURL(for: $0)) == directory
+        }
+    }
+
+    private static func canonicalURL(_ url: URL) -> URL {
+        url.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL
     }
 
     #if canImport(AppKit)

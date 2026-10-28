@@ -57,7 +57,10 @@ import FinchMoEDecodeProtocol
                         forceLogitsHead: request.forceLogitsHead) { _ in }
                     modelDirectory = directory
                     loadedOptions = request.runtimeOptions
-                    let memory = AppMemorySampler().sample()
+                    // The client reports the device's allocated engine bytes,
+                    // which include the mmap-backed resident weights the
+                    // process footprint leaves out.
+                    let memory = client.currentInferenceMemoryBytes
                     try write(DecodeServiceEvent(
                         kind: .ready, generationID: request.requestID,
                         currentMemoryBytes: memory, peakMemoryBytes: memory,
@@ -100,16 +103,31 @@ import FinchMoEDecodeProtocol
                     let options = try appRuntimeOptions(request.runtimeOptions)
                     let generation = AppGenerationRequest(
                         modelDirectory: modelDirectory, prompt: request.prompt,
+                        images: request.images?.map {
+                            AppImageAttachment(id: $0.id,
+                                               mediaType: $0.mediaType,
+                                               data: $0.data,
+                                               pixelWidth: $0.pixelWidth,
+                                               pixelHeight: $0.pixelHeight)
+                        } ?? [],
                         history: request.history.map { turn in
                             AppChatTurn(
                                 role: turn.role == "assistant" ? .assistant : .user,
-                                text: turn.text)
+                                text: turn.text,
+                                images: turn.images?.map {
+                                    AppImageAttachment(id: $0.id,
+                                                       mediaType: $0.mediaType,
+                                                       data: $0.data,
+                                                       pixelWidth: $0.pixelWidth,
+                                                       pixelHeight: $0.pixelHeight)
+                                } ?? [])
                         },
                         maxNewTokens: request.maxNewTokens,
                         maxContextTokens: request.maxContextTokens,
                         temperature: request.temperature,
                         repetitionPenalty: request.repetitionPenalty,
-                        runtimeOptions: options)
+                        runtimeOptions: options,
+                        promptReuseEnabled: request.promptReuseEnabled ?? true)
                     for try await event in client.generate(generation) {
                         outbox.publish(event)
                     }

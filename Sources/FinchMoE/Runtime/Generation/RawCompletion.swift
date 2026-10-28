@@ -145,6 +145,7 @@ public func runRawCompletion(producer: any LogitProducer,
                              context: MetalContext,
                              scratch: RawCompletionScratch,
                              prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+                             multimodal: MultimodalPrefillInput? = nil,
                              prefillLogitsDumpPath: String? = nil,
                              start: RawCompletionStart = .reset,
                              shouldStop: () -> Bool = { false },
@@ -174,6 +175,16 @@ public func runRawCompletion(producer: any LogitProducer,
                 "producer does not support continuation")
         }
         cachedPromptTokens = count
+    }
+    if let multimodal {
+        guard cachedPromptTokens == 0 else {
+            throw PrefillError.multimodalUnsupported(
+                "a multimodal prompt cannot resume from a cached text prefix")
+        }
+        guard multimodal.positions.count == promptIds.count else {
+            throw PrefillError.multimodalUnsupported(
+                "multimodal positions cover \(multimodal.positions.count) tokens but the prefill covers \(promptIds.count)")
+        }
     }
     let computedPrefillTokens = promptIds.count - cachedPromptTokens
 
@@ -206,9 +217,10 @@ public func runRawCompletion(producer: any LogitProducer,
                                                       startPosition: position,
                                                       outputMode: mode,
                                                       config: prefillConfig,
-                                                      into: scratch.logits) { done in
+                                                      into: scratch.logits,
+                                                      onProgress: { done in
             onProgress(.prefill(done: cachedPromptTokens + done, total: promptIds.count))
-        }
+        }, multimodal: multimodal)
         if mode == .logits, result.seed != .logitsWritten {
             throw PrefillError.unsupportedPrefillSeed(
                 "RawCompletion chunked prefill requested logits but producer returned \(result.seed)")
@@ -224,6 +236,10 @@ public func runRawCompletion(producer: any LogitProducer,
         throw PrefillError.chunkedUnsupported(
             PrefillError.chunkedRequiresChunkedRunnerReason)
     case .off:
+        guard multimodal == nil else {
+            throw PrefillError.multimodalUnsupported(
+                "multimodal prompts require chunked prefill")
+        }
         for t in prefillTokens {
             try Task.checkCancellation()
             try await producer.produce(token: t, position: position, into: scratch.logits)

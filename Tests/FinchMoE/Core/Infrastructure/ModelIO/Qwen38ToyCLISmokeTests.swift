@@ -268,6 +268,38 @@ import FinchMoECLICore
         #expect(ExpertCacheSlotCheck.error(slots: 8, topKExperts: 2) == nil)
     }
 
+    /// The same shape as the test above, but reachable end-to-end because the
+    /// toy declares `qwen3_8`. `--kv-int8` now actually reaches
+    /// `RuntimeConfiguration.kvStorageMode` (it used to be dropped at the
+    /// `Args` boundary), which makes `RealForwardRunner.swift:571`'s
+    /// `precondition` reachable from the command line for the first time — on a
+    /// 3.8 pack that is a SIGTRAP naming the runner, not the flag the user
+    /// typed, and a trap no caller can catch. The CLI refuses it before the
+    /// runner is constructed, in the same place and with the same exit code as
+    /// the slot check.
+    @Test func kvInt8OnQwen38IsRefusedInsteadOfTrapping() async throws {
+        let out = try await Qwen38EngineLoadTests.makeInstall()
+        defer { try? FileManager.default.removeItem(atPath: out) }
+        try Self.writeToyTokenizer(into: out)
+
+        let args = try Args.parse([
+            "--model", out,
+            "--prompt", "hello world 3",
+            "--max-new", "4",
+            "--max-context", "64",
+            "--temperature", "0",
+            "--kv-int8",
+        ])
+        // Only reachable at all if the flag survived parsing.
+        #expect(args.kvInt8)
+        let (result, text, errors) = await Self.runCLI(args)
+
+        #expect(result.exitCode == 2, "CLI exited \(result.exitCode): \(errors)")
+        #expect(errors.contains("--kv-int8"), "stderr: \(errors), stdout: \(text)")
+        // Refused before generation, so nothing was written to stdout.
+        #expect(text.isEmpty, "stdout: \(text)")
+    }
+
     // MARK: - CLI harness
 
     /// Drives the CLI in-process and captures both streams.

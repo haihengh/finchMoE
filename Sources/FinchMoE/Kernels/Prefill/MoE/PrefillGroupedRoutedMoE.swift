@@ -245,9 +245,9 @@ public struct PrefillStreamedTileBinding: Sendable, Equatable {
                                            avoidingSlots: Set<Int> = []) async throws
         -> PrefillStreamedTileFetchResult {
         let expertIDs = try expertIDs(forTile: tileIndex, routes: routes)
-        let plan = try plannedFetch ?? model.planRoutedExperts(layer: layer,
-                                                               experts: expertIDs,
-                                                               avoidingSlots: avoidingSlots)
+        let plan = try plannedFetch ?? model.planRoutedExpertsCached(layer: layer,
+                                                                     experts: expertIDs,
+                                                                     avoidingSlots: avoidingSlots)
         let views: [TensorView]
         let usedPlannedFetch: Bool
         let plannedHits: Int

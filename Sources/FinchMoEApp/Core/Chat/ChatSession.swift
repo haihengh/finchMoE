@@ -85,12 +85,17 @@ public struct ChatSession: Identifiable, Codable, Equatable, Sendable {
     /// The sidebar label for a session the user has not named: the first line
     /// of the first thing they asked, collapsed and clipped.
     public static func derivedTitle(from messages: [ChatMessage]) -> String {
-        guard let first = messages.first(where: { $0.role == .user }),
-              let line = first.text
-                .split(whereSeparator: \.isNewline)
-                .map({ $0.trimmingCharacters(in: .whitespaces) })
-                .first(where: { !$0.isEmpty })
+        guard let first = messages.first(where: { $0.role == .user }) else {
+            return untitledTitle
+        }
+        guard let line = first.text
+            .split(whereSeparator: \.isNewline)
+            .map({ $0.trimmingCharacters(in: .whitespaces) })
+            .first(where: { !$0.isEmpty })
         else {
+            if let count = first.attachments?.count, count > 0 {
+                return count == 1 ? "Image" : "\(count) Images"
+            }
             return untitledTitle
         }
         let collapsed = line.split(whereSeparator: \.isWhitespace).joined(separator: " ")

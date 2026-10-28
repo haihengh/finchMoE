@@ -20,7 +20,11 @@ public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
 }
 
 public struct RuntimeConfiguration: Sendable, Equatable {
-    public static let allowedExpertCacheSlots = [8, 16, 24, 32]
+    /// A model's top-k is a second, per-model floor: a layer's expert cache
+    /// must hold every routed expert at once (`PreadExpertStreamer` traps
+    /// below that), so 3.8 (top-k 10) cannot use the 8-slot setting. The app
+    /// filters its picker and clamps its effective options accordingly.
+    public static let allowedExpertCacheSlots = [8, 10, 16, 24, 32]
     // Prefill cost is dominated by re-reading a layer's routed-expert pool once
     // per chunk (the LFU cache holds singles of experts, not the pool), so the
     // chunk size is the prefill I/O divisor. The ceiling was 128 — the upstream
@@ -29,9 +33,23 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     // per chunk token for Qwen 3.6, so 512 costs ~79 MiB and 1024 ~158 MiB
     // against a ~1.1 GiB resident budget.
     public static let allowedPrefillChunkTokens = [32, 64, 128, 256, 512, 1024]
+    /// The shipping chunk, and the top of the list above. Measured on the 3.8
+    /// 125B at 2,907 tokens: 512 prefills in 141.6 s having read 127.7 GB at
+    /// 4.91 GB peak RSS; 1,024 in 111.3 s having read 72.1 GB at 4.84 GB. GPU
+    /// time is the same at both (48.06 s vs 48.13 s), so the whole −21 % is the
+    /// halved re-read, and the doubled scratch costs no extra peak RSS here.
+    /// Seeded runs at both chunks are byte-identical. The old 512 default came
+    /// from a sweep that read 1024 as "only a little more"; it is +27 % pp.
+    /// See `STRATA_PP_KV_ANALYSIS.md` §4.1.
+    public static let defaultPrefillChunkTokens = 1024
 
     public let expertCacheSlots: Int
     public let expertCachePolicy: RuntimeExpertCachePolicy
+    /// Decode reads every routed expert on every step and does not retain
+    /// expert contents between steps. Prefill keeps the cached path. This is
+    /// the old engine's `cache_entries = 0` mode: it lets the OS page cache,
+    /// rather than the per-layer LFU slots, decide what stays hot.
+    public let directExpertCache: Bool
     public let rdadvisePolicy: RDAdvicePolicyMode
     public let prefillPolicy: RuntimePrefillPolicy
     public let prefillChunkTokens: Int
@@ -75,9 +93,10 @@ public struct RuntimeConfiguration: Sendable, Equatable {
 
     public init(expertCacheSlots: Int = 16,
                 expertCachePolicy: RuntimeExpertCachePolicy = .lfu,
+                directExpertCache: Bool = false,
                 rdadvisePolicy: RDAdvicePolicyMode = .off,
                 prefillEnabled: Bool = true,
-                prefillChunkTokens: Int = 512,
+                prefillChunkTokens: Int = RuntimeConfiguration.defaultPrefillChunkTokens,
                 prefillAttentionPath: RuntimePrefillAttentionPath = .fullTensorOps2DPreferred,
                 forceLogitsHead: Bool = false,
                 qsaIndexerEnabled: Bool = true,
@@ -93,6 +112,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                      "prefill tiles hold 1 to 16 experts")
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
+        self.directExpertCache = directExpertCache
         self.rdadvisePolicy = rdadvisePolicy
         self.prefillPolicy = prefillEnabled ? .chunked : .off
         self.prefillChunkTokens = prefillChunkTokens

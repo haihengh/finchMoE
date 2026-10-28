@@ -60,6 +60,8 @@ extension AppModel {
 
     public func deleteSession(_ id: UUID) {
         guard canStartNewSession else { return }
+        chatStore?.removeAttachmentDirectory(relativePath: id.uuidString)
+        ChatAttachmentImageCache.removeAll()
         sessions.removeAll { $0.id == id }
         if sessions.isEmpty { sessions = [ChatSession()] }
         if activeSessionID == id { activeSessionID = sessions[0].id }
@@ -69,6 +71,11 @@ extension AppModel {
 
     public func deleteAllSessions() {
         guard canStartNewSession else { return }
+        if let chatStore {
+            try? FileManager.default.removeItem(
+                at: chatStore.attachmentsDirectory)
+        }
+        ChatAttachmentImageCache.removeAll()
         let session = ChatSession()
         sessions = [session]
         activeSessionID = session.id
@@ -93,6 +100,9 @@ extension AppModel {
             persistChatSessions()
             return
         }
+        chatStore?.removeAttachmentDirectory(
+            relativePath: session.id.uuidString)
+        ChatAttachmentImageCache.removeAll()
         session.removeAllMessages()
         replaceActiveSession(session)
         persistChatSessions()
@@ -102,7 +112,15 @@ extension AppModel {
     /// model does not see its own previous answer as context.
     public func regenerateLastReply() {
         guard canRegenerateLastReply,
-              let question = activeSession.lastUserMessage?.text else { return }
+              let lastUser = activeSession.lastUserMessage else { return }
+        let question = lastUser.text
+        pendingImages = chatTurn(for: lastUser).images.map {
+            AppPendingImage(id: $0.id,
+                            data: $0.data,
+                            mediaType: $0.mediaType,
+                            pixelWidth: $0.pixelWidth,
+                            pixelHeight: $0.pixelHeight)
+        }
         var session = activeSession
         if session.messages.last?.role == .assistant {
             session.messages.removeLast()
@@ -111,6 +129,7 @@ extension AppModel {
             session.messages.removeLast()
         }
         replaceActiveSession(session)
+        deleteAttachments(for: lastUser)
         promptText = question
         run()
     }
@@ -119,10 +138,34 @@ extension AppModel {
 
     /// Records the user's question and the assistant bubble that the running
     /// generation will fill in.
-    func beginChatExchange(prompt: String) {
+    func beginChatExchange(prompt: String, images: [AppImageAttachment] = []) {
         var session = activeSession
         let now = Date()
-        session.append(ChatMessage(role: .user, text: prompt, createdAt: now))
+        let userID = UUID()
+        var stored: [ChatImageAttachment] = []
+        if let chatStore {
+            for image in images {
+                let ext = image.mediaType == "image/png" ? "png" : "jpg"
+                let relative = "\(session.id.uuidString)/\(userID.uuidString)/\(image.id.uuidString).\(ext)"
+                do {
+                    try chatStore.saveAttachment(image.data, relativePath: relative)
+                    stored.append(ChatImageAttachment(
+                        id: image.id,
+                        fileName: relative,
+                        mediaType: image.mediaType,
+                        pixelWidth: image.pixelWidth,
+                        pixelHeight: image.pixelHeight))
+                } catch {
+                    // A file that cannot be written cannot be shown or
+                    // replayed; the text turn still goes through.
+                }
+            }
+        }
+        session.append(ChatMessage(id: userID,
+                                   role: .user,
+                                   text: prompt,
+                                   createdAt: now,
+                                   attachments: stored.isEmpty ? nil : stored))
         let reply = ChatMessage(
             role: .assistant,
             text: "",
@@ -132,6 +175,38 @@ extension AppModel {
         session.append(reply)
         session.updatedAt = now
         replaceActiveSession(session, moveToFront: true)
+    }
+
+    /// Rebuilds one replayable turn, reloading its images from the attachment
+    /// directory. Missing files are skipped rather than failing the turn.
+    func chatTurn(for message: ChatMessage) -> AppChatTurn {
+        let images = (message.attachments ?? []).compactMap { attachment -> AppImageAttachment? in
+            guard let data = attachmentData(attachment) else { return nil }
+            return AppImageAttachment(id: attachment.id,
+                                      mediaType: attachment.mediaType,
+                                      data: data,
+                                      pixelWidth: attachment.pixelWidth,
+                                      pixelHeight: attachment.pixelHeight)
+        }
+        return AppChatTurn(role: message.role, text: message.text, images: images)
+    }
+
+    /// Removes every persisted image belonging to one message (and the
+    /// now-empty parent directories).
+    func deleteAttachments(for message: ChatMessage) {
+        guard let chatStore else { return }
+        let sessionID = activeSessionID.uuidString
+        for attachment in message.attachments ?? [] {
+            ChatAttachmentImageCache.remove(fileName: attachment.fileName)
+            chatStore.removeAttachment(relativePath: attachment.fileName)
+        }
+        chatStore.removeAttachmentDirectory(
+            relativePath: "\(sessionID)/\(message.id.uuidString)")
+    }
+
+    /// Bytes for a persisted image, cached for the lifetime of the view.
+    public func attachmentData(_ attachment: ChatImageAttachment) -> Data? {
+        ChatAttachmentImageCache.data(attachment, store: chatStore)
     }
 
     /// Streams text into the bubble being written.

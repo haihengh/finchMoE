@@ -97,6 +97,8 @@ import Testing
 
         snapshot = Self.installedSnapshot(loadState: ready)
         snapshot.isRunning = true
+        snapshot.generationPhase = .processingImage
+        cases.append((snapshot, "Processing image", true))
         snapshot.generationPhase = .prefill
         cases.append((snapshot, "Prefill", false))
         snapshot.generationPhase = .decode

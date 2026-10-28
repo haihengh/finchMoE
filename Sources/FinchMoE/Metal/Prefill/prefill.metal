@@ -456,7 +456,7 @@ static inline float prefill_moe_int4_gemv_row_dev(
     return acc;
 }
 
-static inline float prefill_moe_int4_gemv_row_tg(
+static inline __attribute__((unused)) float prefill_moe_int4_gemv_row_tg(
     device const uint8_t* W,
     device const bfloat* S,
     device const bfloat* B,
@@ -1066,7 +1066,7 @@ static inline float prefill_attention_tg_sum(
     return partial[0];
 }
 
-static inline float prefill_attention_tg_sum_single_bank(
+static inline __attribute__((unused)) float prefill_attention_tg_sum_single_bank(
     float value,
     uint lane,
     uint simd_group,

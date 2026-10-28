@@ -54,4 +54,45 @@ import FinchMoE
                     "\(choice.label) has a picker row but is not installable")
         }
     }
+
+    /// `installName` is the single source of truth for the row's directory: the
+    /// checkout path and the app-owned path both derive from it, so it must be
+    /// exactly the basename those paths end in.
+    @Test func installNamesAreDefaultURLBasenames() {
+        let root = URL(fileURLWithPath: "/repo")
+        for choice in AppModelChoice.allCases {
+            #expect(choice.defaultURL(packageRoot: root).lastPathComponent
+                        == choice.installName,
+                    "\(choice) derives a different basename than its installName")
+            #expect(!choice.installName.isEmpty)
+        }
+    }
+
+    /// Pins the on-disk basenames so a rename cannot silently orphan an
+    /// installed model — the app-owned destinations outside a checkout are
+    /// derived from these names.
+    @Test func installNamesMatchThePinnedLayout() {
+        let expected: [(AppModelChoice, String)] = [
+            (.gemma4, "gemma4.finch"),
+            (.qwen3_6, "Qwen3.6-35B-A3B-4bit.finch"),
+            (.qwen3_6_3bit, "Qwen3.6-35B-A3B-3bit.finch"),
+            (.qwen3_6_3bit_vision, "Qwen3.6-35B-A3B-3bit-vision.finch"),
+            (.qwen3_6_abliterated, "Qwen3.6-35B-A3B-abliterated-4bit.finch"),
+            (.qwen3_6_abliterated_3bit, "Qwen3.6-35B-A3B-abliterated-3bit.finch"),
+            (.qwen3_8, "Qwen3.8-Flash-Next-125B-ple4bit.finch"),
+            (.qwen3_8_3bit, "Qwen3.8-Flash-Next-125B-ple3bit.finch"),
+            (.qwen3_8_2bit, "Qwen3.8-Flash-Next-125B-ple2bit.finch"),
+            (.qwen3_8_abliterated, "Qwen3.8-Flash-Next-abliterated-ple4bit.finch"),
+            (.qwen3_8_abliterated_3bit, "Qwen3.8-Flash-Next-abliterated-ple3bit.finch"),
+            (.qwen3_8_abliterated_2bit, "Qwen3.8-Flash-Next-abliterated-ple2bit.finch"),
+            (.qwen3_8_abliterated_2bit_vision,
+             "Qwen3.8-Flash-Next-abliterated-ple2bit-vision.finch"),
+        ]
+        #expect(expected.count == AppModelChoice.allCases.count)
+        for (choice, name) in expected {
+            #expect(choice.installName == name, "\(choice) install name drifted")
+        }
+        #expect(Set(expected.map { $0.1 }).count == expected.count,
+                "two rows share an install name")
+    }
 }
