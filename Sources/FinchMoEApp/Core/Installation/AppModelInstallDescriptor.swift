@@ -244,6 +244,25 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         shortDisplayName: "Qwen 3.8 125B 4-bit",
         finchDistribution: qwen38Distribution)
 
+    /// The 3.8 4-bit build plus the source BF16 vision tower. Text bytes are
+    /// identical to `.qwen3_8`; `requiresVision` is what the probe uses to keep
+    /// the two directories from claiming each other.
+    public static let qwen3_8_vision = AppModelInstallDescriptor(
+        displayName: "Qwen 3.8 Flash-Next 125B 4-bit (Vision)",
+        repoID: "Qwen/Qwen3.8-Flash-Next",
+        revision: "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+        sourceIndexSHA256: "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
+        weightsSHA256: "c522877f166d128e0c30ce58bf93322d48e3ebbda55ccf9b2c8dae86efa82a06",
+        routedExpertBits: 4,
+        approximateDownloadBytes: qwen38VisionFourBitDistribution.approximateDownloadBytes,
+        installedBytes: 104_900_737_069,
+        rangeStagingBytes: 0,
+        reserveBytes: distributionReserveBytes,
+        architecture: .qwen3_8_flashNext_125B,
+        shortDisplayName: "Qwen 3.8 125B 4-bit Vision",
+        requiresVision: true,
+        finchDistribution: qwen38VisionFourBitDistribution)
+
     /// Qwen 3.8 Flash-Next 125B at 3-bit routed experts — the quality-neutral
     /// step down (HumanEval+ matches the 4-bit build exactly). `installedBytes`
     /// measured 2026-10-15 from `models/Qwen3.8-Flash-Next-125B-ple3bit.finch`.
@@ -262,6 +281,25 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         shortDisplayName: "Qwen 3.8 125B 3-bit",
         finchDistribution: qwen38ThreeBitDistribution)
 
+    /// The 3.8 3-bit build plus the source BF16 vision tower. Text bytes are
+    /// identical to `.qwen3_8_3bit`; `requiresVision` is what the probe uses to
+    /// keep the two directories from claiming each other.
+    public static let qwen3_8_3bit_vision = AppModelInstallDescriptor(
+        displayName: "Qwen 3.8 Flash-Next 125B 3-bit (Vision)",
+        repoID: "Qwen/Qwen3.8-Flash-Next",
+        revision: "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+        sourceIndexSHA256: "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
+        weightsSHA256: "c522877f166d128e0c30ce58bf93322d48e3ebbda55ccf9b2c8dae86efa82a06",
+        routedExpertBits: 3,
+        approximateDownloadBytes: qwen38VisionThreeBitDistribution.approximateDownloadBytes,
+        installedBytes: 90_002_563_885,
+        rangeStagingBytes: 0,
+        reserveBytes: distributionReserveBytes,
+        architecture: .qwen3_8_flashNext_125B,
+        shortDisplayName: "Qwen 3.8 125B 3-bit Vision",
+        requiresVision: true,
+        finchDistribution: qwen38VisionThreeBitDistribution)
+
     /// Qwen 3.8 Flash-Next 125B at 2-bit routed experts — the fastest decode of
     /// the family, ~10 pp of quality below 3-bit. `installedBytes` measured
     /// 2026-10-15 from `models/Qwen3.8-Flash-Next-125B-ple2bit.finch`.
@@ -279,6 +317,25 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         architecture: .qwen3_8_flashNext_125B,
         shortDisplayName: "Qwen 3.8 125B 2-bit",
         finchDistribution: qwen38TwoBitDistribution)
+
+    /// The 3.8 2-bit build plus the source BF16 vision tower. Text bytes are
+    /// identical to `.qwen3_8_2bit`; `requiresVision` is what the probe uses to
+    /// keep the two directories from claiming each other.
+    public static let qwen3_8_2bit_vision = AppModelInstallDescriptor(
+        displayName: "Qwen 3.8 Flash-Next 125B 2-bit (Vision)",
+        repoID: "Qwen/Qwen3.8-Flash-Next",
+        revision: "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+        sourceIndexSHA256: "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
+        weightsSHA256: "c522877f166d128e0c30ce58bf93322d48e3ebbda55ccf9b2c8dae86efa82a06",
+        routedExpertBits: 2,
+        approximateDownloadBytes: qwen38VisionTwoBitDistribution.approximateDownloadBytes,
+        installedBytes: 74_701_690_333,
+        rangeStagingBytes: 0,
+        reserveBytes: distributionReserveBytes,
+        architecture: .qwen3_8_flashNext_125B,
+        shortDisplayName: "Qwen 3.8 125B 2-bit Vision",
+        requiresVision: true,
+        finchDistribution: qwen38VisionTwoBitDistribution)
 
     /// Abliterated (refusal-direction-removed) Qwen 3.6. Structurally identical
     /// to `.qwen3_6` — same architecture, same layout, **the same
@@ -305,6 +362,26 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         shortDisplayName: "Qwen 3.6 Abl. 4-bit",
         finchDistribution: qwen36AbliteratedDistribution)
 
+    /// The 3.6 4-bit abliterated build plus the source BF16 vision tower.
+    /// Text bytes are identical to `.qwen3_6_abliterated`; `requiresVision` is
+    /// what the probe uses to keep the two directories from claiming each
+    /// other.
+    public static let qwen3_6_abliterated_vision = AppModelInstallDescriptor(
+        displayName: "Qwen 3.6 35B-A3B 4-bit (Abliterated, Vision)",
+        repoID: "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated",
+        revision: "",
+        sourceIndexSHA256: "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83",
+        weightsSHA256: "f6862341c9688e234c682cef186af5a92445be1dbcdd36d59637338634d311bd",
+        routedExpertBits: 4,
+        approximateDownloadBytes: qwen36VisionFourBitAbliteratedDistribution.approximateDownloadBytes,
+        installedBytes: 20_952_723_982,
+        rangeStagingBytes: 0,
+        reserveBytes: distributionReserveBytes,
+        architecture: .qwen3_6_35B_A3B,
+        shortDisplayName: "Qwen 3.6 Abl. 4-bit Vision",
+        requiresVision: true,
+        finchDistribution: qwen36VisionFourBitAbliteratedDistribution)
+
     /// Abliterated Qwen 3.6 at 3-bit routed experts, repacked 2026-10-16 from
     /// `models/Qwen3.6-35B-A3B-abliterated-bf16`. Payload is byte-identical to
     /// the base 3-bit build (verified on disk 2026-10-16); `installedBytes` is
@@ -323,6 +400,26 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         architecture: .qwen3_6_35B_A3B,
         shortDisplayName: "Qwen 3.6 Abl. 3-bit",
         finchDistribution: qwen36ThreeBitAbliteratedDistribution)
+
+    /// The 3.6 3-bit abliterated build plus the source BF16 vision tower.
+    /// Text bytes are identical to `.qwen3_6_abliterated_3bit`; `requiresVision`
+    /// is what the probe uses to keep the two directories from claiming each
+    /// other.
+    public static let qwen3_6_abliterated_3bit_vision = AppModelInstallDescriptor(
+        displayName: "Qwen 3.6 35B-A3B 3-bit (Abliterated, Vision)",
+        repoID: "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated",
+        revision: "",
+        sourceIndexSHA256: "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83",
+        weightsSHA256: "f6862341c9688e234c682cef186af5a92445be1dbcdd36d59637338634d311bd",
+        routedExpertBits: 3,
+        approximateDownloadBytes: qwen36VisionThreeBitAbliteratedDistribution.approximateDownloadBytes,
+        installedBytes: 16_926_160_702,
+        rangeStagingBytes: 0,
+        reserveBytes: distributionReserveBytes,
+        architecture: .qwen3_6_35B_A3B,
+        shortDisplayName: "Qwen 3.6 Abl. 3-bit Vision",
+        requiresVision: true,
+        finchDistribution: qwen36VisionThreeBitAbliteratedDistribution)
 
     /// Abliterated Qwen 3.8 Flash-Next, the 3.8 counterpart of
     /// `.qwen3_6_abliterated`: same relationship, same reason it needs its own
@@ -347,6 +444,25 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         shortDisplayName: "Qwen 3.8 Abl. 4-bit",
         finchDistribution: qwen38AbliteratedDistribution)
 
+    /// The abliterated 4-bit build plus the source BF16 vision tower. Text
+    /// bytes are identical to `.qwen3_8_abliterated`; `requiresVision` is what
+    /// the probe uses to keep the two directories from claiming each other.
+    public static let qwen3_8_abliterated_vision = AppModelInstallDescriptor(
+        displayName: "Qwen 3.8 Flash-Next 125B 4-bit (Abliterated, Vision)",
+        repoID: "windowsxp811203/Qwen3.8-Flash-Next-Abliterated",
+        revision: "",
+        sourceIndexSHA256: "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
+        weightsSHA256: "6af82b557d8207e470f50c1fba5dbb14e7ff4b48139a5b0b2e4f8ac56d188acb",
+        routedExpertBits: 4,
+        approximateDownloadBytes: qwen38VisionFourBitAbliteratedDistribution.approximateDownloadBytes,
+        installedBytes: 104_900_737_076,
+        rangeStagingBytes: 0,
+        reserveBytes: distributionReserveBytes,
+        architecture: .qwen3_8_flashNext_125B,
+        shortDisplayName: "Qwen 3.8 Abl. 4-bit Vision",
+        requiresVision: true,
+        finchDistribution: qwen38VisionFourBitAbliteratedDistribution)
+
     /// Abliterated Qwen 3.8 at 3-bit routed experts, repacked 2026-10-16 from
     /// `models/Qwen3.8-Flash-Next-abliterated-bf16`. Payload is byte-identical
     /// to the base 3-bit build (verified on disk 2026-10-16); `installedBytes`
@@ -365,6 +481,26 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         architecture: .qwen3_8_flashNext_125B,
         shortDisplayName: "Qwen 3.8 Abl. 3-bit",
         finchDistribution: qwen38ThreeBitAbliteratedDistribution)
+
+    /// The abliterated 3-bit build plus the source BF16 vision tower. Text
+    /// bytes are identical to `.qwen3_8_abliterated_3bit`; `requiresVision` is
+    /// what the probe uses to keep the two directories from claiming each
+    /// other.
+    public static let qwen3_8_abliterated_3bit_vision = AppModelInstallDescriptor(
+        displayName: "Qwen 3.8 Flash-Next 125B 3-bit (Abliterated, Vision)",
+        repoID: "windowsxp811203/Qwen3.8-Flash-Next-Abliterated",
+        revision: "",
+        sourceIndexSHA256: "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
+        weightsSHA256: "6af82b557d8207e470f50c1fba5dbb14e7ff4b48139a5b0b2e4f8ac56d188acb",
+        routedExpertBits: 3,
+        approximateDownloadBytes: qwen38VisionThreeBitAbliteratedDistribution.approximateDownloadBytes,
+        installedBytes: 90_002_563_892,
+        rangeStagingBytes: 0,
+        reserveBytes: distributionReserveBytes,
+        architecture: .qwen3_8_flashNext_125B,
+        shortDisplayName: "Qwen 3.8 Abl. 3-bit Vision",
+        requiresVision: true,
+        finchDistribution: qwen38VisionThreeBitAbliteratedDistribution)
 
     /// Abliterated Qwen 3.8 at 2-bit routed experts, repacked 2026-10-16.
     /// Payload identical to the base 2-bit build (verified on disk
@@ -421,9 +557,13 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     /// that fallback answers exactly as it did before widths existed.
     public static let installable: [AppModelInstallDescriptor] = [
         .qwen3_6, .qwen3_6_3bit, .qwen3_6_3bit_vision,
-        .qwen3_6_abliterated, .qwen3_6_abliterated_3bit,
-        .qwen3_8, .qwen3_8_3bit, .qwen3_8_2bit,
-        .qwen3_8_abliterated, .qwen3_8_abliterated_3bit,
+        .qwen3_6_abliterated, .qwen3_6_abliterated_vision,
+        .qwen3_6_abliterated_3bit, .qwen3_6_abliterated_3bit_vision,
+        .qwen3_8, .qwen3_8_vision,
+        .qwen3_8_3bit, .qwen3_8_3bit_vision,
+        .qwen3_8_2bit, .qwen3_8_2bit_vision,
+        .qwen3_8_abliterated, .qwen3_8_abliterated_vision,
+        .qwen3_8_abliterated_3bit, .qwen3_8_abliterated_3bit_vision,
         .qwen3_8_abliterated_2bit, .qwen3_8_abliterated_2bit_vision,
     ]
 }
@@ -468,6 +608,36 @@ private let qwen36VisionThreeBitDistribution = FinchDistribution(
     approximateDownloadBytes: 16_926_141_154,
     installedBytes: 16_926_159_989)
 
+private let qwen36VisionThreeBitAbliteratedDistribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.6-35B-A3B-finch-3bit-abliterated-vision",
+    revision: "324c4790f266e4336d1af42dd61e7f97ccd83b9e",
+    approximateDownloadBytes: 16_926_141_539,
+    installedBytes: 16_926_160_702)
+
+private let qwen36VisionFourBitAbliteratedDistribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.6-35B-A3B-finchmoe-4bit-abliterated-vision",
+    revision: "a018ecf3991b9e1c96dfd1131beb03103e93a685",
+    approximateDownloadBytes: 20_952_704_819,
+    installedBytes: 20_952_723_982)
+
+private let qwen38VisionFourBitDistribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple4bit-vision",
+    revision: "b910489427ca399c02361e886c64f3144a7f4973",
+    approximateDownloadBytes: 104_900_675_753,
+    installedBytes: 104_900_737_069)
+
+private let qwen38VisionThreeBitDistribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple3bit-vision",
+    revision: "dd541cf0457a12bffb20b811da1288f8d8b7def3",
+    approximateDownloadBytes: 90_002_502_569,
+    installedBytes: 90_002_563_885)
+
+private let qwen38VisionTwoBitDistribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple2bit-vision",
+    revision: "ed54aca1afb6173f81d76ce62f66442e6e001216",
+    approximateDownloadBytes: 74_701_629_113,
+    installedBytes: 74_701_690_333)
+
 private let qwen38ThreeBitDistribution = FinchDistribution(
     repoID: "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple3bit",
     revision: "80a63e6294655af8a9424ce1307478d294d9e463",
@@ -497,6 +667,18 @@ private let qwen38VisionTwoBitAbliteratedDistribution = FinchDistribution(
     revision: "e27a5361544c5902f3e46c2220d961c16164ef96",
     approximateDownloadBytes: 74_701_629_113,
     installedBytes: 74_701_690_351)
+
+private let qwen38VisionThreeBitAbliteratedDistribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple3bit-abliterated-vision",
+    revision: "4b879c65a35c925e0098cca32fb2ef7dc0a99bf4",
+    approximateDownloadBytes: 90_002_502_569,
+    installedBytes: 90_002_563_892)
+
+private let qwen38VisionFourBitAbliteratedDistribution = FinchDistribution(
+    repoID: "haihengh/Qwen3.8-Flash-Next-125B-finchmoe-4bit-ple4bit-abliterated-vision",
+    revision: "c2fe1cd8ba7b692b8f167ce94d08c2ef34cfc177",
+    approximateDownloadBytes: 104_900_675_753,
+    installedBytes: 104_900_737_076)
 
 private let qwen36AbliteratedDistribution = FinchDistribution(
     repoID: "haihengh/Qwen3.6-35B-A3B-finchmoe-4bit-abliterated",

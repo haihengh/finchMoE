@@ -214,6 +214,78 @@ import FinchMoERepackCore
     #expect(q38Distribution.approximateDownloadBytes == 74_701_629_113)
   }
 
+  /// Every published vision row, pinned. A vision row is only useful if its
+  /// distribution really is the vision-bearing repo at the commit recorded
+  /// here: pointing it at the text sibling's revision would download text
+  /// bytes under a vision label, and the probe would reject the install it
+  /// just completed. The count assertion against `allCases` is what makes a
+  /// newly added vision row fail here instead of shipping unpinned.
+  @MainActor
+  @Test func everyVisionRowDownloadsItsOwnVisionDistribution() {
+    let expected: [(descriptor: AppModelInstallDescriptor,
+                    repoID: String,
+                    revision: String,
+                    payload: UInt64,
+                    installed: UInt64)] = [
+      (.qwen3_6_3bit_vision,
+       "haihengh/Qwen3.6-35B-A3B-finch-3bit-vision",
+       "5208d13622f30566bb8b12183d161e8cecdb81e5",
+       16_926_141_154, 16_926_159_989),
+      (.qwen3_6_abliterated_vision,
+       "haihengh/Qwen3.6-35B-A3B-finchmoe-4bit-abliterated-vision",
+       "a018ecf3991b9e1c96dfd1131beb03103e93a685",
+       20_952_704_819, 20_952_723_982),
+      (.qwen3_6_abliterated_3bit_vision,
+       "haihengh/Qwen3.6-35B-A3B-finch-3bit-abliterated-vision",
+       "324c4790f266e4336d1af42dd61e7f97ccd83b9e",
+       16_926_141_539, 16_926_160_702),
+      (.qwen3_8_vision,
+       "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple4bit-vision",
+       "b910489427ca399c02361e886c64f3144a7f4973",
+       104_900_675_753, 104_900_737_069),
+      (.qwen3_8_3bit_vision,
+       "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple3bit-vision",
+       "dd541cf0457a12bffb20b811da1288f8d8b7def3",
+       90_002_502_569, 90_002_563_885),
+      (.qwen3_8_2bit_vision,
+       "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple2bit-vision",
+       "ed54aca1afb6173f81d76ce62f66442e6e001216",
+       74_701_629_113, 74_701_690_333),
+      (.qwen3_8_abliterated_vision,
+       "haihengh/Qwen3.8-Flash-Next-125B-finchmoe-4bit-ple4bit-abliterated-vision",
+       "c2fe1cd8ba7b692b8f167ce94d08c2ef34cfc177",
+       104_900_675_753, 104_900_737_076),
+      (.qwen3_8_abliterated_3bit_vision,
+       "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple3bit-abliterated-vision",
+       "4b879c65a35c925e0098cca32fb2ef7dc0a99bf4",
+       90_002_502_569, 90_002_563_892),
+      (.qwen3_8_abliterated_2bit_vision,
+       "haihengh/Qwen3.8-Flash-Next-125B-finch-4bit-ple2bit-abliterated-vision",
+       "e27a5361544c5902f3e46c2220d961c16164ef96",
+       74_701_629_113, 74_701_690_351),
+    ]
+    #expect(expected.count == AppModelChoice.allCases.filter {
+      $0.descriptor.requiresVision
+    }.count, "a vision row is missing its distribution pin")
+    for row in expected {
+      #expect(row.descriptor.requiresVision)
+      #expect(row.descriptor.architecture.isQwen3_6
+                || row.descriptor.architecture.isQwen3_8)
+      #expect(row.descriptor.installedBytes == row.installed)
+      guard case .finchDistribution(let distribution) = row.descriptor.installRoute else {
+        Issue.record("\(row.descriptor.displayName) has no published distribution")
+        continue
+      }
+      #expect(distribution.repoID == row.repoID,
+              "\(row.descriptor.displayName) downloads the wrong repository")
+      #expect(distribution.revision == row.revision,
+              "\(row.descriptor.displayName) is not pinned to its audited commit")
+      #expect(distribution.approximateDownloadBytes == row.payload)
+      #expect(distribution.installedBytes == row.installed)
+      #expect(row.descriptor.approximateDownloadBytes == row.payload)
+    }
+  }
+
   /// The 3.8 counterpart. The hash is the one thing here that cannot be
   /// re-derived from the repo — it is the sha256 of the source snapshot's
   /// `model.safetensors.index.json`, which is what the manifest stores and

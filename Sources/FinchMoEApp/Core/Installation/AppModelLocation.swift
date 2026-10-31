@@ -209,16 +209,21 @@ enum AppModelLocation {
     /// checkout scan above and the app-owned scan below so the two cannot
     /// disagree about which installed model wins at launch.
     ///
-    /// These are the twelve picker rows' install names, in that order. A vision
-    /// row sits immediately before its text sibling: when both directories
-    /// exist, the vision install can do everything the text one can, so it
-    /// wins at launch; a text-only install resolves exactly as before.
+    /// These are the nineteen picker rows' install names, in that order. A
+    /// vision row sits immediately before its text sibling: when both
+    /// directories exist, the vision install can do everything the text one
+    /// can, so it wins at launch; a text-only install resolves exactly as
+    /// before.
     private static let preferredChoices: [AppModelChoice] = [
-        .qwen3_6_abliterated, .qwen3_6_abliterated_3bit,
+        .qwen3_6_abliterated_vision, .qwen3_6_abliterated,
+        .qwen3_6_abliterated_3bit_vision, .qwen3_6_abliterated_3bit,
         .qwen3_6, .qwen3_6_3bit_vision, .qwen3_6_3bit,
-        .qwen3_8_abliterated, .qwen3_8_abliterated_3bit,
+        .qwen3_8_abliterated_vision, .qwen3_8_abliterated,
+        .qwen3_8_abliterated_3bit_vision, .qwen3_8_abliterated_3bit,
         .qwen3_8_abliterated_2bit_vision, .qwen3_8_abliterated_2bit,
-        .qwen3_8, .qwen3_8_3bit, .qwen3_8_2bit,
+        .qwen3_8_vision, .qwen3_8,
+        .qwen3_8_3bit_vision, .qwen3_8_3bit,
+        .qwen3_8_2bit_vision, .qwen3_8_2bit,
     ]
 
     /// Rowless raw-BF16-PLE 3.8 install (162 GiB): the last Qwen entry in the
