@@ -244,9 +244,13 @@ import FinchMoE
                 "two descriptors share a weights digest, width and vision capability; the scan cannot tell them apart")
         for expected: AppModelInstallDescriptor in [
             .qwen3_6, .qwen3_6_3bit, .qwen3_6_3bit_vision,
-            .qwen3_6_abliterated, .qwen3_6_abliterated_3bit,
-            .qwen3_8, .qwen3_8_3bit, .qwen3_8_2bit,
-            .qwen3_8_abliterated, .qwen3_8_abliterated_3bit,
+            .qwen3_6_abliterated, .qwen3_6_abliterated_vision,
+            .qwen3_6_abliterated_3bit, .qwen3_6_abliterated_3bit_vision,
+            .qwen3_8, .qwen3_8_vision,
+            .qwen3_8_3bit, .qwen3_8_3bit_vision,
+            .qwen3_8_2bit, .qwen3_8_2bit_vision,
+            .qwen3_8_abliterated, .qwen3_8_abliterated_vision,
+            .qwen3_8_abliterated_3bit, .qwen3_8_abliterated_3bit_vision,
             .qwen3_8_abliterated_2bit, .qwen3_8_abliterated_2bit_vision,
         ] {
             #expect(AppModelInstallDescriptor.installable.contains(expected),

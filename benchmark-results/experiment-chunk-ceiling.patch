@@ -1,0 +1,99 @@
+diff --git a/README.md b/README.md
+index 307d061..4af15cf 100644
+--- a/README.md
++++ b/README.md
+@@ -452,6 +452,68 @@ because the 125B's expert set is far larger, so much less of each token's
+ [the sweep findings](docs/PLE2BIT_SWEEP_IO_FINDINGS.md) documents what that
+ costs over a full run.
+ 
++### Mac Studio M5 Max (36 GB), 3-bit installs on the internal SSD, 2026-11-15
++
++A 36 GB Mac Studio (`Mac17,14`, Apple M5 Max, 18 cores, macOS 27.2.1, Swift
++6.4.2, commit `ab2c2dd`) with both 3-bit installs read from the Mac's
++**internal SSD** instead of the external volume the repo lives on. The Qwen
++3.6 3-bit install is the existing `Qwen3.6-35B-A3B-3bit-vision` install
++(16.93 GB, including a `--include-vision` payload the text path never reads)
++copied to the internal volume; the Qwen 3.8 3-bit install was repacked on
++this machine from the local bf16 snapshot with `--routed-expert-bits 3`
++(89,104,658,035 B, matching the published 3-bit install's 82.99 GiB). Both
++carry `verified-install.json` receipts recorded at their internal paths, and
++the identical release CLI runs from the internal volume beside them. Same
++frozen cases, sampling defaults, 128-token cap, discarded warmup, fresh
++processes, one measured run per cell:
++
++| Prompt-suite case | Model | Prompt tokens | Prefill | Prefill tok/s | Decode | Decode tok/s | Expert reads/token |
++| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
++| short-explanation | Qwen 3.6 35B-A3B 3-bit | 62 | 1.07s | 57.7 | 3.53s | 36.22 | 168.8 MB |
++| short-explanation | Qwen 3.8 Flash-Next 125B 3-bit | 62 | 3.44s | 18.0 | 8.54s | 15.00 | 455.3 MB |
++| medium-review | Qwen 3.6 35B-A3B 3-bit | 426 | 2.74s | 155.7 | 3.39s | 37.76 | 190.3 MB |
++| medium-review | Qwen 3.8 Flash-Next 125B 3-bit | 426 | 8.07s | 52.8 | 9.88s | 12.95 | 552.9 MB |
++| long-synthesis | Qwen 3.6 35B-A3B 3-bit | 2,940 | 19.08s | 154.1 | 3.81s | 33.60 | 191.1 MB |
++| long-synthesis | Qwen 3.8 Flash-Next 125B 3-bit | 2,940 | 47.96s | 61.3 | 10.80s | 11.85 | 569.0 MB |
++
++The 3.6 decode rates (36.2 / 37.8 / 33.6 tok/s) are 3.0-3.6x the 16 GB
++M4 mini's 3-bit rows (10.0 / 10.8 / 12.1) and 1.6-1.8x the 24 GB M4 Pro's
++4-bit rows; the 3.8 decode rates (15.0 / 13.0 / 11.9) are 4.0-4.5x the M4
++mini's external-SSD 3-bit rows (3.11 / 2.98 / 2.73). Both the host (M5 Max,
++36 GB) and the storage path changed there; the storage-only effect is isolated
++below.
++
++**Same host, both volumes.** The identical Qwen 3.6 3-bit install and the same
++protocol were re-run reading through the Samsung 2T external SSD, so the only
++variable is which drive serves the expert streaming (the 3.8 3-bit install
++exists only on the internal volume, so this A/B covers 3.6):
++
++| Case | Samsung external: prefill / decode tok/s | Internal SSD: prefill / decode tok/s |
++| --- | ---: | ---: |
++| short-explanation | 68.2 / 35.15 | 57.7 / 36.22 |
++| medium-review | 117.3 / 33.01 | 155.7 / 37.76 |
++| long-synthesis | 111.0 / 23.43 | 154.1 / 33.60 |
++
++Expert reads per token (169-199 MB) and cache hit rates (52.6-59.8%) are the
++same on both volumes, so routing and cache policy are unchanged; what differs
++is the cost of serving a miss. On the long case the internal SSD buys
++**+43% decode** (23.43 to 33.60 tok/s) and **+39% prefill** (111.0 to 154.1);
++medium lands at +14% decode; short is within noise, as expected for a 16.9 GB
++working set that the 36 GB page cache largely holds once warm.
++
++**Drive probes, for context.** A single-pass 8 GiB sequential write+read with
++`F_NOCACHE` measured the internal SSD at 11,469 MB/s write and 9,203 MB/s
++read, and the Samsung 2T (PCI-Express bridge volume) at 3,124 MB/s write and
++3,034 MB/s read. Expert streaming is not sequential — it is bounded parallel
++reads through a 16-slot cache — so read these as scale (~3.4x sequential
++bandwidth) rather than as an inference ratio; the measured +43% long-decode
++delta is the workload's own answer.
++
++Single sample per cell: read short-case differences of a few percent as noise,
++and note that the 3.8 3-bit host comparison changes host and storage
++together. Raw artifacts: `benchmark-results/internal-m5max-20261115/` and
++`benchmark-results/m5max-3bit-samsung-20261115/`.
++
+ ## The Qwen 3.8 Flash-Next 125B port
+ 
+ Qwen 3.8 Flash-Next 125B (`qwen4_exp_text`, GGUF `qwen4exp`, Finch family
+diff --git a/Sources/FinchMoE/Runtime/Configuration/RuntimeConfiguration.swift b/Sources/FinchMoE/Runtime/Configuration/RuntimeConfiguration.swift
+index 64b6c52..5ce4082 100644
+--- a/Sources/FinchMoE/Runtime/Configuration/RuntimeConfiguration.swift
++++ b/Sources/FinchMoE/Runtime/Configuration/RuntimeConfiguration.swift
+@@ -32,7 +32,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
+     // experts make the union saturate far earlier. Prefill scratch is ~154 KiB
+     // per chunk token for Qwen 3.6, so 512 costs ~79 MiB and 1024 ~158 MiB
+     // against a ~1.1 GiB resident budget.
+-    public static let allowedPrefillChunkTokens = [32, 64, 128, 256, 512, 1024]
++    public static let allowedPrefillChunkTokens = [32, 64, 128, 256, 512, 1024, 2048, 4096]
+     /// The shipping chunk, and the top of the list above. Measured on the 3.8
+     /// 125B at 2,907 tokens: 512 prefills in 141.6 s having read 127.7 GB at
+     /// 4.91 GB peak RSS; 1,024 in 111.3 s having read 72.1 GB at 4.84 GB. GPU
+diff --git a/Sources/FinchMoE/Runtime/Prefill/PrefillRuntimeConfig.swift b/Sources/FinchMoE/Runtime/Prefill/PrefillRuntimeConfig.swift
+index 2b0e77c..f950eb7 100644
+--- a/Sources/FinchMoE/Runtime/Prefill/PrefillRuntimeConfig.swift
++++ b/Sources/FinchMoE/Runtime/Prefill/PrefillRuntimeConfig.swift
+@@ -172,7 +172,7 @@ public struct PrefillRuntimeConfig: Sendable, Equatable {
+         case chunked
+     }
+ 
+-    public static let maxChunkTokens = 1024
++    public static let maxChunkTokens = 4096
+ 
+     public let mode: Mode
+     public let chunkTokens: Int

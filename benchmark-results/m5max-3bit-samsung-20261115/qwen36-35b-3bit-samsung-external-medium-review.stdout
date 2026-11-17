@@ -1,0 +1,4 @@
+The proposed design contains critical flaws that violate the core goals of bounded memory, correctness, and deduplication. Below are the most significant risks, prioritized by severity.
+
+**1. Memory Exhaustion and Unbounded Growth**
+The most severe risk is the lack of an upper bound on payload length. Since the buffer is "reusable" but resized dynamically without a maximum limit, a single malicious or large file can cause the buffer to consume all available heap memory. Furthermore, because the dictionary maps keys to slots, and slots are reused, the system cannot easily reclaim memory from a specific key’s data without invalidating all references to

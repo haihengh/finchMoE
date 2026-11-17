@@ -1,0 +1,6 @@
+The proposed design contains critical flaws that violate the core goals of bounded memory, correctness, and deduplication. Below are the most significant risks, prioritized by severity, followed by a safer design proposal.
+
+### Critical Risks
+
+1.  **Memory Exhaustion (Unbounded Growth)**
+    The lack of an upper bound on payload length allows an attacker or malformed file to trigger a buffer resize to the maximum integer size. Since the buffer is "reusable" but potentially resized, and there is no eviction policy tied to memory pressure, a single large object can consume all available heap memory, causing an Out-of-Memory (

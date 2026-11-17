@@ -1,0 +1,4 @@
+TurboFieldfare is a specialized inference runtime for Apple Silicon that enables running large language models on hardware with severely constrained RAM. The project’s central innovation is its ability to execute the Gemma 4 26B-A4B model using only ~2 GB of resident memory, bypassing the need to load the full 14.3 GB parameter set into RAM simultaneously.
+
+**Resource Constraints and Data Partitioning**
+The system partitions model weights into two categories: resident and streamed. The "resident" set includes the shared core weights (approximately 1.35 GB) and the FP16 Key-Value (

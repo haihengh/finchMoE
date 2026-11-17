@@ -1,0 +1,4 @@
+The proposed design contains critical flaws that violate the core goals of bounded memory, correctness, and deduplication. Below are the most significant risks, prioritized by severity.
+
+### 1. Memory Exhaustion (Critical Correctness Risk)
+The most severe flaw is the lack of an upper bound on payload length. Since the service uses a fixed number of reusable slots, a single malicious or large file can cause the buffer to resize indefinitely. Because the buffer is owned by the slot and reused, this unbounded growth directly translates to unbounded memory consumption, violating the "bounded memory" goal. Furthermore, if the buffer grows beyond available

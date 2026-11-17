@@ -1,0 +1,4 @@
+The proposed design contains critical flaws that violate the core goals of bounded memory, correctness, and deduplication. Below are the most severe risks, prioritized by impact.
+
+### 1. Memory Exhaustion (Unbounded Growth)
+The most immediate risk is a denial-of-service via memory exhaustion. The design states there is "no upper bound on payload length beyond the integer type." If an attacker or a corrupted file provides a header claiming a payload size of 2^63 bytes, the service will attempt to resize the reusable buffer to accommodate it. Since the buffer is reused per slot, and slots are chosen based on "

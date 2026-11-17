@@ -1,0 +1,6 @@
+started: Sun Nov 15 16:22 EST 2026
+host: Mac Studio M5 Max 36 GB (Mac17,14), macOS 27.2.1, Swift 6.4.2
+commit: ab2c2ddf330dee94f0fa2aaeda86dcdfd007b97d
+install: models/Qwen3.6-35B-A3B-3bit-vision.finch (16,926,159,987 B incl. unused vision payload) on the Samsung 2T external SSD (/dev/disk5s1, PCI-Express bridge)
+purpose: same-host A/B of storage location; internal-volume rows live in benchmark-results/internal-m5max-20261115
+storage probe (8 GiB F_NOCACHE sequential): internal write 11469 MB/s read 9203 MB/s; samsung write 3124 MB/s read 3034 MB/s

@@ -1,0 +1,5 @@
+This design suffers from critical race conditions and resource management flaws that violate its core goals of correctness and bounded memory.
+
+**Critical Risks**
+
+1.  **Data Corruption via Race Conditions:** The assumption that concurrent misses choosing the same slot are "harmless" is false. If two threads select the same slot, they will concurrently write to the same buffer. Since the buffer is not protected, this results in interleaved writes and corrupted data. Furthermore, returning a view into a slot buffer while an asynchronous read is in flight creates a Time-of-Check-to-Time-of-Use (TOCTOU) race. The caller may

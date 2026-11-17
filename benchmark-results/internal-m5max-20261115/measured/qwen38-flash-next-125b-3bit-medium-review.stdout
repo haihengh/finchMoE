@@ -1,0 +1,5 @@
+### Critical Risks
+
+1.  **Data Corruption & Race Conditions (Critical):** The design is fundamentally broken. Sharing a single mutable buffer across concurrent reads without synchronization guarantees data corruption. If two requests hit the same slot, one may overwrite the buffer while the other is parsing it, or return partial/mixed data. "Harmless" is incorrect; it is catastrophic.
+2.  **Unbounded Memory & DoS (Critical):** No upper bound on payload length allows malicious or large files to exhaust memory. Resizing buffers dynamically under load creates GC pressure and potential OOM crashes.
+3.  **Stale/
