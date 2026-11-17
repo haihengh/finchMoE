@@ -1,0 +1,5 @@
+**Technical Assessment: TurboFieldfare**
+
+TurboFieldfare is a specialized Swift/Metal runtime designed to execute the Gemma 4 26B-A4B mixture-of-experts (MoE) model on Apple Silicon Macs with as little as 8 GB of RAM. The central constraint is memory capacity; the solution avoids loading the full 14.3 GB model into RAM by maintaining a hybrid memory architecture. Only the shared expert weights and the Key-Value (KV) cache remain resident in memory (~2 GB total), while the sparse routed experts are streamed from SSD storage on demand.
+
+The runtime divides

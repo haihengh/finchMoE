@@ -1,0 +1,3 @@
+[stop=maxTokens prefill=62tok new=128tok decode=3.64s tok/s=35.150 prefill=0.91s (68.2tok/s)]
+[stop=maxTokens prefill=426tok new=128tok decode=3.88s tok/s=33.007 prefill=3.63s (117.3tok/s)]
+[stop=maxTokens prefill=2940tok new=128tok decode=5.46s tok/s=23.433 prefill=26.48s (111.0tok/s)]

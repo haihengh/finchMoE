@@ -1,0 +1,25 @@
+started: Sun Nov 15 16:13:29 EST 2026
+commit: ab2c2ddf330dee94f0fa2aaeda86dcdfd007b97d
+git_dirty: clean
+ProductName:		macOS
+ProductVersion:		27.2.1
+BuildVersion:		26B131
+hw.model: Mac17,14
+Model Name: Mac Studio
+      Model Identifier: Mac17,14
+      Model Number: Z1U4000E5LL/A
+      Chip: Apple M5 Max
+      Total Number of Cores: 18 (6 Super and 12 Performance)
+      Memory: 36 GB
+      System Firmware Version: 20457.41.3
+      OS Loader Version: 20457.41.3
+prompt hashes:
+  da9e6f9e0b06523f477baa942e339ebb0fe02311dacdc3de5cff98014d159f75  docs/benchmark-prompts/real-generation-v1/long-matched.json
+  b12e4a71493ad151d7a85b91e878ba784b116ef65de9fcb1b1b1c05198b537b8  docs/benchmark-prompts/real-generation-v1/long-synthesis.json
+  23add7976db2069c9927affd13c2f5120508702a1c4915ea88b7de565bdd4b33  docs/benchmark-prompts/real-generation-v1/medium-review.json
+  c57da2677143657be55e03797c1aabe8e012d61c1a71bf9345acdd575117d1e1  docs/benchmark-prompts/real-generation-v1/short-explanation.json
+model installs (internal SSD):
+  16926159986 bytes  /Users/hai/Library/Caches/FinchMoEBench/models/Qwen3.6-35B-A3B-3bit.finch
+  89104658035 bytes  /Users/hai/Library/Caches/FinchMoEBench/models/Qwen3.8-Flash-Next-125B-ple3bit.finch
+cli binary: /Users/hai/Library/Caches/FinchMoEBench/bin/FinchMoECLI sha256 ea083e91a51fa64b3cc8369455818e2c1c0df5f47c6a1a8a867ff6344ebde449
+swift: Apple Swift version 6.4.2 (swiftlang-6.4.2.1.9 clang-2100.4.1.1)

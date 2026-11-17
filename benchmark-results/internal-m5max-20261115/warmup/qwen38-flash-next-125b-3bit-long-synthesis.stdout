@@ -1,0 +1,8 @@
+**Technical Assessment: TurboFieldfare**
+
+**Central Resource Constraint**
+The primary bottleneck is physical memory capacity, specifically the 8 GB RAM limit on entry-level Apple Silicon Macs. The system must execute a 26-billion-parameter model (Gemma 4 26B-A4B) with a total footprint of ~14.3 GB. TurboFieldfare solves this by maintaining a strict ~2 GB resident memory budget, forcing the remaining weights to reside on SSD.
+
+**Memory Architecture: Resident vs. Streamed**
+The runtime employs a hybrid loading strategy:
+1.  **Resident Data:**
